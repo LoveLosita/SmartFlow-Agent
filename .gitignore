@@ -1,0 +1,25 @@
+# 1. 编译产物 (Build Artifacts)
+/bin/
+/dist/
+*.exe
+*.dll
+*.so
+
+# 2. 依赖管理 (Dependencies)
+# Go 项目通常不提交 vendor，除非你有特殊需求
+/vendor/
+
+# 3. 配置文件与敏感信息 (Security & Configs)
+# 绝对不要提交包含数据库密码和 Kafka 地址的配置文件
+.env
+configs/*.yaml
+!configs/config.example.yaml # 提交一个示例文件，告诉别人该怎么配
+
+# 4. 临时文件与日志 (Logs & Temp)
+*.log
+/tmp/
+
+# 5. IDE 与系统文件
+.idea/
+.vscode/
+.DS_Store # Mac 用户必加
