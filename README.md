@@ -96,7 +96,7 @@
 
 ## 3.1 ER图
 
-![DB_ER_Design](./docs/Pics/DB_ER_Design.png)
+![DB_ER_Design](./docs/pics/DB_ER_Design.png)
 
 ## 3.2 核心表结构
 
