@@ -1,0 +1,33 @@
+﻿# 应用配置文件
+# 包含服务器、数据库等基础配置
+
+server:
+  port: 8080
+  mode: debug
+  timeout: 30s
+
+database:
+  host: localhost
+  port: 3306
+  user: smartflow_user
+  password: "smartflow_password_456"
+  dbname: "smartflow"
+  charset: utf8mb4
+  parseTime: true
+  loc: Local
+
+jwt:
+  accessSecret: "smartflow_jwt_access_secret_123"
+  refreshSecret: "smartflow_jwt_refresh_secret_123"
+  accessTokenExpire: 15min
+  refreshTokenExpire: 7d
+
+log:
+  level: info
+  path: logs/
+
+redis:
+  host: localhost
+  port: 6379
+  password: "redis_password_789"
+  db: 0
