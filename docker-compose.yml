@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # MySQL 数据库服务
   mysql:
@@ -8,9 +6,9 @@ services:
     restart: always
     environment:
       MYSQL_ROOT_PASSWORD: root_password_123  # Root 用户密码
-      MYSQL_DATABASE: redflow                 # 初始创建的数据库名
-      MYSQL_USER: redflow_user                # 业务用户
-      MYSQL_PASSWORD: redflow_password_456    # 业务用户密码
+      MYSQL_DATABASE: smartflow                 # 初始创建的数据库名
+      MYSQL_USER: smartflow_user                # 业务用户
+      MYSQL_PASSWORD: smartflow_password_456    # 业务用户密码
     ports:
       - "3306:3306"
     volumes:

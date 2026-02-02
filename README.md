@@ -82,9 +82,9 @@
 
 ![平台首页_已登录](./docs/design/Pics/平台首页_已登录.png)
 
-![日程查看&安排中心 多选后](./docs/design/Pics/日程查看&安排中心 多选后.png)
+![日程查看&安排中心 多选后](./docs/design/Pics/日程查看&安排中心_多选后.png)
 
-![日程查看&安排中心 展开数据结构并排进去一个任务后](./docs/design/Pics/日程查看&安排中心 展开数据结构并排进去一个任务后.png)
+![日程查看&安排中心 展开数据结构并排进去一个任务后](./docs/design/Pics/日程查看&安排中心_展开数据结构并排进去一个任务后.png)
 
 ![日程查看&安排中心](./docs/design/Pics/日程查看&安排中心.png)
 
@@ -96,7 +96,7 @@
 
 ## 3.1 ER图
 
-![DB-ER-Design](./docs/Pics/DB-ER-Design.png)
+![DB_ER_Design](./docs/Pics/DB_ER_Design.png)
 
 ## 3.2 核心表结构
 
