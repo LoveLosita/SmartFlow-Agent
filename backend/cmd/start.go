@@ -43,16 +43,20 @@ func Start() {
 	userRepo := dao.NewUserDAO(db)
 	cacheRepo := dao.NewCacheDAO(rdb)
 	taskRepo := dao.NewTaskDAO(db)
+	scheduleRepo := dao.NewScheduleDAO(db)
 	//service 层
 	userService := service.NewUserService(userRepo, cacheRepo)
 	taskSv := service.NewTaskService(taskRepo)
+	scheduleService := service.NewScheduleService(scheduleRepo)
 	//api 层
 	userApi := api.NewUserHandler(userService)
 	taskApi := api.NewTaskHandler(taskSv)
+	scheduleApi := api.NewScheduleHandler(scheduleService)
 
 	handlers := &api.ApiHandlers{
-		UserHandler: userApi,
-		TaskHandler: taskApi,
+		UserHandler:     userApi,
+		TaskHandler:     taskApi,
+		ScheduleHandler: scheduleApi,
 	}
 	r := routers.RegisterRouters(handlers, cacheRepo)
 	routers.StartEngine(r)

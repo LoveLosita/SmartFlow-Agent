@@ -133,4 +133,9 @@ var ( //请求相关的响应
 		Status: "40018",
 		Info:   "invalid priority",
 	}
+
+	WrongCourseInfo = Response{ //课程信息错误
+		Status: "40019",
+		Info:   "wrong course info",
+	}
 )
