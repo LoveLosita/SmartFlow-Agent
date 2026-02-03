@@ -4,25 +4,25 @@ package service
 
 import (
 	"errors"
+	"time"
 
-	"github.com/golang-jwt/jwt/v4"
-	"github.com/smartflow/backend/auth"
-	"github.com/smartflow/backend/dao"
-	"github.com/smartflow/backend/model"
-	"github.com/smartflow/backend/respond"
-	"github.com/smartflow/backend/utils"
+	"github.com/LoveLosita/smartflow/backend/auth"
+	"github.com/LoveLosita/smartflow/backend/dao"
+	"github.com/LoveLosita/smartflow/backend/model"
+	"github.com/LoveLosita/smartflow/backend/respond"
+	"github.com/LoveLosita/smartflow/backend/utils"
 	"gorm.io/gorm"
 )
 
 type UserService struct {
-	// 伸出手：准备接住 DAO
-	repo *dao.UserDAO
+	userRepo  *dao.UserDAO
+	cacheRepo *dao.CacheDAO
 }
 
-// NewUserService：组装 Service 的“工厂”
-func NewUserService(repo *dao.UserDAO) *UserService {
+func NewUserService(userRepo *dao.UserDAO, cacheRepo *dao.CacheDAO) *UserService {
 	return &UserService{
-		repo: repo, // 把传进来的 DAO 揣进口袋里
+		userRepo:  userRepo, // 把传进来的 DAO 揣进口袋里
+		cacheRepo: cacheRepo,
 	}
 }
 
@@ -37,7 +37,7 @@ func (sv *UserService) UserRegister(user model.UserRegisterRequest) (*model.User
 		return nil, respond.ParamTooLong
 	}
 	//检查用户名是否已存在
-	result, err := sv.repo.IfUsernameExists(user.Username)
+	result, err := sv.userRepo.IfUsernameExists(user.Username)
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +49,7 @@ func (sv *UserService) UserRegister(user model.UserRegisterRequest) (*model.User
 		return nil, err
 	}
 	user.Password = hashedPwd //将user的密码字段改为加密后的密码
-	newUser, err := sv.repo.Create(user.Username, user.PhoneNumber, user.Password)
+	newUser, err := sv.userRepo.Create(user.Username, user.PhoneNumber, user.Password)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +59,7 @@ func (sv *UserService) UserRegister(user model.UserRegisterRequest) (*model.User
 
 func (sv *UserService) UserLogin(req *model.UserLoginRequest) (*model.Tokens, error) {
 	var tokens model.Tokens
-	hashedPwd, err := sv.repo.GetUserHashedPasswordByName(req.Username) //调用dao层的方法
+	hashedPwd, err := sv.userRepo.GetUserHashedPasswordByName(req.Username) //调用dao层的方法
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, respond.WrongName
@@ -72,7 +72,7 @@ func (sv *UserService) UserLogin(req *model.UserLoginRequest) (*model.Tokens, er
 	} else if !result { //密码不匹配
 		return nil, respond.WrongPwd
 	}
-	id, err := sv.repo.GetUserIDByName(req.Username)
+	id, err := sv.userRepo.GetUserIDByName(req.Username)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, respond.WrongName
@@ -86,9 +86,9 @@ func (sv *UserService) UserLogin(req *model.UserLoginRequest) (*model.Tokens, er
 	return &tokens, nil
 }
 
-func (sv *UserService) RefreshTokenHandler(refreshToken string) (*model.Tokens, error) {
+/*func (sv *UserService) RefreshTokenHandler(refreshToken string) (*model.Tokens, error) {
 	// 验证刷新令牌
-	token, err := auth.ValidateRefreshToken(refreshToken)
+	token, err := auth.ValidateRefreshToken(refreshToken, sv.cacheRepo)
 	if err != nil || !token.Valid { // 刷新令牌无效
 		return nil, respond.InvalidRefreshToken
 	}
@@ -106,4 +106,38 @@ func (sv *UserService) RefreshTokenHandler(refreshToken string) (*model.Tokens, 
 	} else {
 		return nil, respond.InvalidClaims
 	}
+}*/
+
+func (sv *UserService) RefreshTokenHandler(refreshToken string) (*model.Tokens, error) {
+	// 1. 验证刷新令牌 (这里已经包含了 Redis 黑名单检查)
+	token, err := auth.ValidateRefreshToken(refreshToken, sv.cacheRepo)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. 改动点：直接断言为你定义的结构体 model.MyCustomClaims
+	if claims, ok := token.Claims.(*model.MyCustomClaims); ok {
+		// 3. 这里的 userID 已经是 int 了，不再需要 (float64) 转换
+		newAccessToken, newRefreshToken, err := auth.GenerateTokens(claims.UserID)
+		if err != nil {
+			return nil, err
+		}
+		// 返回新的双 Token
+		return &model.Tokens{
+			AccessToken:  newAccessToken,
+			RefreshToken: newRefreshToken,
+		}, nil
+	}
+
+	return nil, respond.InvalidClaims
+}
+
+func (sv *UserService) UserLogout(jti string, expireTime time.Time) error {
+	//1.直接把 jti 扔进黑名单
+	expiration := time.Until(expireTime)
+	err := sv.cacheRepo.SetBlacklist(jti, expiration)
+	if err != nil {
+		return err
+	}
+	return nil
 }

@@ -6,10 +6,10 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/LoveLosita/smartflow/backend/model"
+	"github.com/LoveLosita/smartflow/backend/respond"
+	"github.com/LoveLosita/smartflow/backend/service"
 	"github.com/gin-gonic/gin"
-	"github.com/smartflow/backend/model"
-	"github.com/smartflow/backend/respond"
-	"github.com/smartflow/backend/service"
 )
 
 type UserHandler struct {
@@ -86,7 +86,7 @@ func (api *UserHandler) RefreshTokenHandler(c *gin.Context) {
 	if err != nil {
 		switch {
 		case errors.Is(err, respond.InvalidRefreshToken), errors.Is(err, respond.InvalidClaims),
-			errors.Is(err, respond.InvalidTokenSingingMethod): //如果是无效刷新令牌或者无效claims或者无效签名方法
+			errors.Is(err, respond.InvalidTokenSingingMethod), errors.Is(err, respond.UserLoggedOut): //如果是无效刷新令牌或者无效claims或者无效签名方法
 			c.JSON(http.StatusBadRequest, err)
 			return
 		default:
@@ -94,4 +94,17 @@ func (api *UserHandler) RefreshTokenHandler(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, respond.OKWithData(respond.Ok, tokens))
+}
+
+func (api *UserHandler) UserLogout(c *gin.Context) {
+	//1.从上下文中获取 jti 和 expireTime
+	claims, _ := c.Get("claims")
+	cl := claims.(*model.MyCustomClaims)
+	//2.调用 Service 层的 UserLogout 方法
+	err := api.svc.UserLogout(cl.Jti, cl.ExpiresAt.Time)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, respond.InternalError(err))
+		return
+	}
+	c.JSON(http.StatusOK, respond.Ok)
 }

@@ -1,6 +1,6 @@
 package main
 
-import "github.com/smartflow/backend/cmd"
+import "github.com/LoveLosita/smartflow/backend/cmd"
 
 func main() {
 	cmd.Start()

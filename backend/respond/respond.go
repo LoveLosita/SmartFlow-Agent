@@ -118,4 +118,9 @@ var ( //请求相关的响应
 		Status: "40016",
 		Info:   "wrong token type",
 	}
+
+	UserLoggedOut = Response{ //用户已登出
+		Status: "40017",
+		Info:   "user logged out",
+	}
 )

@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/smartflow/backend/api"
-	"github.com/smartflow/backend/dao"
-	"github.com/smartflow/backend/inits"
-	"github.com/smartflow/backend/routers"
-	"github.com/smartflow/backend/service"
+	"github.com/LoveLosita/smartflow/backend/api"
+	"github.com/LoveLosita/smartflow/backend/dao"
+	"github.com/LoveLosita/smartflow/backend/inits"
+	"github.com/LoveLosita/smartflow/backend/routers"
+	"github.com/LoveLosita/smartflow/backend/service"
 	"github.com/spf13/viper"
 )
 
@@ -38,12 +38,15 @@ func Start() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
+	rdb := inits.InitRedis()
+
 	userRepo := dao.NewUserDAO(db)
-	userService := service.NewUserService(userRepo)
+	cacheRepo := dao.NewCacheDAO(rdb)
+	userService := service.NewUserService(userRepo, cacheRepo)
 	userApi := api.NewUserHandler(userService)
 	handlers := &api.ApiHandlers{
 		UserHandler: userApi,
 	}
-	r := routers.RegisterRouters(handlers)
+	r := routers.RegisterRouters(handlers, cacheRepo)
 	routers.StartEngine(r)
 }

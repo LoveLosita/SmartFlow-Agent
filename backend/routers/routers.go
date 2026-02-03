@@ -5,8 +5,10 @@ package routers
 import (
 	"log"
 
+	"github.com/LoveLosita/smartflow/backend/api"
+	"github.com/LoveLosita/smartflow/backend/dao"
+	"github.com/LoveLosita/smartflow/backend/middleware"
 	"github.com/gin-gonic/gin"
-	"github.com/smartflow/backend/api"
 	"github.com/spf13/viper"
 )
 
@@ -25,7 +27,7 @@ func StartEngine(r *gin.Engine) {
 	}
 }
 
-func RegisterRouters(handlers *api.ApiHandlers) *gin.Engine {
+func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO) *gin.Engine {
 	// 初始化Gin引擎
 	r := gin.Default()
 	// 在这里注册所有的路由和路由组
@@ -44,6 +46,7 @@ func RegisterRouters(handlers *api.ApiHandlers) *gin.Engine {
 			userGroup.POST("/register", handlers.UserHandler.UserRegister)
 			userGroup.POST("/login", handlers.UserHandler.UserLogin)
 			userGroup.POST("/refresh-token", handlers.UserHandler.RefreshTokenHandler)
+			userGroup.POST("/logout", middleware.JWTTokenAuth(cache), handlers.UserHandler.UserLogout)
 		}
 	}
 	// 初始化Gin引擎
