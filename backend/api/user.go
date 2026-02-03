@@ -47,7 +47,7 @@ func (api *UserHandler) UserRegister(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, respond.OKWithData(respond.Ok, retUser))
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, retUser))
 }
 
 func (api *UserHandler) UserLogin(c *gin.Context) {
@@ -68,7 +68,7 @@ func (api *UserHandler) UserLogin(c *gin.Context) {
 			return
 		}
 	}
-	c.JSON(http.StatusOK, respond.OKWithData(respond.Ok, tokens))
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, tokens))
 }
 
 func (api *UserHandler) RefreshTokenHandler(c *gin.Context) {
@@ -93,7 +93,7 @@ func (api *UserHandler) RefreshTokenHandler(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, respond.InternalError(err))
 		}
 	}
-	c.JSON(http.StatusOK, respond.OKWithData(respond.Ok, tokens))
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, tokens))
 }
 
 func (api *UserHandler) UserLogout(c *gin.Context) {

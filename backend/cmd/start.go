@@ -39,13 +39,20 @@ func Start() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	rdb := inits.InitRedis()
-
+	//dao 层
 	userRepo := dao.NewUserDAO(db)
 	cacheRepo := dao.NewCacheDAO(rdb)
+	taskRepo := dao.NewTaskDAO(db)
+	//service 层
 	userService := service.NewUserService(userRepo, cacheRepo)
+	taskSv := service.NewTaskService(taskRepo)
+	//api 层
 	userApi := api.NewUserHandler(userService)
+	taskApi := api.NewTaskHandler(taskSv)
+
 	handlers := &api.ApiHandlers{
 		UserHandler: userApi,
+		TaskHandler: taskApi,
 	}
 	r := routers.RegisterRouters(handlers, cacheRepo)
 	routers.StartEngine(r)

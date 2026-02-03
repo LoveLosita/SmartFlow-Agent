@@ -48,6 +48,12 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO) *gin.Engine
 			userGroup.POST("/refresh-token", handlers.UserHandler.RefreshTokenHandler)
 			userGroup.POST("/logout", middleware.JWTTokenAuth(cache), handlers.UserHandler.UserLogout)
 		}
+		taskGroup := apiGroup.Group("/task")
+		{
+			taskGroup.Use(middleware.JWTTokenAuth(cache))
+			taskGroup.POST("/create", handlers.TaskHandler.AddTask)
+			taskGroup.GET("/get", handlers.TaskHandler.GetUserTasks)
+		}
 	}
 	// 初始化Gin引擎
 	log.Println("Routes setup completed")

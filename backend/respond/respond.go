@@ -18,7 +18,7 @@ func (r Response) Error() string { // 实现 error 接口
 	return r.Info
 }
 
-func OKWithData(response Response, data interface{}) FinalResponse { //传入一个响应结构体和数据，返回一个最终响应结构体
+func RespWithData(response Response, data interface{}) FinalResponse { //传入一个响应结构体和数据，返回一个最终响应结构体
 	var finalResponse FinalResponse
 	finalResponse.Status = response.Status
 	finalResponse.Info = response.Info
@@ -37,6 +37,11 @@ var ( //请求相关的响应
 	Ok = Response{ //正常
 		Status: "10000",
 		Info:   "success",
+	}
+
+	UserTasksEmpty = Response{ //用户任务为空
+		Status: "10001",
+		Info:   "user tasks empty",
 	}
 
 	WrongName = Response{ //用户名错误
@@ -122,5 +127,10 @@ var ( //请求相关的响应
 	UserLoggedOut = Response{ //用户已登出
 		Status: "40017",
 		Info:   "user logged out",
+	}
+
+	InvalidPriority = Response{ //无效优先级
+		Status: "40018",
+		Info:   "invalid priority",
 	}
 )
