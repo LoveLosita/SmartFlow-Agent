@@ -1,6 +1,8 @@
 package service
 
 import (
+	"context"
+
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/model"
@@ -19,7 +21,7 @@ func NewTaskService(dao *dao.TaskDAO) *TaskService {
 	}
 }
 
-func (ts *TaskService) AddTask(req *model.UserAddTaskRequest, userID int) (*model.UserAddTaskResponse, error) {
+func (ts *TaskService) AddTask(ctx context.Context, req *model.UserAddTaskRequest, userID int) (*model.UserAddTaskResponse, error) {
 	//1. 调用 conv 层进行转换
 	taskModel := conv.UserAddTaskRequestToModel(req, userID)
 	//2.检查优先级是否合法
@@ -36,7 +38,7 @@ func (ts *TaskService) AddTask(req *model.UserAddTaskRequest, userID int) (*mode
 	return response, nil
 }
 
-func (ts *TaskService) GetUserTasks(userID int) ([]model.GetUserTaskResp, error) {
+func (ts *TaskService) GetUserTasks(ctx context.Context, userID int) ([]model.GetUserTaskResp, error) {
 	//1. 调用 dao 层获取数据
 	tasks, err := ts.dao.GetTasksByUserID(userID)
 	if err != nil {

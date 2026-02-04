@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
@@ -34,7 +36,10 @@ func (th *TaskHandler) AddTask(c *gin.Context) {
 	// 用户ID从上下文中获取
 	userID := c.GetInt("user_id")
 	//2. 调用 Service 层处理业务逻辑
-	resp, err := th.svc.AddTask(&req, userID)
+	// 创建一个带 1 秒超时的上下文
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源
+	resp, err := th.svc.AddTask(ctx, &req, userID)
 	if err != nil {
 		switch {
 		case errors.Is(err, respond.InvalidPriority): //如果是无效刷新令牌或者无效claims或者无效签名方法
@@ -52,7 +57,10 @@ func (th *TaskHandler) GetUserTasks(c *gin.Context) {
 	// 用户ID从上下文中获取
 	userID := c.GetInt("user_id")
 	//2. 调用 Service 层处理业务逻辑
-	resp, err := th.svc.GetUserTasks(userID)
+	// 创建一个带 1 秒超时的上下文
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源
+	resp, err := th.svc.GetUserTasks(ctx, userID)
 	if err != nil {
 		switch {
 		case errors.Is(err, respond.UserTasksEmpty): //如果任务列表为空

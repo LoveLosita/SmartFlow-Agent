@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
@@ -29,7 +31,10 @@ func (api *TaskClassHandler) UserAddTaskClass(c *gin.Context) {
 		return
 	}
 	userIDInterface := c.GetInt("user_id")
-	err = api.svc.AddTaskClass(&req, userIDInterface)
+	// 创建一个带 1 秒超时的上下文
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源
+	err = api.svc.AddTaskClass(ctx, &req, userIDInterface)
 	if err != nil {
 		if errors.Is(err, respond.WrongParamType) {
 			c.JSON(http.StatusBadRequest, respond.WrongParamType)
@@ -42,7 +47,10 @@ func (api *TaskClassHandler) UserAddTaskClass(c *gin.Context) {
 
 func (api *TaskClassHandler) UserGetTaskClassInfos(c *gin.Context) {
 	userIDInterface := c.GetInt("user_id")
-	resp, err := api.svc.GetUserTaskClassInfos(userIDInterface)
+	// 创建一个带 1 秒超时的上下文
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源
+	resp, err := api.svc.GetUserTaskClassInfos(ctx, userIDInterface)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, respond.InternalError(err))
 		return

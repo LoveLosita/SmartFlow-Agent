@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
@@ -51,7 +53,10 @@ func (sa *ScheduleHandler) AddUserCourses(c *gin.Context) {
 	//2.从上下文获取用户ID
 	userIDInterface := c.GetInt("user_id")
 	//3.调用 service 层的 AddUserCourses 方法添加课程
-	err = sa.service.AddUserCourses(req, userIDInterface)
+	// 创建一个带 1 秒超时的上下文
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源
+	err = sa.service.AddUserCourses(ctx, req, userIDInterface)
 	if err != nil {
 		switch {
 		case errors.Is(err, respond.WrongParamType), errors.Is(err, respond.WrongCourseInfo):

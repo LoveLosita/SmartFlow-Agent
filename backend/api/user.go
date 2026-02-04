@@ -3,8 +3,10 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
@@ -33,8 +35,10 @@ func (api *UserHandler) UserRegister(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
 		return
 	}
-
-	retUser, err := api.svc.UserRegister(user)
+	// 创建一个带 1 秒超时的上下文
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源
+	retUser, err := api.svc.UserRegister(ctx, user)
 	if err != nil {
 		switch {
 		case errors.Is(err, respond.InvalidName), errors.Is(err, respond.MissingParam),
@@ -57,7 +61,10 @@ func (api *UserHandler) UserLogin(c *gin.Context) {
 		c.JSON(http.StatusOK, respond.WrongParamType)
 		return
 	}
-	tokens, err := api.svc.UserLogin(&req)
+	// 创建一个带 1 秒超时的上下文
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源
+	tokens, err := api.svc.UserLogin(ctx, &req)
 	if err != nil {
 		switch {
 		case errors.Is(err, respond.WrongName), errors.Is(err, respond.WrongPwd): //如果是无效ID或者缺少参数的错误
@@ -82,7 +89,10 @@ func (api *UserHandler) RefreshTokenHandler(c *gin.Context) {
 	if requestBody.RefreshToken == "" {
 		c.JSON(http.StatusBadRequest, respond.MissingParam)
 	}
-	tokens, err := api.svc.RefreshTokenHandler(requestBody.RefreshToken)
+	// 创建一个带 1 秒超时的上下文
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源
+	tokens, err := api.svc.RefreshTokenHandler(ctx, requestBody.RefreshToken)
 	if err != nil {
 		switch {
 		case errors.Is(err, respond.InvalidRefreshToken), errors.Is(err, respond.InvalidClaims),
@@ -101,7 +111,10 @@ func (api *UserHandler) UserLogout(c *gin.Context) {
 	claims, _ := c.Get("claims")
 	cl := claims.(*model.MyCustomClaims)
 	//2.调用 Service 层的 UserLogout 方法
-	err := api.svc.UserLogout(cl.Jti, cl.ExpiresAt.Time)
+	// 创建一个带 1 秒超时的上下文
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源
+	err := api.svc.UserLogout(ctx, cl.Jti, cl.ExpiresAt.Time)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, respond.InternalError(err))
 		return

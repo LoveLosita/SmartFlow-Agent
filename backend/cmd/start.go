@@ -49,7 +49,7 @@ func Start() {
 	userService := service.NewUserService(userRepo, cacheRepo)
 	taskSv := service.NewTaskService(taskRepo)
 	scheduleService := service.NewScheduleService(scheduleRepo)
-	taskClassService := service.NewTaskClassService(taskClassRepo)
+	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo)
 	//api 层
 	userApi := api.NewUserHandler(userService)
 	taskApi := api.NewTaskHandler(taskSv)

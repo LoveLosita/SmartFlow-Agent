@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/LoveLosita/smartflow/backend/dao"
@@ -33,7 +34,7 @@ func CheckSingleCourse(req model.UserCheckCourseRequest) bool {
 }
 
 // AddUserCourses 添加用户课程表
-func (ss *ScheduleService) AddUserCourses(req model.UserImportCoursesRequest, userID int) error {
+func (ss *ScheduleService) AddUserCourses(ctx context.Context, req model.UserImportCoursesRequest, userID int) error {
 	//1.先校验参数是否正确
 	for _, course := range req.Courses {
 		result := CheckSingleCourse(course)

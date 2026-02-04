@@ -6,6 +6,8 @@ import (
 	"errors"
 	"time"
 
+	"context"
+
 	"github.com/LoveLosita/smartflow/backend/auth"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/model"
@@ -26,7 +28,7 @@ func NewUserService(userRepo *dao.UserDAO, cacheRepo *dao.CacheDAO) *UserService
 	}
 }
 
-func (sv *UserService) UserRegister(user model.UserRegisterRequest) (*model.UserRegisterResponse, error) {
+func (sv *UserService) UserRegister(ctx context.Context, user model.UserRegisterRequest) (*model.UserRegisterResponse, error) {
 	//检查是否有空字段
 	if user.Username == "" || user.Password == "" ||
 		user.PhoneNumber == "" {
@@ -57,7 +59,7 @@ func (sv *UserService) UserRegister(user model.UserRegisterRequest) (*model.User
 	return &model.UserRegisterResponse{ID: newUser.ID}, nil
 }
 
-func (sv *UserService) UserLogin(req *model.UserLoginRequest) (*model.Tokens, error) {
+func (sv *UserService) UserLogin(ctx context.Context, req *model.UserLoginRequest) (*model.Tokens, error) {
 	var tokens model.Tokens
 	hashedPwd, err := sv.userRepo.GetUserHashedPasswordByName(req.Username) //调用dao层的方法
 	if err != nil {
@@ -86,29 +88,7 @@ func (sv *UserService) UserLogin(req *model.UserLoginRequest) (*model.Tokens, er
 	return &tokens, nil
 }
 
-/*func (sv *UserService) RefreshTokenHandler(refreshToken string) (*model.Tokens, error) {
-	// 验证刷新令牌
-	token, err := auth.ValidateRefreshToken(refreshToken, sv.cacheRepo)
-	if err != nil || !token.Valid { // 刷新令牌无效
-		return nil, respond.InvalidRefreshToken
-	}
-
-	// 生成新的访问令牌和刷新令牌
-	if claims, ok := token.Claims.(jwt.MapClaims); ok {
-		userID := int(claims["user_id"].(float64))
-		newAccessToken, newRefreshToken, err := auth.GenerateTokens(userID)
-		if err != nil {
-			return nil, err
-		}
-
-		// 返回新的访问令牌和刷新令牌
-		return &model.Tokens{AccessToken: newAccessToken, RefreshToken: newRefreshToken}, nil
-	} else {
-		return nil, respond.InvalidClaims
-	}
-}*/
-
-func (sv *UserService) RefreshTokenHandler(refreshToken string) (*model.Tokens, error) {
+func (sv *UserService) RefreshTokenHandler(ctx context.Context, refreshToken string) (*model.Tokens, error) {
 	// 1. 验证刷新令牌 (这里已经包含了 Redis 黑名单检查)
 	token, err := auth.ValidateRefreshToken(refreshToken, sv.cacheRepo)
 	if err != nil {
@@ -132,7 +112,7 @@ func (sv *UserService) RefreshTokenHandler(refreshToken string) (*model.Tokens, 
 	return nil, respond.InvalidClaims
 }
 
-func (sv *UserService) UserLogout(jti string, expireTime time.Time) error {
+func (sv *UserService) UserLogout(ctx context.Context, jti string, expireTime time.Time) error {
 	//1.直接把 jti 扔进黑名单
 	expiration := time.Until(expireTime)
 	err := sv.cacheRepo.SetBlacklist(jti, expiration)
