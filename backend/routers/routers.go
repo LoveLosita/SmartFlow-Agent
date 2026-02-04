@@ -60,6 +60,12 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO) *gin.Engine
 			scheduleGroup.POST("/validate", handlers.ScheduleHandler.CheckUserCourse)
 			scheduleGroup.POST("/import-courses", handlers.ScheduleHandler.AddUserCourses)
 		}
+		taskClassGroup := apiGroup.Group("/task-class")
+		{
+			taskClassGroup.Use(middleware.JWTTokenAuth(cache))
+			taskClassGroup.POST("/add", handlers.TaskClassHandler.UserAddTaskClass)
+			taskClassGroup.GET("/list", handlers.TaskClassHandler.UserGetTaskClassInfos)
+		}
 	}
 	// 初始化Gin引擎
 	log.Println("Routes setup completed")
