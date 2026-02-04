@@ -17,10 +17,11 @@ type TaskClass struct {
 	StartDate *time.Time `gorm:"column:start_date"`
 	EndDate   *time.Time `gorm:"column:end_date"`
 	//section 3
-	TotalSlots        *int    `gorm:"column:total_slots;comment:分配的总节数"`
-	AllowFillerCourse *bool   `gorm:"column:allow_filler_course;default:true"`
-	Strategy          *string `gorm:"column:strategy;type:enum('steady','rapid')"`
-	ExcludedSlots     *string `gorm:"column:excluded_slots;type:json;comment:不想要的时段切片"`
+	TotalSlots        *int            `gorm:"column:total_slots;comment:分配的总节数"`
+	AllowFillerCourse *bool           `gorm:"column:allow_filler_course;default:true"`
+	Strategy          *string         `gorm:"column:strategy;type:enum('steady','rapid')"`
+	ExcludedSlots     *string         `gorm:"column:excluded_slots;type:json;comment:不想要的时段切片"`
+	Items             []TaskClassItem `gorm:"foreignKey:CategoryID;references:ID"` // 一对多关联：一个 TaskClass 有多个 TaskClassItem
 }
 
 // TableName 设定 TaskClass 的表名为 task_classes

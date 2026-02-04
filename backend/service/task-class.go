@@ -24,16 +24,19 @@ func NewTaskClassService(taskClassRepo *dao.TaskClassDAO, cacheRepo *dao.CacheDA
 	}
 }
 
-// AddTaskClass 为指定用户添加任务类
-func (sv *TaskClassService) AddTaskClass(ctx context.Context, req *model.UserAddTaskClassRequest, userID int) error {
+// AddOrUpdateTaskClass 为指定用户添加任务类
+func (sv *TaskClassService) AddOrUpdateTaskClass(ctx context.Context, req *model.UserAddTaskClassRequest, userID int, method int, targetTaskClassID int) error {
 	// 1) 先写数据库（事务内）
 	if err := sv.taskClassRepo.Transaction(func(txDAO *dao.TaskClassDAO) error {
 		taskClass, items, err := conv.ProcessUserAddTaskClassRequest(req, userID)
 		if err != nil {
 			return err
 		}
+		if method == 1 { // 更新操作
+			taskClass.ID = targetTaskClassID
+		}
 
-		taskClassID, err := txDAO.AddTaskClass(taskClass)
+		taskClassID, err := txDAO.AddOrUpdateTaskClass(userID, taskClass)
 		if err != nil {
 			return err
 		}
@@ -41,7 +44,7 @@ func (sv *TaskClassService) AddTaskClass(ctx context.Context, req *model.UserAdd
 		for i := range items {
 			items[i].CategoryID = &taskClassID
 		}
-		if err := txDAO.AddTaskClassItems(items); err != nil {
+		if err := txDAO.AddOrUpdateTaskClassItems(userID, items); err != nil {
 			return err
 		}
 		return nil
@@ -74,6 +77,20 @@ func (sv *TaskClassService) GetUserTaskClassInfos(ctx context.Context, userID in
 	resp := conv.TaskClassModelToResponse(taskClasses)
 	//3.写入缓存
 	err = sv.cacheRepo.AddTaskClassList(ctx, userID, resp)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (sv *TaskClassService) GetUserCompleteTaskClass(ctx context.Context, userID int, taskClassID int) (*model.UserAddTaskClassRequest, error) {
+	//1.查询数据库
+	taskClass, err := sv.taskClassRepo.GetCompleteTaskClassByID(ctx, taskClassID, userID)
+	if err != nil {
+		return nil, err
+	}
+	//2.转换为响应结构体
+	resp, err := conv.ProcessUserGetCompleteTaskClassRequest(taskClass)
 	if err != nil {
 		return nil, err
 	}

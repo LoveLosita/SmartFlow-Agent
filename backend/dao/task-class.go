@@ -1,7 +1,10 @@
 package dao
 
 import (
+	"context"
+
 	"github.com/LoveLosita/smartflow/backend/model"
+	"github.com/LoveLosita/smartflow/backend/respond"
 	"gorm.io/gorm"
 )
 
@@ -18,17 +21,87 @@ func NewTaskClassDAO(db *gorm.DB) *TaskClassDAO {
 	}
 }
 
-// AddTaskClass 为指定用户添加任务类
-func (dao *TaskClassDAO) AddTaskClass(taskClass *model.TaskClass) (int, error) {
-	err := dao.db.Create(taskClass).Error
-	if err != nil {
-		return 0, err
+// AddOrUpdateTaskClass 为指定用户添加/更新任务类（防越权：更新时限定 user_id）
+func (dao *TaskClassDAO) AddOrUpdateTaskClass(userID int, taskClass *model.TaskClass) (int, error) {
+	// 不信任入参里的 UserID，强制使用当前登录用户
+	taskClass.UserID = &userID
+
+	// 新增：ID == 0 直接插入
+	if taskClass.ID == 0 {
+		if err := dao.db.Create(taskClass).Error; err != nil {
+			return 0, err
+		}
+		return taskClass.ID, nil
+	}
+	// 更新：必须同时匹配 id + user_id，否则不会更新任何行（避免覆盖他人数据）
+	tx := dao.db.Model(&model.TaskClass{}).
+		Where("id = ? AND user_id = ?", taskClass.ID, userID).
+		Updates(taskClass)
+	if tx.Error != nil {
+		return 0, tx.Error
+	}
+	if tx.RowsAffected == 0 {
+		// 未匹配到记录：要么不存在，要么不属于该用户
+		return 0, respond.UserTaskClassForbidden
 	}
 	return taskClass.ID, nil
 }
 
-func (dao *TaskClassDAO) AddTaskClassItems(items []model.TaskClassItem) error {
-	return dao.db.Create(&items).Error
+func (dao *TaskClassDAO) AddOrUpdateTaskClassItems(userID int, items []model.TaskClassItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	// 1) 校验这些 items 关联的 task_class（category_id）都属于当前用户
+	categoryIDSet := make(map[int]struct{}, len(items))
+	var categoryIDs []int
+	for _, it := range items {
+		if *it.CategoryID == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		if _, ok := categoryIDSet[*it.CategoryID]; !ok {
+			categoryIDSet[*it.CategoryID] = struct{}{}
+			categoryIDs = append(categoryIDs, *it.CategoryID)
+		}
+	}
+
+	var count int64
+	if err := dao.db.Model(&model.TaskClass{}).
+		Where("id IN ? AND user_id = ?", categoryIDs, userID).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count != int64(len(categoryIDs)) {
+		return respond.UserTaskClassForbidden
+	}
+
+	// 2) 新增与更新分开处理：新增不受影响；更新时限定 category_id（防越权）
+	var toCreate []model.TaskClassItem
+	for _, it := range items {
+		if it.ID == 0 {
+			toCreate = append(toCreate, it)
+			continue
+		}
+
+		tx := dao.db.Model(&model.TaskClassItem{}).
+			Where("id = ? AND category_id IN ?", it.ID, categoryIDs).
+			Updates(map[string]any{
+				"category_id": it.CategoryID,
+			})
+		if tx.Error != nil {
+			return tx.Error
+		}
+		if tx.RowsAffected == 0 {
+			return respond.UserTaskClassForbidden
+		}
+	}
+
+	if len(toCreate) > 0 {
+		if err := dao.db.Create(&toCreate).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Transaction 在一个事务中执行传入的函数，供 service 层复用（自动提交/回滚）
@@ -46,4 +119,22 @@ func (dao *TaskClassDAO) GetUserTaskClasses(userID int) ([]model.TaskClass, erro
 		return nil, err
 	}
 	return taskClasses, nil
+}
+
+// GetCompleteTaskClassByID 带着 ID 和 UserID 去取，防越权
+func (dao *TaskClassDAO) GetCompleteTaskClassByID(ctx context.Context, id int, userID int) (*model.TaskClass, error) {
+	var taskClass model.TaskClass
+
+	// 1. 使用 Preload("Items") 自动执行两条 SQL 并组装
+	// SQL A: SELECT * FROM task_classes WHERE id = ? AND user_id = ?
+	// SQL B: SELECT * FROM task_class_items WHERE category_id = (SQL A 的 ID)
+	err := dao.db.WithContext(ctx).
+		Preload("Items").
+		Where("id = ? AND user_id = ?", id, userID).
+		First(&taskClass).Error
+
+	if err != nil {
+		return nil, err
+	}
+	return &taskClass, nil
 }

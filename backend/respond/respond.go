@@ -138,4 +138,14 @@ var ( //请求相关的响应
 		Status: "40019",
 		Info:   "wrong course info",
 	}
+
+	UserTaskClassNotFound = Response{ //用户任务类未找到
+		Status: "40020",
+		Info:   "user task class not found",
+	}
+
+	UserTaskClassForbidden = Response{ //用户任务类禁止访问
+		Status: "40021",
+		Info:   "user task class forbidden",
+	}
 )

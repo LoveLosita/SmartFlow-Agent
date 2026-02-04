@@ -65,6 +65,8 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO) *gin.Engine
 			taskClassGroup.Use(middleware.JWTTokenAuth(cache))
 			taskClassGroup.POST("/add", handlers.TaskClassHandler.UserAddTaskClass)
 			taskClassGroup.GET("/list", handlers.TaskClassHandler.UserGetTaskClassInfos)
+			taskClassGroup.GET("/get", handlers.TaskClassHandler.UserGetCompleteTaskClass)
+			taskClassGroup.PUT("/update", handlers.TaskClassHandler.UserUpdateTaskClass)
 		}
 	}
 	// 初始化Gin引擎

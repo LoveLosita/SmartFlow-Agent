@@ -1,6 +1,8 @@
 package conv
 
 import (
+	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/model"
@@ -93,4 +95,74 @@ func TaskClassModelToResponse(taskClasses []model.TaskClass) *model.UserGetTaskC
 		resp.TaskClasses = append(resp.TaskClasses, tcResp)
 	}
 	return &resp
+}
+
+func ProcessUserGetCompleteTaskClassRequest(taskClass *model.TaskClass) (*model.UserAddTaskClassRequest, error) {
+	if taskClass == nil {
+		return nil, errors.New("源数据对象不可为空")
+	}
+	// 1. 映射基础信息 (处理指针解引用)
+	req := &model.UserAddTaskClassRequest{
+		Name:      safeStr(taskClass.Name),
+		Mode:      safeStr(taskClass.Mode),
+		StartDate: formatTime(taskClass.StartDate),
+		EndDate:   formatTime(taskClass.EndDate),
+	}
+	// 2. 映射配置信息 (Config Section)
+	req.Config = model.UserAddTaskClassConfig{
+		TotalSlots:        safeInt(taskClass.TotalSlots),
+		AllowFillerCourse: safeBool(taskClass.AllowFillerCourse),
+		Strategy:          safeStr(taskClass.Strategy),
+	}
+	// 3. 处理 ExcludedSlots JSON 字符串 -> []int
+	if taskClass.ExcludedSlots != nil && *taskClass.ExcludedSlots != "" {
+		var excluded []int
+		// 直接使用标准反序列化，比手动处理 rune 字符要健壮得多
+		if err := json.Unmarshal([]byte(*taskClass.ExcludedSlots), &excluded); err == nil {
+			req.Config.ExcludedSlots = excluded
+		}
+	}
+	// 4. 映射子项信息 (Items Section)
+	// 此时 items 已经通过 Preload 加载到了 taskClass.Items 中
+	req.Items = make([]model.UserAddTaskClassItemRequest, 0, len(taskClass.Items))
+	for _, item := range taskClass.Items {
+		itemReq := model.UserAddTaskClassItemRequest{
+			Order:        safeInt(item.Order),
+			Content:      safeStr(item.Content),
+			EmbeddedTime: item.EmbeddedTime, // 结构体指针直接复用
+		}
+		req.Items = append(req.Items, itemReq)
+	}
+	return req, nil
+}
+
+// --- 🛡️ 辅助工具函数：保持代码清爽并防止 Panic ---
+
+func safeStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+func safeInt(i *int) int {
+	if i == nil {
+		return 0
+	}
+	return *i
+}
+
+func safeBool(b *bool) bool {
+	if b == nil {
+		return true
+	}
+	return *b
+}
+
+func formatTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	// 务必使用 2006-01-02 格式以匹配前端校验
+	return t.Format("2006-01-02")
 }
