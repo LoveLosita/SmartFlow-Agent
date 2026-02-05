@@ -7,6 +7,7 @@ import (
 	"time"
 )
 
+// TaskClass 用于和数据库中的 task_classes 表进行映射
 type TaskClass struct {
 	//section 1
 	ID     int  `gorm:"column:id;primaryKey;autoIncrement"`
@@ -24,33 +25,7 @@ type TaskClass struct {
 	Items             []TaskClassItem `gorm:"foreignKey:CategoryID;references:ID"` // 一对多关联：一个 TaskClass 有多个 TaskClassItem
 }
 
-// TableName 设定 TaskClass 的表名为 task_classes
-func (TaskClass) TableName() string {
-	return "task_classes"
-}
-
-type UserAddTaskClassRequest struct {
-	Name      string                        `json:"name" binding:"required"`
-	StartDate string                        `json:"start_date" binding:"required"` // YYYY-MM-DD
-	EndDate   string                        `json:"end_date" binding:"required"`   // YYYY-MM-DD
-	Mode      string                        `json:"mode" binding:"required,oneof=auto manual"`
-	Config    UserAddTaskClassConfig        `json:"config" binding:"required"`
-	Items     []UserAddTaskClassItemRequest `json:"items" binding:"required"`
-}
-
-type UserAddTaskClassConfig struct {
-	TotalSlots        int    `json:"total_slots" binding:"required,min=1"`
-	AllowFillerCourse bool   `json:"allow_filler_course"`
-	Strategy          string `json:"strategy" binding:"required,oneof=steady rapid"`
-	ExcludedSlots     []int  `json:"excluded_slots"`
-}
-
-type UserAddTaskClassItemRequest struct {
-	Order        int         `json:"order" binding:"required,min=1"`
-	Content      string      `json:"content" binding:"required"`
-	EmbeddedTime *TargetTime `json:"embedded_time"` // 例: 2025-12-22 1-2节; nil 表示未安排
-}
-
+// TaskClassItem 用于和数据库中的 task_items 表进行映射
 type TaskClassItem struct {
 	//section 1
 	ID         int  `gorm:"column:id;primaryKey;autoIncrement"`
@@ -62,12 +37,55 @@ type TaskClassItem struct {
 	Status       *int        `gorm:"column:status;comment:1:未安排, 2:已应用"`
 }
 
+// UserAddTaskClassRequest 用于处理用户添加任务类别的请求
+type UserAddTaskClassRequest struct {
+	Name      string                        `json:"name" binding:"required"`
+	StartDate string                        `json:"start_date" binding:"required"` // YYYY-MM-DD
+	EndDate   string                        `json:"end_date" binding:"required"`   // YYYY-MM-DD
+	Mode      string                        `json:"mode" binding:"required,oneof=auto manual"`
+	Config    UserAddTaskClassConfig        `json:"config" binding:"required"`
+	Items     []UserAddTaskClassItemRequest `json:"items" binding:"required"`
+}
+
+// UserAddTaskClassConfig 用于处理用户添加任务类别时的配置部分
+type UserAddTaskClassConfig struct {
+	TotalSlots        int    `json:"total_slots" binding:"required,min=1"`
+	AllowFillerCourse bool   `json:"allow_filler_course"`
+	Strategy          string `json:"strategy" binding:"required,oneof=steady rapid"`
+	ExcludedSlots     []int  `json:"excluded_slots"`
+}
+
+// UserAddTaskClassItemRequest 用于处理用户添加任务类别时的任务块部分
+type UserAddTaskClassItemRequest struct {
+	Order        int         `json:"order" binding:"required,min=1"`
+	Content      string      `json:"content" binding:"required"`
+	EmbeddedTime *TargetTime `json:"embedded_time"` // 例: 2025-12-22 1-2节; nil 表示未安排
+}
+
+// TargetTime 表示任务块的目标时间
 type TargetTime struct {
 	Date        string `json:"date"`         // 例: 2025-12-22
 	SectionFrom int    `json:"section_from"` // 起始节次
 	SectionTo   int    `json:"section_to"`   // 结束节次
 }
 
+// UserGetTaskClassesResponse 用于返回用户的任务类列表，展示简要信息
+type UserGetTaskClassesResponse struct {
+	TaskClasses []TaskClassSummary `json:"task_classes"`
+}
+
+// TaskClassSummary 提供任务类别的简要信息
+type TaskClassSummary struct {
+	ID         int       `json:"id"`
+	Name       string    `json:"name"`
+	Mode       string    `json:"mode"`
+	Strategy   string    `json:"strategy"`
+	StartDate  time.Time `json:"start_date"`
+	EndDate    time.Time `json:"end_date"`
+	TotalSlots int       `json:"total_slots"`
+}
+
+// Value 实现 driver.Valuer 接口，负责将 TargetTime 转换为数据库存储的格式
 func (t *TargetTime) Value() (driver.Value, error) {
 	if t == nil {
 		return nil, nil
@@ -77,6 +95,7 @@ func (t *TargetTime) Value() (driver.Value, error) {
 	return json.Marshal(t)
 }
 
+// Scan 实现 sql.Scanner 接口，负责将数据库中的值转换为 TargetTime 结构体
 func (t *TargetTime) Scan(value any) error {
 	if value == nil {
 		// 如果数据库是 NULL，保持指针对应的对象为零值即可
@@ -97,25 +116,18 @@ func (t *TargetTime) Scan(value any) error {
 	return json.Unmarshal(data, t)
 }
 
+// TableName 指定 TaskClass 对应的数据库表名
+func (TaskClass) TableName() string {
+	return "task_classes"
+}
+
+// TableName 指定 TaskClassItem 对应的数据库表名
 func (TaskClassItem) TableName() string {
 	return "task_items"
 }
 
+// 任务块状态常量
 const (
-	TaskItemStatusUnscheduled = 1
-	TaskItemStatusApplied     = 2
+	TaskItemStatusUnscheduled = 1 // 未安排
+	TaskItemStatusApplied     = 2 // 已应用
 )
-
-type UserGetTaskClassesResponse struct {
-	TaskClasses []TaskClassSummary `json:"task_classes"`
-}
-
-type TaskClassSummary struct {
-	ID         int       `json:"id"`
-	Name       string    `json:"name"`
-	Mode       string    `json:"mode"`
-	Strategy   string    `json:"strategy"`
-	StartDate  time.Time `json:"start_date"`
-	EndDate    time.Time `json:"end_date"`
-	TotalSlots int       `json:"total_slots"`
-}

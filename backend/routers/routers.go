@@ -54,11 +54,11 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO) *gin.Engine
 			taskGroup.POST("/create", handlers.TaskHandler.AddTask)
 			taskGroup.GET("/get", handlers.TaskHandler.GetUserTasks)
 		}
-		scheduleGroup := apiGroup.Group("/schedule")
+		courseGroup := apiGroup.Group("/course")
 		{
-			scheduleGroup.Use(middleware.JWTTokenAuth(cache))
-			scheduleGroup.POST("/validate", handlers.ScheduleHandler.CheckUserCourse)
-			scheduleGroup.POST("/import-courses", handlers.ScheduleHandler.AddUserCourses)
+			courseGroup.Use(middleware.JWTTokenAuth(cache))
+			courseGroup.POST("/validate", handlers.ScheduleHandler.CheckUserCourse)
+			courseGroup.POST("/import", handlers.ScheduleHandler.AddUserCourses)
 		}
 		taskClassGroup := apiGroup.Group("/task-class")
 		{

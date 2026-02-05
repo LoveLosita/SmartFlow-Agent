@@ -2,21 +2,20 @@ package service
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
 )
 
-type ScheduleService struct {
+type CourseService struct {
 	// 伸出手：准备接住 DAO
-	dao *dao.ScheduleDAO
+	dao *dao.CourseDAO
 }
 
-// NewScheduleService 创建 ScheduleService 实例
-func NewScheduleService(dao *dao.ScheduleDAO) *ScheduleService {
-	return &ScheduleService{
+// NewCourseService 创建 CourseService 实例
+func NewCourseService(dao *dao.CourseDAO) *CourseService {
+	return &CourseService{
 		dao: dao,
 	}
 }
@@ -34,7 +33,7 @@ func CheckSingleCourse(req model.UserCheckCourseRequest) bool {
 }
 
 // AddUserCourses 添加用户课程表
-func (ss *ScheduleService) AddUserCourses(ctx context.Context, req model.UserImportCoursesRequest, userID int) error {
+func (ss *CourseService) AddUserCourses(ctx context.Context, req model.UserImportCoursesRequest, userID int) error {
 	//1.先校验参数是否正确
 	for _, course := range req.Courses {
 		result := CheckSingleCourse(course)
@@ -43,30 +42,32 @@ func (ss *ScheduleService) AddUserCourses(ctx context.Context, req model.UserImp
 		}
 	}
 	//2.转换为 Schedule 切片
+	var finalSchedules []model.Schedule
 	for _, course := range req.Courses {
 		var schedules []model.Schedule
 		for _, arrangement := range course.Arrangements {
 			for week := arrangement.StartWeek; week <= arrangement.EndWeek; week++ {
-				sections := fmt.Sprintf("%d-%d", arrangement.StartSection, arrangement.EndSection)
-				schedule := model.Schedule{
-					Type:          "course",
-					Week:          week,
-					DayOfWeek:     arrangement.DayOfWeek,
-					Sections:      sections,
-					Status:        "normal",
-					UserID:        userID,
-					CanBeEmbedded: course.IsAllowTasks,
+				for section := arrangement.StartSection; section <= arrangement.EndSection; section++ {
+					schedule := model.Schedule{
+						Type:          "course",
+						Week:          week,
+						DayOfWeek:     arrangement.DayOfWeek,
+						Section:       section,
+						Status:        "normal",
+						UserID:        userID,
+						CanBeEmbedded: course.IsAllowTasks,
+					}
+					schedules = append(schedules, schedule)
 				}
-				schedules = append(schedules, schedule)
 			}
 		}
-		//3.调用 DAO 方法添加课程
-		err := ss.dao.AddUserCourses(schedules)
-		if err != nil {
-			return err
-		}
+		finalSchedules = append(finalSchedules, schedules...)
 	}
-
+	//3.调用 DAO 方法添加课程
+	err := ss.dao.AddUserCourses(finalSchedules)
+	if err != nil {
+		return err
+	}
 	//4.返回结果
 	return nil
 }

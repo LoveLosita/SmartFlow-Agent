@@ -12,19 +12,19 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type ScheduleHandler struct {
+type CourseHandler struct {
 	// 伸出手：准备接住 Service
-	service *service.ScheduleService
+	service *service.CourseService
 }
 
-// NewScheduleHandler 创建 ScheduleHandler 实例
-func NewScheduleHandler(service *service.ScheduleService) *ScheduleHandler {
-	return &ScheduleHandler{
+// NewCourseHandler 创建 CourseHandler 实例
+func NewCourseHandler(service *service.CourseService) *CourseHandler {
+	return &CourseHandler{
 		service: service,
 	}
 }
 
-func (sa *ScheduleHandler) CheckUserCourse(c *gin.Context) {
+func (sa *CourseHandler) CheckUserCourse(c *gin.Context) {
 	//1.从请求中获取课程信息
 	var req model.UserCheckCourseRequest
 	err := c.ShouldBindJSON(&req)
@@ -42,7 +42,7 @@ func (sa *ScheduleHandler) CheckUserCourse(c *gin.Context) {
 	}
 }
 
-func (sa *ScheduleHandler) AddUserCourses(c *gin.Context) {
+func (sa *CourseHandler) AddUserCourses(c *gin.Context) {
 	//1.从请求中获取课程信息
 	var req model.UserImportCoursesRequest
 	err := c.ShouldBindJSON(&req)
