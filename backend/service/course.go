@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"strings"
 
+	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
@@ -10,14 +12,32 @@ import (
 
 type CourseService struct {
 	// 伸出手：准备接住 DAO
-	dao *dao.CourseDAO
+	courseDAO   *dao.CourseDAO
+	scheduleDAO *dao.ScheduleDAO
 }
 
 // NewCourseService 创建 CourseService 实例
-func NewCourseService(dao *dao.CourseDAO) *CourseService {
+func NewCourseService(courseDAO *dao.CourseDAO, scheduleDAO *dao.ScheduleDAO) *CourseService {
 	return &CourseService{
-		dao: dao,
+		courseDAO:   courseDAO,
+		scheduleDAO: scheduleDAO,
 	}
+}
+
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	// 兼容常见 MySQL / PostgreSQL / SQLite 的报错关键字
+	// 也可以进一步精确到你的索引名 idx_user_slot_atomic
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "duplicate entry") ||
+		strings.Contains(msg, "unique constraint") ||
+		strings.Contains(msg, "unique violation") ||
+		strings.Contains(msg, "duplicate key") {
+		return true
+	}
+	return false
 }
 
 func CheckSingleCourse(req model.UserCheckCourseRequest) bool {
@@ -33,14 +53,15 @@ func CheckSingleCourse(req model.UserCheckCourseRequest) bool {
 }
 
 // AddUserCourses 添加用户课程表
-func (ss *CourseService) AddUserCourses(ctx context.Context, req model.UserImportCoursesRequest, userID int) error {
+func (ss *CourseService) AddUserCourses(ctx context.Context, req model.UserImportCoursesRequest, userID int) ([]model.ScheduleConflictDetail, error) {
 	//1.先校验参数是否正确
 	for _, course := range req.Courses {
 		result := CheckSingleCourse(course)
 		if !result {
-			return respond.WrongCourseInfo
+			return nil, respond.WrongCourseInfo
 		}
 	}
+	//2.将前端传来的课程信息转换为 Schedule 和 ScheduleEvent 切片
 	var finalSchedules []model.Schedule
 	var finalScheduleEvents []model.ScheduleEvent
 	var pos []int
@@ -82,9 +103,25 @@ func (ss *CourseService) AddUserCourses(ctx context.Context, req model.UserImpor
 			}
 		}
 	}
-	//TODO 冲突处理、重复检测...预计0.2.0版本之前完成
-	//4.事务：插入两个表要么都成功，要么都回滚
-	return ss.dao.Transaction(func(txDAO *dao.CourseDAO) error {
+	//3.先检测是否重复插入了课程（同一周、同一天、同一节已有课程）
+	exists, err := ss.scheduleDAO.CheckScheduleConflict(ctx, finalSchedules)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		return nil, respond.InsertCourseTwice
+	}
+	//4.再检查是否和某些非课程的日程冲突（同一周、同一天、同一节已有非课程日程），并给出具体的冲突信息
+	conflicts, err := ss.scheduleDAO.GetNonCourseScheduleConflicts(ctx, finalSchedules)
+	if err != nil {
+		return nil, err
+	}
+	if len(conflicts) > 0 {
+		ret := conv.SchedulesToScheduleConflictDetail(conflicts)
+		return ret, respond.ScheduleConflict
+	}
+	//5.事务：插入两个表要么都成功，要么都回滚
+	err = ss.courseDAO.Transaction(func(txDAO *dao.CourseDAO) error {
 		ids, err := txDAO.AddUserCoursesIntoScheduleEvents(ctx, finalScheduleEvents)
 		if err != nil {
 			return err
@@ -98,4 +135,11 @@ func (ss *CourseService) AddUserCourses(ctx context.Context, req model.UserImpor
 		}
 		return nil
 	})
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, respond.InsertCourseTwice
+		}
+		return nil, err
+	}
+	return nil, nil
 }

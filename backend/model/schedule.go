@@ -19,6 +19,26 @@ type Schedule struct {
 	Section        int    `gorm:"column:section;uniqueIndex:idx_user_slot_atomic,priority:4;not null;comment:原子化节次 (1-12)" json:"section"`
 	EmbeddedTaskID *int   `gorm:"column:embedded_task_id;comment:若为水课嵌入，记录具体的任务项ID" json:"embedded_task_id"`
 	Status         string `gorm:"column:status;type:enum('normal','interrupted');default:'normal';comment:状态: 正常/因故中断" json:"status"`
+	// 💡 必须加上这一行，告诉 GORM 如何关联元数据
+	Event ScheduleEvent `gorm:"foreignKey:EventID" json:"event"`
+}
+
+type ScheduleConflictDetail struct {
+	EventID       int                    `json:"event_id"`
+	Name          string                 `json:"name"`
+	Location      string                 `json:"location"`
+	DayOfWeek     int                    `json:"day_of_week"`
+	Week          int                    `json:"week"`
+	Sections      []int                  `json:"sections"`
+	StartSection  int                    `json:"start_section"`
+	EndSection    int                    `json:"end_section"`
+	Type          string                 `json:"type"`
+	EmbeddedTasks []ScheduleEmbeddedTask `json:"embedded_tasks"`
+}
+
+type ScheduleEmbeddedTask struct {
+	Section int `json:"section"`
+	TaskID  int `json:"task_id"`
 }
 
 func (ScheduleEvent) TableName() string { return "schedule_events" }

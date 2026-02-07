@@ -137,12 +137,12 @@ func ProcessUserGetCompleteTaskClassRequest(taskClass *model.TaskClass) (*model.
 }
 
 // UserInsertTaskItemRequestToModel 用于将填入空闲时段日程的请求转换为 Schedule 模型
-func UserInsertTaskItemRequestToModel(req *model.UserInsertTaskClassItemToScheduleRequest, item *model.TaskClassItem, taskID, userID, startSection, endSection int) ([]model.Schedule, *model.ScheduleEvent) {
+func UserInsertTaskItemRequestToModel(req *model.UserInsertTaskClassItemToScheduleRequest, item *model.TaskClassItem, taskID *int, userID, startSection, endSection int) ([]model.Schedule, *model.ScheduleEvent) {
 	var schedules []model.Schedule
 	for section := startSection; section <= endSection; section++ {
 		req1 := &model.Schedule{
-			UserID:         userID, // 由调用方填充
-			EmbeddedTaskID: &taskID,
+			UserID:         userID,
+			EmbeddedTaskID: taskID,
 			Week:           req.Week,
 			DayOfWeek:      req.DayOfWeek,
 			Section:        section,

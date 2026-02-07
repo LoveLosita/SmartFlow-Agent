@@ -19,6 +19,10 @@ func NewTaskDAO(db *gorm.DB) *TaskDAO {
 	}
 }
 
+func (r *TaskDAO) WithTx(tx *gorm.DB) *TaskDAO {
+	return &TaskDAO{db: tx}
+}
+
 // AddTask 为指定用户添加任务
 func (dao *TaskDAO) AddTask(req *model.Task) (*model.Task, error) {
 	if err := dao.db.Create(req).Error; err != nil {

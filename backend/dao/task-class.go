@@ -21,6 +21,12 @@ func NewTaskClassDAO(db *gorm.DB) *TaskClassDAO {
 	}
 }
 
+func (dao *TaskClassDAO) WithTx(tx *gorm.DB) *TaskClassDAO {
+	return &TaskClassDAO{
+		db: tx,
+	}
+}
+
 // AddOrUpdateTaskClass 为指定用户添加/更新任务类（防越权：更新时限定 user_id）
 func (dao *TaskClassDAO) AddOrUpdateTaskClass(userID int, taskClass *model.TaskClass) (int, error) {
 	// 不信任入参里的 UserID，强制使用当前登录用户

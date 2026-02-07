@@ -46,11 +46,12 @@ func Start() {
 	courseRepo := dao.NewCourseDAO(db)
 	taskClassRepo := dao.NewTaskClassDAO(db)
 	scheduleRepo := dao.NewScheduleDAO(db)
+	manager := dao.NewManager(db)
 	//service 层
 	userService := service.NewUserService(userRepo, cacheRepo)
 	taskSv := service.NewTaskService(taskRepo)
-	courseService := service.NewCourseService(courseRepo)
-	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo)
+	courseService := service.NewCourseService(courseRepo, scheduleRepo)
+	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo, manager)
 	//api 层
 	userApi := api.NewUserHandler(userService)
 	taskApi := api.NewTaskHandler(taskSv)

@@ -23,6 +23,10 @@ func NewUserDAO(db *gorm.DB) *UserDAO {
 	}
 }
 
+func (r *UserDAO) WithTx(tx *gorm.DB) *UserDAO {
+	return &UserDAO{db: tx}
+}
+
 // Create 创建新用户
 // 插入新用户信息到数据库
 func (dao *UserDAO) Create(username, phoneNumber, password string) (*model.User, error) {

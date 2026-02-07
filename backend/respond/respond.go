@@ -183,4 +183,9 @@ var ( //请求相关的响应
 		Status: "40028",
 		Info:   "course time not match",
 	}
+
+	InsertCourseTwice = Response{ //重复插入课程
+		Status: "40029",
+		Info:   "insert course twice",
+	}
 )

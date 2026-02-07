@@ -18,6 +18,10 @@ func NewCourseDAO(db *gorm.DB) *CourseDAO {
 	}
 }
 
+func (r *CourseDAO) WithTx(tx *gorm.DB) *CourseDAO {
+	return &CourseDAO{db: tx}
+}
+
 func (dao *CourseDAO) AddUserCoursesIntoSchedule(ctx context.Context, courses []model.Schedule) error {
 	if err := dao.db.WithContext(ctx).Create(&courses).Error; err != nil {
 		return err

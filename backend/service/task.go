@@ -28,7 +28,7 @@ func (ts *TaskService) AddTask(ctx context.Context, req *model.UserAddTaskReques
 	if taskModel.Priority < 1 || taskModel.Priority >= 5 {
 		return nil, respond.InvalidPriority
 	}
-	//3. 调用 dao 层进行数据持久化
+	//3. 调用 courseDAO 层进行数据持久化
 	createdTask, err := ts.dao.AddTask(taskModel)
 	if err != nil {
 		return nil, err
@@ -39,7 +39,7 @@ func (ts *TaskService) AddTask(ctx context.Context, req *model.UserAddTaskReques
 }
 
 func (ts *TaskService) GetUserTasks(ctx context.Context, userID int) ([]model.GetUserTaskResp, error) {
-	//1. 调用 dao 层获取数据
+	//1. 调用 courseDAO 层获取数据
 	tasks, err := ts.dao.GetTasksByUserID(userID)
 	if err != nil {
 		return nil, err
