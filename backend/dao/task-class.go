@@ -138,3 +138,46 @@ func (dao *TaskClassDAO) GetCompleteTaskClassByID(ctx context.Context, id int, u
 	}
 	return &taskClass, nil
 }
+
+func (dao *TaskClassDAO) GetTaskClassItemByID(ctx context.Context, id int) (*model.TaskClassItem, error) {
+	var item model.TaskClassItem
+	err := dao.db.WithContext(ctx).
+		Where("id = ?", id).
+		First(&item).Error
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (dao *TaskClassDAO) GetTaskClassIDByTaskItemID(ctx context.Context, itemID int) (int, error) {
+	var item model.TaskClassItem
+	err := dao.db.WithContext(ctx).
+		Select("category_id").
+		Where("id = ?", itemID).
+		First(&item).Error
+	if err != nil {
+		return 0, err
+	}
+	return *item.CategoryID, nil
+}
+
+func (dao *TaskClassDAO) GetTaskClassUserIDByID(ctx context.Context, taskClassID int) (int, error) {
+	var taskClass model.TaskClass
+	err := dao.db.WithContext(ctx).
+		Select("user_id").
+		Where("id = ?", taskClassID).
+		First(&taskClass).Error
+	if err != nil {
+		return 0, err
+	}
+	return *taskClass.UserID, nil
+}
+
+func (dao *TaskClassDAO) UpdateTaskClassItemEmbeddedTime(ctx context.Context, taskID int, embeddedTime *model.TargetTime) error {
+	err := dao.db.WithContext(ctx).
+		Model(&model.TaskClassItem{}).
+		Where("id = ?", taskID).
+		Update("embedded_time", embeddedTime).Error
+	return err
+}

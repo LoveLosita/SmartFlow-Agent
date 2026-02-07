@@ -117,3 +117,35 @@ func (api *TaskClassHandler) UserUpdateTaskClass(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, respond.Ok)
 }
+
+func (api *TaskClassHandler) UserAddTaskClassItemIntoSchedule(c *gin.Context) {
+	var req model.UserInsertTaskClassItemToScheduleRequest
+	err := c.ShouldBindJSON(&req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		return
+	}
+	taskID := c.Query("task_item_id")
+	//将taskID转换为int
+	intTaskID, err := strconv.Atoi(taskID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		return
+	}
+	userIDInterface := c.GetInt("user_id")
+	// 创建一个带 1 秒超时的上下文
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源
+	err = api.svc.AddTaskClassItemIntoSchedule(ctx, &req, userIDInterface, intTaskID)
+	if err != nil {
+		if errors.Is(err, respond.TaskClassItemNotBelongToUser) || errors.Is(err, respond.CourseNotBelongToUser) ||
+			errors.Is(err, respond.CourseAlreadyEmbeddedByOtherTaskBlock) || errors.Is(err, respond.CourseTimeNotMatch) ||
+			errors.Is(err, respond.ScheduleConflict) || errors.Is(err, respond.WrongCourseID) {
+			c.JSON(http.StatusBadRequest, err)
+			return
+		}
+		c.JSON(http.StatusInternalServerError, respond.InternalError(err))
+		return
+	}
+	c.JSON(http.StatusOK, respond.Ok)
+}

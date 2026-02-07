@@ -148,4 +148,39 @@ var ( //请求相关的响应
 		Status: "40021",
 		Info:   "user task class forbidden",
 	}
+
+	TaskClassItemNotBelongToUser = Response{ //任务类项目不属于用户
+		Status: "40022",
+		Info:   "task class item does not belong to user",
+	}
+
+	TimeOutOfRangeOfThisSemester = Response{ //时间超出本学期范围
+		Status: "40023",
+		Info:   "time out of range of this semester",
+	}
+
+	CourseNotBelongToUser = Response{ //课程不属于用户
+		Status: "40024",
+		Info:   "course does not belong to user",
+	}
+
+	CourseAlreadyEmbeddedByOtherTaskBlock = Response{ //课程已被其他任务块嵌入
+		Status: "40025",
+		Info:   "course already embedded by other task block",
+	}
+
+	ScheduleConflict = Response{ //日程冲突
+		Status: "40026",
+		Info:   "schedule conflict",
+	}
+
+	WrongCourseID = Response{ //课程ID错误
+		Status: "40027",
+		Info:   "wrong course id",
+	}
+
+	CourseTimeNotMatch = Response{ //课程时间不匹配
+		Status: "40028",
+		Info:   "course time not match",
+	}
 )

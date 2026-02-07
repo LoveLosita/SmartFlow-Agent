@@ -64,9 +64,10 @@ type UserAddTaskClassItemRequest struct {
 
 // TargetTime 表示任务块的目标时间
 type TargetTime struct {
-	Date        string `json:"date"`         // 例: 2025-12-22
-	SectionFrom int    `json:"section_from"` // 起始节次
-	SectionTo   int    `json:"section_to"`   // 结束节次
+	Week        int `json:"week"`         // 周次
+	DayOfWeek   int `json:"day_of_week"`  // 星期几
+	SectionFrom int `json:"section_from"` // 起始节次
+	SectionTo   int `json:"section_to"`   // 结束节次
 }
 
 // UserGetTaskClassesResponse 用于返回用户的任务类列表，展示简要信息
@@ -83,6 +84,14 @@ type TaskClassSummary struct {
 	StartDate  time.Time `json:"start_date"`
 	EndDate    time.Time `json:"end_date"`
 	TotalSlots int       `json:"total_slots"`
+}
+
+type UserInsertTaskClassItemToScheduleRequest struct {
+	Week               int `json:"week" binding:"required,min=1"`
+	DayOfWeek          int `json:"day_of_week" binding:"required,min=1,max=7"`
+	StartSection       int `json:"start_section" binding:"required,min=1"`
+	EndSection         int `json:"end_section" binding:"required,min=1,gtefield=StartSection"`
+	EmbedCourseEventID int `json:"embed_course_event_id"` // 可选，嵌入的课程日程事件 ID
 }
 
 // Value 实现 driver.Valuer 接口，负责将 TargetTime 转换为数据库存储的格式

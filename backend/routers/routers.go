@@ -67,6 +67,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO) *gin.Engine
 			taskClassGroup.GET("/list", handlers.TaskClassHandler.UserGetTaskClassInfos)
 			taskClassGroup.GET("/get", handlers.TaskClassHandler.UserGetCompleteTaskClass)
 			taskClassGroup.PUT("/update", handlers.TaskClassHandler.UserUpdateTaskClass)
+			taskClassGroup.POST("/insert-into-schedule", handlers.TaskClassHandler.UserAddTaskClassItemIntoSchedule)
 		}
 	}
 	// 初始化Gin引擎

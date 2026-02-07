@@ -136,6 +136,30 @@ func ProcessUserGetCompleteTaskClassRequest(taskClass *model.TaskClass) (*model.
 	return req, nil
 }
 
+// UserInsertTaskItemRequestToModel 用于将填入空闲时段日程的请求转换为 Schedule 模型
+func UserInsertTaskItemRequestToModel(req *model.UserInsertTaskClassItemToScheduleRequest, item *model.TaskClassItem, taskID, userID, startSection, endSection int) ([]model.Schedule, *model.ScheduleEvent) {
+	var schedules []model.Schedule
+	for section := startSection; section <= endSection; section++ {
+		req1 := &model.Schedule{
+			UserID:         userID, // 由调用方填充
+			EmbeddedTaskID: &taskID,
+			Week:           req.Week,
+			DayOfWeek:      req.DayOfWeek,
+			Section:        section,
+			Status:         "normal",
+		}
+		schedules = append(schedules, *req1)
+	}
+	req2 := &model.ScheduleEvent{
+		UserID:        userID,                // 由调用方填充
+		Name:          safeStr(item.Content), // 任务内容作为事件名称
+		Type:          "task",
+		RelID:         &item.ID, // 关联到 TaskClassItem 的 ID
+		CanBeEmbedded: false,    // 任务事件允许嵌入其他任务（如果需要的话）
+	}
+	return schedules, req2
+}
+
 // --- 🛡️ 辅助工具函数：保持代码清爽并防止 Panic ---
 
 func safeStr(s *string) string {

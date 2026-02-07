@@ -31,3 +31,9 @@ redis:
   port: 6379
   password: ""
   db: 0
+
+time:
+    zone: "Asia/Shanghai"
+    semesterStartDate: "2024-09-09" #学期开始日期，一定要设定为周一，以便于计算周数
+    semesterEndDate: "2025-01-20" #学期结束日期，一定要设定为周日，确保最后一周完整
+
