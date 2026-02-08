@@ -52,17 +52,20 @@ func Start() {
 	taskSv := service.NewTaskService(taskRepo)
 	courseService := service.NewCourseService(courseRepo, scheduleRepo)
 	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo, manager)
+	scheduleService := service.NewScheduleService(scheduleRepo, userRepo)
 	//api 层
 	userApi := api.NewUserHandler(userService)
 	taskApi := api.NewTaskHandler(taskSv)
 	courseApi := api.NewCourseHandler(courseService)
 	taskClassApi := api.NewTaskClassHandler(taskClassService)
+	scheduleApi := api.NewScheduleAPI(scheduleService)
 
 	handlers := &api.ApiHandlers{
 		UserHandler:      userApi,
 		TaskHandler:      taskApi,
-		ScheduleHandler:  courseApi,
 		TaskClassHandler: taskClassApi,
+		CourseHandler:    courseApi,
+		ScheduleHandler:  scheduleApi,
 	}
 	r := routers.RegisterRouters(handlers, cacheRepo)
 	routers.StartEngine(r)

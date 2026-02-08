@@ -59,3 +59,203 @@ func SchedulesToScheduleConflictDetail(schedules []model.Schedule) []model.Sched
 
 	return res
 }
+
+// SectionToTime 映射表：将原子节次转为起始/结束时间点
+// 此处以重邮为例
+var sectionTimeMap = map[int][2]string{
+	1: {"08:00", "08:45"}, 2: {"08:55", "09:40"},
+	3: {"10:15", "11:00"}, 4: {"11:10", "11:55"},
+	5: {"14:00", "14:45"}, 6: {"14:55", "15:40"},
+	7: {"16:15", "17:00"}, 8: {"17:10", "17:55"},
+	9: {"19:00", "19:45"}, 10: {"19:55", "20:40"},
+	11: {"20:50", "21:35"}, 12: {"21:45", "22:30"},
+}
+
+/*func SchedulesToUserTodaySchedule(schedules []model.Schedule) []model.UserTodaySchedule {
+	if len(schedules) == 0 {
+		return []model.UserTodaySchedule{}
+	}
+
+	// 1. 按周次和星期进行第一层分组 (map[week][day]schedules)
+	// 虽然是“今日日程”，但传入的切片可能包含多天，这样写兼容性更好
+	dayGroups := make(map[string][]model.Schedule)
+	for _, s := range schedules {
+		dayKey := fmt.Sprintf("%d-%d", s.Week, s.DayOfWeek)
+		dayGroups[dayKey] = append(dayGroups[dayKey], s)
+	}
+
+	var result []model.UserTodaySchedule
+
+	for _, daySchedules := range dayGroups {
+		todayDTO := model.UserTodaySchedule{
+			Week:      daySchedules[0].Week,
+			DayOfWeek: daySchedules[0].DayOfWeek,
+			Events:    []model.EventBrief{},
+		}
+
+		// 2. 在每一天内部，按 EventID 进行第二层聚合（把连续的节次拼成一个 Event）
+		eventGroups := make(map[int][]model.Schedule)
+		for _, s := range daySchedules {
+			eventGroups[s.EventID] = append(eventGroups[s.EventID], s)
+		}
+
+		// 3. 遍历每个 Event 组，转化为 EventBrief
+		var tempEvents []model.EventBrief
+		for eventID, slots := range eventGroups {
+			// 对当前 Event 的所有原子槽位按节次排序
+			sort.Slice(slots, func(i, j int) bool {
+				return slots[i].Section < slots[j].Section
+			})
+
+			firstSlot := slots[0]
+			lastSlot := slots[len(slots)-1]
+
+			brief := model.EventBrief{
+				ID:        eventID,
+				Name:      firstSlot.Event.Name,
+				Location:  *firstSlot.Event.Location,
+				Type:      firstSlot.Event.Type,
+				StartTime: sectionTimeMap[firstSlot.Section][0], // 取第一节的开始时间
+				EndTime:   sectionTimeMap[lastSlot.Section][1],  // 取最后一节的结束时间
+			}
+
+			// 💡 4. 检查是否有嵌入任务 (Embedded Task)
+			// 逻辑：只要这个时间块中任何一个原子槽位带了 EmbeddedTaskID，就提取它
+			// 注意：这里假设你在 DAO 层也 Preload 了 Task 信息，或者在此处仅填 ID
+			for _, slot := range slots {
+				if slot.EmbeddedTaskID != nil {
+					brief.EmbeddedTaskInfo = model.TaskBrief{
+						ID:   *slot.EmbeddedTaskID,
+						Name: *slot.EmbeddedTask.Content,
+						Type: "task",
+					}
+					break // 找到一个即代表该块已占用
+				}
+			}
+
+			tempEvents = append(tempEvents, brief)
+		}
+
+		// 5. 对结果进行排序（按开始时间），并分配 Order
+		sort.Slice(tempEvents, func(i, j int) bool {
+			return tempEvents[i].StartTime < tempEvents[j].StartTime
+		})
+
+		for i := range tempEvents {
+			tempEvents[i].Order = i + 1
+		}
+
+		todayDTO.Events = tempEvents
+		result = append(result, todayDTO)
+	}
+
+	return result
+}*/
+
+func SchedulesToUserTodaySchedule(schedules []model.Schedule) []model.UserTodaySchedule {
+	if len(schedules) == 0 {
+		return []model.UserTodaySchedule{}
+	}
+
+	// 1. 数据预处理：按 Week-Day 分组
+	dayGroups := make(map[string][]model.Schedule)
+	for _, s := range schedules {
+		dayKey := fmt.Sprintf("%d-%d", s.Week, s.DayOfWeek)
+		dayGroups[dayKey] = append(dayGroups[dayKey], s)
+	}
+
+	var result []model.UserTodaySchedule
+
+	for _, daySchedules := range dayGroups {
+		todayDTO := model.UserTodaySchedule{
+			Week:      daySchedules[0].Week,
+			DayOfWeek: daySchedules[0].DayOfWeek,
+			Events:    []model.EventBrief{},
+		}
+
+		// 💡 关键点：建立一个 Section 查找表，方便 O(1) 确定某节课是什么
+		sectionMap := make(map[int]model.Schedule)
+		for _, s := range daySchedules {
+			sectionMap[s.Section] = s
+		}
+
+		order := 1
+		// 💡 线性扫描：从第 1 节巡检到第 12 节
+		for curr := 1; curr <= 12; {
+			if slot, ok := sectionMap[curr]; ok {
+				// === A 场景：当前节次有课 ===
+
+				// 1. 寻找该事件的连续范围（比如 9-12 节连上）
+				// 我们向后探测，直到 EventID 变化或节次断开
+				end := curr
+				for next := curr + 1; next <= 12; next++ {
+					if nextSlot, exist := sectionMap[next]; exist && nextSlot.EventID == slot.EventID {
+						end = next
+					} else {
+						break
+					}
+				}
+
+				// 2. 封装 EventBrief
+				brief := model.EventBrief{
+					ID:        slot.EventID,
+					Order:     order,
+					Name:      slot.Event.Name,
+					Location:  *slot.Event.Location,
+					Type:      slot.Event.Type,
+					StartTime: sectionTimeMap[curr][0],
+					EndTime:   sectionTimeMap[end][1],
+					Span:      end - curr + 1,
+				}
+
+				// 3. 处理嵌入任务
+				// 只要这几个连续节次里有一个有任务，就带上
+				for i := curr; i <= end; i++ {
+					if s, exist := sectionMap[i]; exist && s.EmbeddedTask != nil {
+						brief.EmbeddedTaskInfo = model.TaskBrief{
+							ID:   s.EmbeddedTask.ID,
+							Name: *s.EmbeddedTask.Content,
+							Type: "task",
+						}
+						break
+					}
+				}
+
+				todayDTO.Events = append(todayDTO.Events, brief)
+
+				// 💡 指针跳跃：直接跳过已处理的节次
+				curr = end + 1
+				order++
+
+			} else {
+				// === B 场景：当前节次没课（Type = "empty"） ===
+
+				// 逻辑：按照学校标准大节（1-2, 3-4...）进行空位合并
+				// 如果当前是奇数节（1, 3, 5...）且下一节也没课，就合并成一个空块
+				emptyEnd := curr
+				if curr%2 != 0 && curr < 12 {
+					if _, nextHasClass := sectionMap[curr+1]; !nextHasClass {
+						emptyEnd = curr + 1
+					}
+				}
+
+				todayDTO.Events = append(todayDTO.Events, model.EventBrief{
+					ID:        0, // 空课 ID 为 0
+					Order:     order,
+					Name:      "无课",
+					Type:      "empty",
+					StartTime: sectionTimeMap[curr][0],
+					EndTime:   sectionTimeMap[emptyEnd][1],
+					Location:  "休息时间",
+				})
+
+				curr = emptyEnd + 1
+				order++
+			}
+		}
+
+		result = append(result, todayDTO)
+	}
+
+	return result
+}

@@ -29,7 +29,7 @@ func (r *UserDAO) WithTx(tx *gorm.DB) *UserDAO {
 
 // Create 创建新用户
 // 插入新用户信息到数据库
-func (dao *UserDAO) Create(username, phoneNumber, password string) (*model.User, error) {
+func (r *UserDAO) Create(username, phoneNumber, password string) (*model.User, error) {
 	// 创建User实例
 	user := &model.User{
 		Username:    username,
@@ -41,15 +41,15 @@ func (dao *UserDAO) Create(username, phoneNumber, password string) (*model.User,
 	}
 
 	// 插入数据
-	if err := dao.db.Create(user).Error; err != nil {
+	if err := r.db.Create(user).Error; err != nil {
 		return nil, err
 	}
 
 	return user, nil
 }
 
-func (dao *UserDAO) IfUsernameExists(name string) (bool, error) {
-	err := dao.db.Where("username = ?", name).First(&model.User{}).Error
+func (r *UserDAO) IfUsernameExists(name string) (bool, error) {
+	err := r.db.Where("username = ?", name).First(&model.User{}).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return false, nil
@@ -59,20 +59,29 @@ func (dao *UserDAO) IfUsernameExists(name string) (bool, error) {
 	return true, nil
 }
 
-func (dao *UserDAO) GetUserHashedPasswordByName(name string) (string, error) {
+func (r *UserDAO) GetUserHashedPasswordByName(name string) (string, error) {
 	var user model.User
-	err := dao.db.Where("username = ?", name).First(&user).Error
+	err := r.db.Where("username = ?", name).First(&user).Error
 	if err != nil {
 		return "", err
 	}
 	return user.Password, nil
 }
 
-func (dao *UserDAO) GetUserIDByName(name string) (int, error) {
+func (r *UserDAO) GetUserIDByName(name string) (int, error) {
 	var user model.User
-	err := dao.db.Where("username = ?", name).First(&user).Error
+	err := r.db.Where("username = ?", name).First(&user).Error
 	if err != nil {
 		return -1, err
 	}
 	return int(user.ID), nil
+}
+
+func (r *UserDAO) GetUserByID(id int) (*model.User, error) {
+	var user model.User
+	err := r.db.Where("id = ?", id).First(&user).Error
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
 }

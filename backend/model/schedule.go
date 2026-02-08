@@ -20,7 +20,8 @@ type Schedule struct {
 	EmbeddedTaskID *int   `gorm:"column:embedded_task_id;comment:若为水课嵌入，记录具体的任务项ID" json:"embedded_task_id"`
 	Status         string `gorm:"column:status;type:enum('normal','interrupted');default:'normal';comment:状态: 正常/因故中断" json:"status"`
 	// 💡 必须加上这一行，告诉 GORM 如何关联元数据
-	Event ScheduleEvent `gorm:"foreignKey:EventID" json:"event"`
+	Event        ScheduleEvent  `gorm:"foreignKey:EventID" json:"event"`
+	EmbeddedTask *TaskClassItem `gorm:"foreignKey:EmbeddedTaskID" json:"embedded_task"`
 }
 
 type ScheduleConflictDetail struct {
@@ -39,6 +40,32 @@ type ScheduleConflictDetail struct {
 type ScheduleEmbeddedTask struct {
 	Section int `json:"section"`
 	TaskID  int `json:"task_id"`
+}
+
+type UserTodaySchedule struct {
+	DayOfWeek int          `json:"day_of_week"`
+	Week      int          `json:"week"`
+	Events    []EventBrief `json:"events"`
+}
+
+type EventBrief struct {
+	ID               int       `json:"id"`    // 这个 ID 是 ScheduleEvent 的 ID，不是 Schedule 的 ID
+	Order            int       `json:"order"` // order 用于区分它们的显示顺序
+	Name             string    `json:"name"`
+	StartTime        string    `json:"start_time"`
+	EndTime          string    `json:"end_time"`
+	Location         string    `json:"location"`
+	Type             string    `json:"type"`
+	Span             int       `json:"span"` // 跨越的节数，给前端用来渲染宽度
+	EmbeddedTaskInfo TaskBrief `json:"embedded_task_info,omitempty"`
+}
+
+type TaskBrief struct {
+	ID   int    `json:"id"` // 这个 ID 是 ScheduleEvent 的 ID，不是 Schedule 的 ID
+	Name string `json:"name"`
+	/*StartTime          string `json:"start_time"`
+	EndTime            string `json:"end_time"`*/
+	Type string `json:"type"`
 }
 
 func (ScheduleEvent) TableName() string { return "schedule_events" }

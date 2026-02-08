@@ -266,3 +266,21 @@ func (d *ScheduleDAO) GetNonCourseScheduleConflicts(ctx context.Context, newSche
 
 	return fullConflicts, err
 }
+func (d *ScheduleDAO) GetUserTodaySchedule(ctx context.Context, userID, week, dayOfWeek int) ([]model.Schedule, error) {
+	var schedules []model.Schedule
+
+	// 1. Preload("Event"): 拿到课程/任务的基础信息（名、地、型）
+	// 2. Preload("EmbeddedTask"): 拿到“水课”里嵌入的具体任务详情
+	err := d.db.WithContext(ctx).
+		Preload("Event").
+		Preload("EmbeddedTask").
+		Where("user_id = ? AND week = ? AND day_of_week = ?", userID, week, dayOfWeek).
+		Order("section ASC").
+		Find(&schedules).Error
+
+	if err != nil {
+		return nil, err
+	}
+
+	return schedules, nil
+}

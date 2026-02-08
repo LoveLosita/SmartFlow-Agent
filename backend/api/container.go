@@ -3,6 +3,7 @@ package api
 type ApiHandlers struct {
 	UserHandler      *UserHandler
 	TaskHandler      *TaskHandler
-	ScheduleHandler  *CourseHandler
+	CourseHandler    *CourseHandler
 	TaskClassHandler *TaskClassHandler
+	ScheduleHandler  *ScheduleAPI
 }

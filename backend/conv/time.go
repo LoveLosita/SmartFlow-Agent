@@ -11,19 +11,22 @@ import (
 // DateFormat 此处定义基准学期的开始和结束日期
 const DateFormat = "2006-01-02"
 
-var (
-	SemesterStartDate = viper.GetString("semesterStartDate") // 从配置文件中读取学期开始日期
-	SemesterEndDate   = viper.GetString("semesterEndDate")   // 从配置文件中读取学期结束日期
-)
-
 // RealDateToRelativeDate 将绝对日期转换为相对日期（格式: "week-day"）
 func RealDateToRelativeDate(realDate string) (int, int, error) {
+	SemesterStartDate := viper.GetString("time.semesterStartDate") // 从配置文件中读取学期开始日期
+	SemesterEndDate := viper.GetString("time.semesterEndDate")     // 从配置文件中读取学期结束日期
 	t, err := time.Parse(DateFormat, realDate)
 	if err != nil {
 		return 0, 0, err
 	}
-	start, _ := time.Parse(DateFormat, SemesterStartDate)
-	end, _ := time.Parse(DateFormat, SemesterEndDate)
+	start, err := time.Parse(DateFormat, SemesterStartDate)
+	if err != nil {
+		return 0, 0, err
+	}
+	end, err := time.Parse(DateFormat, SemesterEndDate)
+	if err != nil {
+		return 0, 0, err
+	}
 	// 边界校验：日期必须在学期范围内
 	if t.Before(start) || t.After(end) {
 		return 0, 0, errors.New("日期超出学期范围")
@@ -39,6 +42,8 @@ func RealDateToRelativeDate(realDate string) (int, int, error) {
 
 // RelativeDateToRealDate 将相对日期转换为绝对日期（输入格式: "week-day"）
 func RelativeDateToRealDate(week, dayOfWeek int) (string, error) {
+	SemesterStartDate := viper.GetString("time.semesterStartDate") // 从配置文件中读取学期开始日期
+	SemesterEndDate := viper.GetString("time.semesterEndDate")     // 从配置文件中读取学期结束日期
 	start, _ := time.Parse(DateFormat, SemesterStartDate)
 	// 核心转换逻辑：(周-1)*7 + (天-1)
 	offsetDays := (week-1)*7 + (dayOfWeek - 1)

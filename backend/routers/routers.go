@@ -57,8 +57,8 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO) *gin.Engine
 		courseGroup := apiGroup.Group("/course")
 		{
 			courseGroup.Use(middleware.JWTTokenAuth(cache))
-			courseGroup.POST("/validate", handlers.ScheduleHandler.CheckUserCourse)
-			courseGroup.POST("/import", handlers.ScheduleHandler.AddUserCourses)
+			courseGroup.POST("/validate", handlers.CourseHandler.CheckUserCourse)
+			courseGroup.POST("/import", handlers.CourseHandler.AddUserCourses)
 		}
 		taskClassGroup := apiGroup.Group("/task-class")
 		{
@@ -68,6 +68,11 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO) *gin.Engine
 			taskClassGroup.GET("/get", handlers.TaskClassHandler.UserGetCompleteTaskClass)
 			taskClassGroup.PUT("/update", handlers.TaskClassHandler.UserUpdateTaskClass)
 			taskClassGroup.POST("/insert-into-schedule", handlers.TaskClassHandler.UserAddTaskClassItemIntoSchedule)
+		}
+		scheduleGroup := apiGroup.Group("/schedule")
+		{
+			scheduleGroup.Use(middleware.JWTTokenAuth(cache))
+			scheduleGroup.GET("/today", handlers.ScheduleHandler.GetUserTodaySchedule)
 		}
 	}
 	// 初始化Gin引擎
