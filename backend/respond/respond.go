@@ -188,4 +188,9 @@ var ( //请求相关的响应
 		Status: "40029",
 		Info:   "insert course twice",
 	}
+
+	WeekOutOfRange = Response{ //周数超出范围
+		Status: "40030",
+		Info:   "week out of range",
+	}
 )

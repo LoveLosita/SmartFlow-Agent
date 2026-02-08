@@ -56,7 +56,7 @@ type EventBrief struct {
 	EndTime          string    `json:"end_time"`
 	Location         string    `json:"location"`
 	Type             string    `json:"type"`
-	Span             int       `json:"span"` // 跨越的节数，给前端用来渲染宽度
+	Span             int       `json:"span"` // 跨越的节数，给前端用来渲染宽度/高度
 	EmbeddedTaskInfo TaskBrief `json:"embedded_task_info,omitempty"`
 }
 
@@ -66,6 +66,24 @@ type TaskBrief struct {
 	/*StartTime          string `json:"start_time"`
 	EndTime            string `json:"end_time"`*/
 	Type string `json:"type"`
+}
+
+type UserWeekSchedule struct {
+	Week   int                `json:"week"`
+	Events []WeeklyEventBrief `json:"events"`
+}
+
+type WeeklyEventBrief struct {
+	ID               int       `json:"id"`    // 这个 ID 是 ScheduleEvent 的 ID，不是 Schedule 的 ID
+	Order            int       `json:"order"` // order 用于区分它们在一天中的显示顺序
+	DayOfWeek        int       `json:"day_of_week"`
+	Name             string    `json:"name"`
+	StartTime        string    `json:"start_time"`
+	EndTime          string    `json:"end_time"`
+	Location         string    `json:"location"`
+	Type             string    `json:"type"`
+	Span             int       `json:"span"` // 跨越的节数，给前端用来渲染宽度/高度
+	EmbeddedTaskInfo TaskBrief `json:"embedded_task_info,omitempty"`
 }
 
 func (ScheduleEvent) TableName() string { return "schedule_events" }

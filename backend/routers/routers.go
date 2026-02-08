@@ -73,6 +73,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO) *gin.Engine
 		{
 			scheduleGroup.Use(middleware.JWTTokenAuth(cache))
 			scheduleGroup.GET("/today", handlers.ScheduleHandler.GetUserTodaySchedule)
+			scheduleGroup.GET("/week", handlers.ScheduleHandler.GetUserWeeklySchedule)
 		}
 	}
 	// 初始化Gin引擎

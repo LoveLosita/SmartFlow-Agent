@@ -284,3 +284,20 @@ func (d *ScheduleDAO) GetUserTodaySchedule(ctx context.Context, userID, week, da
 
 	return schedules, nil
 }
+
+func (d *ScheduleDAO) GetUserWeeklySchedule(ctx context.Context, userID, week int) ([]model.Schedule, error) {
+	var schedules []model.Schedule
+
+	err := d.db.WithContext(ctx).
+		Preload("Event").
+		Preload("EmbeddedTask").
+		Where("user_id = ? AND week = ?", userID, week).
+		Order("day_of_week ASC, section ASC").
+		Find(&schedules).Error
+
+	if err != nil {
+		return nil, err
+	}
+
+	return schedules, nil
+}
