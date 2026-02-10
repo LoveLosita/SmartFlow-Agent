@@ -115,7 +115,15 @@ func (sv *TaskClassService) AddTaskClassItemIntoSchedule(ctx context.Context, re
 	if ownerID != userID {
 		return respond.TaskClassItemNotBelongToUser
 	}
-	//2.取出任务块信息
+	//2.再检查任务块本身是否已经被安排
+	result, err := sv.taskClassRepo.IfTaskClassItemArranged(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if result {
+		return respond.TaskClassItemAlreadyArranged
+	}
+	//3.取出任务块信息
 	taskItem, err := sv.taskClassRepo.GetTaskClassItemByID(ctx, taskID) //通过任务块ID获取任务块信息
 	if err != nil {
 		return err

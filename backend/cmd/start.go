@@ -7,6 +7,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/api"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/inits"
+	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/LoveLosita/smartflow/backend/routers"
 	"github.com/LoveLosita/smartflow/backend/service"
 	"github.com/spf13/viper"
@@ -39,6 +40,8 @@ func Start() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	rdb := inits.InitRedis()
+	//工具包
+	limiter := pkg.NewRateLimiter(rdb)
 	//dao 层
 	userRepo := dao.NewUserDAO(db)
 	cacheRepo := dao.NewCacheDAO(rdb)
@@ -59,7 +62,6 @@ func Start() {
 	courseApi := api.NewCourseHandler(courseService)
 	taskClassApi := api.NewTaskClassHandler(taskClassService)
 	scheduleApi := api.NewScheduleAPI(scheduleService)
-
 	handlers := &api.ApiHandlers{
 		UserHandler:      userApi,
 		TaskHandler:      taskApi,
@@ -67,6 +69,6 @@ func Start() {
 		CourseHandler:    courseApi,
 		ScheduleHandler:  scheduleApi,
 	}
-	r := routers.RegisterRouters(handlers, cacheRepo)
+	r := routers.RegisterRouters(handlers, cacheRepo, limiter)
 	routers.StartEngine(r)
 }

@@ -221,4 +221,13 @@ var ( //请求相关的响应
 		Status: "40032",
 		Info:   "target schedule does not have embedded task",
 	}
+	TooManyRequests = Response{ //请求过多
+		Status: "40033",
+		Info:   "too many requests",
+	}
+
+	TaskClassItemAlreadyArranged = Response{ //任务类项目已安排
+		Status: "40034",
+		Info:   "task class item already arranged",
+	}
 )

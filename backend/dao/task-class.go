@@ -195,3 +195,15 @@ func (dao *TaskClassDAO) DeleteTaskClassItemEmbeddedTime(ctx context.Context, ta
 		Update("embedded_time", nil).Error
 	return err
 }
+
+func (dao *TaskClassDAO) IfTaskClassItemArranged(ctx context.Context, taskID int) (bool, error) {
+	var item model.TaskClassItem
+	err := dao.db.WithContext(ctx).
+		Select("embedded_time").
+		Where("id = ?", taskID).
+		First(&item).Error
+	if err != nil {
+		return false, err
+	}
+	return item.EmbeddedTime != nil, nil
+}

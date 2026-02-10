@@ -8,6 +8,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/api"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/middleware"
+	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
 )
@@ -27,7 +28,7 @@ func StartEngine(r *gin.Engine) {
 	}
 }
 
-func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO) *gin.Engine {
+func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, limiter *pkg.RateLimiter) *gin.Engine {
 	// 初始化Gin引擎
 	r := gin.Default()
 	// 在这里注册所有的路由和路由组
@@ -46,23 +47,23 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO) *gin.Engine
 			userGroup.POST("/register", handlers.UserHandler.UserRegister)
 			userGroup.POST("/login", handlers.UserHandler.UserLogin)
 			userGroup.POST("/refresh-token", handlers.UserHandler.RefreshTokenHandler)
-			userGroup.POST("/logout", middleware.JWTTokenAuth(cache), handlers.UserHandler.UserLogout)
+			userGroup.POST("/logout", middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1), handlers.UserHandler.UserLogout)
 		}
 		taskGroup := apiGroup.Group("/task")
 		{
-			taskGroup.Use(middleware.JWTTokenAuth(cache))
+			taskGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
 			taskGroup.POST("/create", handlers.TaskHandler.AddTask)
 			taskGroup.GET("/get", handlers.TaskHandler.GetUserTasks)
 		}
 		courseGroup := apiGroup.Group("/course")
 		{
-			courseGroup.Use(middleware.JWTTokenAuth(cache))
+			courseGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
 			courseGroup.POST("/validate", handlers.CourseHandler.CheckUserCourse)
 			courseGroup.POST("/import", handlers.CourseHandler.AddUserCourses)
 		}
 		taskClassGroup := apiGroup.Group("/task-class")
 		{
-			taskClassGroup.Use(middleware.JWTTokenAuth(cache))
+			taskClassGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
 			taskClassGroup.POST("/add", handlers.TaskClassHandler.UserAddTaskClass)
 			taskClassGroup.GET("/list", handlers.TaskClassHandler.UserGetTaskClassInfos)
 			taskClassGroup.GET("/get", handlers.TaskClassHandler.UserGetCompleteTaskClass)
@@ -71,7 +72,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO) *gin.Engine
 		}
 		scheduleGroup := apiGroup.Group("/schedule")
 		{
-			scheduleGroup.Use(middleware.JWTTokenAuth(cache))
+			scheduleGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
 			scheduleGroup.GET("/today", handlers.ScheduleHandler.GetUserTodaySchedule)
 			scheduleGroup.GET("/week", handlers.ScheduleHandler.GetUserWeeklySchedule)
 			scheduleGroup.DELETE("/delete", handlers.ScheduleHandler.DeleteScheduleEvent)
