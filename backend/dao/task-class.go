@@ -2,6 +2,7 @@ package dao
 
 import (
 	"context"
+	"errors"
 
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
@@ -158,12 +159,15 @@ func (dao *TaskClassDAO) GetTaskClassItemByID(ctx context.Context, id int) (*mod
 
 func (dao *TaskClassDAO) GetTaskClassIDByTaskItemID(ctx context.Context, itemID int) (int, error) {
 	var item model.TaskClassItem
-	err := dao.db.WithContext(ctx).
+	res := dao.db.WithContext(ctx).
 		Select("category_id").
 		Where("id = ?", itemID).
-		First(&item).Error
-	if err != nil {
-		return 0, err
+		First(&item)
+	if res.Error != nil {
+		if errors.Is(res.Error, gorm.ErrRecordNotFound) {
+			return 0, respond.TaskClassItemNotFound
+		}
+		return 0, res.Error
 	}
 	return *item.CategoryID, nil
 }
@@ -206,4 +210,11 @@ func (dao *TaskClassDAO) IfTaskClassItemArranged(ctx context.Context, taskID int
 		return false, err
 	}
 	return item.EmbeddedTime != nil, nil
+}
+
+func (dao *TaskClassDAO) DeleteTaskClassItemByID(ctx context.Context, id int) error {
+	err := dao.db.WithContext(ctx).
+		Where("id = ?", id).
+		Delete(&model.TaskClassItem{}).Error
+	return err
 }

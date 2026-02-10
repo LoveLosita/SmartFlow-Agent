@@ -230,4 +230,14 @@ var ( //请求相关的响应
 		Status: "40034",
 		Info:   "task class item already arranged",
 	}
+
+	TargetTaskNotEmbeddedInAnySchedule = Response{ //目标任务未嵌入任何日程
+		Status: "40035",
+		Info:   "target task not embedded in any schedule",
+	}
+
+	TaskClassItemNotFound = Response{ //任务类项目未找到
+		Status: "40036",
+		Info:   "task class item not found",
+	}
 )

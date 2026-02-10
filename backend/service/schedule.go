@@ -37,8 +37,8 @@ func (ss *ScheduleService) GetUserTodaySchedule(ctx context.Context, userID int)
 		return nil, err
 	}*/
 	//2.获取当前日期
-	curTime := time.Now().Format("2006-01-02")
-	/*curTime := "2026-03-02" //测试数据*/
+	/*curTime := time.Now().Format("2006-01-02")*/
+	curTime := "2026-03-02" //测试数据
 	week, dayOfWeek, err := conv.RealDateToRelativeDate(curTime)
 	if err != nil {
 		return nil, err

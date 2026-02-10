@@ -131,3 +131,23 @@ func (api *TaskClassHandler) UserAddTaskClassItemIntoSchedule(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, respond.Ok)
 }
+
+func (api *TaskClassHandler) DeleteTaskClassItem(c *gin.Context) {
+	taskID := c.Query("task_item_id")
+	//将taskID转换为int
+	intTaskID, err := strconv.Atoi(taskID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		return
+	}
+	userID := c.GetInt("user_id")
+	// 创建一个带 1 秒超时的上下文
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源
+	err = api.svc.DeleteTaskClassItem(ctx, userID, intTaskID)
+	if err != nil {
+		respond.DealWithError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, respond.Ok)
+}

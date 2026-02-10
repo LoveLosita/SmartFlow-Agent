@@ -242,3 +242,50 @@ func (sv *TaskClassService) AddTaskClassItemIntoSchedule(ctx context.Context, re
 	}
 	return nil
 }
+
+func (sv *TaskClassService) DeleteTaskClassItem(ctx context.Context, userID int, taskItemID int) error {
+	//1.先验证任务块归属
+	taskClassID, err := sv.taskClassRepo.GetTaskClassIDByTaskItemID(ctx, taskItemID) //通过任务块ID获取所属任务类ID
+	if err != nil {
+		return err
+	}
+	ownerID, err := sv.taskClassRepo.GetTaskClassUserIDByID(ctx, taskClassID) //通过任务类ID获取所属用户ID
+	if err != nil {
+		return err
+	}
+	if ownerID != userID {
+		return respond.TaskClassItemNotBelongToUser
+	}
+	//2.如果该任务块已经被安排了，先解除安排，再删除任务块（事务）
+	if err := sv.repoManager.Transaction(ctx, func(txM *dao.RepoManager) error {
+		//2.1.先检查该任务块是否已经被安排了
+		arranged, err := txM.TaskClass.IfTaskClassItemArranged(ctx, taskItemID)
+		if err != nil {
+			return err
+		}
+		if arranged {
+			//2.2.如果已经被安排了，先解除安排
+			//先扫schedules找到该task_item_id并删除
+			_, txErr := txM.Schedule.FindEmbeddedTaskIDAndDeleteIt(ctx, taskItemID)
+			//2.3.再将task_items表的embedded_time字段设置为null
+			txErr = txM.TaskClass.DeleteTaskClassItemEmbeddedTime(ctx, taskItemID)
+			if txErr != nil {
+				return txErr
+			}
+			//再删除schedule_event表中对应的事件
+			txErr = txM.Schedule.DeleteScheduleEventByTaskItemID(ctx, taskItemID)
+			if txErr != nil {
+				return txErr
+			}
+		}
+		//2.4.最后删除任务块
+		err = txM.TaskClass.DeleteTaskClassItemByID(ctx, taskItemID)
+		if err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return nil
+}

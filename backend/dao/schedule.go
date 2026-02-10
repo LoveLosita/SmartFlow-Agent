@@ -397,3 +397,50 @@ func (d *ScheduleDAO) SetScheduleEmbeddedTaskIDToNull(ctx context.Context, event
 	}
 	return embeddedTaskID, nil
 }
+
+func (d *ScheduleDAO) FindEmbeddedTaskIDAndDeleteIt(ctx context.Context, taskID int) (int, error) {
+	// 1. 先找到 schedules 表中 embedded_task_id = taskID 的记录，获取对应的 event_id
+	type row struct {
+		EventID *int `gorm:"column:event_id"`
+	}
+	var r row
+	err := d.db.WithContext(ctx).
+		Table("schedules").
+		Select("event_id").
+		Where("embedded_task_id = ?", taskID).
+		Order("id ASC").
+		Limit(1).
+		Scan(&r).Error
+	if err != nil {
+		return 0, err
+	}
+	if r.EventID == nil {
+		return 0, respond.TargetTaskNotEmbeddedInAnySchedule
+	}
+	eventID := *r.EventID
+
+	// 2. 删除该 event_id 对应的课程事件（通过级联删除实现）
+	res := d.db.WithContext(ctx).
+		Table("schedule_events").
+		Where("id = ?", eventID).
+		Delete(&model.ScheduleEvent{})
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return 0, respond.TargetTaskNotEmbeddedInAnySchedule
+	}
+	return eventID, nil
+}
+
+func (d *ScheduleDAO) DeleteScheduleEventByTaskItemID(ctx context.Context, taskItemID int) error {
+	//直接找schedule_events表中type=task且rel_id=taskItemID的记录，删除它（级联删schedules）
+	res := d.db.WithContext(ctx).
+		Table("schedule_events").
+		Where("type = ? AND rel_id = ?", "task", taskItemID).
+		Delete(&model.ScheduleEvent{})
+	if res.Error != nil {
+		return res.Error
+	}
+	return nil
+}
