@@ -2,6 +2,13 @@
 // 统一API响应格式和处理逻辑
 package respond
 
+import (
+	"errors"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
+
 type Response struct { //响应结构体
 	Status string `json:"status"`
 	Info   string `json:"info"`
@@ -13,7 +20,6 @@ type FinalResponse struct { //最终响应结构体
 	Data   interface{} `json:"data"`
 }
 
-// 实现error接口
 func (r Response) Error() string { // 实现 error 接口
 	return r.Info
 }
@@ -24,6 +30,18 @@ func RespWithData(response Response, data interface{}) FinalResponse { //传入�
 	finalResponse.Info = response.Info
 	finalResponse.Data = data
 	return finalResponse
+}
+
+func DealWithError(c *gin.Context, err error) { //处理错误，返回对应的响应结构体
+	if err == nil {
+		return
+	}
+	var resp Response
+	if errors.As(err, &resp) {
+		c.JSON(http.StatusBadRequest, resp)
+		return
+	}
+	c.JSON(http.StatusInternalServerError, InternalError(err))
 }
 
 func InternalError(err error) Response { //服务器错误
@@ -192,5 +210,15 @@ var ( //请求相关的响应
 	WeekOutOfRange = Response{ //周数超出范围
 		Status: "40030",
 		Info:   "week out of range",
+	}
+
+	WrongScheduleEventID = Response{ //日程ID错误
+		Status: "40031",
+		Info:   "wrong schedule_event id",
+	}
+
+	TargetScheduleNotHaveEmbeddedTask = Response{ //目标日程没有嵌入任务
+		Status: "40032",
+		Info:   "target schedule does not have embedded task",
 	}
 )

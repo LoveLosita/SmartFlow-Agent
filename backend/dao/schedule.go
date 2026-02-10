@@ -301,3 +301,99 @@ func (d *ScheduleDAO) GetUserWeeklySchedule(ctx context.Context, userID, week in
 
 	return schedules, nil
 }
+
+func (d *ScheduleDAO) DeleteScheduleEventAndSchedule(ctx context.Context, eventID int, userID int) error {
+	//级联删除：先删 schedules，自动删 schedule_events
+	res := d.db.WithContext(ctx).Where("id=? AND user_id=?", eventID, userID).Delete(&model.ScheduleEvent{})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return respond.WrongScheduleEventID // 事件不存在或不属于该用户，统一返回错误
+	}
+	return nil
+}
+
+func (d *ScheduleDAO) GetScheduleTypeByEventID(ctx context.Context, eventID, userID int) (string, error) {
+	type row struct {
+		Type *string `gorm:"column:type"`
+	}
+	var r row
+	err := d.db.WithContext(ctx).
+		Table("schedule_events").
+		Select("type").
+		Where("id = ? AND user_id=?", eventID, userID).
+		First(&r).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", respond.WrongScheduleEventID // 事件不存在或不属于该用户，统一返回错误
+		}
+		return "", err
+	}
+	if r.Type == nil {
+		return "", respond.WrongScheduleEventID
+	}
+	return *r.Type, nil
+}
+
+func (d *ScheduleDAO) GetScheduleEmbeddedTaskID(ctx context.Context, eventID int) (int, error) {
+	// embedded_task_id 存在于 schedules 表中（按 event_id 聚合取一个非空值）
+	// 若该事件没有任何嵌入任务，则返回 0, nil
+	type row struct {
+		EmbeddedTaskID *int `gorm:"column:embedded_task_id"`
+	}
+
+	var r row
+	err := d.db.WithContext(ctx).
+		Table("schedules").
+		Select("embedded_task_id").
+		Where("event_id = ?", eventID).
+		Where("embedded_task_id IS NOT NULL AND embedded_task_id <> 0").
+		Order("id ASC").
+		Limit(1).
+		Scan(&r).Error
+	if err != nil {
+		return 0, err
+	}
+	if r.EmbeddedTaskID == nil { // 没有任何嵌入任务
+		return 0, nil
+	}
+	return *r.EmbeddedTaskID, nil
+}
+
+func (d *ScheduleDAO) IfScheduleEventIDExists(ctx context.Context, eventID int) (bool, error) {
+	var count int64
+	err := d.db.WithContext(ctx).
+		Table("schedule_events").
+		Where("id = ?", eventID).
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (d *ScheduleDAO) SetScheduleEmbeddedTaskIDToNull(ctx context.Context, eventID int) (int, error) {
+	// 先取出该事件当前嵌入的任务 id（若没有嵌入则返回对应业务错误）
+	embeddedTaskID, err := d.GetScheduleEmbeddedTaskID(ctx, eventID)
+	if err != nil {
+		return 0, err
+	}
+	if embeddedTaskID == 0 {
+		return 0, respond.TargetScheduleNotHaveEmbeddedTask
+	}
+
+	// 将 schedules 表中指定 event_id 的 embedded_task_id 字段置空（用于解除嵌入关系）
+	res := d.db.WithContext(ctx).
+		Table("schedules").
+		Where("event_id = ?", eventID).
+		Where("embedded_task_id IS NOT NULL AND embedded_task_id <> 0").
+		Update("embedded_task_id", nil)
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return 0, respond.TargetScheduleNotHaveEmbeddedTask
+	}
+	return embeddedTaskID, nil
+}

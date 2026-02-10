@@ -37,7 +37,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO) *gin.Engine
 		apiGroup.GET("/health", func(c *gin.Context) {
 			c.JSON(200, gin.H{
 				"status":  "ok",
-				"version": "1.0.0",
+				"version": "0.2.0.dev.260210",
 			})
 		})
 
@@ -74,6 +74,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO) *gin.Engine
 			scheduleGroup.Use(middleware.JWTTokenAuth(cache))
 			scheduleGroup.GET("/today", handlers.ScheduleHandler.GetUserTodaySchedule)
 			scheduleGroup.GET("/week", handlers.ScheduleHandler.GetUserWeeklySchedule)
+			scheduleGroup.DELETE("/delete", handlers.ScheduleHandler.DeleteScheduleEvent)
 		}
 	}
 	// 初始化Gin引擎

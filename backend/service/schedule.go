@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -10,30 +9,33 @@ import (
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
-	"gorm.io/gorm"
 )
 
 type ScheduleService struct {
-	scheduleDAO *dao.ScheduleDAO
-	userDAO     *dao.UserDAO
+	scheduleDAO  *dao.ScheduleDAO
+	userDAO      *dao.UserDAO
+	taskClassDAO *dao.TaskClassDAO
+	repoManager  *dao.RepoManager // 统一管理多个 DAO 的事务
 }
 
-func NewScheduleService(scheduleDAO *dao.ScheduleDAO, userDAO *dao.UserDAO) *ScheduleService {
+func NewScheduleService(scheduleDAO *dao.ScheduleDAO, userDAO *dao.UserDAO, taskClassDAO *dao.TaskClassDAO, repoManager *dao.RepoManager) *ScheduleService {
 	return &ScheduleService{
-		scheduleDAO: scheduleDAO,
-		userDAO:     userDAO,
+		scheduleDAO:  scheduleDAO,
+		userDAO:      userDAO,
+		taskClassDAO: taskClassDAO,
+		repoManager:  repoManager,
 	}
 }
 
 func (ss *ScheduleService) GetUserTodaySchedule(ctx context.Context, userID int) ([]model.UserTodaySchedule, error) {
-	//1.先检查用户id是否存在
-	_, err := ss.userDAO.GetUserByID(userID)
+	//1.先检查用户id是否存在(考虑移除)
+	/*_, err := ss.userDAO.GetUserByID(userID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, respond.WrongUserID
 		}
 		return nil, err
-	}
+	}*/
 	//2.获取当前日期
 	curTime := time.Now().Format("2006-01-02")
 	/*curTime := "2026-03-02" //测试数据*/
@@ -57,14 +59,14 @@ func (ss *ScheduleService) GetUserWeeklySchedule(ctx context.Context, userID, we
 	if week < 0 || week > 25 {
 		return nil, respond.WeekOutOfRange
 	}
-	//2.先检查用户id是否存在
-	_, err := ss.userDAO.GetUserByID(userID)
+	//2.先检查用户id是否存在(考虑移除)
+	/*_, err := ss.userDAO.GetUserByID(userID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, respond.WrongUserID
 		}
 		return nil, err
-	}
+	}*/
 	//2.查询用户每周的日程安排
 	//如果没有传入 week 参数，则默认查询当前周的日程安排
 	if week == 0 {
@@ -82,4 +84,134 @@ func (ss *ScheduleService) GetUserWeeklySchedule(ctx context.Context, userID, we
 	//3.转换为前端需要的格式
 	weeklySchedules := conv.SchedulesToUserWeeklySchedule(schedules)
 	return weeklySchedules, nil
+}
+
+func (ss *ScheduleService) DeleteScheduleEvent(ctx context.Context, requests []model.UserDeleteScheduleEvent, userID int) error {
+	err := ss.repoManager.Transaction(ctx, func(txM *dao.RepoManager) error {
+		for _, req := range requests {
+			//1.如果要删课程和嵌入的事件
+			if req.DeleteEmbeddedTask && req.DeleteCourse {
+				//通过schedule表的embedded_task_id字段找到对应的task_id
+				taskID, err := txM.Schedule.GetScheduleEmbeddedTaskID(ctx, req.ID)
+				if err != nil {
+					return err
+				}
+				//再将task_items表中对应的embedded_time字段设置为null
+				if taskID != 0 {
+					err = txM.TaskClass.DeleteTaskClassItemEmbeddedTime(ctx, taskID)
+					if err != nil {
+						return err
+					}
+				}
+				//再删除课程事件和嵌入的事件（通过级联删除实现）
+				err = txM.Schedule.DeleteScheduleEventAndSchedule(ctx, req.ID, userID)
+				if err != nil {
+					return err
+				}
+				continue
+			}
+			//2.只删课程事件
+			if req.DeleteCourse {
+				//2.1.检查课程是否有嵌入的任务事件
+				exists, err := txM.Schedule.IfScheduleEventIDExists(ctx, req.ID)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					return respond.WrongScheduleEventID
+				}
+				embeddedTaskID, err := txM.Schedule.GetScheduleEmbeddedTaskID(ctx, req.ID)
+				if err != nil {
+					return err
+				}
+				//2.2.如果有，则需另外为其创建新的scheduleEvent（type=task）
+				//课程事件先删除后再创建任务事件
+				if embeddedTaskID != 0 {
+					//2.2.1.先通过id取出taskClassItem详情
+					taskClassItem, err := txM.TaskClass.GetTaskClassItemByID(ctx, embeddedTaskID)
+					if err != nil {
+						return err
+					}
+					//下方开启事务，删除课程事件并创建新的任务事件
+
+					//2.2.2.删除课程事件
+					txErr := txM.Schedule.DeleteScheduleEventAndSchedule(ctx, req.ID, userID)
+					if txErr != nil {
+						return txErr
+					}
+					//2.2.3.再复用代码创建新的scheduleEvent，下方代码改编自AddTaskClassItemIntoSchedule函数
+					//直接构造Schedule模型
+					sections := make([]int, 0, taskClassItem.EmbeddedTime.SectionTo-taskClassItem.EmbeddedTime.SectionFrom+1)
+					// 这里的 req 主要是为了传递 Week 和 DayOfWeek，其他字段不需要了
+					schedules, scheduleEvent := conv.UserInsertTaskItemRequestToModel(
+						&model.UserInsertTaskClassItemToScheduleRequest{
+							Week:      taskClassItem.EmbeddedTime.Week,
+							DayOfWeek: taskClassItem.EmbeddedTime.DayOfWeek},
+						taskClassItem, nil, userID, taskClassItem.EmbeddedTime.SectionFrom, taskClassItem.EmbeddedTime.SectionTo)
+					//将节次区间转换为节次切片，方便后续检查冲突
+					for section := taskClassItem.EmbeddedTime.SectionFrom; section <= taskClassItem.EmbeddedTime.SectionTo; section++ {
+						sections = append(sections, section)
+					}
+					//单用户不存在删除时这个格子被占用的情况，所以不检查冲突了
+					/*//4.1 统一检查冲突（避免逐条查库）
+					conflict, err := ss.scheduleDAO.HasUserScheduleConflict(ctx, userID, req.Week, req.DayOfWeek, sections)
+					if err != nil {
+						return err
+					}
+					if conflict {
+						return respond.ScheduleConflict
+					}*/
+					// 5. 写入数据库（通过 RepoManager 统一管理事务）
+					// 这里的 sv.daoManager 是你在初始化 Service 时注入的全局 RepoManager 实例
+					// 5.1 使用事务中的 ScheduleRepo 插入 Event
+					// 💡 这里的 txM.Schedule 已经注入了事务句柄
+					eventID, txErr := txM.Schedule.AddScheduleEvent(scheduleEvent)
+					if txErr != nil {
+						return txErr // 触发回滚
+					}
+					// 5.2 关联 ID（纯内存操作，无需 tx）
+					for i := range schedules {
+						schedules[i].EventID = eventID
+					}
+					// 5.3 使用事务中的 ScheduleRepo 批量插入原子槽位
+					// 💡 如果这里因为外键或唯一索引报错，5.1 的 Event 也会被撤回
+					if _, txErr = txM.Schedule.AddSchedules(schedules); txErr != nil {
+						return txErr // 触发回滚
+					}
+					// 5.4 使用事务中的 TaskRepo 更新任务状态
+					// 💡 这里的 txM.Task 取代了你原来的 txDAO
+					if txErr = txM.TaskClass.UpdateTaskClassItemEmbeddedTime(ctx, embeddedTaskID, taskClassItem.EmbeddedTime); txErr != nil {
+						return txErr // 触发回滚
+					}
+					continue
+				}
+				//2.3.如果没有嵌入的事件，就直接删除课程事件
+				err = txM.Schedule.DeleteScheduleEventAndSchedule(ctx, req.ID, userID)
+				if err != nil {
+					return err
+				}
+				continue
+			}
+			//3.只删嵌入的事件
+			if req.DeleteEmbeddedTask {
+				//下面先设置schedule表的embedded_task_id字段为null，再设置task_items表的embedded_time字段为null，实现删除嵌入事件的效果
+				//3.1.先将schedule表的embedded_task_id字段设置为null
+				taskID, txErr := txM.Schedule.SetScheduleEmbeddedTaskIDToNull(ctx, req.ID)
+				if txErr != nil {
+					return txErr
+				}
+				//3.2.再将task_items表的embedded_time字段设置为null
+				txErr = txM.TaskClass.DeleteTaskClassItemEmbeddedTime(ctx, taskID)
+				if txErr != nil {
+					return txErr
+				}
+				continue
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return nil
 }

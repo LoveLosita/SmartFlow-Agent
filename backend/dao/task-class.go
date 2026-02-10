@@ -187,3 +187,11 @@ func (dao *TaskClassDAO) UpdateTaskClassItemEmbeddedTime(ctx context.Context, ta
 		Update("embedded_time", embeddedTime).Error
 	return err
 }
+
+func (dao *TaskClassDAO) DeleteTaskClassItemEmbeddedTime(ctx context.Context, taskID int) error {
+	err := dao.db.WithContext(ctx).
+		Model(&model.TaskClassItem{}).
+		Where("id = ?", taskID).
+		Update("embedded_time", nil).Error
+	return err
+}

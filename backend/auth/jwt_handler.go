@@ -111,7 +111,7 @@ func ValidateRefreshToken(tokenString string, cache *dao.CacheDAO) (*jwt.Token, 
 	isBlack, err := cache.IsBlacklisted(claims.Jti)
 	if err != nil {
 		// Redis 出错时的处理逻辑，建议报错以防“漏网之鱼”
-		return nil, respond.InternalError(errors.New("无法验证令牌状态"))
+		return nil, errors.New("无法验证令牌状态")
 	}
 	if isBlack {
 		return nil, respond.UserLoggedOut // 返回你定义的“用户已登出”错误

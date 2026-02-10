@@ -4,7 +4,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"time"
 
@@ -40,15 +39,8 @@ func (api *UserHandler) UserRegister(c *gin.Context) {
 	defer cancel() // 记得释放资源
 	retUser, err := api.svc.UserRegister(ctx, user)
 	if err != nil {
-		switch {
-		case errors.Is(err, respond.InvalidName), errors.Is(err, respond.MissingParam),
-			errors.Is(err, respond.ParamTooLong): //如果是无效ID或者缺少参数的错误
-			c.JSON(http.StatusBadRequest, err)
-			return
-		default:
-			c.JSON(http.StatusInternalServerError, respond.InternalError(err))
-			return
-		}
+		respond.DealWithError(c, err)
+		return
 	}
 
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, retUser))
@@ -66,14 +58,8 @@ func (api *UserHandler) UserLogin(c *gin.Context) {
 	defer cancel() // 记得释放资源
 	tokens, err := api.svc.UserLogin(ctx, &req)
 	if err != nil {
-		switch {
-		case errors.Is(err, respond.WrongName), errors.Is(err, respond.WrongPwd): //如果是无效ID或者缺少参数的错误
-			c.JSON(http.StatusBadRequest, err)
-			return
-		default:
-			c.JSON(http.StatusInternalServerError, respond.InternalError(err))
-			return
-		}
+		respond.DealWithError(c, err)
+		return
 	}
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, tokens))
 }
@@ -94,14 +80,8 @@ func (api *UserHandler) RefreshTokenHandler(c *gin.Context) {
 	defer cancel() // 记得释放资源
 	tokens, err := api.svc.RefreshTokenHandler(ctx, requestBody.RefreshToken)
 	if err != nil {
-		switch {
-		case errors.Is(err, respond.InvalidRefreshToken), errors.Is(err, respond.InvalidClaims),
-			errors.Is(err, respond.InvalidTokenSingingMethod), errors.Is(err, respond.UserLoggedOut): //如果是无效刷新令牌或者无效claims或者无效签名方法
-			c.JSON(http.StatusBadRequest, err)
-			return
-		default:
-			c.JSON(http.StatusInternalServerError, respond.InternalError(err))
-		}
+		respond.DealWithError(c, err)
+		return
 	}
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, tokens))
 }
@@ -116,7 +96,7 @@ func (api *UserHandler) UserLogout(c *gin.Context) {
 	defer cancel() // 记得释放资源
 	err := api.svc.UserLogout(ctx, cl.Jti, cl.ExpiresAt.Time)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, respond.InternalError(err))
+		respond.DealWithError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, respond.Ok)

@@ -58,15 +58,10 @@ func (sa *CourseHandler) AddUserCourses(c *gin.Context) {
 	defer cancel() // 记得释放资源
 	conflicts, err := sa.service.AddUserCourses(ctx, req, userIDInterface)
 	if err != nil {
-		switch {
-		case errors.Is(err, respond.WrongParamType), errors.Is(err, respond.WrongCourseInfo),
-			errors.Is(err, respond.InsertCourseTwice):
-			c.JSON(http.StatusBadRequest, err)
-		case errors.Is(err, respond.ScheduleConflict):
+		if errors.Is(err, respond.ScheduleConflict) {
 			c.JSON(http.StatusConflict, respond.RespWithData(respond.ScheduleConflict, conflicts))
-		default:
-			c.JSON(http.StatusInternalServerError, respond.InternalError(err))
 		}
+		respond.DealWithError(c, err)
 		return
 	}
 	//4.返回成功响应

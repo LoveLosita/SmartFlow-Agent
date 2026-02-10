@@ -86,6 +86,12 @@ type WeeklyEventBrief struct {
 	EmbeddedTaskInfo TaskBrief `json:"embedded_task_info,omitempty"`
 }
 
+type UserDeleteScheduleEvent struct {
+	ID                 int  `json:"id"` // 这个 ID 是 ScheduleEvent 的 ID，不是 Schedule 的 ID
+	DeleteCourse       bool `json:"delete_course"`
+	DeleteEmbeddedTask bool `json:"delete_embedded_task"`
+}
+
 func (ScheduleEvent) TableName() string { return "schedule_events" }
 
 func (Schedule) TableName() string { return "schedules" }

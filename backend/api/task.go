@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -41,13 +40,8 @@ func (th *TaskHandler) AddTask(c *gin.Context) {
 	defer cancel() // 记得释放资源
 	resp, err := th.svc.AddTask(ctx, &req, userID)
 	if err != nil {
-		switch {
-		case errors.Is(err, respond.InvalidPriority): //如果是无效刷新令牌或者无效claims或者无效签名方法
-			c.JSON(http.StatusBadRequest, err)
-			return
-		default:
-			c.JSON(http.StatusInternalServerError, respond.InternalError(err))
-		}
+		respond.DealWithError(c, err)
+		return
 	}
 	//3. 返回响应
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
@@ -62,14 +56,8 @@ func (th *TaskHandler) GetUserTasks(c *gin.Context) {
 	defer cancel() // 记得释放资源
 	resp, err := th.svc.GetUserTasks(ctx, userID)
 	if err != nil {
-		switch {
-		case errors.Is(err, respond.UserTasksEmpty): //如果任务列表为空
-			c.JSON(http.StatusOK, respond.RespWithData(respond.UserTasksEmpty, []model.Task{})) //确实没错误，但是任务列表为空，返回自定义响应
-			return
-		default:
-			c.JSON(http.StatusInternalServerError, respond.InternalError(err))
-			return
-		}
+		respond.DealWithError(c, err)
+		return
 	}
 	//3. 返回响应
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))

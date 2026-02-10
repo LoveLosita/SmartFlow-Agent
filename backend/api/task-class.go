@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -11,7 +10,6 @@ import (
 	"github.com/LoveLosita/smartflow/backend/respond"
 	"github.com/LoveLosita/smartflow/backend/service"
 	"github.com/gin-gonic/gin"
-	"gorm.io/gorm"
 )
 
 type TaskClassHandler struct {
@@ -43,11 +41,8 @@ func (api *TaskClassHandler) UserAddTaskClass(c *gin.Context) {
 	defer cancel() // 记得释放资源
 	err = api.svc.AddOrUpdateTaskClass(ctx, &req, userIDInterface, create, 0)
 	if err != nil {
-		if errors.Is(err, respond.WrongParamType) {
-			c.JSON(http.StatusBadRequest, respond.WrongParamType)
-			return
-		}
-		c.JSON(http.StatusInternalServerError, respond.InternalError(err))
+		respond.DealWithError(c, err)
+		return
 	}
 	c.JSON(http.StatusOK, respond.Ok)
 }
@@ -59,7 +54,7 @@ func (api *TaskClassHandler) UserGetTaskClassInfos(c *gin.Context) {
 	defer cancel() // 记得释放资源
 	resp, err := api.svc.GetUserTaskClassInfos(ctx, userIDInterface)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, respond.InternalError(err))
+		respond.DealWithError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
@@ -83,11 +78,7 @@ func (api *TaskClassHandler) UserGetCompleteTaskClass(c *gin.Context) {
 	defer cancel() // 记得释放资源
 	resp, err := api.svc.GetUserCompleteTaskClass(ctx, userIDInterface, intTaskClassID)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusNotFound, respond.UserTaskClassNotFound)
-			return
-		}
-		c.JSON(http.StatusInternalServerError, respond.InternalError(err))
+		respond.DealWithError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
@@ -109,11 +100,8 @@ func (api *TaskClassHandler) UserUpdateTaskClass(c *gin.Context) {
 	defer cancel() // 记得释放资源
 	err = api.svc.AddOrUpdateTaskClass(ctx, &req, userIDInterface, update, intTaskClassID)
 	if err != nil {
-		if errors.Is(err, respond.WrongParamType) || errors.Is(err, respond.UserTaskClassForbidden) {
-			c.JSON(http.StatusBadRequest, err)
-			return
-		}
-		c.JSON(http.StatusInternalServerError, respond.InternalError(err))
+		respond.DealWithError(c, err)
+		return
 	}
 	c.JSON(http.StatusOK, respond.Ok)
 }
@@ -138,13 +126,7 @@ func (api *TaskClassHandler) UserAddTaskClassItemIntoSchedule(c *gin.Context) {
 	defer cancel() // 记得释放资源
 	err = api.svc.AddTaskClassItemIntoSchedule(ctx, &req, userIDInterface, intTaskID)
 	if err != nil {
-		if errors.Is(err, respond.TaskClassItemNotBelongToUser) || errors.Is(err, respond.CourseNotBelongToUser) ||
-			errors.Is(err, respond.CourseAlreadyEmbeddedByOtherTaskBlock) || errors.Is(err, respond.CourseTimeNotMatch) ||
-			errors.Is(err, respond.ScheduleConflict) || errors.Is(err, respond.WrongCourseID) {
-			c.JSON(http.StatusBadRequest, err)
-			return
-		}
-		c.JSON(http.StatusInternalServerError, respond.InternalError(err))
+		respond.DealWithError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, respond.Ok)
