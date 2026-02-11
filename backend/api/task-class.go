@@ -151,3 +151,23 @@ func (api *TaskClassHandler) DeleteTaskClassItem(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, respond.Ok)
 }
+
+func (api *TaskClassHandler) DeleteTaskClass(c *gin.Context) {
+	taskClassID := c.Query("task_class_id")
+	//将taskClassID转换为int
+	intTaskClassID, err := strconv.Atoi(taskClassID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		return
+	}
+	userID := c.GetInt("user_id")
+	// 创建一个带 1 秒超时的上下文
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源
+	err = api.svc.DeleteTaskClass(ctx, userID, intTaskClassID)
+	if err != nil {
+		respond.DealWithError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, respond.Ok)
+}

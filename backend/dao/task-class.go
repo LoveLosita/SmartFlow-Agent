@@ -218,3 +218,16 @@ func (dao *TaskClassDAO) DeleteTaskClassItemByID(ctx context.Context, id int) er
 		Delete(&model.TaskClassItem{}).Error
 	return err
 }
+
+func (dao *TaskClassDAO) DeleteTaskClassByID(ctx context.Context, id int) error {
+	res := dao.db.WithContext(ctx).
+		Where("id = ?", id).
+		Delete(&model.TaskClass{})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return respond.WrongTaskClassID
+	}
+	return nil
+}

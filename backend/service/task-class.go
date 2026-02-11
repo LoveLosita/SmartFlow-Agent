@@ -10,6 +10,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
 	"github.com/go-redis/redis/v8"
+	"gorm.io/gorm"
 )
 
 type TaskClassService struct {
@@ -297,6 +298,31 @@ func (sv *TaskClassService) DeleteTaskClassItem(ctx context.Context, userID int,
 	err = sv.cacheRepo.DeleteUserTodayScheduleFromCache(ctx, userID)
 	if err != nil {
 		// 缓存删除失败，记录日志但不影响正常返回数据
+		log.Printf("Failed to delete task class list cache for userID %d: %v", userID, err)
+	}
+	return nil
+}
+
+func (sv *TaskClassService) DeleteTaskClass(ctx context.Context, userID int, taskClassID int) error {
+	//1.先验证任务类归属
+	ownerID, err := sv.taskClassRepo.GetTaskClassUserIDByID(ctx, taskClassID) //通过任务类ID获取所属用户ID
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return respond.WrongTaskClassID
+		}
+		return err
+	}
+	if ownerID != userID {
+		return respond.TaskClassNotBelongToUser
+	}
+	//2.删除任务类（事务）
+	err = sv.taskClassRepo.DeleteTaskClassByID(ctx, taskClassID)
+	if err != nil {
+		return err
+	}
+	//3.事务提交成功后，清除相关缓存（如果有的话），以保证数据一致性
+	err = sv.cacheRepo.DeleteTaskClassList(ctx, userID)
+	if err != nil {
 		log.Printf("Failed to delete task class list cache for userID %d: %v", userID, err)
 	}
 	return nil

@@ -70,6 +70,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, limiter *pk
 			taskClassGroup.PUT("/update", middleware.IdempotencyMiddleware(cache), handlers.TaskClassHandler.UserUpdateTaskClass)
 			taskClassGroup.POST("/insert-into-schedule", middleware.IdempotencyMiddleware(cache), handlers.TaskClassHandler.UserAddTaskClassItemIntoSchedule)
 			taskClassGroup.DELETE("/delete-item", middleware.IdempotencyMiddleware(cache), handlers.TaskClassHandler.DeleteTaskClassItem)
+			taskClassGroup.DELETE("/delete-class", middleware.IdempotencyMiddleware(cache), handlers.TaskClassHandler.DeleteTaskClass)
 		}
 		scheduleGroup := apiGroup.Group("/schedule")
 		{

@@ -250,4 +250,14 @@ var ( //请求相关的响应
 		Status: "40038",
 		Info:   "request is processing, please do not repeat click",
 	}
+
+	TaskClassNotBelongToUser = Response{ //任务类不属于用户
+		Status: "40039",
+		Info:   "task class does not belong to user",
+	}
+
+	WrongTaskClassID = Response{ //任务类ID错误
+		Status: "40040",
+		Info:   "wrong task class id",
+	}
 )
