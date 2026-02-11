@@ -85,3 +85,54 @@ func (d *CacheDAO) AcquireLock(ctx context.Context, key string, ttl time.Duratio
 func (d *CacheDAO) ReleaseLock(ctx context.Context, key string) error {
 	return d.client.Del(ctx, key).Err()
 }
+
+func (d *CacheDAO) GetUserTasksFromCache(ctx context.Context, userID int) ([]model.GetUserTaskResp, error) {
+	key := fmt.Sprintf("smartflow:tasks:%d", userID)
+	var tasks []model.GetUserTaskResp
+	val, err := d.client.Get(ctx, key).Result()
+	if err != nil {
+		return nil, err // 注意：如果是 redis.Nil，交给 Service 层处理查库逻辑
+	}
+	err = json.Unmarshal([]byte(val), &tasks)
+	return tasks, err
+}
+
+func (d *CacheDAO) SetUserTasksToCache(ctx context.Context, userID int, tasks []model.GetUserTaskResp) error {
+	key := fmt.Sprintf("smartflow:tasks:%d", userID)
+	data, err := json.Marshal(tasks)
+	if err != nil {
+		return err
+	}
+	return d.client.Set(ctx, key, data, 24*time.Hour).Err()
+}
+
+func (d *CacheDAO) DeleteUserTasksFromCache(ctx context.Context, userID int) error {
+	key := fmt.Sprintf("smartflow:tasks:%d", userID)
+	return d.client.Del(ctx, key).Err()
+}
+
+func (d *CacheDAO) GetUserTodayScheduleFromCache(ctx context.Context, userID int) ([]model.UserTodaySchedule, error) {
+	key := fmt.Sprintf("smartflow:today_schedule:%d", userID)
+	var schedules []model.UserTodaySchedule
+	val, err := d.client.Get(ctx, key).Result()
+	if err != nil {
+		return nil, err // 注意：如果是 redis.Nil，交给 Service 层处理查库逻辑
+	}
+	err = json.Unmarshal([]byte(val), &schedules)
+	return schedules, err
+}
+
+func (d *CacheDAO) SetUserTodayScheduleToCache(ctx context.Context, userID int, schedules []model.UserTodaySchedule) error {
+	key := fmt.Sprintf("smartflow:today_schedule:%d", userID)
+	data, err := json.Marshal(schedules)
+	if err != nil {
+		return err
+	}
+	// 设置过期时间为当天剩余的时间，确保每天更新一次缓存
+	return d.client.Set(ctx, key, data, time.Until(time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day()+1, 0, 0, 0, 0, time.Now().Location()))).Err()
+}
+
+func (d *CacheDAO) DeleteUserTodayScheduleFromCache(ctx context.Context, userID int) error {
+	key := fmt.Sprintf("smartflow:today_schedule:%d", userID)
+	return d.client.Del(ctx, key).Err()
+}

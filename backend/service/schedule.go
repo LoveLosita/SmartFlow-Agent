@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
+	"github.com/go-redis/redis/v8"
 )
 
 type ScheduleService struct {
@@ -16,14 +18,16 @@ type ScheduleService struct {
 	userDAO      *dao.UserDAO
 	taskClassDAO *dao.TaskClassDAO
 	repoManager  *dao.RepoManager // 统一管理多个 DAO 的事务
+	cacheDAO     *dao.CacheDAO    // 需要在 ScheduleService 中使用缓存
 }
 
-func NewScheduleService(scheduleDAO *dao.ScheduleDAO, userDAO *dao.UserDAO, taskClassDAO *dao.TaskClassDAO, repoManager *dao.RepoManager) *ScheduleService {
+func NewScheduleService(scheduleDAO *dao.ScheduleDAO, userDAO *dao.UserDAO, taskClassDAO *dao.TaskClassDAO, repoManager *dao.RepoManager, cacheDAO *dao.CacheDAO) *ScheduleService {
 	return &ScheduleService{
 		scheduleDAO:  scheduleDAO,
 		userDAO:      userDAO,
 		taskClassDAO: taskClassDAO,
 		repoManager:  repoManager,
+		cacheDAO:     cacheDAO,
 	}
 }
 
@@ -36,6 +40,16 @@ func (ss *ScheduleService) GetUserTodaySchedule(ctx context.Context, userID int)
 		}
 		return nil, err
 	}*/
+	//1.先尝试从缓存获取数据
+	cachedResp, err := ss.cacheDAO.GetUserTodayScheduleFromCache(ctx, userID)
+	if err == nil {
+		// 缓存命中，直接返回
+		return cachedResp, nil
+	}
+	// 如果是 redis.Nil 错误，说明缓存未命中，我们继续查库
+	if !errors.Is(err, redis.Nil) {
+		return nil, err
+	}
 	//2.获取当前日期
 	/*curTime := time.Now().Format("2006-01-02")*/
 	curTime := "2026-03-02" //测试数据
@@ -43,7 +57,6 @@ func (ss *ScheduleService) GetUserTodaySchedule(ctx context.Context, userID int)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println(week, dayOfWeek)
 	//3.查询用户当天的日程安排
 	schedules, err := ss.scheduleDAO.GetUserTodaySchedule(ctx, userID, week, dayOfWeek) //测试数据
 	if err != nil {
@@ -51,6 +64,8 @@ func (ss *ScheduleService) GetUserTodaySchedule(ctx context.Context, userID int)
 	}
 	//4.转换为前端需要的格式
 	todaySchedules := conv.SchedulesToUserTodaySchedule(schedules)
+	//5.将查询结果存入缓存，设置过期时间为当天结束
+	err = ss.cacheDAO.SetUserTodayScheduleToCache(ctx, userID, todaySchedules)
 	return todaySchedules, nil
 }
 
@@ -212,6 +227,12 @@ func (ss *ScheduleService) DeleteScheduleEvent(ctx context.Context, requests []m
 	})
 	if err != nil {
 		return err
+	}
+	//4.删除成功后，清除相关缓存（如果有的话），以保证数据一致性
+	err = ss.cacheDAO.DeleteUserTodayScheduleFromCache(ctx, userID)
+	if err != nil {
+		// 缓存删除失败，记录日志但不影响正常返回数据
+		fmt.Printf("Failed to delete user today schedule cache for userID %d: %v\n", userID, err)
 	}
 	return nil
 }
