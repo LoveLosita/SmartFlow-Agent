@@ -240,4 +240,14 @@ var ( //请求相关的响应
 		Status: "40036",
 		Info:   "task class item not found",
 	}
+
+	MissingIdempotencyKey = Response{ //缺少幂等性键
+		Status: "40037",
+		Info:   "missing idempotency key",
+	}
+
+	RequestIsProcessing = Response{ //请求正在处理中
+		Status: "40038",
+		Info:   "request is processing, please do not repeat click",
+	}
 )

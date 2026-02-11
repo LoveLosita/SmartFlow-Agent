@@ -52,31 +52,31 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, limiter *pk
 		taskGroup := apiGroup.Group("/task")
 		{
 			taskGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
-			taskGroup.POST("/create", handlers.TaskHandler.AddTask)
+			taskGroup.POST("/create", middleware.IdempotencyMiddleware(cache), handlers.TaskHandler.AddTask)
 			taskGroup.GET("/get", handlers.TaskHandler.GetUserTasks)
 		}
 		courseGroup := apiGroup.Group("/course")
 		{
 			courseGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
 			courseGroup.POST("/validate", handlers.CourseHandler.CheckUserCourse)
-			courseGroup.POST("/import", handlers.CourseHandler.AddUserCourses)
+			courseGroup.POST("/import", middleware.IdempotencyMiddleware(cache), handlers.CourseHandler.AddUserCourses)
 		}
 		taskClassGroup := apiGroup.Group("/task-class")
 		{
 			taskClassGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
-			taskClassGroup.POST("/add", handlers.TaskClassHandler.UserAddTaskClass)
+			taskClassGroup.POST("/add", middleware.IdempotencyMiddleware(cache), handlers.TaskClassHandler.UserAddTaskClass)
 			taskClassGroup.GET("/list", handlers.TaskClassHandler.UserGetTaskClassInfos)
 			taskClassGroup.GET("/get", handlers.TaskClassHandler.UserGetCompleteTaskClass)
-			taskClassGroup.PUT("/update", handlers.TaskClassHandler.UserUpdateTaskClass)
-			taskClassGroup.POST("/insert-into-schedule", handlers.TaskClassHandler.UserAddTaskClassItemIntoSchedule)
-			taskClassGroup.DELETE("/delete-item", handlers.TaskClassHandler.DeleteTaskClassItem)
+			taskClassGroup.PUT("/update", middleware.IdempotencyMiddleware(cache), handlers.TaskClassHandler.UserUpdateTaskClass)
+			taskClassGroup.POST("/insert-into-schedule", middleware.IdempotencyMiddleware(cache), handlers.TaskClassHandler.UserAddTaskClassItemIntoSchedule)
+			taskClassGroup.DELETE("/delete-item", middleware.IdempotencyMiddleware(cache), handlers.TaskClassHandler.DeleteTaskClassItem)
 		}
 		scheduleGroup := apiGroup.Group("/schedule")
 		{
 			scheduleGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
 			scheduleGroup.GET("/today", handlers.ScheduleHandler.GetUserTodaySchedule)
 			scheduleGroup.GET("/week", handlers.ScheduleHandler.GetUserWeeklySchedule)
-			scheduleGroup.DELETE("/delete", handlers.ScheduleHandler.DeleteScheduleEvent)
+			scheduleGroup.DELETE("/delete", middleware.IdempotencyMiddleware(cache), handlers.ScheduleHandler.DeleteScheduleEvent)
 		}
 	}
 	// 初始化Gin引擎

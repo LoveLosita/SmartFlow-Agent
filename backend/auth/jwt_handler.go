@@ -91,8 +91,12 @@ func ValidateRefreshToken(tokenString string, cache *dao.CacheDAO) (*jwt.Token, 
 		return RefreshKey, nil
 	})
 
-	if err != nil || !token.Valid {
-		return nil, err
+	if err != nil {
+		return nil, respond.InvalidRefreshToken
+	}
+
+	if !token.Valid {
+		return nil, respond.InvalidRefreshToken
 	}
 
 	// 2. 断言获取 Claims
