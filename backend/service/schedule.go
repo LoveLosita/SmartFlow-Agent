@@ -236,3 +236,17 @@ func (ss *ScheduleService) DeleteScheduleEvent(ctx context.Context, requests []m
 	}
 	return nil
 }
+
+func (ss *ScheduleService) GetUserRecentCompletedSchedules(ctx context.Context, userID, index, limit int) (model.UserRecentCompletedScheduleResponse, error) {
+	//1.查询用户最近完成的日程安排
+	//获取现在的时间
+	/*nowTime := time.Now()*/
+	nowTime := time.Date(2026, 6, 15, 12, 0, 0, 0, time.Local) //测试数据
+	schedules, err := ss.scheduleDAO.GetUserRecentCompletedSchedules(ctx, nowTime, userID, index, limit)
+	if err != nil {
+		return model.UserRecentCompletedScheduleResponse{}, err
+	}
+	//2.转换为前端需要的格式
+	result := conv.SchedulesToRecentCompletedSchedules(schedules)
+	return result, nil
+}

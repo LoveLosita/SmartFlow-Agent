@@ -71,87 +71,6 @@ var sectionTimeMap = map[int][2]string{
 	11: {"20:50", "21:35"}, 12: {"21:45", "22:30"},
 }
 
-/*func SchedulesToUserTodaySchedule(schedules []model.Schedule) []model.UserTodaySchedule {
-	if len(schedules) == 0 {
-		return []model.UserTodaySchedule{}
-	}
-
-	// 1. 按周次和星期进行第一层分组 (map[week][day]schedules)
-	// 虽然是“今日日程”，但传入的切片可能包含多天，这样写兼容性更好
-	dayGroups := make(map[string][]model.Schedule)
-	for _, s := range schedules {
-		dayKey := fmt.Sprintf("%d-%d", s.Week, s.DayOfWeek)
-		dayGroups[dayKey] = append(dayGroups[dayKey], s)
-	}
-
-	var result []model.UserTodaySchedule
-
-	for _, daySchedules := range dayGroups {
-		todayDTO := model.UserTodaySchedule{
-			Week:      daySchedules[0].Week,
-			DayOfWeek: daySchedules[0].DayOfWeek,
-			Events:    []model.EventBrief{},
-		}
-
-		// 2. 在每一天内部，按 EventID 进行第二层聚合（把连续的节次拼成一个 Event）
-		eventGroups := make(map[int][]model.Schedule)
-		for _, s := range daySchedules {
-			eventGroups[s.EventID] = append(eventGroups[s.EventID], s)
-		}
-
-		// 3. 遍历每个 Event 组，转化为 EventBrief
-		var tempEvents []model.EventBrief
-		for eventID, slots := range eventGroups {
-			// 对当前 Event 的所有原子槽位按节次排序
-			sort.Slice(slots, func(i, j int) bool {
-				return slots[i].Section < slots[j].Section
-			})
-
-			firstSlot := slots[0]
-			lastSlot := slots[len(slots)-1]
-
-			brief := model.EventBrief{
-				ID:        eventID,
-				Name:      firstSlot.Event.Name,
-				Location:  *firstSlot.Event.Location,
-				Type:      firstSlot.Event.Type,
-				StartTime: sectionTimeMap[firstSlot.Section][0], // 取第一节的开始时间
-				EndTime:   sectionTimeMap[lastSlot.Section][1],  // 取最后一节的结束时间
-			}
-
-			// 💡 4. 检查是否有嵌入任务 (Embedded Task)
-			// 逻辑：只要这个时间块中任何一个原子槽位带了 EmbeddedTaskID，就提取它
-			// 注意：这里假设你在 DAO 层也 Preload 了 Task 信息，或者在此处仅填 ID
-			for _, slot := range slots {
-				if slot.EmbeddedTaskID != nil {
-					brief.EmbeddedTaskInfo = model.TaskBrief{
-						ID:   *slot.EmbeddedTaskID,
-						Name: *slot.EmbeddedTask.Content,
-						Type: "task",
-					}
-					break // 找到一个即代表该块已占用
-				}
-			}
-
-			tempEvents = append(tempEvents, brief)
-		}
-
-		// 5. 对结果进行排序（按开始时间），并分配 Order
-		sort.Slice(tempEvents, func(i, j int) bool {
-			return tempEvents[i].StartTime < tempEvents[j].StartTime
-		})
-
-		for i := range tempEvents {
-			tempEvents[i].Order = i + 1
-		}
-
-		todayDTO.Events = tempEvents
-		result = append(result, todayDTO)
-	}
-
-	return result
-}*/
-
 func SchedulesToUserTodaySchedule(schedules []model.Schedule) []model.UserTodaySchedule {
 	if len(schedules) == 0 {
 		return []model.UserTodaySchedule{}
@@ -341,4 +260,21 @@ func SchedulesToUserWeeklySchedule(schedules []model.Schedule) []model.UserWeekS
 		result = append(result, weekDTO)
 	}
 	return result
+}
+
+func SchedulesToRecentCompletedSchedules(schedules []model.Schedule) model.UserRecentCompletedScheduleResponse {
+	var result model.UserRecentCompletedScheduleResponse
+	for _, s := range schedules {
+		strTime := s.Event.EndTime.Format("2006-01-02 15:04:05")
+		temp := model.RecentCompletedEventBrief{
+			ID:   s.ID,
+			Name: s.Event.Name,
+			Type: s.Event.Type,
+			// CompletedTime 需要从 ScheduleEvent 的 CompletedTime 字段获取
+			CompletedTime: strTime,
+		}
+		result.Events = append(result.Events, temp)
+	}
+	return result
+
 }

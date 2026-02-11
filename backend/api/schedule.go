@@ -79,3 +79,30 @@ func (s *ScheduleAPI) DeleteScheduleEvent(c *gin.Context) {
 	//4.返回删除成功的响应给前端
 	c.JSON(http.StatusOK, respond.Ok)
 }
+
+func (s *ScheduleAPI) GetUserRecentCompletedSchedules(c *gin.Context) {
+	// 1. 从请求上下文中获取用户ID以及其他查询参数（如 index 和 limit）
+	userID := c.GetInt("user_id")
+	index := c.Query("index")
+	limit := c.Query("limit")
+	intIndex, err := strconv.Atoi(index)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		return
+	}
+	intLimit, err := strconv.Atoi(limit)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		return
+	}
+	//2.调用服务层方法获取用户最近完成的日程事件
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源
+	completedSchedules, err := s.scheduleService.GetUserRecentCompletedSchedules(ctx, userID, intIndex, intLimit)
+	if err != nil {
+		respond.DealWithError(c, err)
+		return
+	}
+	//3.返回数据给前端
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, completedSchedules))
+}

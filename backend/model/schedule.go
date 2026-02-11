@@ -1,13 +1,17 @@
 package model
 
+import "time"
+
 type ScheduleEvent struct {
-	ID            int     `gorm:"primaryKey;autoIncrement" json:"id"`
-	UserID        int     `gorm:"column:user_id;index:idx_user_events;not null" json:"user_id"`
-	Name          string  `gorm:"column:name;type:varchar(255);not null;comment:课程或任务名称" json:"name"`
-	Location      *string `gorm:"column:location;type:varchar(255);default:'';comment:地点 (教学楼/会议室)" json:"location"`
-	Type          string  `gorm:"column:type;type:enum('course','task');not null;comment:日程类型" json:"type"`
-	RelID         *int    `gorm:"column:rel_id;comment:关联原始数据ID (如教务系统的课程ID)" json:"rel_id"`
-	CanBeEmbedded bool    `gorm:"column:can_be_embedded;not null;default:0;comment:是否允许在此时段嵌入其他任务" json:"can_be_embedded"`
+	ID            int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	UserID        int       `gorm:"column:user_id;index:idx_user_events;not null" json:"user_id"`
+	Name          string    `gorm:"column:name;type:varchar(255);not null;comment:课程或任务名称" json:"name"`
+	Location      *string   `gorm:"column:location;type:varchar(255);default:'';comment:地点 (教学楼/会议室)" json:"location"`
+	Type          string    `gorm:"column:type;type:enum('course','task');not null;comment:日程类型" json:"type"`
+	RelID         *int      `gorm:"column:rel_id;comment:关联原始数据ID (如教务系统的课程ID)" json:"rel_id"`
+	CanBeEmbedded bool      `gorm:"column:can_be_embedded;not null;default:0;comment:是否允许在此时段嵌入其他任务" json:"can_be_embedded"`
+	StartTime     time.Time `gorm:"column:start_time;type:time;comment:开始时间" json:"start_time"`
+	EndTime       time.Time `gorm:"column:end_time;type:time;comment:结束时间" json:"end_time"`
 }
 
 type Schedule struct {
@@ -90,6 +94,17 @@ type UserDeleteScheduleEvent struct {
 	ID                 int  `json:"id"` // 这个 ID 是 ScheduleEvent 的 ID，不是 Schedule 的 ID
 	DeleteCourse       bool `json:"delete_course"`
 	DeleteEmbeddedTask bool `json:"delete_embedded_task"`
+}
+
+type UserRecentCompletedScheduleResponse struct {
+	Events []RecentCompletedEventBrief `json:"events"`
+}
+
+type RecentCompletedEventBrief struct {
+	ID            int    `json:"id"` //如果是嵌入的任务事件，这个ID是TaskClassItem的ID；如果是课程事件，这个ID是ScheduleEvent的ID
+	Name          string `json:"name"`
+	Type          string `json:"type"`
+	CompletedTime string `json:"completed_time"`
 }
 
 func (ScheduleEvent) TableName() string { return "schedule_events" }

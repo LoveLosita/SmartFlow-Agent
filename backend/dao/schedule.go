@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
@@ -443,4 +444,22 @@ func (d *ScheduleDAO) DeleteScheduleEventByTaskItemID(ctx context.Context, taskI
 		return res.Error
 	}
 	return nil
+}
+
+func (d *ScheduleDAO) GetUserRecentCompletedSchedules(ctx context.Context, nowTime time.Time, userID int, index, limit int) ([]model.Schedule, error) {
+	var schedules []model.Schedule
+	err := d.db.WithContext(ctx).
+		Preload("Event").
+		Preload("EmbeddedTask").
+		Joins("JOIN schedule_events ON schedule_events.id = schedules.event_id").
+		Where("schedules.user_id = ? AND schedule_events.type = ? AND schedule_events.end_time < ?",
+							userID, "task", nowTime).
+		Order("schedule_events.end_time DESC"). // 命中索引
+		Offset(index).
+		Limit(limit).
+		Find(&schedules).Error
+	if err != nil {
+		return nil, err
+	}
+	return schedules, nil
 }
