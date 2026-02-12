@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/conv"
@@ -69,20 +68,22 @@ func (ss *ScheduleService) GetUserTodaySchedule(ctx context.Context, userID int)
 	return todaySchedules, nil
 }
 
-func (ss *ScheduleService) GetUserWeeklySchedule(ctx context.Context, userID, week int) ([]model.UserWeekSchedule, error) {
+func (ss *ScheduleService) GetUserWeeklySchedule(ctx context.Context, userID, week int) (*model.UserWeekSchedule, error) {
 	//1.先检查 week 参数是否合法
 	if week < 0 || week > 25 {
 		return nil, respond.WeekOutOfRange
 	}
-	//2.先检查用户id是否存在(考虑移除)
-	/*_, err := ss.userDAO.GetUserByID(userID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, respond.WrongUserID
-		}
+	//2.先看看缓存里有没有数据（如果有的话直接返回，没有的话继续查库）
+	cachedResp, err := ss.cacheDAO.GetUserWeeklyScheduleFromCache(ctx, userID, week)
+	if err == nil {
+		// 缓存命中，直接返回
+		return cachedResp, nil
+	}
+	// 如果是 redis.Nil 错误，说明缓存未命中，我们继续查库
+	if !errors.Is(err, redis.Nil) {
 		return nil, err
-	}*/
-	//2.查询用户每周的日程安排
+	}
+	//3.查询用户每周的日程安排
 	//如果没有传入 week 参数，则默认查询当前周的日程安排
 	if week == 0 {
 		curTime := time.Now().Format("2006-01-02")
@@ -97,8 +98,10 @@ func (ss *ScheduleService) GetUserWeeklySchedule(ctx context.Context, userID, we
 		return nil, err
 	}
 	//3.转换为前端需要的格式
-	weeklySchedules := conv.SchedulesToUserWeeklySchedule(schedules)
-	return weeklySchedules, nil
+	weeklySchedule := conv.SchedulesToUserWeeklySchedule(schedules)
+	//4.将查询结果存入缓存，设置过期时间为一周（或者根据实际情况调整）
+	err = ss.cacheDAO.SetUserWeeklyScheduleToCache(ctx, userID, weeklySchedule)
+	return weeklySchedule, nil
 }
 
 func (ss *ScheduleService) DeleteScheduleEvent(ctx context.Context, requests []model.UserDeleteScheduleEvent, userID int) error {
@@ -148,7 +151,6 @@ func (ss *ScheduleService) DeleteScheduleEvent(ctx context.Context, requests []m
 						return err
 					}
 					//下方开启事务，删除课程事件并创建新的任务事件
-
 					//2.2.2.删除课程事件
 					txErr := txM.Schedule.DeleteScheduleEventAndSchedule(ctx, req.ID, userID)
 					if txErr != nil {
@@ -179,7 +181,6 @@ func (ss *ScheduleService) DeleteScheduleEvent(ctx context.Context, requests []m
 					// 5. 写入数据库（通过 RepoManager 统一管理事务）
 					// 这里的 sv.daoManager 是你在初始化 Service 时注入的全局 RepoManager 实例
 					// 5.1 使用事务中的 ScheduleRepo 插入 Event
-					// 💡 这里的 txM.Schedule 已经注入了事务句柄
 					eventID, txErr := txM.Schedule.AddScheduleEvent(scheduleEvent)
 					if txErr != nil {
 						return txErr // 触发回滚
@@ -189,12 +190,10 @@ func (ss *ScheduleService) DeleteScheduleEvent(ctx context.Context, requests []m
 						schedules[i].EventID = eventID
 					}
 					// 5.3 使用事务中的 ScheduleRepo 批量插入原子槽位
-					// 💡 如果这里因为外键或唯一索引报错，5.1 的 Event 也会被撤回
 					if _, txErr = txM.Schedule.AddSchedules(schedules); txErr != nil {
 						return txErr // 触发回滚
 					}
 					// 5.4 使用事务中的 TaskRepo 更新任务状态
-					// 💡 这里的 txM.Task 取代了你原来的 txDAO
 					if txErr = txM.TaskClass.UpdateTaskClassItemEmbeddedTime(ctx, embeddedTaskID, taskClassItem.EmbeddedTime); txErr != nil {
 						return txErr // 触发回滚
 					}
@@ -228,25 +227,34 @@ func (ss *ScheduleService) DeleteScheduleEvent(ctx context.Context, requests []m
 	if err != nil {
 		return err
 	}
-	//4.删除成功后，清除相关缓存（如果有的话），以保证数据一致性
-	err = ss.cacheDAO.DeleteUserTodayScheduleFromCache(ctx, userID)
-	if err != nil {
-		// 缓存删除失败，记录日志但不影响正常返回数据
-		fmt.Printf("Failed to delete user today schedule cache for userID %d: %v\n", userID, err)
-	}
 	return nil
 }
 
 func (ss *ScheduleService) GetUserRecentCompletedSchedules(ctx context.Context, userID, index, limit int) (model.UserRecentCompletedScheduleResponse, error) {
-	//1.查询用户最近完成的日程安排
+	//1.先查缓存
+	cachedResp, err := ss.cacheDAO.GetUserRecentCompletedSchedulesFromCache(ctx, userID, index, limit)
+	if err == nil {
+		// 缓存命中，直接返回
+		return cachedResp, nil
+	}
+	// 如果是 redis.Nil 错误，说明缓存未命中，我们继续查库
+	if !errors.Is(err, redis.Nil) {
+		return model.UserRecentCompletedScheduleResponse{}, err
+	}
+	//2.查询用户最近完成的日程安排
 	//获取现在的时间
 	/*nowTime := time.Now()*/
-	nowTime := time.Date(2026, 6, 15, 12, 0, 0, 0, time.Local) //测试数据
+	nowTime := time.Date(2026, 6, 30, 12, 0, 0, 0, time.Local) //测试数据
 	schedules, err := ss.scheduleDAO.GetUserRecentCompletedSchedules(ctx, nowTime, userID, index, limit)
 	if err != nil {
 		return model.UserRecentCompletedScheduleResponse{}, err
 	}
-	//2.转换为前端需要的格式
+	//3.转换为前端需要的格式
 	result := conv.SchedulesToRecentCompletedSchedules(schedules)
+	//4.将查询结果存入缓存，设置过期时间为30分钟（根据实际情况调整）
+	err = ss.cacheDAO.SetUserRecentCompletedSchedulesToCache(ctx, userID, index, limit, result)
+	if err != nil {
+		return model.UserRecentCompletedScheduleResponse{}, err
+	}
 	return result, nil
 }

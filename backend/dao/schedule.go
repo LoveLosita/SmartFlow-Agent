@@ -463,3 +463,24 @@ func (d *ScheduleDAO) GetUserRecentCompletedSchedules(ctx context.Context, nowTi
 	}
 	return schedules, nil
 }
+
+func (d *ScheduleDAO) GetScheduleEventWeekByID(ctx context.Context, eventID int) (int, error) {
+	type row struct {
+		Week *int `gorm:"column:week"`
+	}
+	var r row
+	err := d.db.WithContext(ctx).
+		Table("schedules").
+		Select("week").
+		Where("event_id = ?", eventID).
+		Order("id ASC").
+		Limit(1).
+		Scan(&r).Error
+	if err != nil {
+		return 0, err
+	}
+	if r.Week == nil {
+		return 0, respond.WrongScheduleEventID
+	}
+	return *r.Week, nil
+}

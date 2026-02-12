@@ -58,11 +58,6 @@ func (sv *TaskClassService) AddOrUpdateTaskClass(ctx context.Context, req *model
 		return err
 	}
 
-	// 2) 事务提交成功后删除该用户缓存(如果有)
-	err := sv.cacheRepo.DeleteTaskClassList(ctx, userID)
-	if err != nil {
-		log.Printf("redis删除任务分类列表缓存失败: userID=%d err=%v", userID, err)
-	}
 	return nil
 }
 
@@ -71,7 +66,7 @@ func (sv *TaskClassService) GetUserTaskClassInfos(ctx context.Context, userID in
 	list, err := sv.cacheRepo.GetTaskClassList(ctx, userID)
 	if err == nil {
 		//命中缓存
-		return &list, nil
+		return list, nil
 	} else if !errors.Is(err, redis.Nil) { //不是缓存未命中错误，说明redis可能炸了，照常放行
 		log.Println("redis获取任务分类列表失败:", err)
 	}
@@ -189,35 +184,18 @@ func (sv *TaskClassService) AddTaskClassItemIntoSchedule(ctx context.Context, re
 	if conflict {
 		return respond.ScheduleConflict
 	}
-	//5.写入数据库（事务）
-	/*if err := sv.taskClassRepo.Transaction(func(txDAO *dao.TaskClassDAO) error {
-		//5.1 先将任务块插入scheduleEvent表，获取生成的ID后再插入schedule表（因为schedule表有外键关联）
-		id, err := sv.scheduleRepo.AddScheduleEvent(scheduleEvent)
-		if err != nil {
-			return err
-		}
-		//5.2 将生成的 ScheduleEvent ID 赋值给对应的 Schedule 的 EventID 字段
-		for i := range schedules {
-			schedules[i].EventID = id
-		}
-		//5.3 插入 Schedule 表
-		_, err = sv.scheduleRepo.AddSchedules(schedules)
-		if err != nil {
-			return err
-		}
-		//5.4 更新任务块的 embedded_time 字段
-		if err := txDAO.UpdateTaskClassItemEmbeddedTime(ctx, taskID, taskItem.EmbeddedTime); err != nil {
-			return err
-		}
-		return nil
-	}); err != nil {
-		return err
-	}*/
 	// 5. 写入数据库（通过 RepoManager 统一管理事务）
 	// 这里的 sv.daoManager 是你在初始化 Service 时注入的全局 RepoManager 实例
 	if err := sv.repoManager.Transaction(ctx, func(txM *dao.RepoManager) error {
 		// 5.1 使用事务中的 ScheduleRepo 插入 Event
 		// 💡 这里的 txM.Schedule 已经注入了事务句柄
+		//此处要将req中的起始section以及第几周、星期几转换成绝对时间，存入scheduleEvent的StartTime和EndTime字段中，方便后续查询和冲突检查
+		st, ed, err := conv.RelativeTimeToRealTime(req.Week, req.DayOfWeek, req.StartSection, req.EndSection)
+		if err != nil {
+			return err
+		}
+		scheduleEvent.StartTime = st
+		scheduleEvent.EndTime = ed
 		eventID, err := txM.Schedule.AddScheduleEvent(scheduleEvent)
 		if err != nil {
 			return err // 触发回滚
@@ -242,11 +220,19 @@ func (sv *TaskClassService) AddTaskClassItemIntoSchedule(ctx context.Context, re
 		return err
 	}
 	//6.事务提交成功后，清除相关缓存（如果有的话），以保证数据一致性
-	err = sv.cacheRepo.DeleteTaskClassList(ctx, userID)
+	/*err = sv.cacheRepo.DeleteTaskClassList(ctx, userID)
 	if err != nil {
 		// 缓存删除失败，记录日志但不影响正常返回数据
 		log.Printf("Failed to delete task class list cache for userID %d: %v", userID, err)
 	}
+	err = sv.cacheRepo.DeleteUserTodayScheduleFromCache(ctx, userID)
+	if err != nil {
+		log.Printf("Failed to delete user today schedule cache for userID %d: %v", userID, err)
+	}
+	err = sv.cacheRepo.DeleteUserWeeklyScheduleFromCache(ctx, userID, req.Week)
+	if err != nil {
+		log.Printf("Failed to delete user weekly schedule cache for userID %d week %d: %v", userID, req.Week, err)
+	}*/
 	return nil
 }
 
@@ -294,12 +280,6 @@ func (sv *TaskClassService) DeleteTaskClassItem(ctx context.Context, userID int,
 	}); err != nil {
 		return err
 	}
-	//3.事务提交成功后，清除相关缓存（如果有的话），以保证数据一致性
-	err = sv.cacheRepo.DeleteUserTodayScheduleFromCache(ctx, userID)
-	if err != nil {
-		// 缓存删除失败，记录日志但不影响正常返回数据
-		log.Printf("Failed to delete task class list cache for userID %d: %v", userID, err)
-	}
 	return nil
 }
 
@@ -319,11 +299,6 @@ func (sv *TaskClassService) DeleteTaskClass(ctx context.Context, userID int, tas
 	err = sv.taskClassRepo.DeleteTaskClassByID(ctx, taskClassID)
 	if err != nil {
 		return err
-	}
-	//3.事务提交成功后，清除相关缓存（如果有的话），以保证数据一致性
-	err = sv.cacheRepo.DeleteTaskClassList(ctx, userID)
-	if err != nil {
-		log.Printf("Failed to delete task class list cache for userID %d: %v", userID, err)
 	}
 	return nil
 }

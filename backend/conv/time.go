@@ -2,6 +2,7 @@ package conv
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/respond"
@@ -54,4 +55,69 @@ func RelativeDateToRealDate(week, dayOfWeek int) (string, error) {
 		return "", respond.TimeOutOfRangeOfThisSemester
 	}
 	return targetDate.Format(DateFormat), nil
+}
+
+type SectionTime struct {
+	Start string // 第一个开始
+	End   string // 第一个结束
+}
+
+var sectionTimeMap2 = map[int]SectionTime{
+	1:  {Start: "08:00", End: "08:45"},
+	2:  {Start: "08:55", End: "09:40"},
+	3:  {Start: "10:15", End: "11:00"},
+	4:  {Start: "11:10", End: "11:55"},
+	5:  {Start: "14:00", End: "14:45"},
+	6:  {Start: "14:55", End: "15:40"},
+	7:  {Start: "16:15", End: "17:00"},
+	8:  {Start: "17:10", End: "17:55"},
+	9:  {Start: "19:00", End: "19:45"},
+	10: {Start: "19:55", End: "20:40"},
+	11: {Start: "20:50", End: "21:35"},
+	12: {Start: "21:45", End: "22:30"},
+}
+
+func RelativeTimeToRealTime(week, dayOfWeek, startSection, endSection int) (time.Time, time.Time, error) {
+	// 1. 安全校验
+	if startSection > endSection {
+		return time.Time{}, time.Time{}, respond.InvalidSectionRange
+	}
+
+	startTimeInfo, okStart := sectionTimeMap2[startSection]
+	endTimeInfo, okEnd := sectionTimeMap2[endSection]
+	if !okStart || !okEnd {
+		return time.Time{}, time.Time{}, respond.InvalidSectionNumber
+	}
+
+	if week < 1 || dayOfWeek < 1 || dayOfWeek > 7 {
+		return time.Time{}, time.Time{}, respond.InvalidWeekOrDayOfWeek
+	}
+
+	// 2. 计算目标日期
+	// 偏移天数 = (周数-1)*7 + (周几-1)
+	daysOffset := (week-1)*7 + (dayOfWeek - 1)
+	TermStartDate := viper.GetString("time.semesterStartDate") // 从配置文件中读取学期开始日期
+	baseDate, _ := time.Parse("2006-01-02", TermStartDate)
+	targetDate := baseDate.AddDate(0, 0, daysOffset)
+	dateStr := targetDate.Format("2006-01-02")
+
+	// 3. 锁定时区 (Asia/Shanghai)
+	timeZone := viper.GetString("time.zone") // 从配置文件中读取时区
+	loc, _ := time.LoadLocation(timeZone)
+
+	// 拼接：起始节次的 Start 和 结束节次的 End
+	startFullStr := fmt.Sprintf("%s %s", dateStr, startTimeInfo.Start)
+	endFullStr := fmt.Sprintf("%s %s", dateStr, endTimeInfo.End)
+
+	startTime, err := time.ParseInLocation("2006-01-02 15:04", startFullStr, loc)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+
+	endTime, err := time.ParseInLocation("2006-01-02 15:04", endFullStr, loc)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+
+	return startTime, endTime, nil
 }

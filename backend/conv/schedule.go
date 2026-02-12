@@ -163,118 +163,136 @@ func SchedulesToUserTodaySchedule(schedules []model.Schedule) []model.UserTodayS
 	return result
 }
 
-func SchedulesToUserWeeklySchedule(schedules []model.Schedule) []model.UserWeekSchedule {
-	if len(schedules) == 0 {
-		return []model.UserWeekSchedule{}
+func SchedulesToUserWeeklySchedule(schedules []model.Schedule) *model.UserWeekSchedule {
+	// 1. 初始化返回结构 (默认取第一条数据的周次)
+	weekDTO := &model.UserWeekSchedule{
+		Week:   schedules[0].Week,
+		Events: []model.WeeklyEventBrief{},
 	}
-	// 1. 数据预处理：按 Week 分组
-	weekGroups := make(map[int][]model.Schedule)
+
+	// 2. 建立 [天][节次] 的快速索引地图
+	// indexMap[day][section] -> model.Schedule
+	indexMap := make(map[int]map[int]model.Schedule)
+	for d := 1; d <= 7; d++ {
+		indexMap[d] = make(map[int]model.Schedule)
+	}
 	for _, s := range schedules {
-		weekGroups[s.Week] = append(weekGroups[s.Week], s)
+		indexMap[s.DayOfWeek][s.Section] = s
 	}
-	var result []model.UserWeekSchedule
-	// 2. 遍历每一个周
-	for week, weekSchedules := range weekGroups {
-		weekDTO := model.UserWeekSchedule{
-			Week:   week,
-			Events: []model.WeeklyEventBrief{},
-		}
-		// 💡 核心优化：建立 [天][节次] 的快速索引地图
-		// indexMap[day][section] -> model.Schedule
-		indexMap := make(map[int]map[int]model.Schedule)
-		for d := 1; d <= 7; d++ {
-			indexMap[d] = make(map[int]model.Schedule)
-		}
-		for _, s := range weekSchedules {
-			indexMap[s.DayOfWeek][s.Section] = s
-		}
-		// 3. 线性扫描 1-7 天
-		for day := 1; day <= 7; day++ {
-			order := 1 // 每一天开始时，Order 重置
-			// 4. 线性扫描 1-12 节
-			for curr := 1; curr <= 12; {
-				// 检查当前槽位是否有课
-				if slot, hasClass := indexMap[day][curr]; hasClass {
-					// === A 场景：有课，寻找连续边界 (Span 计算) ===
-					end := curr
-					// 探测逻辑：只要 EventID 相同且在同一天，就视为同一个块
-					for next := curr + 1; next <= 12; next++ {
-						if nextSlot, exist := indexMap[day][next]; exist && nextSlot.EventID == slot.EventID {
-							end = next
-						} else {
-							break
-						}
+
+	// 3. 线性扫描 1-7 天
+	for day := 1; day <= 7; day++ {
+		order := 1 // 每一天开始时，内部显示顺序重置
+
+		// 4. 线性扫描 1-12 节
+		for curr := 1; curr <= 12; {
+			// 场景 A：当前槽位有课/有任务
+			if slot, hasClass := indexMap[day][curr]; hasClass {
+				end := curr
+				// 探测逻辑：合并相同 EventID 的连续节次 (Span 计算)
+				for next := curr + 1; next <= 12; next++ {
+					if nextSlot, exist := indexMap[day][next]; exist && nextSlot.EventID == slot.EventID {
+						end = next
+					} else {
+						break
 					}
-					span := end - curr + 1
-					brief := model.WeeklyEventBrief{
-						ID:        slot.EventID,
-						Order:     order,
-						DayOfWeek: day,
-						Name:      slot.Event.Name,
-						Location:  *slot.Event.Location,
-						Type:      slot.Event.Type,
-						StartTime: sectionTimeMap[curr][0],
-						EndTime:   sectionTimeMap[end][1],
-						Span:      span,
-					}
-					// 提取嵌入任务信息 (如果有)
-					for i := curr; i <= end; i++ {
-						if s, exist := indexMap[day][i]; exist && s.EmbeddedTask != nil {
-							brief.EmbeddedTaskInfo = model.TaskBrief{
-								ID:   s.EmbeddedTask.ID,
-								Name: *s.EmbeddedTask.Content,
-								Type: "task",
-							}
-							break
-						}
-					}
-					weekDTO.Events = append(weekDTO.Events, brief)
-					curr = end + 1 // 指针跳跃
-					order++
-				} else {
-					// === B 场景：无课 (Type="empty") ===
-					// 逻辑：默认按“大节”合并空位（1-2, 3-4...）
-					emptyEnd := curr
-					// 如果是奇数节且下一节也没课，则合并为一个 2 节的大空块
-					if curr%2 != 0 && curr < 12 {
-						if _, nextHasClass := indexMap[day][curr+1]; !nextHasClass {
-							emptyEnd = curr + 1
-						}
-					}
-					weekDTO.Events = append(weekDTO.Events, model.WeeklyEventBrief{
-						ID:        0,
-						Order:     order,
-						DayOfWeek: day,
-						Name:      "无课",
-						Type:      "empty",
-						StartTime: sectionTimeMap[curr][0],
-						EndTime:   sectionTimeMap[emptyEnd][1],
-						Span:      emptyEnd - curr + 1,
-						Location:  "",
-					})
-					curr = emptyEnd + 1
-					order++
 				}
+
+				span := end - curr + 1
+				brief := model.WeeklyEventBrief{
+					ID:        slot.EventID,
+					Order:     order,
+					DayOfWeek: day,
+					Name:      slot.Event.Name,
+					Location:  *slot.Event.Location,
+					Type:      slot.Event.Type,
+					StartTime: sectionTimeMap[curr][0], // 使用你定义的映射表
+					EndTime:   sectionTimeMap[end][1],
+					Span:      span,
+				}
+
+				// 提取嵌入任务信息 (逻辑同前，探测整个 Span)
+				for i := curr; i <= end; i++ {
+					if s, exist := indexMap[day][i]; exist && s.EmbeddedTask != nil {
+						brief.EmbeddedTaskInfo = model.TaskBrief{
+							ID:   s.EmbeddedTask.ID,
+							Name: *s.EmbeddedTask.Content,
+							Type: "task",
+						}
+						break
+					}
+				}
+
+				weekDTO.Events = append(weekDTO.Events, brief)
+				curr = end + 1 // 指针跳跃到下一块
+				order++
+			} else {
+				// 场景 B：无课 (Type="empty")，进行逻辑合并
+				emptyEnd := curr
+				// 奇数节起步且下一节也空，则合并为大节 (1-2, 3-4...)
+				if curr%2 != 0 && curr < 12 {
+					if _, nextHasClass := indexMap[day][curr+1]; !nextHasClass {
+						emptyEnd = curr + 1
+					}
+				}
+
+				weekDTO.Events = append(weekDTO.Events, model.WeeklyEventBrief{
+					ID:        0,
+					Order:     order,
+					DayOfWeek: day,
+					Name:      "无课",
+					Type:      "empty",
+					StartTime: sectionTimeMap[curr][0],
+					EndTime:   sectionTimeMap[emptyEnd][1],
+					Span:      emptyEnd - curr + 1,
+					Location:  "",
+				})
+				curr = emptyEnd + 1
+				order++
 			}
 		}
-		result = append(result, weekDTO)
 	}
-	return result
+
+	return weekDTO
 }
 
 func SchedulesToRecentCompletedSchedules(schedules []model.Schedule) model.UserRecentCompletedScheduleResponse {
-	var result model.UserRecentCompletedScheduleResponse
+	// 1. 初始化结果集
+	result := model.UserRecentCompletedScheduleResponse{
+		Events: make([]model.RecentCompletedEventBrief, 0),
+	}
+
+	if len(schedules) == 0 {
+		return result
+	}
+
+	// 💡 核心：去重地图，key 是 EventID
+	seen := make(map[int]bool)
+
 	for _, s := range schedules {
+		// 2. 检查这个逻辑事件是否已经添加过
+		if seen[s.EventID] {
+			continue
+		}
+
+		// 3. 格式化结束时间
 		strTime := s.Event.EndTime.Format("2006-01-02 15:04:05")
+
+		// 4. 构造 Brief
 		temp := model.RecentCompletedEventBrief{
-			ID:   s.ID,
-			Name: s.Event.Name,
-			Type: s.Event.Type,
-			// CompletedTime 需要从 ScheduleEvent 的 CompletedTime 字段获取
+			// 注意：这里 ID 必须改用 s.EventID (逻辑事件ID)
+			// 否则如果你传 s.ID，前端拿到的是原子槽位的ID，依然不唯一
+			ID:            s.EventID,
+			Name:          s.Event.Name,
+			Type:          s.Event.Type,
 			CompletedTime: strTime,
 		}
-		result.Events = append(result.Events, temp)
-	}
-	return result
 
+		result.Events = append(result.Events, temp)
+
+		// 5. 标记该事件已处理
+		seen[s.EventID] = true
+	}
+
+	return result
 }

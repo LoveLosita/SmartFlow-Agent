@@ -7,6 +7,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/api"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/inits"
+	"github.com/LoveLosita/smartflow/backend/middleware"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/LoveLosita/smartflow/backend/routers"
 	"github.com/LoveLosita/smartflow/backend/service"
@@ -39,12 +40,17 @@ func Start() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
+
 	rdb := inits.InitRedis()
 	//工具包
 	limiter := pkg.NewRateLimiter(rdb)
+	//中间件
+
 	//dao 层
-	userRepo := dao.NewUserDAO(db)
+
 	cacheRepo := dao.NewCacheDAO(rdb)
+	_ = db.Use(middleware.NewGormCachePlugin(cacheRepo)) // 注册 GORM 插件
+	userRepo := dao.NewUserDAO(db)
 	taskRepo := dao.NewTaskDAO(db)
 	courseRepo := dao.NewCourseDAO(db)
 	taskClassRepo := dao.NewTaskClassDAO(db)

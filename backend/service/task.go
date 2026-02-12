@@ -40,12 +40,6 @@ func (ts *TaskService) AddTask(ctx context.Context, req *model.UserAddTaskReques
 	}
 	//4. 调用 conv 层进行响应转换
 	response := conv.ModelToUserAddTaskResponse(createdTask)
-	//5. 添加成功后，清除相关缓存（如果有的话），以保证数据一致性
-	err = ts.cache.DeleteUserTasksFromCache(ctx, userID)
-	if err != nil {
-		// 缓存删除失败，记录日志但不影响正常返回数据
-		log.Printf("Failed to delete user tasks cache for userID %d: %v", userID, err)
-	}
 	return response, nil
 }
 

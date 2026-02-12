@@ -47,18 +47,18 @@ func (d *CacheDAO) AddTaskClassList(ctx context.Context, userID int, list *model
 	return d.client.Set(ctx, key, data, 30*time.Minute).Err()
 }
 
-func (d *CacheDAO) GetTaskClassList(ctx context.Context, userID int) (model.UserGetTaskClassesResponse, error) {
+func (d *CacheDAO) GetTaskClassList(ctx context.Context, userID int) (*model.UserGetTaskClassesResponse, error) {
 	key := fmt.Sprintf("smartflow:task_classes:%d", userID)
 	var resp model.UserGetTaskClassesResponse
 	// 1. 从 Redis 获取字符串
 	val, err := d.client.Get(ctx, key).Result()
 	if err != nil {
 		// 注意：如果是 redis.Nil，交给 Service 层处理查库逻辑
-		return resp, err
+		return &resp, err
 	}
 	// 2. 反序列化：将 JSON 还原回结构体
 	err = json.Unmarshal([]byte(val), &resp)
-	return resp, err
+	return &resp, err
 }
 
 func (d *CacheDAO) DeleteTaskClassList(ctx context.Context, userID int) error {
@@ -135,4 +135,74 @@ func (d *CacheDAO) SetUserTodayScheduleToCache(ctx context.Context, userID int, 
 func (d *CacheDAO) DeleteUserTodayScheduleFromCache(ctx context.Context, userID int) error {
 	key := fmt.Sprintf("smartflow:today_schedule:%d", userID)
 	return d.client.Del(ctx, key).Err()
+}
+
+func (d *CacheDAO) GetUserWeeklyScheduleFromCache(ctx context.Context, userID int, week int) (*model.UserWeekSchedule, error) {
+	key := fmt.Sprintf("smartflow:weekly_schedule:%d:%d", userID, week)
+	var schedules model.UserWeekSchedule
+	val, err := d.client.Get(ctx, key).Result()
+	if err != nil {
+		return nil, err // 注意：如果是 redis.Nil，交给 Service 层处理查库逻辑
+	}
+	err = json.Unmarshal([]byte(val), &schedules)
+	return &schedules, err
+}
+
+func (d *CacheDAO) SetUserWeeklyScheduleToCache(ctx context.Context, userID int, schedules *model.UserWeekSchedule) error {
+	key := fmt.Sprintf("smartflow:weekly_schedule:%d:%d", userID, schedules.Week)
+	data, err := json.Marshal(schedules)
+	if err != nil {
+		return err
+	}
+	// 设置过期时间为一天
+	return d.client.Set(ctx, key, data, 24*time.Hour).Err()
+}
+
+func (d *CacheDAO) DeleteUserWeeklyScheduleFromCache(ctx context.Context, userID int, week int) error {
+	key := fmt.Sprintf("smartflow:weekly_schedule:%d:%d", userID, week)
+	return d.client.Del(ctx, key).Err()
+}
+
+func (d *CacheDAO) GetUserRecentCompletedSchedulesFromCache(ctx context.Context, userID, index, limit int) (model.UserRecentCompletedScheduleResponse, error) {
+	key := fmt.Sprintf("smartflow:recent_completed_schedules:%d:%d:%d", userID, index, limit)
+	var resp model.UserRecentCompletedScheduleResponse
+	val, err := d.client.Get(ctx, key).Result()
+	if err != nil {
+		return resp, err // 注意：如果是 redis.Nil，交给 Service 层处理查库逻辑
+	}
+	err = json.Unmarshal([]byte(val), &resp)
+	return resp, err
+}
+
+func (d *CacheDAO) SetUserRecentCompletedSchedulesToCache(ctx context.Context, userID, index, limit int, resp model.UserRecentCompletedScheduleResponse) error {
+	key := fmt.Sprintf("smartflow:recent_completed_schedules:%d:%d:%d", userID, index, limit)
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return err
+	}
+	// 设置过期时间为30分钟
+	return d.client.Set(ctx, key, data, 30*time.Minute).Err()
+}
+
+func (d *CacheDAO) DeleteUserRecentCompletedSchedulesFromCache(ctx context.Context, userID int) error {
+	pattern := fmt.Sprintf("smartflow:recent_completed_schedules:%d:*", userID)
+
+	var cursor uint64
+	for {
+		keys, next, err := d.client.Scan(ctx, cursor, pattern, 500).Result()
+		if err != nil {
+			return err
+		}
+		if len(keys) > 0 {
+			// 用 UNLINK\(\) 异步删除，降低阻塞风险；如需强一致删除可改用 Del\(\)
+			if err := d.client.Unlink(ctx, keys...).Err(); err != nil {
+				return err
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return nil
 }

@@ -260,4 +260,19 @@ var ( //请求相关的响应
 		Status: "40040",
 		Info:   "wrong task class id",
 	}
+
+	InvalidSectionNumber = Response{ //无效的节次
+		Status: "40041",
+		Info:   "invalid section number",
+	}
+
+	InvalidWeekOrDayOfWeek = Response{ //无效的周数或星期
+		Status: "40042",
+		Info:   "invalid week or day_of_week",
+	}
+
+	InvalidSectionRange = Response{ //无效的节次范围
+		Status: "40043",
+		Info:   "invalid section range, start_section should be less than or equal to end_section",
+	}
 )

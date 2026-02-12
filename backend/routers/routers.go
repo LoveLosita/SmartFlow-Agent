@@ -78,7 +78,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, limiter *pk
 			scheduleGroup.GET("/today", handlers.ScheduleHandler.GetUserTodaySchedule)
 			scheduleGroup.GET("/week", handlers.ScheduleHandler.GetUserWeeklySchedule)
 			scheduleGroup.DELETE("/delete", middleware.IdempotencyMiddleware(cache), handlers.ScheduleHandler.DeleteScheduleEvent)
-			scheduleGroup.GET("/recent-completed", middleware.IdempotencyMiddleware(cache), handlers.ScheduleHandler.GetUserRecentCompletedSchedules)
+			scheduleGroup.GET("/recent-completed", handlers.ScheduleHandler.GetUserRecentCompletedSchedules)
 		}
 	}
 	// 初始化Gin引擎
