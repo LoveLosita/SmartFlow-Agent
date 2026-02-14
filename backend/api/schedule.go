@@ -106,3 +106,40 @@ func (s *ScheduleAPI) GetUserRecentCompletedSchedules(c *gin.Context) {
 	//3.返回数据给前端
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, completedSchedules))
 }
+
+func (s *ScheduleAPI) GetUserOngoingSchedule(c *gin.Context) {
+	// 1. 从请求上下文中获取用户ID
+	userID := c.GetInt("user_id")
+	//2.调用服务层方法获取用户正在进行的日程事件
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源
+	ongoingSchedule, err := s.scheduleService.GetUserOngoingSchedule(ctx, userID)
+	if err != nil {
+		respond.DealWithError(c, err)
+		return
+	}
+	//3.返回数据给前端
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, ongoingSchedule))
+}
+
+func (s *ScheduleAPI) UserRevocateTaskItemFromSchedule(c *gin.Context) {
+	// 1. 从请求上下文中获取用户ID
+	userID := c.GetInt("user_id")
+	// 2. 获取要撤销的任务块ID
+	eventID := c.Query("event_id")
+	intEventID, err := strconv.Atoi(eventID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		return
+	}
+	//3.调用服务层方法撤销任务块的安排
+	/*ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源*/
+	err = s.scheduleService.RevocateUserTaskClassItem(context.Background(), userID, intEventID)
+	if err != nil {
+		respond.DealWithError(c, err)
+		return
+	}
+	//4.返回撤销成功的响应给前端
+	c.JSON(http.StatusOK, respond.Ok)
+}

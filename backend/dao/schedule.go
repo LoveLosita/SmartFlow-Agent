@@ -304,15 +304,33 @@ func (d *ScheduleDAO) GetUserWeeklySchedule(ctx context.Context, userID, week in
 }
 
 func (d *ScheduleDAO) DeleteScheduleEventAndSchedule(ctx context.Context, eventID int, userID int) error {
-	//级联删除：先删 schedules，自动删 schedule_events
-	res := d.db.WithContext(ctx).Where("id=? AND user_id=?", eventID, userID).Delete(&model.ScheduleEvent{})
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
-		return respond.WrongScheduleEventID // 事件不存在或不属于该用户，统一返回错误
-	}
-	return nil
+	return d.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 先查出要删除的 schedules，让 GORM 在 Delete 时能带上模型字段（供钩子读取 UserID/Week）
+		var schedules []model.Schedule
+		if err := tx.
+			Where("event_id = ? AND user_id = ?", eventID, userID).
+			Find(&schedules).Error; err != nil {
+			return err
+		}
+
+		// 显式删子表 schedules（触发 schedules 的 GORM Delete 回调/插件）
+		if len(schedules) > 0 {
+			if err := tx.Delete(&schedules).Error; err != nil {
+				return err
+			}
+		}
+
+		// 再删父表 schedule_events（同样触发回调/插件）
+		res := tx.Where("id = ? AND user_id = ?", eventID, userID).
+			Delete(&model.ScheduleEvent{})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return respond.WrongScheduleEventID
+		}
+		return nil
+	})
 }
 
 func (d *ScheduleDAO) GetScheduleTypeByEventID(ctx context.Context, eventID, userID int) (string, error) {
@@ -452,8 +470,11 @@ func (d *ScheduleDAO) GetUserRecentCompletedSchedules(ctx context.Context, nowTi
 		Preload("Event").
 		Preload("EmbeddedTask").
 		Joins("JOIN schedule_events ON schedule_events.id = schedules.event_id").
-		Where("schedules.user_id = ? AND schedule_events.type = ? AND schedule_events.end_time < ?",
-							userID, "task", nowTime).
+		// 修改后的核心逻辑：
+		// 1. 用户匹配 & 已结束
+		// 2. 满足 (事件本身是任务) OR (虽然是课程但嵌入了任务)
+		Where("schedules.user_id = ? AND schedule_events.end_time < ? AND (schedule_events.type = ? OR schedules.embedded_task_id IS NOT NULL)",
+							userID, nowTime, "task").
 		Order("schedule_events.end_time DESC"). // 命中索引
 		Offset(index).
 		Limit(limit).
@@ -483,4 +504,56 @@ func (d *ScheduleDAO) GetScheduleEventWeekByID(ctx context.Context, eventID int)
 		return 0, respond.WrongScheduleEventID
 	}
 	return *r.Week, nil
+}
+
+func (d *ScheduleDAO) GetUserOngoingSchedule(ctx context.Context, userID int, nowTime time.Time) ([]model.Schedule, error) {
+	var schedules []model.Schedule
+	err := d.db.WithContext(ctx).
+		Preload("Event").
+		Preload("EmbeddedTask").
+		Joins("JOIN schedule_events ON schedule_events.id = schedules.event_id").
+		Where("schedules.user_id = ?  AND schedule_events.start_time <= ? AND schedule_events.end_time >= ?",
+			userID, nowTime, nowTime).
+		Or("schedules.user_id = ?  AND schedule_events.start_time > ?",
+								userID, nowTime).
+		Order("schedule_events.start_time ASC"). // 命中索引
+		Find(&schedules).Error
+	if err != nil {
+		return nil, err
+	}
+	return schedules, nil
+}
+
+func (d *ScheduleDAO) RevocateSchedulesByEventID(ctx context.Context, eventID int) error {
+	// 将 schedules 表中指定 event_id 的 embedded_task_id 字段置空（用于撤销嵌入关系）
+	res := d.db.WithContext(ctx).
+		Table("schedules").
+		Where("event_id = ?", eventID).
+		Update("status", "interrupted")
+	if res.RowsAffected == 0 {
+		return respond.WrongScheduleEventID
+	}
+	return res.Error
+}
+
+func (d *ScheduleDAO) GetRelIDByScheduleEventID(ctx context.Context, eventID int) (int, error) {
+	type row struct {
+		RelID *int `gorm:"column:rel_id"`
+	}
+	var r row
+	err := d.db.WithContext(ctx).
+		Table("schedule_events").
+		Select("rel_id").
+		Where("id = ?", eventID).
+		First(&r).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, respond.WrongScheduleEventID
+		}
+		return 0, err
+	}
+	if r.RelID == nil {
+		return 0, nil
+	}
+	return *r.RelID, nil
 }

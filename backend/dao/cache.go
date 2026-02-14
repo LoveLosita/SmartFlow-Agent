@@ -163,18 +163,18 @@ func (d *CacheDAO) DeleteUserWeeklyScheduleFromCache(ctx context.Context, userID
 	return d.client.Del(ctx, key).Err()
 }
 
-func (d *CacheDAO) GetUserRecentCompletedSchedulesFromCache(ctx context.Context, userID, index, limit int) (model.UserRecentCompletedScheduleResponse, error) {
+func (d *CacheDAO) GetUserRecentCompletedSchedulesFromCache(ctx context.Context, userID, index, limit int) (*model.UserRecentCompletedScheduleResponse, error) {
 	key := fmt.Sprintf("smartflow:recent_completed_schedules:%d:%d:%d", userID, index, limit)
 	var resp model.UserRecentCompletedScheduleResponse
 	val, err := d.client.Get(ctx, key).Result()
 	if err != nil {
-		return resp, err // 注意：如果是 redis.Nil，交给 Service 层处理查库逻辑
+		return &resp, err // 注意：如果是 redis.Nil，交给 Service 层处理查库逻辑
 	}
 	err = json.Unmarshal([]byte(val), &resp)
-	return resp, err
+	return &resp, err
 }
 
-func (d *CacheDAO) SetUserRecentCompletedSchedulesToCache(ctx context.Context, userID, index, limit int, resp model.UserRecentCompletedScheduleResponse) error {
+func (d *CacheDAO) SetUserRecentCompletedSchedulesToCache(ctx context.Context, userID, index, limit int, resp *model.UserRecentCompletedScheduleResponse) error {
 	key := fmt.Sprintf("smartflow:recent_completed_schedules:%d:%d:%d", userID, index, limit)
 	data, err := json.Marshal(resp)
 	if err != nil {
@@ -205,4 +205,42 @@ func (d *CacheDAO) DeleteUserRecentCompletedSchedulesFromCache(ctx context.Conte
 		}
 	}
 	return nil
+}
+
+func (d *CacheDAO) GetUserOngoingScheduleFromCache(ctx context.Context, userID int) (*model.OngoingSchedule, error) {
+	key := fmt.Sprintf("smartflow:ongoing_schedule:%d", userID)
+	var schedule model.OngoingSchedule
+	val, err := d.client.Get(ctx, key).Result()
+	if err != nil {
+		return &schedule, err // 注意：如果是 redis.Nil，交给 Service 层处理查库逻辑
+	}
+	if val == "null" {
+		return nil, nil // 之前缓存过没有正在进行的日程，直接返回 nil
+	}
+	err = json.Unmarshal([]byte(val), &schedule)
+	return &schedule, err
+}
+
+func (d *CacheDAO) SetUserOngoingScheduleToCache(ctx context.Context, userID int, schedule *model.OngoingSchedule) error {
+	if schedule == nil {
+		// 如果没有正在进行的日程，设置空值并短暂过期，避免频繁查库
+		key := fmt.Sprintf("smartflow:ongoing_schedule:%d", userID)
+		return d.client.Set(ctx, key, "null", 5*time.Minute).Err()
+	}
+	key := fmt.Sprintf("smartflow:ongoing_schedule:%d", userID)
+	data, err := json.Marshal(schedule)
+	if err != nil {
+		return err
+	}
+	// 设置过期时间为到 endTime 的剩余时间（若已过期则不写入缓存）
+	ttl := time.Until(schedule.EndTime)
+	if ttl <= 0 {
+		return nil
+	}
+	return d.client.Set(ctx, key, data, ttl).Err()
+}
+
+func (d *CacheDAO) DeleteUserOngoingScheduleFromCache(ctx context.Context, userID int) error {
+	key := fmt.Sprintf("smartflow:ongoing_schedule:%d", userID)
+	return d.client.Del(ctx, key).Err()
 }

@@ -256,9 +256,9 @@ func SchedulesToUserWeeklySchedule(schedules []model.Schedule) *model.UserWeekSc
 	return weekDTO
 }
 
-func SchedulesToRecentCompletedSchedules(schedules []model.Schedule) model.UserRecentCompletedScheduleResponse {
-	// 1. 初始化结果集
-	result := model.UserRecentCompletedScheduleResponse{
+func SchedulesToRecentCompletedSchedules(schedules []model.Schedule) *model.UserRecentCompletedScheduleResponse {
+	// 1. 初始化结果集，确保即使为空也返回空数组而非 nil
+	result := &model.UserRecentCompletedScheduleResponse{
 		Events: make([]model.RecentCompletedEventBrief, 0),
 	}
 
@@ -270,29 +270,55 @@ func SchedulesToRecentCompletedSchedules(schedules []model.Schedule) model.UserR
 	seen := make(map[int]bool)
 
 	for _, s := range schedules {
-		// 2. 检查这个逻辑事件是否已经添加过
+		// 2. 检查这个逻辑事件（课程或任务块）是否已经处理过
 		if seen[s.EventID] {
 			continue
 		}
 
-		// 3. 格式化结束时间
+		// 3. 确定显示的“名分”和“类型”
+		displayName := s.Event.Name
+		displayType := s.Event.Type
+
+		// 🚀 关键逻辑：如果存在嵌入任务，则“鸠占鹊巢”
+		// 即使载体是 course，只要里面塞了任务，我们就对外宣称这是一个 task
+		if s.EmbeddedTask != nil && s.EmbeddedTask.Content != nil {
+			displayName = *s.EmbeddedTask.Content
+			displayType = "embedded_task"
+		}
+
+		// 4. 格式化结束时间 (即完成时间)
 		strTime := s.Event.EndTime.Format("2006-01-02 15:04:05")
 
-		// 4. 构造 Brief
+		// 5. 构造 Brief
 		temp := model.RecentCompletedEventBrief{
-			// 注意：这里 ID 必须改用 s.EventID (逻辑事件ID)
-			// 否则如果你传 s.ID，前端拿到的是原子槽位的ID，依然不唯一
+			// ID 统一使用 EventID，确保唯一性且方便前端追踪逻辑块
 			ID:            s.EventID,
-			Name:          s.Event.Name,
-			Type:          s.Event.Type,
+			Name:          displayName,
+			Type:          displayType,
 			CompletedTime: strTime,
 		}
 
 		result.Events = append(result.Events, temp)
 
-		// 5. 标记该事件已处理
+		// 6. 标记该事件已处理
 		seen[s.EventID] = true
 	}
 
 	return result
+}
+
+func SchedulesToUserOngoingSchedule(schedules []model.Schedule) *model.OngoingSchedule {
+	if len(schedules) == 0 {
+		return nil
+	}
+	//取第一个 Schedule 的 Event 作为正在进行的事件
+	ongoing := schedules[0]
+	return &model.OngoingSchedule{
+		ID:        ongoing.EventID,
+		Name:      ongoing.Event.Name,
+		Type:      ongoing.Event.Type,
+		Location:  *ongoing.Event.Location,
+		StartTime: ongoing.Event.StartTime,
+		EndTime:   ongoing.Event.EndTime,
+	}
 }

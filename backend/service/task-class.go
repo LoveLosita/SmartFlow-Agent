@@ -219,20 +219,6 @@ func (sv *TaskClassService) AddTaskClassItemIntoSchedule(ctx context.Context, re
 		// 这里处理最终的错误返回，比如 respond.Error
 		return err
 	}
-	//6.事务提交成功后，清除相关缓存（如果有的话），以保证数据一致性
-	/*err = sv.cacheRepo.DeleteTaskClassList(ctx, userID)
-	if err != nil {
-		// 缓存删除失败，记录日志但不影响正常返回数据
-		log.Printf("Failed to delete task class list cache for userID %d: %v", userID, err)
-	}
-	err = sv.cacheRepo.DeleteUserTodayScheduleFromCache(ctx, userID)
-	if err != nil {
-		log.Printf("Failed to delete user today schedule cache for userID %d: %v", userID, err)
-	}
-	err = sv.cacheRepo.DeleteUserWeeklyScheduleFromCache(ctx, userID, req.Week)
-	if err != nil {
-		log.Printf("Failed to delete user weekly schedule cache for userID %d week %d: %v", userID, req.Week, err)
-	}*/
 	return nil
 }
 

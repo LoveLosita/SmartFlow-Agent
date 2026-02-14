@@ -76,8 +76,9 @@ func (p *GormCachePlugin) invalidScheduleCache(userID int, week int) {
 	go func() {
 		// 这里调用你的 CacheDAO 删缓存
 		_ = p.cacheDAO.DeleteUserWeeklyScheduleFromCache(context.Background(), userID, week)
-		_ = p.cacheDAO.DeleteUserTodayScheduleFromCache(context.Background(), userID)            // 同时删当天的缓存，确保数据一致
-		_ = p.cacheDAO.DeleteUserRecentCompletedSchedulesFromCache(context.Background(), userID) // 同时删最近完成的缓存，确保数据一致
+		_ = p.cacheDAO.DeleteUserTodayScheduleFromCache(context.Background(), userID)            // 同时删当天日程的缓存，确保数据一致
+		_ = p.cacheDAO.DeleteUserRecentCompletedSchedulesFromCache(context.Background(), userID) // 同时删最近完成日程的缓存，确保数据一致
+		_ = p.cacheDAO.DeleteUserOngoingScheduleFromCache(context.Background(), userID)          // 同时删正在进行日程的缓存，确保数据一致
 		log.Printf("[GORM-Cache] Invalidated cache for user %d, week %d", userID, week)
 	}()
 }

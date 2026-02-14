@@ -107,6 +107,16 @@ type RecentCompletedEventBrief struct {
 	CompletedTime string `json:"completed_time"`
 }
 
+type OngoingSchedule struct {
+	ID         int       `json:"id"` // 这个 ID 是 ScheduleEvent 的 ID，不是 Schedule 的 ID
+	Name       string    `json:"name"`
+	Location   string    `json:"location"`
+	Type       string    `json:"type"`
+	TimeStatus string    `json:"time_status"` // "upcoming", "ongoing"
+	StartTime  time.Time `json:"start_time"`
+	EndTime    time.Time `json:"end_time"`
+}
+
 func (ScheduleEvent) TableName() string { return "schedule_events" }
 
 func (Schedule) TableName() string { return "schedules" }

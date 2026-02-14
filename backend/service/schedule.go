@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/conv"
@@ -128,7 +129,7 @@ func (ss *ScheduleService) DeleteScheduleEvent(ctx context.Context, requests []m
 				}
 				continue
 			}
-			//2.只删课程事件
+			//2.只删课程/事件
 			if req.DeleteCourse {
 				//2.1.检查课程是否有嵌入的任务事件
 				exists, err := txM.Schedule.IfScheduleEventIDExists(ctx, req.ID)
@@ -204,6 +205,19 @@ func (ss *ScheduleService) DeleteScheduleEvent(ctx context.Context, requests []m
 				if err != nil {
 					return err
 				}
+				//先通过rel_id找到对应的task_id
+				taskID, txErr := txM.Schedule.GetRelIDByScheduleEventID(ctx, req.ID)
+				if txErr != nil {
+					return err
+				}
+				//2.4.如果是任务块，转而去清除task_items表中的嵌入时间
+				if taskID != 0 {
+					//再将task_items表中对应的embedded_time字段设置为null
+					txErr = txM.TaskClass.DeleteTaskClassItemEmbeddedTime(ctx, taskID)
+					if txErr != nil {
+						return txErr
+					}
+				}
 				continue
 			}
 			//3.只删嵌入的事件
@@ -230,7 +244,7 @@ func (ss *ScheduleService) DeleteScheduleEvent(ctx context.Context, requests []m
 	return nil
 }
 
-func (ss *ScheduleService) GetUserRecentCompletedSchedules(ctx context.Context, userID, index, limit int) (model.UserRecentCompletedScheduleResponse, error) {
+func (ss *ScheduleService) GetUserRecentCompletedSchedules(ctx context.Context, userID, index, limit int) (*model.UserRecentCompletedScheduleResponse, error) {
 	//1.先查缓存
 	cachedResp, err := ss.cacheDAO.GetUserRecentCompletedSchedulesFromCache(ctx, userID, index, limit)
 	if err == nil {
@@ -239,7 +253,7 @@ func (ss *ScheduleService) GetUserRecentCompletedSchedules(ctx context.Context, 
 	}
 	// 如果是 redis.Nil 错误，说明缓存未命中，我们继续查库
 	if !errors.Is(err, redis.Nil) {
-		return model.UserRecentCompletedScheduleResponse{}, err
+		return nil, err
 	}
 	//2.查询用户最近完成的日程安排
 	//获取现在的时间
@@ -247,14 +261,117 @@ func (ss *ScheduleService) GetUserRecentCompletedSchedules(ctx context.Context, 
 	nowTime := time.Date(2026, 6, 30, 12, 0, 0, 0, time.Local) //测试数据
 	schedules, err := ss.scheduleDAO.GetUserRecentCompletedSchedules(ctx, nowTime, userID, index, limit)
 	if err != nil {
-		return model.UserRecentCompletedScheduleResponse{}, err
+		return nil, err
 	}
 	//3.转换为前端需要的格式
 	result := conv.SchedulesToRecentCompletedSchedules(schedules)
 	//4.将查询结果存入缓存，设置过期时间为30分钟（根据实际情况调整）
 	err = ss.cacheDAO.SetUserRecentCompletedSchedulesToCache(ctx, userID, index, limit, result)
 	if err != nil {
-		return model.UserRecentCompletedScheduleResponse{}, err
+		return nil, err
 	}
 	return result, nil
+}
+
+func (ss *ScheduleService) GetUserOngoingSchedule(ctx context.Context, userID int) (*model.OngoingSchedule, error) {
+	//1.先查缓存
+	cachedResp, err := ss.cacheDAO.GetUserOngoingScheduleFromCache(ctx, userID)
+	if err == nil && cachedResp == nil {
+		// 之前缓存过没有正在进行的日程，直接返回 nil
+		return nil, respond.NoOngoingOrUpcomingSchedule
+	}
+	if err == nil {
+		// 缓存命中，直接返回
+		return cachedResp, nil
+	}
+	// 如果是 redis.Nil 错误，说明缓存未命中，我们继续查库
+	if !errors.Is(err, redis.Nil) {
+		return nil, err
+	}
+	//2.查询用户正在进行的日程安排
+	/*nowTime := time.Now()*/
+	nowTime := time.Date(2026, 6, 30, 18, 50, 0, 0, time.Local) //测试数据
+	schedules, err := ss.scheduleDAO.GetUserOngoingSchedule(ctx, userID, nowTime)
+	if err != nil {
+		return nil, err
+	}
+	//3.转换为前端需要的格式
+	result := conv.SchedulesToUserOngoingSchedule(schedules)
+	if result != nil {
+		if result.StartTime.After(nowTime) {
+			result.TimeStatus = "upcoming"
+		} else {
+			result.TimeStatus = "ongoing"
+		}
+	}
+	//4.将查询结果存入缓存，设置过期时间直到此任务结束（根据实际情况调整）
+	err = ss.cacheDAO.SetUserOngoingScheduleToCache(ctx, userID, result)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		// 没有正在进行或即将开始的日程，返回特定错误
+		return nil, respond.NoOngoingOrUpcomingSchedule
+	}
+	return result, nil
+}
+
+func (ss *ScheduleService) RevocateUserTaskClassItem(ctx context.Context, userID, eventID int) error {
+	//1.先查库，看看这个event是任务事件还是课程事件，以及判断它是否属于用户
+	eventType, err := ss.scheduleDAO.GetScheduleTypeByEventID(ctx, eventID, userID)
+	if err != nil {
+		return err
+	}
+	//2.根据查询结果进行不同的撤销操作
+	if eventType == "course" {
+		//下面开启事务，撤销嵌入事件
+		err := ss.repoManager.Transaction(ctx, func(txM *dao.RepoManager) error {
+			//下面先设置schedule表的embedded_task_id字段为null，再设置task_items表的embedded_time字段为null，实现删除嵌入事件的效果
+			//3.1.先将schedule表的embedded_task_id字段设置为null
+			taskID, txErr := txM.Schedule.SetScheduleEmbeddedTaskIDToNull(ctx, eventID)
+			if txErr != nil {
+				return txErr
+			}
+			//3.2.再将task_items表的embedded_time字段设置为null
+			txErr = txM.TaskClass.DeleteTaskClassItemEmbeddedTime(ctx, taskID)
+			if txErr != nil {
+				return txErr
+			}
+			//3.3.最后设置task_items表的status字段为已撤销
+			txErr = txM.Schedule.RevocateSchedulesByEventID(ctx, eventID)
+			if txErr != nil {
+				return txErr
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	} else if eventType == "task" {
+		//下面开启事务，撤销任务事件
+		err := ss.repoManager.Transaction(ctx, func(txM *dao.RepoManager) error {
+			//先通过rel_id找到对应的task_id
+			taskID, txErr := txM.Schedule.GetRelIDByScheduleEventID(ctx, eventID)
+			if txErr != nil {
+				return err
+			}
+			//再将task_items表中对应的embedded_time字段设置为null
+			txErr = txM.TaskClass.DeleteTaskClassItemEmbeddedTime(ctx, taskID)
+			if txErr != nil {
+				return txErr
+			}
+			//最后将其从日程表中删除（通过级联删除实现）
+			err = txM.Schedule.DeleteScheduleEventAndSchedule(ctx, eventID, userID)
+			if err != nil {
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	} else {
+		log.Println("ScheduleService.RevocateUserTaskClassItem: eventType is neither embedded_task nor task, something must be wrong")
+	}
+	return nil
 }

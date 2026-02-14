@@ -37,6 +37,10 @@ func DealWithError(c *gin.Context, err error) { //处理错误，返回对应的
 		return
 	}
 	var resp Response
+	if errors.Is(err, UserTasksEmpty) || errors.Is(err, NoOngoingOrUpcomingSchedule) {
+		c.JSON(http.StatusOK, err)
+		return
+	}
 	if errors.As(err, &resp) {
 		c.JSON(http.StatusBadRequest, resp)
 		return
@@ -60,6 +64,11 @@ var ( //请求相关的响应
 	UserTasksEmpty = Response{ //用户任务为空
 		Status: "10001",
 		Info:   "user tasks empty",
+	}
+
+	NoOngoingOrUpcomingSchedule = Response{ //没有正在进行或即将开始的日程
+		Status: "10002",
+		Info:   "no ongoing or upcoming schedule",
 	}
 
 	WrongName = Response{ //用户名错误
