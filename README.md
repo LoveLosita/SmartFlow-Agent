@@ -96,11 +96,163 @@
 
 ## 3.1 ER图
 
+PS：此图截至版本v0.3.3
+
 ![DB_ER_Design](./docs/pics/DB_ER_Design.png)
 
 ## 3.2 核心表结构
 
+其实每个表都很核心。在此展示它们的创建语句：
 
+```sql
+CREATE TABLE `agent_chats`
+(
+    `id`              int       NOT NULL AUTO_INCREMENT,
+    `user_id`         int            DEFAULT NULL,
+    `message_content` text COMMENT '用户或AI的话',
+    `role`            varchar(255)   DEFAULT NULL COMMENT 'user / assistant',
+    `tokens_consumed` int            DEFAULT '0' COMMENT '单次消耗，用于累加到 users 表',
+    `created_at`      timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_agent_chats_id` (`id`),
+    KEY `user_id` (`user_id`),
+    CONSTRAINT `agent_chats_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4
+  COLLATE = utf8mb4_0900_ai_ci
+  
+CREATE TABLE `courses`
+(
+    `id`        int          NOT NULL AUTO_INCREMENT,
+    `user_id`   int          DEFAULT NULL,
+    `name`      varchar(255) NOT NULL,
+    `location`  varchar(255) DEFAULT NULL,
+    `is_filler` tinyint(1)   DEFAULT '0',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_courses_id` (`id`),
+    KEY `user_id` (`user_id`),
+    CONSTRAINT `courses_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4
+  COLLATE = utf8mb4_0900_ai_ci
+  
+CREATE TABLE `schedule_events`
+(
+    `id`              int                    NOT NULL AUTO_INCREMENT,
+    `user_id`         int                    NOT NULL,
+    `name`            varchar(255)           NOT NULL COMMENT '课程或任务名称',
+    `location`        varchar(255)                    DEFAULT '' COMMENT '地点 (教学楼/会议室)',
+    `type`            enum ('course','task') NOT NULL COMMENT '日程类型',
+    `rel_id`          int                             DEFAULT NULL COMMENT '关联原始数据ID (如教务系统的课程ID)',
+    `can_be_embedded` tinyint(1)             NOT NULL DEFAULT '0' COMMENT '是否允许在此时段嵌入其他任务',
+    `created_at`      timestamp              NULL     DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`      timestamp              NULL     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    `start_time`      datetime                        DEFAULT NULL COMMENT '任务开始的绝对时间',
+    `end_time`        datetime                        DEFAULT NULL COMMENT '任务结束的绝对时间',
+    PRIMARY KEY (`id`),
+    KEY `idx_user_events` (`user_id`),
+    KEY `idx_user_endtime` (`user_id`, `end_time` DESC),
+    CONSTRAINT `fk_event_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE = InnoDB
+  AUTO_INCREMENT = 148
+  DEFAULT CHARSET = utf8mb4
+  COLLATE = utf8mb4_0900_ai_ci
+  
+CREATE TABLE `schedules`
+(
+    `id`               int NOT NULL AUTO_INCREMENT,
+    `event_id`         int NOT NULL COMMENT '关联元数据ID',
+    `user_id`          int NOT NULL COMMENT '冗余UID方便直接查询',
+    `week`             int NOT NULL COMMENT '周次 (1-25)',
+    `day_of_week`      int NOT NULL COMMENT '星期 (1-7)',
+    `section`          int NOT NULL COMMENT '原子化节次 (1-12)',
+    `embedded_task_id` int                           DEFAULT NULL COMMENT '若为水课嵌入，记录具体的任务项ID',
+    `status`           enum ('normal','interrupted') DEFAULT 'normal' COMMENT '状态: 正常/因故中断',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `idx_user_slot_atomic` (`user_id`, `week`, `day_of_week`, `section`),
+    KEY `idx_event_id` (`event_id`),
+    KEY `fk_embedded_task` (`embedded_task_id`),
+    CONSTRAINT `fk_embedded_task` FOREIGN KEY (`embedded_task_id`) REFERENCES `task_items` (`id`) ON DELETE SET NULL,
+    CONSTRAINT `fk_schedule_event` FOREIGN KEY (`event_id`) REFERENCES `schedule_events` (`id`) ON DELETE CASCADE,
+    CONSTRAINT `fk_schedule_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE = InnoDB
+  AUTO_INCREMENT = 214
+  DEFAULT CHARSET = utf8mb4
+  COLLATE = utf8mb4_0900_ai_ci
+  
+CREATE TABLE `task_classes`
+(
+    `id`                  int NOT NULL AUTO_INCREMENT,
+    `user_id`             int                     DEFAULT NULL,
+    `name`                varchar(255)            DEFAULT NULL,
+    `mode`                enum ('auto','manual')  DEFAULT NULL,
+    `start_date`          date                    DEFAULT NULL,
+    `end_date`            date                    DEFAULT NULL,
+    `total_slots`         int                     DEFAULT NULL COMMENT '分配的总节数',
+    `allow_filler_course` tinyint(1)              DEFAULT '1',
+    `strategy`            enum ('steady','rapid') DEFAULT NULL,
+    `excluded_slots`      json                    DEFAULT NULL COMMENT '不想要的时段切片',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_task_classes_id` (`id`),
+    KEY `idx_task_classes_user_id` (`user_id`),
+    CONSTRAINT `task_classes_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+) ENGINE = InnoDB
+  AUTO_INCREMENT = 15
+  DEFAULT CHARSET = utf8mb4
+  COLLATE = utf8mb4_0900_ai_ci
+  
+CREATE TABLE `task_items`
+(
+    `id`            int NOT NULL AUTO_INCREMENT,
+    `category_id`   int  DEFAULT NULL,
+    `content`       text,
+    `embedded_time` json DEFAULT NULL COMMENT '目标时间{date,section_from,section_to}',
+    `status`        int  DEFAULT NULL COMMENT '1:未安排, 2:已应用',
+    `order`         int  DEFAULT NULL,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_task_items_id` (`id`),
+    KEY `task_items_ibfk_1` (`category_id`),
+    CONSTRAINT `task_items_ibfk_1` FOREIGN KEY (`category_id`) REFERENCES `task_classes` (`id`) ON DELETE CASCADE
+) ENGINE = InnoDB
+  AUTO_INCREMENT = 43
+  DEFAULT CHARSET = utf8mb4
+  COLLATE = utf8mb4_0900_ai_ci
+  
+CREATE TABLE `tasks`
+(
+    `id`           int          NOT NULL AUTO_INCREMENT,
+    `user_id`      int               DEFAULT NULL,
+    `title`        varchar(255) NOT NULL,
+    `priority`     int               DEFAULT NULL,
+    `is_completed` tinyint(1)        DEFAULT '0',
+    `deadline_at`  timestamp    NULL DEFAULT NULL,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_tasks_id` (`id`),
+    KEY `idx_user_id` (`user_id`),
+    CONSTRAINT `tasks_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`),
+    CONSTRAINT `chk_priority` CHECK ((`priority` in (1, 2, 3, 4)))
+) ENGINE = InnoDB
+  AUTO_INCREMENT = 23
+  DEFAULT CHARSET = utf8mb4
+  COLLATE = utf8mb4_0900_ai_ci
+  
+CREATE TABLE `users`
+(
+    `id`            int          NOT NULL AUTO_INCREMENT,
+    `username`      varchar(255) NOT NULL,
+    `password`      varchar(255) NOT NULL,
+    `phone_number`  varchar(255)      DEFAULT NULL,
+    `token_limit`   int               DEFAULT '100000',
+    `token_usage`   int               DEFAULT '0',
+    `last_reset_at` timestamp    NULL DEFAULT NULL COMMENT '上次周用量重置时间',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `username` (`username`),
+    UNIQUE KEY `uk_users_id` (`id`)
+) ENGINE = InnoDB
+  AUTO_INCREMENT = 4
+  DEFAULT CHARSET = utf8mb4
+  COLLATE = utf8mb4_0900_ai_ci
+```
 
 # 4 接口契约
 
@@ -116,24 +268,28 @@
 
 ## 5.1 技术栈
 
-| **分类**          | **选用技术**         | **在 SmartFlow-Agent 中的应用场景**                          |
-| ----------------- | -------------------- | ------------------------------------------------------------ |
-| **Web 框架**      | **Gin**              | 负责全站 API 的路由分发，处理任务增删改查及智能排程的请求。  |
-| **持久层数据库**  | **MySQL 8.0**        | 存储用户、任务、课表及日程运行图（Schedules）的核心数据。    |
-| **ORM 框架**      | **GORM**             | 用于简化 Go 与数据库的交互，利用事务处理 `Apply` 接口的原子性操作。 |
-| **高性能缓存**    | **Redis**            | 缓存用户的周日程视图（避免频繁扫表）、存储 Token 临时限额、实现分布式锁防止重复排程。 |
-| **消息队列**      | **Kafka**            | **异步解耦**：当用户点击“应用”时，通过 Kafka 异步触发 AI 消耗统计及任务状态同步。 |
-| **AI 编排框架**   | **Eino / LangChain** | 作为 AI Agent 的大脑，根据排程策略（Steady/Rapid）计算任务与水课的嵌入逻辑。 |
-| **身份认证**      | **JWT**              | 实现无状态登录，将 `user_id` 封装在 Token 中，确保数据的用户隔离。 |
-| **配置管理**      | **Viper**            | 管理数据库、Redis、Kafka 的连接参数，支持多环境（开发/生产）切换。 |
-| **API 文档/调试** | **Apifox**           | 维护接口协议，进行前后端联调及自动化测试。                   |
-| **日志监控**      | **Zap / Logrus**     | 记录系统运行状态，特别是 Kafka 消费失败或 AI 接口超时的错误日志。 |
+| **分类**          | **选用技术**     | **在 SmartFlow-Agent 中的应用场景**                          |
+| ----------------- | ---------------- | ------------------------------------------------------------ |
+| **Web 框架**      | **Gin**          | 负责全站 API 的路由分发，处理任务增删改查及智能排程的请求。  |
+| **持久层数据库**  | **MySQL 8.0**    | 存储用户、任务、课表及日程运行图（Schedules）的核心数据。    |
+| **ORM 框架**      | **GORM**         | 用于简化 Go 与数据库的交互，利用事务处理 `Apply` 接口的原子性操作。 |
+| **高性能缓存**    | **Redis**        | 缓存用户的周日程视图（避免频繁扫表）、存储 Token 临时限额、实现分布式锁防止重复排程。 |
+| **消息队列**      | **Kafka**        | **异步解耦**：当用户点击“应用”时，通过 Kafka 异步触发 AI 消耗统计及任务状态同步。 |
+| **AI 编排框架**   | **Eino**         | 作为 AI Agent 的大脑，根据排程策略（Steady/Rapid）计算任务与水课的嵌入逻辑。 |
+| **身份认证**      | **JWT**          | 实现无状态登录，将 `user_id` 封装在 Token 中，确保数据的用户隔离。 |
+| **配置管理**      | **Viper**        | 管理数据库、Redis、Kafka 的连接参数，支持多环境（开发/生产）切换。 |
+| **API 文档/调试** | **Apifox**       | 维护接口协议，进行前后端联调及自动化测试。                   |
+| **日志监控**      | **Zap / Logrus** | 记录系统运行状态，特别是 Kafka 消费失败或 AI 接口超时的错误日志。 |
 
 ## 5.2 架构图
 
+PS：截至v0.3.3。其中黑色箭头为请求数据链路，绿色箭头为返回数据，虚线箭头为控制流。
 
+![后端架构图](docs/pics/backend_structure.png)
 
 ## 5.3 核心算法
+
+### 5.3.1 智能排课算法
 
 
 
