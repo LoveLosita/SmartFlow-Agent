@@ -1,7 +1,6 @@
 package conv
 
 import (
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -43,7 +42,7 @@ func ProcessUserAddTaskClassRequest(req *model.UserAddTaskClassRequest, userID i
 	taskClass.TotalSlots = &req.Config.TotalSlots
 	taskClass.AllowFillerCourse = &req.Config.AllowFillerCourse
 	taskClass.Strategy = &req.Config.Strategy
-	//处理 ExcludedSlots 切片为 JSON 字符串
+	/*//处理 ExcludedSlots 切片为 JSON 字符串
 	if len(req.Config.ExcludedSlots) > 0 {
 		//转换为 JSON 字符串
 		excludedSlotsJSON := "["
@@ -58,7 +57,8 @@ func ProcessUserAddTaskClassRequest(req *model.UserAddTaskClassRequest, userID i
 	} else {
 		emptyJSON := "[]"
 		taskClass.ExcludedSlots = &emptyJSON
-	}
+	}*/
+	taskClass.ExcludedSlots = req.Config.ExcludedSlots // 直接复用 IntSlice 类型，前端也能正确解析为 []int
 	//3.开始构建 items
 	var items []model.TaskClassItem
 	for _, itemReq := range req.Items {
@@ -114,14 +114,15 @@ func ProcessUserGetCompleteTaskClassRequest(taskClass *model.TaskClass) (*model.
 		AllowFillerCourse: safeBool(taskClass.AllowFillerCourse),
 		Strategy:          safeStr(taskClass.Strategy),
 	}
-	// 3. 处理 ExcludedSlots JSON 字符串 -> []int
+	/*// 3. 处理 ExcludedSlots JSON 字符串 -> []int
 	if taskClass.ExcludedSlots != nil && *taskClass.ExcludedSlots != "" {
 		var excluded []int
 		// 直接使用标准反序列化，比手动处理 rune 字符要健壮得多
 		if err := json.Unmarshal([]byte(*taskClass.ExcludedSlots), &excluded); err == nil {
 			req.Config.ExcludedSlots = excluded
 		}
-	}
+	}*/
+	req.Config.ExcludedSlots = taskClass.ExcludedSlots // 直接复用 IntSlice 类型，前端也能正确解析为 []int
 	// 4. 映射子项信息 (Items Section)
 	// 此时 items 已经通过 Preload 加载到了 taskClass.Items 中
 	req.Items = make([]model.UserAddTaskClassItemRequest, 0, len(taskClass.Items))

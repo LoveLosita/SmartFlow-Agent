@@ -164,6 +164,12 @@ func SchedulesToUserTodaySchedule(schedules []model.Schedule) []model.UserTodayS
 }
 
 func SchedulesToUserWeeklySchedule(schedules []model.Schedule) *model.UserWeekSchedule {
+	if len(schedules) == 0 {
+		return &model.UserWeekSchedule{
+			Week:   0,
+			Events: []model.WeeklyEventBrief{},
+		}
+	}
 	// 1. 初始化返回结构 (默认取第一条数据的周次)
 	weekDTO := &model.UserWeekSchedule{
 		Week:   schedules[0].Week,
@@ -321,4 +327,154 @@ func SchedulesToUserOngoingSchedule(schedules []model.Schedule) *model.OngoingSc
 		StartTime: ongoing.Event.StartTime,
 		EndTime:   ongoing.Event.EndTime,
 	}
+}
+
+// 这里我们使用一个临时的内部结构来兼容“实日程”和“虚计划”
+type slotInfo struct {
+	schedule *model.Schedule
+	plan     *model.TaskClassItem
+}
+
+func PlanningResultToUserWeekSchedules(userSchedule []model.Schedule, plans []model.TaskClassItem) []model.UserWeekSchedule {
+	// 1. 周次范围探测与数据分桶 (保持高效的 O(N) 复杂度)
+	minW, maxW := 25, 1
+	weekMap := make(map[int][]model.Schedule)
+	for _, s := range userSchedule {
+		if s.Week < minW {
+			minW = s.Week
+		}
+		if s.Week > maxW {
+			maxW = s.Week
+		}
+		weekMap[s.Week] = append(weekMap[s.Week], s)
+	}
+
+	planMap := make(map[int][]model.TaskClassItem)
+	for _, p := range plans {
+		if p.EmbeddedTime == nil {
+			continue
+		}
+		w := p.EmbeddedTime.Week
+		if w < minW {
+			minW = w
+		}
+		if w > maxW {
+			maxW = w
+		}
+		planMap[w] = append(planMap[w], p)
+	}
+
+	var results []model.UserWeekSchedule
+
+	for w := minW; w <= maxW; w++ {
+		// 构建当前周的逻辑网格
+		indexMap := make(map[int]map[int]slotInfo)
+		for d := 1; d <= 7; d++ {
+			indexMap[d] = make(map[int]slotInfo)
+		}
+
+		for _, s := range weekMap[w] {
+			indexMap[s.DayOfWeek][s.Section] = slotInfo{schedule: &s}
+		}
+		for _, p := range planMap[w] {
+			for sec := p.EmbeddedTime.SectionFrom; sec <= p.EmbeddedTime.SectionTo; sec++ {
+				info := indexMap[p.EmbeddedTime.DayOfWeek][sec]
+				info.plan = &p
+				indexMap[p.EmbeddedTime.DayOfWeek][sec] = info
+			}
+		}
+
+		weekDTO := &model.UserWeekSchedule{Week: w, Events: []model.WeeklyEventBrief{}}
+
+		for day := 1; day <= 7; day++ {
+			order := 1
+			for curr := 1; curr <= 12; {
+				slot := indexMap[day][curr]
+
+				if slot.schedule != nil || slot.plan != nil {
+					end := curr
+					// 🚀 修复逻辑 A：精准探测合并边界
+					for next := curr + 1; next <= 12; next++ {
+						nextSlot := indexMap[day][next]
+						isSame := false
+
+						if slot.schedule != nil && nextSlot.schedule != nil {
+							// 场景：都是课，且是同一门课
+							isSame = slot.schedule.EventID == nextSlot.schedule.EventID
+						} else if slot.schedule == nil && nextSlot.schedule == nil && slot.plan != nil && nextSlot.plan != nil {
+							// 场景：都是新排任务，且是同一个 TaskItem (修复了之前会合并不同任务的 Bug)
+							isSame = slot.plan.ID == nextSlot.plan.ID
+						}
+
+						if isSame {
+							end = next
+						} else {
+							break
+						}
+					}
+
+					// 🚀 修复逻辑 B：直接计算 span 并传值，消除重复计算
+					span := end - curr + 1
+					brief := buildBrief(slot, day, curr, end, span, order)
+
+					weekDTO.Events = append(weekDTO.Events, brief)
+					curr = end + 1
+					order++
+				} else {
+					// 场景 B：留空处理 (逻辑保持原子化)
+					emptyEnd := curr
+					if curr%2 != 0 && curr < 12 {
+						if next := indexMap[day][curr+1]; next.schedule == nil && next.plan == nil {
+							emptyEnd = curr + 1
+						}
+					}
+					weekDTO.Events = append(weekDTO.Events, model.WeeklyEventBrief{
+						Name: "无课", Type: "empty", DayOfWeek: day, Order: order,
+						StartTime: sectionTimeMap[curr][0], EndTime: sectionTimeMap[emptyEnd][1],
+						Span: emptyEnd - curr + 1,
+					})
+					curr = emptyEnd + 1
+					order++
+				}
+			}
+		}
+		results = append(results, *weekDTO)
+	}
+	return results
+}
+
+func buildBrief(slot slotInfo, day, start, end, span, order int) model.WeeklyEventBrief {
+	brief := model.WeeklyEventBrief{
+		DayOfWeek: day,
+		Order:     order,
+		StartTime: sectionTimeMap[start][0],
+		EndTime:   sectionTimeMap[end][1],
+		Span:      span,
+		Status:    "normal", // 默认设为正常状态
+	}
+
+	if slot.schedule != nil {
+		// 场景 A：它是数据库里原有的课 (实日程)
+		brief.ID = slot.schedule.EventID
+		brief.Name = slot.schedule.Event.Name
+		brief.Location = *slot.schedule.Event.Location
+		brief.Type = slot.schedule.Event.Type
+
+		// 如果这节课里被算法“塞”进了一个计划任务
+		if slot.plan != nil {
+			brief.Status = "suggested" // 标记为建议状态，前端据此高亮整块
+			brief.EmbeddedTaskInfo = model.TaskBrief{
+				ID:   slot.plan.ID,
+				Name: *slot.plan.Content,
+				Type: "task",
+			}
+		}
+	} else if slot.plan != nil {
+		// 场景 B：它是算法在空地新建的任务块 (虚日程)
+		brief.Name = *slot.plan.Content
+		brief.Type = "task"
+		brief.Status = "suggested" // 标记为建议状态
+	}
+
+	return brief
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"time"
 
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
@@ -32,7 +33,27 @@ func NewTaskClassService(taskClassRepo *dao.TaskClassDAO, cacheRepo *dao.CacheDA
 
 // AddOrUpdateTaskClass 为指定用户添加任务类
 func (sv *TaskClassService) AddOrUpdateTaskClass(ctx context.Context, req *model.UserAddTaskClassRequest, userID int, method int, targetTaskClassID int) error {
-	// 1) 先写数据库（事务内）
+	//1.先校验参数
+	if req.Mode == "auto" {
+		if req.StartDate == "" || req.EndDate == "" {
+			return respond.MissingParamForAutoScheduling
+		}
+		st, err := time.Parse("2006-01-02", req.StartDate)
+		if err != nil {
+			return respond.WrongParamType
+		}
+		ed, err := time.Parse("2006-01-02", req.EndDate)
+		if err != nil {
+			return respond.WrongParamType
+		}
+		if st.After(ed) {
+			return respond.InvalidDateRange
+		}
+	}
+	if req.Mode == "" || req.Name == "" || len(req.Items) == 0 {
+		return respond.MissingParam
+	}
+	//2.写数据库（事务内）
 	if err := sv.taskClassRepo.Transaction(func(txDAO *dao.TaskClassDAO) error {
 		taskClass, items, err := conv.ProcessUserAddTaskClassRequest(req, userID)
 		if err != nil {

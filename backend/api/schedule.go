@@ -143,3 +143,26 @@ func (s *ScheduleAPI) UserRevocateTaskItemFromSchedule(c *gin.Context) {
 	//4.返回撤销成功的响应给前端
 	c.JSON(http.StatusOK, respond.Ok)
 }
+
+func (s *ScheduleAPI) SmartPlanning(c *gin.Context) {
+	// 1. 从请求上下文中获取用户ID
+	userID := c.GetInt("user_id")
+	// 2. 从请求体中获取智能规划的参数
+	taskClassID := c.Query("task_class_id")
+	intTaskClassID, err := strconv.Atoi(taskClassID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		return
+	}
+	//3.调用服务层方法进行智能规划
+	/*ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)*/
+	ctx := context.Background()
+	/*defer cancel() // 记得释放资源*/
+	res, err := s.scheduleService.SmartPlanning(ctx, userID, intTaskClassID)
+	if err != nil {
+		respond.DealWithError(c, err)
+		return
+	}
+	//4.返回智能规划成功的响应给前端
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, res))
+}

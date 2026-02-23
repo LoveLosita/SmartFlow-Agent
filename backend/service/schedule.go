@@ -8,6 +8,7 @@ import (
 
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
+	"github.com/LoveLosita/smartflow/backend/logic"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
 	"github.com/go-redis/redis/v8"
@@ -100,6 +101,7 @@ func (ss *ScheduleService) GetUserWeeklySchedule(ctx context.Context, userID, we
 	}
 	//3.转换为前端需要的格式
 	weeklySchedule := conv.SchedulesToUserWeeklySchedule(schedules)
+	weeklySchedule.Week = week
 	//4.将查询结果存入缓存，设置过期时间为一周（或者根据实际情况调整）
 	err = ss.cacheDAO.SetUserWeeklyScheduleToCache(ctx, userID, weeklySchedule)
 	return weeklySchedule, nil
@@ -374,4 +376,31 @@ func (ss *ScheduleService) RevocateUserTaskClassItem(ctx context.Context, userID
 		log.Println("ScheduleService.RevocateUserTaskClassItem: eventType is neither embedded_task nor task, something must be wrong")
 	}
 	return nil
+}
+
+func (ss *ScheduleService) SmartPlanning(ctx context.Context, userID, taskClassID int) ([]model.UserWeekSchedule, error) {
+	//1.通过任务类id获取任务类详情
+	taskClass, err := ss.taskClassDAO.GetCompleteTaskClassByID(ctx, taskClassID, userID)
+	if err != nil {
+		return nil, err
+	}
+	//2.校验任务类的参数是否合法
+	if taskClass == nil {
+		return nil, respond.WrongTaskClassID
+	}
+	if *taskClass.Mode != "auto" {
+		return nil, respond.TaskClassModeNotAuto
+	}
+	//3.获取任务类安排的时间范围内的全部周数信息(左右边界不足一周的情况也要算作一周)
+	schedules, err := ss.scheduleDAO.GetUserSchedulesByTimeRange(ctx, userID, conv.CalculateFirstDayOfWeek(*taskClass.StartDate), conv.CalculateLastDayOfWeek(*taskClass.EndDate))
+	if err != nil {
+		return nil, err
+	}
+	//4.将多个周的信息传入智能排课算法，获取推荐的时间安排（周+周内的天+节次）
+	result, err := logic.SmartPlanningMainLogic(schedules, taskClass)
+	if err != nil {
+		return nil, err
+	}
+	//5.将推荐的时间安排转换为前端需要的格式返回
+	return result, nil
 }

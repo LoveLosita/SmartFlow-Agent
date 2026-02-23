@@ -557,3 +557,19 @@ func (d *ScheduleDAO) GetRelIDByScheduleEventID(ctx context.Context, eventID int
 	}
 	return *r.RelID, nil
 }
+
+func (d *ScheduleDAO) GetUserSchedulesByTimeRange(ctx context.Context, userID int, startTime, endTime time.Time) ([]model.Schedule, error) {
+	var schedules []model.Schedule
+	err := d.db.WithContext(ctx).
+		Preload("Event").
+		Preload("EmbeddedTask").
+		Joins("JOIN schedule_events ON schedule_events.id = schedules.event_id").
+		Where("schedules.user_id = ? AND schedule_events.start_time >= ? AND schedule_events.end_time <= ?",
+								userID, startTime, endTime).
+		Order("schedule_events.start_time ASC"). // 命中索引
+		Find(&schedules).Error
+	if err != nil {
+		return nil, err
+	}
+	return schedules, nil
+}

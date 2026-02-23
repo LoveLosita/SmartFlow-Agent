@@ -35,7 +35,7 @@ func (r *CourseDAO) AddUserCoursesIntoScheduleEvents(ctx context.Context, events
 	}
 	ids := make([]int, 0, len(events))
 	for i := range events {
-		ids = append(ids, int(events[i].ID))
+		ids = append(ids, events[i].ID)
 	}
 	return ids, nil
 }

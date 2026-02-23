@@ -78,6 +78,10 @@ func (ss *CourseService) AddUserCourses(ctx context.Context, req model.UserImpor
 					continue
 				}
 				//2.转换为 Schedule_event 切片
+				st, ed, err := conv.RelativeTimeToRealTime(week, arrangement.DayOfWeek, arrangement.StartSection, arrangement.EndSection)
+				if err != nil {
+					return nil, err
+				}
 				scheduleEvent := model.ScheduleEvent{
 					UserID:        userID,
 					Name:          course.CourseName,
@@ -85,6 +89,8 @@ func (ss *CourseService) AddUserCourses(ctx context.Context, req model.UserImpor
 					Type:          "course",
 					RelID:         nil,
 					CanBeEmbedded: course.IsAllowTasks,
+					StartTime:     st,
+					EndTime:       ed,
 				}
 				finalScheduleEvents = append(finalScheduleEvents, scheduleEvent)
 				//3.转换为 Schedule 切片

@@ -21,8 +21,43 @@ type TaskClass struct {
 	TotalSlots        *int            `gorm:"column:total_slots;comment:分配的总节数"`
 	AllowFillerCourse *bool           `gorm:"column:allow_filler_course;default:true"`
 	Strategy          *string         `gorm:"column:strategy;type:enum('steady','rapid')"`
-	ExcludedSlots     *string         `gorm:"column:excluded_slots;type:json;comment:不想要的时段切片"`
+	ExcludedSlots     IntSlice        `gorm:"column:excluded_slots;type:json;comment:不想要的时段切片"`
 	Items             []TaskClassItem `gorm:"foreignKey:CategoryID;references:ID"` // 一对多关联：一个 TaskClass 有多个 TaskClassItem
+}
+
+// IntSlice 用于把 []int 以 JSON 形式存入/读出数据库 json 字段
+type IntSlice []int
+
+func (s IntSlice) Value() (driver.Value, error) {
+	// nil -> NULL；空切片 -> "[]"
+	if s == nil {
+		return nil, nil
+	}
+	return json.Marshal([]int(s))
+}
+
+func (s *IntSlice) Scan(value any) error {
+	if value == nil {
+		*s = nil
+		return nil
+	}
+
+	var data []byte
+	switch v := value.(type) {
+	case []byte:
+		data = v
+	case string:
+		data = []byte(v)
+	default:
+		return fmt.Errorf("IntSlice: 不支持的扫描类型: %T", value)
+	}
+
+	var out []int
+	if err := json.Unmarshal(data, &out); err != nil {
+		return err
+	}
+	*s = IntSlice(out)
+	return nil
 }
 
 // TaskClassItem 用于和数据库中的 task_items 表进行映射

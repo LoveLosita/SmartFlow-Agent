@@ -24,7 +24,7 @@ type Schedule struct {
 	EmbeddedTaskID *int   `gorm:"column:embedded_task_id;comment:若为水课嵌入，记录具体的任务项ID" json:"embedded_task_id"`
 	Status         string `gorm:"column:status;type:enum('normal','interrupted');default:'normal';comment:状态: 正常/因故中断" json:"status"`
 	// 💡 必须加上这一行，告诉 GORM 如何关联元数据
-	Event        ScheduleEvent  `gorm:"foreignKey:EventID" json:"event"`
+	Event        *ScheduleEvent `gorm:"foreignKey:EventID" json:"event"`
 	EmbeddedTask *TaskClassItem `gorm:"foreignKey:EmbeddedTaskID" json:"embedded_task"`
 }
 
@@ -87,6 +87,7 @@ type WeeklyEventBrief struct {
 	Location         string    `json:"location"`
 	Type             string    `json:"type"`
 	Span             int       `json:"span"` // 跨越的节数，给前端用来渲染宽度/高度
+	Status           string    `json:"status"`
 	EmbeddedTaskInfo TaskBrief `json:"embedded_task_info,omitempty"`
 }
 

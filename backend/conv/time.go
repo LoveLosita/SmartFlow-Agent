@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-// DateFormat 此处定义基准学期的开始和结束日期
+// DateFormat 此处定义一个全局常量，确保在整个代码中使用统一的日期格式解析和格式化
 const DateFormat = "2006-01-02"
 
 // RealDateToRelativeDate 将绝对日期转换为相对日期（格式: "week-day"）
@@ -120,4 +120,30 @@ func RelativeTimeToRealTime(week, dayOfWeek, startSection, endSection int) (time
 	}
 
 	return startTime, endTime, nil
+}
+
+func CalculateFirstDayOfWeek(date time.Time) time.Time {
+	// 计算当前日期是周几（0-6，0表示周日）
+	weekday := int(date.Weekday())
+	if weekday == 0 {
+		weekday = 7 // 将周日调整为7，方便计算
+	}
+	// 计算距离周一的天数偏移
+	offset := weekday - 1
+	// 计算本周一的日期
+	firstDayOfWeek := date.AddDate(0, 0, -offset)
+	return firstDayOfWeek
+}
+
+func CalculateLastDayOfWeek(date time.Time) time.Time {
+	// 计算当前日期是周几（0-6，0表示周日）
+	weekday := int(date.Weekday())
+	if weekday == 0 {
+		weekday = 7 // 将周日调整为7，方便计算
+	}
+	// 计算距离周日的天数偏移
+	offset := 7 - weekday
+	// 计算本周日的日期
+	lastDayOfWeek := date.AddDate(0, 0, offset)
+	return lastDayOfWeek
 }

@@ -35,5 +35,5 @@ redis:
 time:
     zone: "Asia/Shanghai"
     semesterStartDate: "2026-03-02" #学期开始日期，一定要设定为周一，以便于计算周数
-    semesterEndDate: "2026-06-30" #学期结束日期，一定要设定为周日，确保最后一周完整
+    semesterEndDate: "2026-07-19" #学期结束日期，一定要设定为周日，确保最后一周完整
 

@@ -284,4 +284,24 @@ var ( //请求相关的响应
 		Status: "40043",
 		Info:   "invalid section range, start_section should be less than or equal to end_section",
 	}
+
+	MissingParamForAutoScheduling = Response{ //自动排课缺少参数
+		Status: "40044",
+		Info:   "missing param for auto scheduling",
+	}
+
+	InvalidDateRange = Response{ //无效的日期范围
+		Status: "40045",
+		Info:   "invalid date range, start_date should be before or equal to end_date",
+	}
+
+	TaskClassModeNotAuto = Response{ //任务类模式不是自动
+		Status: "40046",
+		Info:   "task class mode is not auto",
+	}
+
+	TimeNotEnoughForAutoScheduling = Response{ //自动排课时间不足
+		Status: "40047",
+		Info:   "time not enough for auto scheduling",
+	}
 )

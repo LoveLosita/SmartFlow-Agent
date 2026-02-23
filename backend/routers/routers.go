@@ -81,6 +81,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, limiter *pk
 			scheduleGroup.GET("/recent-completed", handlers.ScheduleHandler.GetUserRecentCompletedSchedules)
 			scheduleGroup.GET("/current", handlers.ScheduleHandler.GetUserOngoingSchedule)
 			scheduleGroup.DELETE("/undo-task-item", middleware.IdempotencyMiddleware(cache), handlers.ScheduleHandler.UserRevocateTaskItemFromSchedule)
+			scheduleGroup.GET("/smart-planning", handlers.ScheduleHandler.SmartPlanning)
 		}
 	}
 	// 初始化Gin引擎
