@@ -155,9 +155,8 @@ func (s *ScheduleAPI) SmartPlanning(c *gin.Context) {
 		return
 	}
 	//3.调用服务层方法进行智能规划
-	/*ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)*/
-	ctx := context.Background()
-	/*defer cancel() // 记得释放资源*/
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源
 	res, err := s.scheduleService.SmartPlanning(ctx, userID, intTaskClassID)
 	if err != nil {
 		respond.DealWithError(c, err)

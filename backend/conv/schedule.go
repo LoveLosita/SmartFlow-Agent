@@ -474,6 +474,7 @@ func buildBrief(slot slotInfo, day, start, end, span, order int) model.WeeklyEve
 		brief.Name = *slot.plan.Content
 		brief.Type = "task"
 		brief.Status = "suggested" // 标记为建议状态
+		brief.ID = slot.plan.ID    // 虚日程的 ID 直接使用 TaskClassItem 的 ID，方便前端追踪和操作
 	}
 
 	return brief

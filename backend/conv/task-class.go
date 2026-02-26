@@ -138,7 +138,7 @@ func ProcessUserGetCompleteTaskClassRequest(taskClass *model.TaskClass) (*model.
 }
 
 // UserInsertTaskItemRequestToModel 用于将填入空闲时段日程的请求转换为 Schedule 模型
-func UserInsertTaskItemRequestToModel(req *model.UserInsertTaskClassItemToScheduleRequest, item *model.TaskClassItem, taskID *int, userID, startSection, endSection int) ([]model.Schedule, *model.ScheduleEvent) {
+func UserInsertTaskItemRequestToModel(req *model.UserInsertTaskClassItemToScheduleRequest, item *model.TaskClassItem, taskID *int, userID, startSection, endSection int) ([]model.Schedule, *model.ScheduleEvent, error) {
 	var schedules []model.Schedule
 	for section := startSection; section <= endSection; section++ {
 		req1 := &model.Schedule{
@@ -151,14 +151,20 @@ func UserInsertTaskItemRequestToModel(req *model.UserInsertTaskClassItemToSchedu
 		}
 		schedules = append(schedules, *req1)
 	}
+	startTime, endTime, err := RelativeTimeToRealTime(req.Week, req.DayOfWeek, startSection, endSection)
+	if err != nil {
+		return nil, nil, err
+	}
 	req2 := &model.ScheduleEvent{
 		UserID:        userID,                // 由调用方填充
 		Name:          safeStr(item.Content), // 任务内容作为事件名称
 		Type:          "task",
 		RelID:         &item.ID, // 关联到 TaskClassItem 的 ID
 		CanBeEmbedded: false,    // 任务事件允许嵌入其他任务（如果需要的话）
+		StartTime:     startTime,
+		EndTime:       endTime,
 	}
-	return schedules, req2
+	return schedules, req2, nil
 }
 
 // --- 🛡️ 辅助工具函数：保持代码清爽并防止 Panic ---

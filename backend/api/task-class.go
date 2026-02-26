@@ -171,3 +171,22 @@ func (api *TaskClassHandler) DeleteTaskClass(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, respond.Ok)
 }
+
+func (api *TaskClassHandler) UserInsertBatchTaskClassItemsIntoSchedule(c *gin.Context) {
+	var req model.UserInsertTaskClassItemToScheduleRequestBatch
+	err := c.ShouldBindJSON(&req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		return
+	}
+	userID := c.GetInt("user_id")
+	// 创建一个带 1 秒超时的上下文
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel() // 记得释放资源
+	err = api.svc.BatchApplyPlans(ctx, req.TaskClassID, userID, &req)
+	if err != nil {
+		respond.DealWithError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, respond.Ok)
+}

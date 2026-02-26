@@ -573,3 +573,55 @@ func (d *ScheduleDAO) GetUserSchedulesByTimeRange(ctx context.Context, userID in
 	}
 	return schedules, nil
 }
+
+func (d *ScheduleDAO) BatchEmbedTaskIntoSchedule(ctx context.Context, eventIDs, taskItemIDs []int) error {
+	if len(eventIDs) == 0 {
+		return nil
+	}
+	if len(eventIDs) != len(taskItemIDs) {
+		return fmt.Errorf("eventIDs length != taskItemIDs length")
+	}
+
+	db := d.db.WithContext(ctx)
+
+	for i, eventID := range eventIDs {
+		taskItemID := taskItemIDs[i]
+
+		// 1) 校验该 event 是否为 course
+		var typ string
+		if err := db.
+			Table("schedule_events").
+			Select("type").
+			Where("id = ?", eventID).
+			Scan(&typ).Error; err != nil {
+			return err
+		}
+		if typ != "course" {
+			continue
+		}
+
+		// 2) 一 event 对多 schedules：批量写入 embedded_task_id
+		if err := db.
+			Table("schedules").
+			Where("event_id = ?", eventID).
+			Update("embedded_task_id", taskItemID).Error; err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (d *ScheduleDAO) InsertScheduleEvents(ctx context.Context, events []model.ScheduleEvent) ([]int, error) {
+	if len(events) == 0 {
+		return nil, nil
+	}
+	if err := d.db.WithContext(ctx).Create(&events).Error; err != nil {
+		return nil, err
+	}
+	ids := make([]int, len(events))
+	for i, e := range events {
+		ids[i] = e.ID
+	}
+	return ids, nil
+}

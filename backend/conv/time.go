@@ -62,7 +62,7 @@ type SectionTime struct {
 	End   string // 第一个结束
 }
 
-var sectionTimeMap2 = map[int]SectionTime{
+var SectionTimeMap2 = map[int]SectionTime{
 	1:  {Start: "08:00", End: "08:45"},
 	2:  {Start: "08:55", End: "09:40"},
 	3:  {Start: "10:15", End: "11:00"},
@@ -83,8 +83,8 @@ func RelativeTimeToRealTime(week, dayOfWeek, startSection, endSection int) (time
 		return time.Time{}, time.Time{}, respond.InvalidSectionRange
 	}
 
-	startTimeInfo, okStart := sectionTimeMap2[startSection]
-	endTimeInfo, okEnd := sectionTimeMap2[endSection]
+	startTimeInfo, okStart := SectionTimeMap2[startSection]
+	endTimeInfo, okEnd := SectionTimeMap2[endSection]
 	if !okStart || !okEnd {
 		return time.Time{}, time.Time{}, respond.InvalidSectionNumber
 	}

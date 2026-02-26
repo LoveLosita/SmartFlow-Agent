@@ -212,6 +212,21 @@ func (dao *TaskClassDAO) IfTaskClassItemArranged(ctx context.Context, taskID int
 	return item.EmbeddedTime != nil, nil
 }
 
+func (dao *TaskClassDAO) BatchCheckIfTaskClassItemsArranged(ctx context.Context, itemIDs []int) (bool, error) {
+	if len(itemIDs) == 0 {
+		return false, nil
+	}
+	var count int64
+	err := dao.db.WithContext(ctx).
+		Model(&model.TaskClassItem{}).
+		Where("id IN ? AND embedded_time IS NOT NULL", itemIDs).
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func (dao *TaskClassDAO) DeleteTaskClassItemByID(ctx context.Context, id int) error {
 	err := dao.db.WithContext(ctx).
 		Where("id = ?", id).
@@ -230,4 +245,56 @@ func (dao *TaskClassDAO) DeleteTaskClassByID(ctx context.Context, id int) error 
 		return respond.WrongTaskClassID
 	}
 	return nil
+}
+
+func (dao *TaskClassDAO) BatchUpdateTaskClassItemEmbeddedTime(ctx context.Context, itemIDs []int, updates []*model.TargetTime) error {
+	if len(itemIDs) == 0 {
+		return nil
+	}
+	if len(itemIDs) != len(updates) {
+		return errors.New("itemIDs length mismatch updates length")
+	}
+
+	// 单条 SQL 批量更新：UPDATE ... SET embedded_time = CASE id WHEN ? THEN ? ... END WHERE id IN (?)
+	caseSQL := "CASE id"
+	args := make([]any, 0, len(itemIDs)*2)
+	for i, id := range itemIDs {
+		caseSQL += " WHEN ? THEN ?"
+		args = append(args, id, updates[i])
+	}
+	caseSQL += " END"
+
+	res := dao.db.WithContext(ctx).
+		Model(&model.TaskClassItem{}).
+		Where("id IN ?", itemIDs).
+		Update("embedded_time", gorm.Expr(caseSQL, args...))
+
+	return res.Error
+}
+
+func (dao *TaskClassDAO) ValidateTaskItemIDsBelongToTaskClass(ctx context.Context, taskClassID int, itemIDs []int) (bool, error) {
+	if len(itemIDs) == 0 {
+		return true, nil
+	}
+
+	var count int64
+	err := dao.db.WithContext(ctx).
+		Model(&model.TaskClassItem{}).
+		Where("id IN ? AND category_id = ?", itemIDs, taskClassID).
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count == int64(len(itemIDs)), nil
+}
+
+func (dao *TaskClassDAO) GetTaskClassItemsByIDs(ctx context.Context, itemIDs []int) ([]model.TaskClassItem, error) {
+	var items []model.TaskClassItem
+	err := dao.db.WithContext(ctx).
+		Where("id IN ?", itemIDs).
+		Find(&items).Error
+	if err != nil {
+		return nil, err
+	}
+	return items, nil
 }

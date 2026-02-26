@@ -129,6 +129,20 @@ type UserInsertTaskClassItemToScheduleRequest struct {
 	EmbedCourseEventID int `json:"embed_course_event_id"` // 可选，嵌入的课程日程事件 ID
 }
 
+type UserInsertTaskClassItemToScheduleRequestBatch struct {
+	TaskClassID int                   `json:"task_class_id" binding:"required"`
+	Items       []SingleTaskClassItem `json:"items" binding:"required,dive,required"`
+}
+
+type SingleTaskClassItem struct {
+	TaskItemID         int `json:"task_item_id" binding:"required"`
+	Week               int `json:"week" binding:"required,min=1"`
+	DayOfWeek          int `json:"day_of_week" binding:"required,min=1,max=7"`
+	StartSection       int `json:"start_section" binding:"required,min=1"`
+	EndSection         int `json:"end_section" binding:"required,min=1,gtefield=StartSection"`
+	EmbedCourseEventID int `json:"embed_course_event_id"` // 可选，嵌入的课程日程事件 ID
+}
+
 // Value 实现 driver.Valuer 接口，负责将 TargetTime 转换为数据库存储的格式
 func (t *TargetTime) Value() (driver.Value, error) {
 	if t == nil {

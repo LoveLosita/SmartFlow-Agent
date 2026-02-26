@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
+	"sort"
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/conv"
@@ -192,7 +194,10 @@ func (sv *TaskClassService) AddTaskClassItemIntoSchedule(ctx context.Context, re
 	}
 	//4.否则构造Schedule模型
 	sections := make([]int, 0, req.EndSection-req.StartSection+1)
-	schedules, scheduleEvent := conv.UserInsertTaskItemRequestToModel(req, taskItem, nil, userID, req.StartSection, req.EndSection)
+	schedules, scheduleEvent, err := conv.UserInsertTaskItemRequestToModel(req, taskItem, nil, userID, req.StartSection, req.EndSection)
+	if err != nil {
+		return err
+	}
 	//将节次区间转换为节次切片，方便后续检查冲突
 	for section := req.StartSection; section <= req.EndSection; section++ {
 		sections = append(sections, section)
@@ -305,6 +310,217 @@ func (sv *TaskClassService) DeleteTaskClass(ctx context.Context, userID int, tas
 	//2.删除任务类（事务）
 	err = sv.taskClassRepo.DeleteTaskClassByID(ctx, taskClassID)
 	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (sv *TaskClassService) BatchApplyPlans(ctx context.Context, taskClassID int, userID int, plans *model.UserInsertTaskClassItemToScheduleRequestBatch) error {
+	//1.通过任务类id获取任务类详情
+	taskClass, err := sv.taskClassRepo.GetCompleteTaskClassByID(ctx, taskClassID, userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return respond.WrongTaskClassID
+		}
+		return err
+	}
+	//2.校验任务类的参数是否合法
+	if taskClass == nil {
+		return respond.WrongTaskClassID
+	}
+	if *taskClass.Mode != "auto" {
+		return respond.TaskClassModeNotAuto
+	}
+	//3.获取任务类安排的时间范围内的全部周数信息(左右边界不足一周的情况也要算作一周)，用于下方冲突检查
+	startWeekTime := conv.CalculateFirstDayOfWeek(*taskClass.StartDate)
+	endWeekTime := conv.CalculateLastDayOfWeek(*taskClass.EndDate)
+	schedules, err := sv.scheduleRepo.GetUserSchedulesByTimeRange(ctx, userID, startWeekTime, endWeekTime)
+	if err != nil {
+		return err
+	}
+	startWeek, _, err := conv.RealDateToRelativeDate(startWeekTime.Format("2006-01-02"))
+	if err != nil {
+		return err
+	}
+	endWeek, _, err := conv.RealDateToRelativeDate(endWeekTime.Format("2006-01-02"))
+	if err != nil {
+		return err
+	}
+	//4.统一检查冲突（避免逐条查库）
+	//先将日程放入一个map中，key是"周-星期-节次"，value是课程信息，方便后续检查冲突
+	courseMap := make(map[string]model.Schedule)
+	for _, schedule := range schedules {
+		key := fmt.Sprintf("%d-%d-%d", schedule.Week, schedule.DayOfWeek, schedule.Section)
+		courseMap[key] = schedule
+	}
+	//再遍历每个任务块的安排时间，检查是否和课程冲突（目前逻辑是只要有一个时段冲突就算冲突，后续可以优化为统计冲突的时段数量，或者提供具体的冲突时段信息）
+	for _, plan := range plans.Items {
+		if plan.Week < startWeek || plan.Week > endWeek {
+			return respond.TaskClassItemTryingToInsertOutOfTimeRange
+		}
+		for section := plan.StartSection; section <= plan.EndSection; section++ {
+			key := fmt.Sprintf("%d-%d-%d", plan.Week, plan.DayOfWeek, section)
+			// 如果课程存在，并且满足以下任一条件则认为冲突：
+			// 1. 课程时段已经被其他任务块嵌入了（不允许多个任务块嵌入同一课程）
+			// 2. 当前时段的课的EventID与用户计划中指定的EmbedCourseEventID不匹配（说明用户计划要嵌入的课程和当前时段的课不是同一节）
+			// 3. 用户计划中没有指定EmbedCourseEventID（即EmbedCourseEventID为0），但当前时段有课（不允许在有课的时段安排任务块）
+			// 4. 当前时段的课不允许被嵌入（即使用户计划中指定了EmbedCourseEventID，但如果课程本身不允许被嵌入了，也算冲突）
+			if course, exists := courseMap[key]; exists && ((plan.EmbedCourseEventID != 0 && course.EmbeddedTask != nil) ||
+				(plan.EmbedCourseEventID != course.EventID) || plan.EmbedCourseEventID == 0 || !course.Event.CanBeEmbedded) {
+				return respond.ScheduleConflict
+			}
+		}
+	}
+	//5.分流批量写入数据库（通过 RepoManager 统一管理事务）
+	//先分流
+	toEmbed := make([]model.SingleTaskClassItem, 0)  //需要嵌入课程的任务块
+	toNormal := make([]model.SingleTaskClassItem, 0) //需要新建日程的任务块
+	for _, item := range plans.Items {
+		if item.EmbedCourseEventID != 0 {
+			toEmbed = append(toEmbed, item)
+		} else {
+			toNormal = append(toNormal, item)
+		}
+	}
+	//再开事务批量写库
+	if err := sv.repoManager.Transaction(ctx, func(txM *dao.RepoManager) error {
+		//5.1 先处理需要嵌入课程的任务块
+		//先提取出需要嵌入的课程ID和TaskItemID列表
+		courseIDs := make([]int, 0, len(toEmbed))
+		for _, item := range toEmbed {
+			courseIDs = append(courseIDs, item.EmbedCourseEventID)
+		}
+		itemIDs := make([]int, 0, len(toEmbed))
+		for _, item := range toEmbed {
+			itemIDs = append(itemIDs, item.TaskItemID)
+		}
+		//检查任务块本身是否已经被安排
+		result, err := sv.taskClassRepo.BatchCheckIfTaskClassItemsArranged(ctx, itemIDs)
+		if err != nil {
+			return err
+		}
+		if result {
+			return respond.TaskClassItemAlreadyArranged
+		}
+		//验证一下plans中的taskItemID确实都属于这个用户和这个任务类（避免用户恶意构造请求把别的用户的任务块或者不属于任何任务类的任务块也安排了）
+		//同时也能检查是否重复
+		result, err = sv.taskClassRepo.ValidateTaskItemIDsBelongToTaskClass(ctx, taskClassID, itemIDs)
+		if err != nil {
+			return err
+		}
+		if !result {
+			return respond.TaskClassItemNotBelongToTaskClass
+		}
+		//批量更新日程表中对应课程的embedded_task_id字段（目前业务限制：一个课程只能被一个任务块嵌入了，所以直接批量更新，不用担心覆盖问题）
+		err = txM.Schedule.BatchEmbedTaskIntoSchedule(ctx, courseIDs, itemIDs)
+		if err != nil {
+			return err
+		}
+		//批量更新任务块的embedded_time字段
+		targetTimes := make([]*model.TargetTime, 0, len(toEmbed))
+		for _, item := range toEmbed {
+			targetTimes = append(targetTimes, &model.TargetTime{
+				DayOfWeek:   item.DayOfWeek,
+				Week:        item.Week,
+				SectionFrom: item.StartSection,
+				SectionTo:   item.EndSection,
+			})
+		}
+		err = txM.TaskClass.BatchUpdateTaskClassItemEmbeddedTime(ctx, itemIDs, targetTimes)
+		if err != nil {
+			return err
+		}
+		//5.2 再处理需要新建日程的任务块
+		//先提取出需要新建日程的任务块ID列表
+		normalItemIDs := make([]int, 0, len(toNormal))
+		for _, item := range toNormal {
+			normalItemIDs = append(normalItemIDs, item.TaskItemID)
+		}
+		//验证一下plans中的taskItemID确实都属于这个任务类（避免用户恶意构造请求把别的用户的任务块或者不属于任何任务类的任务块也安排了）
+		result, err = sv.taskClassRepo.ValidateTaskItemIDsBelongToTaskClass(ctx, taskClassID, normalItemIDs)
+		if err != nil {
+			return err
+		}
+		if !result {
+			return respond.TaskClassItemNotBelongToTaskClass
+		}
+		//批量提取TaskItems
+		taskItems, err := txM.TaskClass.GetTaskClassItemsByIDs(ctx, normalItemIDs)
+		if err != nil {
+			return err
+		}
+		if len(taskItems) != len(normalItemIDs) {
+			log.Printf("警告：批量提取任务块时，返回的任务块数量与请求中的任务块ID数量不匹配，可能存在数据问题。请求ID数量：%d，返回任务块数量：%d", len(normalItemIDs), len(taskItems))
+			return respond.InternalError(errors.New("返回的任务块数量与请求中的任务块ID数量不匹配，可能存在数据问题"))
+		}
+		//将toNormal按照TaskItemID升序排序，将taskItems也按照ID升序排序，保证一一对应关系（上面已经检查过重复）
+		//如果请求中的任务块ID有重复，这里就无法保证一一对应关系了，后续可以考虑在请求层面加一个校验，拒绝包含重复任务块ID的请求
+		sort.SliceStable(toNormal, func(i, j int) bool {
+			return toNormal[i].TaskItemID < toNormal[j].TaskItemID
+		})
+		sort.SliceStable(taskItems, func(i, j int) bool {
+			return taskItems[i].ID < taskItems[j].ID
+		})
+		//开始构建event和schedules
+		finalSchedules := make([]model.Schedule, 0)           //最终要插入数据库的Schedule切片
+		finalScheduleEvents := make([]model.ScheduleEvent, 0) //最终要插入数据库的ScheduleEvent切片
+		pos := make([]int, 0)                                 //记录每个任务块对应的Schedule在finalSchedules中的位置，方便后续批量插入数据库后回填EventID
+		for i := 0; i < len(toNormal); i++ {
+			item := toNormal[i]
+			taskItem := taskItems[i]
+			if item.StartSection < 1 || item.EndSection > 12 || item.StartSection > item.EndSection {
+				return respond.InvalidSectionRange
+			}
+			schedules, scheduleEvent, err := conv.UserInsertTaskItemRequestToModel(&model.UserInsertTaskClassItemToScheduleRequest{
+				Week:               item.Week,
+				DayOfWeek:          item.DayOfWeek,
+				StartSection:       item.StartSection,
+				EndSection:         item.EndSection,
+				EmbedCourseEventID: 0, //不嵌入课程
+			}, &taskItem, nil, userID, item.StartSection, item.EndSection)
+			if err != nil {
+				return err
+			}
+			finalScheduleEvents = append(finalScheduleEvents, *scheduleEvent)
+			for range schedules {
+				pos = append(pos, len(finalScheduleEvents)-1)
+			}
+			finalSchedules = append(finalSchedules, schedules...)
+		}
+		//最后批量插入数据库
+		//先插入ScheduleEvent表，获取生成的EventID，再批量插入Schedule表，最后批量更新TaskClassItem的embedded_time字段
+		ids, err := txM.Schedule.InsertScheduleEvents(ctx, finalScheduleEvents)
+		if err != nil {
+			return err
+		}
+		// 将生成的 ScheduleEvent ID 赋值给对应的 Schedule 的 EventID 字段
+		for i := range finalSchedules {
+			finalSchedules[i].EventID = ids[pos[i]]
+		}
+		if _, err = txM.Schedule.AddSchedules(finalSchedules); err != nil {
+			return err
+		}
+		//批量更新任务块的embedded_time字段
+		targetTimes = make([]*model.TargetTime, 0, len(toEmbed))
+		for _, item := range toNormal {
+			targetTimes = append(targetTimes, &model.TargetTime{
+				DayOfWeek:   item.DayOfWeek,
+				Week:        item.Week,
+				SectionFrom: item.StartSection,
+				SectionTo:   item.EndSection,
+			})
+		}
+		//提取出所有需要更新的任务块ID
+		itemIDs = make([]int, 0, len(toNormal))
+		for _, item := range toNormal {
+			itemIDs = append(itemIDs, item.TaskItemID)
+		}
+		err = txM.TaskClass.BatchUpdateTaskClassItemEmbeddedTime(ctx, itemIDs, targetTimes)
+		if err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
 	return nil

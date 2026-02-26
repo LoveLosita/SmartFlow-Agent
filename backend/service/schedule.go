@@ -163,11 +163,14 @@ func (ss *ScheduleService) DeleteScheduleEvent(ctx context.Context, requests []m
 					//直接构造Schedule模型
 					sections := make([]int, 0, taskClassItem.EmbeddedTime.SectionTo-taskClassItem.EmbeddedTime.SectionFrom+1)
 					// 这里的 req 主要是为了传递 Week 和 DayOfWeek，其他字段不需要了
-					schedules, scheduleEvent := conv.UserInsertTaskItemRequestToModel(
+					schedules, scheduleEvent, err := conv.UserInsertTaskItemRequestToModel(
 						&model.UserInsertTaskClassItemToScheduleRequest{
 							Week:      taskClassItem.EmbeddedTime.Week,
 							DayOfWeek: taskClassItem.EmbeddedTime.DayOfWeek},
 						taskClassItem, nil, userID, taskClassItem.EmbeddedTime.SectionFrom, taskClassItem.EmbeddedTime.SectionTo)
+					if err != nil {
+						return err
+					}
 					//将节次区间转换为节次切片，方便后续检查冲突
 					for section := taskClassItem.EmbeddedTime.SectionFrom; section <= taskClassItem.EmbeddedTime.SectionTo; section++ {
 						sections = append(sections, section)

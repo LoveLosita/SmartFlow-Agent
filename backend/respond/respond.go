@@ -304,4 +304,13 @@ var ( //请求相关的响应
 		Status: "40047",
 		Info:   "time not enough for auto scheduling",
 	}
+	TaskClassItemNotBelongToTaskClass = Response{ //任务类项目不属于任务类
+		Status: "40048",
+		Info:   "task class item does not belong to task class",
+	}
+
+	TaskClassItemTryingToInsertOutOfTimeRange = Response{ //任务类项目试图插入超出时间范围
+		Status: "40049",
+		Info:   "task class item trying to insert out of time range",
+	}
 )
