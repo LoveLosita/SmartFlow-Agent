@@ -6,4 +6,5 @@ type ApiHandlers struct {
 	CourseHandler    *CourseHandler
 	TaskClassHandler *TaskClassHandler
 	ScheduleHandler  *ScheduleAPI
+	AgentHandler     *AgentHandler
 }

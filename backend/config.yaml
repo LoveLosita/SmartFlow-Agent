@@ -37,3 +37,7 @@ time:
     semesterStartDate: "2026-03-02" #学期开始日期，一定要设定为周一，以便于计算周数
     semesterEndDate: "2026-07-19" #学期结束日期，一定要设定为周日，确保最后一周完整
 
+agent:
+  workerModel: "doubao-seed-1-6-lite-251015" # 智能体使用的Worker模型，需根据实际情况调整
+  strategistModel: "deepseek-v3-2-251201" # 策略师使用的Worker模型，需根据实际情况调整
+  baseURL: "https://ark.cn-beijing.volces.com/api/v3" # Worker服务的基础URL，需根据实际情况调整

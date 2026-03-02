@@ -38,7 +38,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, limiter *pk
 		apiGroup.GET("/health", func(c *gin.Context) {
 			c.JSON(200, gin.H{
 				"status":  "ok",
-				"version": "0.2.0.dev.260210",
+				"version": "0.4.0.dev",
 			})
 		})
 
@@ -83,6 +83,11 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, limiter *pk
 			scheduleGroup.GET("/current", handlers.ScheduleHandler.GetUserOngoingSchedule)
 			scheduleGroup.DELETE("/undo-task-item", middleware.IdempotencyMiddleware(cache), handlers.ScheduleHandler.UserRevocateTaskItemFromSchedule)
 			scheduleGroup.GET("/smart-planning", handlers.ScheduleHandler.SmartPlanning)
+		}
+		agentGroup := apiGroup.Group("/agent")
+		{
+			agentGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
+			agentGroup.POST("/chat", handlers.AgentHandler.ChatAgent)
 		}
 	}
 	// 初始化Gin引擎

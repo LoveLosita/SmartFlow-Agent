@@ -12,8 +12,7 @@
 # 3. 配置文件与敏感信息 (Security & Configs)
 # 绝对不要提交包含数据库密码和 Kafka 地址的配置文件
 .env
-configs/*.yaml
-!configs/config.example.yaml # 提交一个示例文件，告诉别人该怎么配
+config.yaml
 
 # 4. 临时文件与日志 (Logs & Temp)
 *.log

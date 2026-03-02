@@ -16,7 +16,7 @@ type TaskClassHandler struct {
 	svc *service.TaskClassService
 }
 
-// NewTaskClassHandler：组装 Handler 的“工厂”
+// NewTaskClassHandler 组装 Handler 的“工厂”
 func NewTaskClassHandler(svc *service.TaskClassService) *TaskClassHandler {
 	return &TaskClassHandler{
 		svc: svc, // 把传进来的 Service 揣进口袋里
