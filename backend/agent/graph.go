@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"strings"
 
 	"github.com/cloudwego/eino-ext/components/model/ark"
 	"github.com/cloudwego/eino/schema"
@@ -42,35 +43,44 @@ func ToOpenAIStream(chunk *schema.Message) (string, error) {
 	return string(jsonBytes), nil
 }
 
-func StreamChat(ctx context.Context, llm *ark.ChatModel, userInput string, outChan chan<- string) error {
+func StreamChat(ctx context.Context, llm *ark.ChatModel, userInput string, chatHistory []*schema.Message, outChan chan<- string) (string, error) {
 	// 1. 组装消息
-	messages := []*schema.Message{
-		schema.SystemMessage("你是一位时间管理大师兼日程安排专家兼个人助理，协助用户高效安排日程，优化时间利用率。"),
-		schema.UserMessage(userInput),
+	messages := make([]*schema.Message, 0)
+	// A. 塞入 System Message (人设)
+	messages = append(messages, schema.SystemMessage(SystemPrompt))
+	// B. 塞入历史记录 (上下文)
+	if len(chatHistory) > 0 {
+		messages = append(messages, chatHistory...)
 	}
-
+	// C. 塞入用户当前的消息 (当前需求)
+	messages = append(messages, schema.UserMessage(userInput))
 	// 2. 调用流式接口
 	reader, err := llm.Stream(ctx, messages)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer reader.Close() // 记得关闭 Reader
 
 	// 3. 循环读取直到结束
+	var fullText strings.Builder
 	for {
 		chunk, err := reader.Recv()
 		if err == io.EOF {
 			break // 读取完成
 		}
 		if err != nil {
-			return err
+			return "", err
 		}
+		if chunk.Content == "" {
+			continue
+		}
+		fullText.WriteString(chunk.Content)
 		// 将内容发送到通道中供前端消费
 		retChuck, err := ToOpenAIStream(chunk)
 		if err != nil {
-			return err
+			return "", err
 		}
 		outChan <- retChuck
 	}
-	return nil
+	return fullText.String(), nil
 }
