@@ -44,7 +44,7 @@ func Start() {
 	rdb := inits.InitRedis()
 	//工具包
 	limiter := pkg.NewRateLimiter(rdb)
-	//初始化agent
+	//初始化eino
 	aiHub, err := inits.InitEino()
 	if err != nil {
 		log.Fatalf("Failed to initialize Eino: %v", err)
@@ -53,6 +53,7 @@ func Start() {
 
 	//dao 层
 	cacheRepo := dao.NewCacheDAO(rdb)
+	agentCacheRepo := dao.NewAgentCache(rdb)
 	_ = db.Use(middleware.NewGormCachePlugin(cacheRepo)) // 注册 GORM 插件
 	userRepo := dao.NewUserDAO(db)
 	taskRepo := dao.NewTaskDAO(db)
@@ -67,7 +68,7 @@ func Start() {
 	courseService := service.NewCourseService(courseRepo, scheduleRepo)
 	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo, manager)
 	scheduleService := service.NewScheduleService(scheduleRepo, userRepo, taskClassRepo, manager, cacheRepo)
-	agentService := service.NewAgentService(aiHub, agentRepo)
+	agentService := service.NewAgentService(aiHub, agentRepo, agentCacheRepo)
 	//api 层
 	userApi := api.NewUserHandler(userService)
 	taskApi := api.NewTaskHandler(taskSv)
