@@ -35,7 +35,7 @@ func (api *AgentHandler) ChatAgent(c *gin.Context) {
 	}
 	userID := c.GetInt("user_id") // 从上下文中获取用户 ID
 	// 3. 调用 Service 层的聊天方法，获取输出通道和错误通道
-	outChan, errChan := api.svc.AgentChat(c.Request.Context(), req.Message, userID, req.ConversationID)
+	outChan, errChan := api.svc.AgentChat(c.Request.Context(), req.Message, req.Thinking, userID, req.ConversationID)
 	// 4. 循环转发消息/错误
 	c.Stream(func(w io.Writer) bool {
 		select {

@@ -22,7 +22,7 @@ func NewAgentService(aiHub *inits.AIHub, repo *dao.AgentDAO) *AgentService {
 	}
 }
 
-func (s *AgentService) AgentChat(ctx context.Context, userMessage string, userID int, chatID string) (<-chan string, <-chan error) {
+func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThinking bool, userID int, chatID string) (<-chan string, <-chan error) {
 	//1. 创建一个输出通道
 	outChan := make(chan string, 5)
 	errChan := make(chan error, 1)
@@ -69,7 +69,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, userID
 	go func() {
 		defer close(outChan) // 确保在函数结束时关闭通道
 		//3. 调用 StreamChat 函数进行流式聊天
-		fullText, err := agent.StreamChat(ctx, s.AIHub.Worker, userMessage, chatHistory, outChan)
+		fullText, err := agent.StreamChat(ctx, s.AIHub.Worker, userMessage, ifThinking, chatHistory, outChan)
 		if err != nil {
 			errChan <- err
 			return

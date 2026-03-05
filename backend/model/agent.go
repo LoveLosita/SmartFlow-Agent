@@ -5,7 +5,8 @@ import "time"
 type UserSendMessageRequest struct {
 	ConversationID string `json:"conversation_id,omitempty"` // 可选，指定对话 ID
 	Message        string `json:"message" binding:"required"`
-	Model          string `json:"model,omitempty"` // 可选，指定使用的模型
+	Model          string `json:"model,omitempty"`    // 可选，指定使用的模型
+	Thinking       bool   `json:"thinking,omitempty"` // 可选，是否开启思考模式
 }
 
 type SSEResponse struct {
