@@ -3,11 +3,13 @@ package api
 import (
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
 	"github.com/LoveLosita/smartflow/backend/service"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type AgentHandler struct {
@@ -33,9 +35,18 @@ func (api *AgentHandler) ChatAgent(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
 		return
 	}
+
+	// 兼容：如果前端没传会话 ID，后端兜底创建一个
+	conversationID := strings.TrimSpace(req.ConversationID)
+	if conversationID == "" {
+		conversationID = uuid.NewString()
+	}
+	// 把最终生效的会话 ID 回传给前端，方便后续继续同一会话
+	c.Writer.Header().Set("X-Conversation-ID", conversationID)
+
 	userID := c.GetInt("user_id") // 从上下文中获取用户 ID
 	// 3. 调用 Service 层的聊天方法，获取输出通道和错误通道
-	outChan, errChan := api.svc.AgentChat(c.Request.Context(), req.Message, req.Thinking, userID, req.ConversationID)
+	outChan, errChan := api.svc.AgentChat(c.Request.Context(), req.Message, req.Thinking, userID, conversationID)
 	// 4. 循环转发消息/错误
 	c.Stream(func(w io.Writer) bool {
 		select {

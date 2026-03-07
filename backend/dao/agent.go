@@ -44,9 +44,17 @@ func (a *AgentDAO) CreateNewChat(userID int, chatID string) (int64, error) {
 
 func (a *AgentDAO) GetUserChatHistories(ctx context.Context, userID, limit int, chatID string) ([]model.ChatHistory, error) {
 	var histories []model.ChatHistory
-	err := a.db.WithContext(ctx).Where("user_id = ? AND chat_id = ?", userID, chatID).Order("created_at desc").Limit(limit).Find(&histories).Error
+	err := a.db.WithContext(ctx).
+		Where("user_id = ? AND chat_id = ?", userID, chatID).
+		Order("created_at desc").
+		Limit(limit).
+		Find(&histories).Error
 	if err != nil {
 		return nil, err
+	}
+	// 保留“最近 N 条”的前提下，反转为时间正序，便于模型消费
+	for i, j := 0, len(histories)-1; i < j; i, j = i+1, j-1 {
+		histories[i], histories[j] = histories[j], histories[i]
 	}
 	return histories, nil
 }

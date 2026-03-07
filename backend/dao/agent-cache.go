@@ -95,7 +95,7 @@ func (m *AgentCache) BackfillHistory(ctx context.Context, sessionID string, mess
 	for i, msg := range messages {
 		data, err := json.Marshal(msg)
 		if err != nil {
-			return fmt.Errorf("marshal failed at index %d: %w", err)
+			return fmt.Errorf("marshal failed at index %d: %w", i, err)
 		}
 		values[i] = data
 	}
