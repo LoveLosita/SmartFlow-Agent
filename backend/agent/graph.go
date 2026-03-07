@@ -13,7 +13,7 @@ import (
 	arkModel "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
 )
 
-// StreamResponse 为 OpenAI/DeepSeek 兼容的流式 chunk 结构
+// StreamResponse 为 OpenAI/DeepSeek 兼容的流式 chunk 结构。
 type StreamResponse struct {
 	ID      string         `json:"id"`
 	Object  string         `json:"object"`
@@ -34,7 +34,7 @@ type StreamDelta struct {
 	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
-// ToOpenAIStream 将单个 Eino chunk 转为 OpenAI 兼容 JSON
+// ToOpenAIStream 将单个 Eino chunk 转为 OpenAI 兼容 JSON。
 func ToOpenAIStream(chunk *schema.Message, requestID, modelName string, created int64, includeRole bool) (string, error) {
 	delta := StreamDelta{}
 	if includeRole {
@@ -67,7 +67,7 @@ func ToOpenAIStream(chunk *schema.Message, requestID, modelName string, created 
 	return string(jsonBytes), nil
 }
 
-// ToOpenAIFinishStream 生成结束 chunk（finish_reason=stop）
+// ToOpenAIFinishStream 生成结束 chunk（finish_reason=stop）。
 func ToOpenAIFinishStream(requestID, modelName string, created int64) (string, error) {
 	stop := "stop"
 	dto := StreamResponse{

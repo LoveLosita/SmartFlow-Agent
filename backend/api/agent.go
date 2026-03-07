@@ -17,7 +17,7 @@ type AgentHandler struct {
 	svc *service.AgentService
 }
 
-// NewAgentHandler 组装 AgentHandler
+// NewAgentHandler 组装 AgentHandler。
 func NewAgentHandler(svc *service.AgentService) *AgentHandler {
 	return &AgentHandler{
 		svc: svc,
