@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -16,50 +17,65 @@ type AgentHandler struct {
 	svc *service.AgentService
 }
 
-// NewAgentHandler 组装 Handler 的“工厂”
+// NewAgentHandler 组装 AgentHandler
 func NewAgentHandler(svc *service.AgentService) *AgentHandler {
 	return &AgentHandler{
-		svc: svc, // 把传进来的 Service 揣进口袋里
+		svc: svc,
 	}
 }
 
+func writeSSEData(w io.Writer, payload string) error {
+	_, err := io.WriteString(w, "data: "+payload+"\n\n")
+	return err
+}
+
 func (api *AgentHandler) ChatAgent(c *gin.Context) {
-	// 1. 设置请求头
+	// 1) 设置 SSE 响应头
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("Transfer-Encoding", "chunked")
-	// 2. 从请求中获取用户输入
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+
+	// 2) 解析请求体
 	var req model.UserSendMessageRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
 		return
 	}
 
-	// 兼容：如果前端没传会话 ID，后端兜底创建一个
+	// 3) 规范化会话 ID
 	conversationID := strings.TrimSpace(req.ConversationID)
 	if conversationID == "" {
 		conversationID = uuid.NewString()
 	}
-	// 把最终生效的会话 ID 回传给前端，方便后续继续同一会话
 	c.Writer.Header().Set("X-Conversation-ID", conversationID)
 
-	userID := c.GetInt("user_id") // 从上下文中获取用户 ID
-	// 3. 调用 Service 层的聊天方法，获取输出通道和错误通道
-	outChan, errChan := api.svc.AgentChat(c.Request.Context(), req.Message, req.Thinking, userID, conversationID)
-	// 4. 循环转发消息/错误
+	userID := c.GetInt("user_id")
+	outChan, errChan := api.svc.AgentChat(c.Request.Context(), req.Message, req.Thinking, req.Model, userID, conversationID)
+
+	// 4) 转发 SSE 流
 	c.Stream(func(w io.Writer) bool {
 		select {
 		case err, ok := <-errChan:
 			if ok && err != nil {
-				respond.DealWithError(c, err)
+				errPayload, _ := json.Marshal(map[string]any{
+					"error": map[string]any{
+						"message": err.Error(),
+						"type":    "server_error",
+					},
+				})
+				_ = writeSSEData(w, string(errPayload))
+				_ = writeSSEData(w, "[DONE]")
 			}
 			return false
 		case msg, ok := <-outChan:
 			if !ok {
 				return false
 			}
-			c.SSEvent("message", msg) // 发送 SSE 格式消息
+			if err := writeSSEData(w, msg); err != nil {
+				return false
+			}
 			return true
 		case <-c.Request.Context().Done():
 			return false
