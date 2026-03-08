@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"log"
 
 	"github.com/LoveLosita/smartflow/backend/api"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/inits"
+	kafkabus "github.com/LoveLosita/smartflow/backend/kafka"
 	"github.com/LoveLosita/smartflow/backend/middleware"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/LoveLosita/smartflow/backend/routers"
@@ -42,16 +44,15 @@ func Start() {
 	}
 
 	rdb := inits.InitRedis()
-	//工具包
+	// 工具包
 	limiter := pkg.NewRateLimiter(rdb)
-	//初始化eino
+	// 初始化 eino
 	aiHub, err := inits.InitEino()
 	if err != nil {
 		log.Fatalf("Failed to initialize Eino: %v", err)
 	}
-	//中间件
-
-	//dao 层
+	// 中间件
+	// dao 层
 	cacheRepo := dao.NewCacheDAO(rdb)
 	agentCacheRepo := dao.NewAgentCache(rdb)
 	_ = db.Use(middleware.NewGormCachePlugin(cacheRepo)) // 注册 GORM 插件
@@ -62,14 +63,29 @@ func Start() {
 	scheduleRepo := dao.NewScheduleDAO(db)
 	manager := dao.NewManager(db)
 	agentRepo := dao.NewAgentDAO(db)
-	//service 层
+	outboxRepo := dao.NewOutboxDAO(db)
+	//
+	kafkaCfg := kafkabus.LoadConfig()
+	asyncPipeline, err := service.NewAgentAsyncPipeline(outboxRepo, kafkaCfg)
+	if err != nil {
+		log.Fatalf("Failed to initialize Kafka async pipeline: %v", err)
+	}
+	if asyncPipeline != nil {
+		asyncPipeline.Start(context.Background())
+		defer asyncPipeline.Close()
+		log.Println("Kafka async pipeline started")
+	} else {
+		log.Println("Kafka async pipeline is disabled")
+	}
+
+	// service 层
 	userService := service.NewUserService(userRepo, cacheRepo)
 	taskSv := service.NewTaskService(taskRepo, cacheRepo)
 	courseService := service.NewCourseService(courseRepo, scheduleRepo)
 	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo, manager)
 	scheduleService := service.NewScheduleService(scheduleRepo, userRepo, taskClassRepo, manager, cacheRepo)
-	agentService := service.NewAgentService(aiHub, agentRepo, agentCacheRepo)
-	//api 层
+	agentService := service.NewAgentService(aiHub, agentRepo, agentCacheRepo, asyncPipeline)
+	// api 层
 	userApi := api.NewUserHandler(userService)
 	taskApi := api.NewTaskHandler(taskSv)
 	courseApi := api.NewCourseHandler(courseService)

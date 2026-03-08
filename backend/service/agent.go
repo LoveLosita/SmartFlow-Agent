@@ -9,6 +9,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/inits"
+	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/cloudwego/eino-ext/components/model/ark"
 	"github.com/cloudwego/eino/schema"
@@ -16,16 +17,18 @@ import (
 )
 
 type AgentService struct {
-	AIHub      *inits.AIHub
-	repo       *dao.AgentDAO
-	agentCache *dao.AgentCache
+	AIHub         *inits.AIHub
+	repo          *dao.AgentDAO
+	agentCache    *dao.AgentCache
+	asyncPipeline *AgentAsyncPipeline
 }
 
-func NewAgentService(aiHub *inits.AIHub, repo *dao.AgentDAO, agentRedis *dao.AgentCache) *AgentService {
+func NewAgentService(aiHub *inits.AIHub, repo *dao.AgentDAO, agentRedis *dao.AgentCache, asyncPipeline *AgentAsyncPipeline) *AgentService {
 	return &AgentService{
-		AIHub:      aiHub,
-		repo:       repo,
-		agentCache: agentRedis,
+		AIHub:         aiHub,
+		repo:          repo,
+		agentCache:    agentRedis,
+		asyncPipeline: asyncPipeline,
 	}
 }
 
@@ -38,11 +41,26 @@ func normalizeConversationID(chatID string) string {
 }
 
 func (s *AgentService) pickChatModel(requestModel string) (*ark.ChatModel, string) {
-	model := strings.TrimSpace(requestModel)
-	if strings.EqualFold(model, "strategist") {
+	modelName := strings.TrimSpace(requestModel)
+	if strings.EqualFold(modelName, "strategist") {
 		return s.AIHub.Strategist, "strategist"
 	}
 	return s.AIHub.Worker, "worker"
+}
+
+func (s *AgentService) saveChatHistoryReliable(ctx context.Context, payload model.ChatHistoryPersistPayload) error {
+	if s.asyncPipeline == nil {
+		return s.repo.SaveChatHistory(ctx, payload.UserID, payload.ConversationID, payload.Role, payload.Message)
+	}
+	return s.asyncPipeline.EnqueueChatHistoryPersist(ctx, payload)
+}
+
+func pushErrNonBlocking(errChan chan error, err error) {
+	select {
+	case errChan <- err:
+	default:
+		log.Printf("error channel is full, drop error: %v", err)
+	}
 }
 
 func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThinking bool, modelName string, userID int, chatID string) (<-chan string, <-chan error) {
@@ -50,7 +68,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 	outChan := make(chan string, 5)
 	errChan := make(chan error, 1)
 
-	// 2) 规范化会话并选择模型
+	// 2) 规范会话并选择模型
 	chatID = normalizeConversationID(chatID)
 	selectedModel, resolvedModelName := s.pickChatModel(modelName)
 
@@ -63,9 +81,9 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 		return outChan, errChan
 	}
 	if !result {
-		innerResult, err := s.repo.IfChatExists(ctx, userID, chatID)
-		if err != nil {
-			errChan <- err
+		innerResult, ifErr := s.repo.IfChatExists(ctx, userID, chatID)
+		if ifErr != nil {
+			errChan <- ifErr
 			close(outChan)
 			close(errChan)
 			return outChan, errChan
@@ -95,9 +113,9 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 	cacheMiss := false
 	if chatHistory == nil {
 		cacheMiss = true
-		histories, err := s.repo.GetUserChatHistories(ctx, userID, pkg.HistoryFetchLimitByModel(resolvedModelName), chatID)
-		if err != nil {
-			errChan <- err
+		histories, hisErr := s.repo.GetUserChatHistories(ctx, userID, pkg.HistoryFetchLimitByModel(resolvedModelName), chatID)
+		if hisErr != nil {
+			errChan <- hisErr
 			close(outChan)
 			close(errChan)
 			return outChan, errChan
@@ -112,10 +130,10 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 
 	// 6) 根据最新裁剪结果动态调整 Redis 会话窗口
 	targetWindow := pkg.CalcSessionWindowSize(len(chatHistory))
-	if err := s.agentCache.SetSessionWindowSize(ctx, chatID, targetWindow); err != nil {
+	if err = s.agentCache.SetSessionWindowSize(ctx, chatID, targetWindow); err != nil {
 		log.Printf("failed to set history window for %s: %v", chatID, err)
 	}
-	if err := s.agentCache.EnforceHistoryWindow(ctx, chatID); err != nil {
+	if err = s.agentCache.EnforceHistoryWindow(ctx, chatID); err != nil {
 		log.Printf("failed to enforce history window for %s: %v", chatID, err)
 	}
 
@@ -126,7 +144,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 
 	// 缓存未命中时，把“裁剪后的历史”回填进缓存
 	if cacheMiss {
-		if err := s.agentCache.BackfillHistory(ctx, chatID, chatHistory); err != nil {
+		if err = s.agentCache.BackfillHistory(ctx, chatID, chatHistory); err != nil {
 			errChan <- err
 			close(outChan)
 			close(errChan)
@@ -134,37 +152,44 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 		}
 	}
 
-	// 7) 异步落用户消息（先写缓存再写库）
-	go func() {
-		bg := context.Background()
-		_ = s.agentCache.PushMessage(bg, chatID, &schema.Message{
-			Role:    schema.User,
-			Content: userMessage,
-		})
-		_ = s.repo.SaveChatHistory(bg, userID, chatID, "user", userMessage)
-	}()
+	// 7) 先同步写 Redis，再把持久化请求交给 outbox + Kafka
+	if err = s.agentCache.PushMessage(ctx, chatID, &schema.Message{Role: schema.User, Content: userMessage}); err != nil {
+		log.Printf("failed to push user message into redis history: %v", err)
+	}
+	if err = s.saveChatHistoryReliable(ctx, model.ChatHistoryPersistPayload{
+		UserID:         userID,
+		ConversationID: chatID,
+		Role:           "user",
+		Message:        userMessage,
+	}); err != nil {
+		errChan <- err
+		close(outChan)
+		close(errChan)
+		return outChan, errChan
+	}
 
 	// 8) 启动流式聊天
 	go func() {
 		defer close(outChan)
 
-		fullText, err := agent.StreamChat(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, chatHistory, outChan)
-		if err != nil {
-			errChan <- err
+		fullText, streamErr := agent.StreamChat(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, chatHistory, outChan)
+		if streamErr != nil {
+			pushErrNonBlocking(errChan, streamErr)
 			return
 		}
 
-		// 9) 异步落助手回复
-		go func() {
-			bg := context.Background()
-			_ = s.agentCache.PushMessage(bg, chatID, &schema.Message{
-				Role:    schema.Assistant,
-				Content: fullText,
-			})
-			if saveErr := s.repo.SaveChatHistory(bg, userID, chatID, "assistant", fullText); saveErr != nil {
-				log.Printf("failed to save chat history to database: %v", saveErr)
-			}
-		}()
+		// 9) 回答完成后，同步写 Redis，并把数据库落库交给 outbox + Kafka
+		if cacheErr := s.agentCache.PushMessage(context.Background(), chatID, &schema.Message{Role: schema.Assistant, Content: fullText}); cacheErr != nil {
+			log.Printf("failed to push assistant message into redis history: %v", cacheErr)
+		}
+		if saveErr := s.saveChatHistoryReliable(context.Background(), model.ChatHistoryPersistPayload{
+			UserID:         userID,
+			ConversationID: chatID,
+			Role:           "assistant",
+			Message:        fullText,
+		}); saveErr != nil {
+			pushErrNonBlocking(errChan, saveErr)
+		}
 	}()
 
 	return outChan, errChan

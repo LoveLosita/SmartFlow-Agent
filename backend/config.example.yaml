@@ -33,6 +33,16 @@ redis:
   password: ""
   db: 0
 
+kafka:
+  enabled: true
+  brokers:
+    - "localhost:9092"
+  topic: "smartflow.agent.outbox"
+  groupID: "smartflow-agent-outbox-consumer"
+  retryScanInterval: 1s
+  retryBatchSize: 100
+  maxRetry: 20
+
 time:
     zone: "Asia/Shanghai"
     semesterStartDate: "2026-03-02" #学期开始日期，一定要设定为周一，以便于计算周数

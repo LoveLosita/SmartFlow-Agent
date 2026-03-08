@@ -54,7 +54,7 @@ cp .env.example .env
 - `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE`
 - `REDIS_ADDR` / `REDIS_PASSWORD` / `REDIS_DB`
 - `MYSQL_ALLOWED_DATABASES`：逗号分隔
-- `MYSQL_ALLOWED_TABLES`：逗号分隔，支持 `db.table` 或 `table`
+- `MYSQL_ALLOWED_TABLES`：逗号分隔，支持 `db.table` 或 `table`；留空表示允许所有表
 - `MCP_ENFORCE_WHITELIST`：`true` 时无明确表引用会拒绝执行
 - `MCP_TOOL_TIMEOUT_MS`：单次工具调用超时
 - `MCP_RATE_LIMIT_RPS` + `MCP_RATE_LIMIT_BURST`：基础令牌桶限流
@@ -165,7 +165,7 @@ cp .env.example .env
         "MYSQL_PASSWORD": "replace_me",
         "MYSQL_DATABASE": "smartflow",
         "MYSQL_ALLOWED_DATABASES": "smartflow",
-        "MYSQL_ALLOWED_TABLES": "smartflow.users,smartflow.tasks",
+        "MYSQL_ALLOWED_TABLES": "",
         "REDIS_ADDR": "127.0.0.1:6379",
         "REDIS_DB": "0",
         "MCP_TOOL_TIMEOUT_MS": "5000",
