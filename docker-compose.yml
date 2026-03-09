@@ -1,8 +1,8 @@
 services:
   mysql:
     image: mysql:8.0
-    container_name: SmartFlow-mysql
-    restart: always
+    container_name: smartflow-mysql
+    restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: root_password_123
       MYSQL_DATABASE: smartflow
@@ -10,24 +10,34 @@ services:
       MYSQL_PASSWORD: smartflow_password_456
     ports:
       - "3306:3306"
-    volumes:
-      - ./docker/mysql/data:/var/lib/mysql
     command: --default-authentication-plugin=mysql_native_password
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -proot_password_123"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   redis:
-    image: redis:latest
-    container_name: redflow-redis
-    restart: always
-    command: redis-server --requirepass redis_password_789
+    image: redis:7
+    container_name: smartflow-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass redis_password_789
     ports:
       - "6379:6379"
     volumes:
-      - ./docker/redis/data:/data
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis_password_789", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   kafka:
     image: apache/kafka:3.7.2
-    container_name: SmartFlow-kafka
-    restart: always
+    container_name: smartflow-kafka
+    restart: unless-stopped
     ports:
       - "9092:9092"
     environment:
@@ -40,14 +50,37 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_NUM_PARTITIONS: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_LOG_DIRS: /var/lib/kafka/data
     volumes:
       - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  kafka-init:
+    image: apache/kafka:3.7.2
+    container_name: smartflow-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      /opt/kafka/bin/kafka-topics.sh
+      --bootstrap-server kafka:9094
+      --create
+      --if-not-exists
+      --topic smartflow.agent.outbox
+      --partitions 3
+      --replication-factor 1
+    restart: "no"
 
 volumes:
   mysql_data:

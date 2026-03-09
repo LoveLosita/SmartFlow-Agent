@@ -48,6 +48,9 @@ func (s *AgentService) pickChatModel(requestModel string) (*ark.ChatModel, strin
 	return s.AIHub.Worker, "worker"
 }
 
+// saveChatHistoryReliable 是聊天记录持久化的统一入口：
+// 1) 启用 outbox + Kafka 时，走异步可靠链路；
+// 2) 未启用时，退化为同步写数据库。
 func (s *AgentService) saveChatHistoryReliable(ctx context.Context, payload model.ChatHistoryPersistPayload) error {
 	if s.asyncPipeline == nil {
 		return s.repo.SaveChatHistory(ctx, payload.UserID, payload.ConversationID, payload.Role, payload.Message)
@@ -64,15 +67,15 @@ func pushErrNonBlocking(errChan chan error, err error) {
 }
 
 func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThinking bool, modelName string, userID int, chatID string) (<-chan string, <-chan error) {
-	// 1) 准备输出通道
+	// 1) 准备输出通道。
 	outChan := make(chan string, 5)
 	errChan := make(chan error, 1)
 
-	// 2) 规范会话并选择模型
+	// 2) 规范会话 ID 并选择模型。
 	chatID = normalizeConversationID(chatID)
 	selectedModel, resolvedModelName := s.pickChatModel(modelName)
 
-	// 3) 确保会话存在
+	// 3) 确保会话存在：先查缓存，再回源数据库，必要时创建新会话。
 	result, err := s.agentCache.GetConversationStatus(ctx, chatID)
 	if err != nil {
 		errChan <- err
@@ -101,7 +104,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 		}
 	}
 
-	// 4) 组装历史上下文（先读缓存，缓存未命中再读数据库）
+	// 4) 组装历史上下文：先读缓存，缓存未命中再读数据库。
 	chatHistory, err := s.agentCache.GetHistory(ctx, chatID)
 	if err != nil {
 		errChan <- err
@@ -123,12 +126,12 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 		chatHistory = conv.ToEinoMessages(histories)
 	}
 
-	// 5) 按 token 预算裁剪历史：从最旧消息开始持续弹出，直到满足预算
+	// 5) 基于 token 预算裁剪历史，避免请求超长。
 	historyBudget := pkg.HistoryTokenBudgetByModel(resolvedModelName, agent.SystemPrompt, userMessage)
 	trimmedHistory, totalHistoryTokens, keptHistoryTokens, droppedCount := pkg.TrimHistoryByTokenBudget(chatHistory, historyBudget)
 	chatHistory = trimmedHistory
 
-	// 6) 根据最新裁剪结果动态调整 Redis 会话窗口
+	// 6) 根据裁剪结果调整 Redis 会话窗口，控制缓存体积。
 	targetWindow := pkg.CalcSessionWindowSize(len(chatHistory))
 	if err = s.agentCache.SetSessionWindowSize(ctx, chatID, targetWindow); err != nil {
 		log.Printf("failed to set history window for %s: %v", chatID, err)
@@ -142,7 +145,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 			chatID, totalHistoryTokens, keptHistoryTokens, droppedCount, historyBudget, targetWindow)
 	}
 
-	// 缓存未命中时，把“裁剪后的历史”回填进缓存
+	// 缓存未命中时，把“裁剪后的历史”回填 Redis。
 	if cacheMiss {
 		if err = s.agentCache.BackfillHistory(ctx, chatID, chatHistory); err != nil {
 			errChan <- err
@@ -152,7 +155,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 		}
 	}
 
-	// 7) 先同步写 Redis，再把持久化请求交给 outbox + Kafka
+	// 7) 先同步写 Redis，再把数据库持久化交给 outbox 可靠链路。
 	if err = s.agentCache.PushMessage(ctx, chatID, &schema.Message{Role: schema.User, Content: userMessage}); err != nil {
 		log.Printf("failed to push user message into redis history: %v", err)
 	}
@@ -168,7 +171,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 		return outChan, errChan
 	}
 
-	// 8) 启动流式聊天
+	// 8) 启动流式对话。
 	go func() {
 		defer close(outChan)
 
@@ -178,7 +181,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 			return
 		}
 
-		// 9) 回答完成后，同步写 Redis，并把数据库落库交给 outbox + Kafka
+		// 9) 助手回答完成后，重复同样流程：先写 Redis，再异步持久化。
 		if cacheErr := s.agentCache.PushMessage(context.Background(), chatID, &schema.Message{Role: schema.Assistant, Content: fullText}); cacheErr != nil {
 			log.Printf("failed to push assistant message into redis history: %v", cacheErr)
 		}

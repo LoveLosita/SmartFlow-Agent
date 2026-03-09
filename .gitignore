@@ -22,3 +22,4 @@ backend/config.yaml
 .idea/
 .vscode/
 .DS_Store # Mac 用户必加
+.gocache/

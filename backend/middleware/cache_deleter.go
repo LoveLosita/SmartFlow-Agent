@@ -62,7 +62,7 @@ func (p *GormCachePlugin) dispatchCacheLogic(modelObj interface{}, db *gorm.DB) 
 		p.invalidTaskClassCache(*m.UserID)
 	case model.Task:
 		p.invalidTaskCache(m.UserID)
-	case model.AgentOutboxMessage, model.ChatHistory, model.AgentChat:
+	case model.AgentOutboxMessage, model.ChatHistory, model.AgentChat, model.User:
 		// 这些模型目前没有定义缓存逻辑，先不处理
 	default:
 		// 只有真正没定义的模型才会到这里

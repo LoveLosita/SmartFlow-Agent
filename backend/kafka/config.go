@@ -12,16 +12,21 @@ const (
 	DefaultGroup = "smartflow-agent-outbox-consumer"
 )
 
+// Config 描述 outbox 异步链路所需的 Kafka 配置。
+// 说明：这些参数同时影响“发送端（producer）”与“消费端（consumer）”。
 type Config struct {
-	Enabled           bool
-	Brokers           []string
-	Topic             string
-	GroupID           string
+	Enabled bool
+	Brokers []string
+	Topic   string
+	GroupID string
+	// RetryScanInterval/RetryBatchSize/MaxRetry 作用于 outbox 扫描与失败重试。
 	RetryScanInterval time.Duration
 	RetryBatchSize    int
 	MaxRetry          int
 }
 
+// LoadConfig 从配置中心读取 Kafka 配置，并做兜底默认值。
+// 兼容性：优先读取 kafka.brokers（数组），为空时降级读取 kafka.broker（单值）。
 func LoadConfig() Config {
 	brokers := viper.GetStringSlice("kafka.brokers")
 	if len(brokers) == 0 {
