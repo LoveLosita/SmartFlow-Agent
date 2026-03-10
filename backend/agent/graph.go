@@ -13,7 +13,7 @@ import (
 	arkModel "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
 )
 
-// StreamResponse 为 OpenAI/DeepSeek 兼容的流式 chunk 结构。
+// StreamResponse 是 OpenAI/DeepSeek 兼容的流式 chunk 结构。
 type StreamResponse struct {
 	ID      string         `json:"id"`
 	Object  string         `json:"object"`
@@ -88,8 +88,24 @@ func ToOpenAIFinishStream(requestID, modelName string, created int64) (string, e
 	return string(jsonBytes), nil
 }
 
-func StreamChat(ctx context.Context, llm *ark.ChatModel, modelName string, userInput string, ifThinking bool, chatHistory []*schema.Message, outChan chan<- string) (string, error) {
-	// 1) 组装提示消息
+// StreamChat 负责模型流式输出，并在关键节点打点：
+// 1) 流连接建立（llm.Stream 返回）
+// 2) 首包到达（首字延迟）
+// 3) 流式输出结束
+func StreamChat(
+	ctx context.Context,
+	llm *ark.ChatModel,
+	modelName string,
+	userInput string,
+	ifThinking bool,
+	chatHistory []*schema.Message,
+	outChan chan<- string,
+	traceID string,
+	chatID string,
+	requestStart time.Time,
+) (string, error) {
+	/*callStart := time.Now()*/
+
 	messages := make([]*schema.Message, 0)
 	messages = append(messages, schema.SystemMessage(SystemPrompt))
 	if len(chatHistory) > 0 {
@@ -97,13 +113,14 @@ func StreamChat(ctx context.Context, llm *ark.ChatModel, modelName string, userI
 	}
 	messages = append(messages, schema.UserMessage(userInput))
 
-	// 2) 发起流式请求
 	var thinking *ark.Thinking
 	if ifThinking {
 		thinking = &arkModel.Thinking{Type: arkModel.ThinkingTypeEnabled}
 	} else {
 		thinking = &arkModel.Thinking{Type: arkModel.ThinkingTypeDisabled}
 	}
+
+	/*connectStart := time.Now()*/
 	reader, err := llm.Stream(ctx, messages, ark.WithThinking(thinking))
 	if err != nil {
 		return "", err
@@ -116,8 +133,18 @@ func StreamChat(ctx context.Context, llm *ark.ChatModel, modelName string, userI
 	requestID := "chatcmpl-" + uuid.NewString()
 	created := time.Now().Unix()
 	firstChunk := true
+	chunkCount := 0
+	/*streamRecvStart := time.Now()
 
-	// 3) 持续转发 chunk
+	log.Printf("打点|流连接建立|trace_id=%s|chat_id=%s|request_id=%s|本步耗时_ms=%d|请求累计_ms=%d|history_len=%d",
+		traceID,
+		chatID,
+		requestID,
+		time.Since(connectStart).Milliseconds(),
+		time.Since(requestStart).Milliseconds(),
+		len(chatHistory),
+	)*/
+
 	var fullText strings.Builder
 	for {
 		chunk, err := reader.Recv()
@@ -136,17 +163,36 @@ func StreamChat(ctx context.Context, llm *ark.ChatModel, modelName string, userI
 		}
 		if payload != "" {
 			outChan <- payload
-			firstChunk = false
+			chunkCount++
+			/*if firstChunk {
+				log.Printf("打点|首包到达|trace_id=%s|chat_id=%s|request_id=%s|本步耗时_ms=%d|请求累计_ms=%d",
+					traceID,
+					chatID,
+					requestID,
+					time.Since(streamRecvStart).Milliseconds(),
+					time.Since(requestStart).Milliseconds(),
+				)
+				firstChunk = false
+			}*/
 		}
 	}
 
-	// 4) 发送结束 chunk 和 [DONE]
 	finishChunk, err := ToOpenAIFinishStream(requestID, modelName, created)
 	if err != nil {
 		return "", err
 	}
 	outChan <- finishChunk
 	outChan <- "[DONE]"
+
+	/*log.Printf("打点|流式输出结束|trace_id=%s|chat_id=%s|request_id=%s|chunks=%d|reply_chars=%d|本步耗时_ms=%d|请求累计_ms=%d",
+		traceID,
+		chatID,
+		requestID,
+		chunkCount,
+		len(fullText.String()),
+		time.Since(callStart).Milliseconds(),
+		time.Since(requestStart).Milliseconds(),
+	)*/
 
 	return fullText.String(), nil
 }
