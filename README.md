@@ -1,4 +1,4 @@
-# 1 项目概览
+﻿# 1 项目概览
 
 ## 1.1 总体介绍
 
@@ -352,7 +352,51 @@ $$Gap = \frac{TotalAvailableSlots - (TaskCount \times 2)}{TaskCount + 1}$$
 
 ## 5.4 Agent范式实现细节
 
+### 1) 命中“添加日程/随口记”后的业务流转
 
+```mermaid
+flowchart TD
+    A[用户消息进入 /agent/chat] --> B[规范会话ID + 选模型]
+    B --> C[确保会话存在\nRedis会话状态检查\n必要时回源DB创建]
+    C --> D[quick_note.request.accepted\n推送reasoning状态块]
+    D --> E[意图识别节点\nquick_note.intent.analyzing]
+    E --> F{是否随口记意图}
+    F -- 否 --> X[回落普通聊天链路]
+    F -- 是 --> G[时间抽取与校验\nquick_note.deadline.validating]
+    G --> H{时间是否有效}
+    H -- 否 --> I[返回纠错文案\n不写库\nquick_note.failed]
+    H -- 是 --> J[优先级评估\nquick_note.priority.evaluating]
+    J --> K[调用写库工具\nquick_note.persisting]
+    K --> L{写入是否成功}
+    L -- 否 --> M[按重试策略处理\n最终失败则返回错误文案]
+    L -- 是 --> N[quick_note.persisted]
+    N --> O[quick_note.reply.polishing\nAI生成贴题轻松跟进句]
+    O --> P[拼接最终正文\n一次性content输出]
+    P --> Q[后置持久化\nuser+assistant写Redis\n并写outbox/DB]
+```
+
+### 2) 总分流图（消息识别后的去向）
+
+```mermaid
+flowchart TD
+    A[用户消息进入 AgentChat] --> B{是否命中任务/提醒关键词}
+
+    B -- 否 --> C[尝试随口记graph（静默）]
+    C --> D{是随口记意图?}
+    D -- 是 --> E[执行随口记写库链路\n返回一次性正文]
+    D -- 否 --> F[普通聊天链路\nStreamChat token流式输出]
+
+    B -- 是 --> G[开启reasoning状态推送]
+    G --> H[执行随口记graph（带阶段状态）]
+    H --> I{是随口记意图?}
+    I -- 是 --> J[执行随口记写库链路\n返回一次性正文]
+    I -- 否 --> K[推送fallback状态\n回落普通聊天StreamChat]
+
+    E --> Z[后置持久化\nRedis + outbox/DB]
+    F --> Z
+    J --> Z
+    K --> Z
+```
 
 # 6 前端实现
 
@@ -375,4 +419,5 @@ $$Gap = \frac{TotalAvailableSlots - (TaskCount \times 2)}{TaskCount + 1}$$
 
 
 # 8 快速开始
+
 
