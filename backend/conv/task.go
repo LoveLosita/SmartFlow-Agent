@@ -37,7 +37,12 @@ func ModelToGetUserTasksResp(tasks []model.Task) []model.GetUserTaskResp {
 		if task.IsCompleted {
 			status = "completed"
 		}
-		deadline := task.DeadlineAt.Format("2006-01-02 15:04:05")
+
+		deadline := ""
+		if task.DeadlineAt != nil {
+			deadline = task.DeadlineAt.Format("2006-01-02 15:04:05")
+		}
+
 		resp = append(resp, model.GetUserTaskResp{
 			ID:            task.ID,
 			UserID:        task.UserID,
