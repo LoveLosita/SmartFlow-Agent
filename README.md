@@ -357,22 +357,22 @@ $$Gap = \frac{TotalAvailableSlots - (TaskCount \times 2)}{TaskCount + 1}$$
 ```mermaid
 flowchart TD
     A[用户消息进入 /agent/chat] --> B[规范会话ID + 选模型]
-    B --> C[确保会话存在\nRedis会话状态检查\n必要时回源DB创建]
-    C --> D[quick_note.request.accepted\n推送reasoning状态块]
-    D --> E[意图识别节点\nquick_note.intent.analyzing]
+    B --> C[确保会话存在<br/>Redis会话状态检查<br/>必要时回源DB创建]
+    C --> D[quick_note.request.accepted<br/>推送reasoning状态块]
+    D --> E[意图识别节点<br/>quick_note.intent.analyzing]
     E --> F{是否随口记意图}
     F -- 否 --> X[回落普通聊天链路]
-    F -- 是 --> G[时间抽取与校验\nquick_note.deadline.validating]
+    F -- 是 --> G[时间抽取与校验<br/>quick_note.deadline.validating]
     G --> H{时间是否有效}
-    H -- 否 --> I[返回纠错文案\n不写库\nquick_note.failed]
-    H -- 是 --> J[优先级评估\nquick_note.priority.evaluating]
-    J --> K[调用写库工具\nquick_note.persisting]
+    H -- 否 --> I[返回纠错文案<br/>不写库<br/>quick_note.failed]
+    H -- 是 --> J[优先级评估<br/>quick_note.priority.evaluating]
+    J --> K[调用写库工具<br/>quick_note.persisting]
     K --> L{写入是否成功}
-    L -- 否 --> M[按重试策略处理\n最终失败则返回错误文案]
+    L -- 否 --> M[按重试策略处理<br/>最终失败则返回错误文案]
     L -- 是 --> N[quick_note.persisted]
-    N --> O[quick_note.reply.polishing\nAI生成贴题轻松跟进句]
-    O --> P[拼接最终正文\n一次性content输出]
-    P --> Q[后置持久化\nuser+assistant写Redis\n并写outbox/DB]
+    N --> O[quick_note.reply.polishing<br/>AI生成贴题轻松跟进句]
+    O --> P[拼接最终正文<br/>一次性content输出]
+    P --> Q[后置持久化<br/>user+assistant写Redis<br/>并写outbox/DB]
 ```
 
 ### 2) 总分流图（消息识别后的去向）
@@ -383,16 +383,16 @@ flowchart TD
 
     B -- 否 --> C[尝试随口记graph（静默）]
     C --> D{是随口记意图?}
-    D -- 是 --> E[执行随口记写库链路\n返回一次性正文]
-    D -- 否 --> F[普通聊天链路\nStreamChat token流式输出]
+    D -- 是 --> E[执行随口记写库链路<br/>返回一次性正文]
+    D -- 否 --> F[普通聊天链路<br/>StreamChat token流式输出]
 
     B -- 是 --> G[开启reasoning状态推送]
     G --> H[执行随口记graph（带阶段状态）]
     H --> I{是随口记意图?}
-    I -- 是 --> J[执行随口记写库链路\n返回一次性正文]
-    I -- 否 --> K[推送fallback状态\n回落普通聊天StreamChat]
+    I -- 是 --> J[执行随口记写库链路<br/>返回一次性正文]
+    I -- 否 --> K[推送fallback状态<br/>回落普通聊天StreamChat]
 
-    E --> Z[后置持久化\nRedis + outbox/DB]
+    E --> Z[后置持久化<br/>Redis + outbox/DB]
     F --> Z
     J --> Z
     K --> Z
@@ -419,5 +419,6 @@ flowchart TD
 
 
 # 8 快速开始
+
 
 
