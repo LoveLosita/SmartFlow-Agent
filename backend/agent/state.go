@@ -76,6 +76,12 @@ type QuickNoteState struct {
 	ExtractedDeadline     *time.Time
 	ExtractedDeadlineText string
 	ExtractedPriority     int
+	// ExtractedBanter 是聚合规划阶段生成的“轻松跟进句”。
+	// 该字段非空时，最终回复阶段可直接复用，避免再触发一次独立润色模型调用。
+	ExtractedBanter string
+	// PlannedBySingleCall 标记本次是否走了“单请求聚合规划”快路径。
+	// 用于在后续节点做更激进的性能策略（例如缺失字段时直接本地兜底，避免再触发模型调用）。
+	PlannedBySingleCall bool
 
 	// ExtractedPriorityReason 记录优先级评估理由，便于后续排查模型判断是否符合预期。
 	ExtractedPriorityReason string

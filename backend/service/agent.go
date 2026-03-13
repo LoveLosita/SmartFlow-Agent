@@ -197,62 +197,38 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 		}
 	}
 
-	// 3) 如果命中“任务安排关键词”，开启随口记阶段推送（伪装成 reasoning chunk）。
-	if shouldEmitQuickNoteProgress(userMessage) {
-		go func() {
-			defer close(outChan)
+	// 3) 统一异步分流：
+	// - 先走“模型控制码路由”决定 quick_note / chat；
+	// - 路由命中 quick_note 时推阶段状态并执行 graph；
+	// - 路由命中 chat 时直接普通流式聊天。
+	go func() {
+		defer close(outChan)
 
-			progress := newQuickNoteProgressEmitter(outChan, resolvedModelName, true)
-			progress.Emit("request.accepted", "检测到任务安排请求，开始执行随口记流程。")
-
-			quickHandled, quickState, quickErr := s.tryHandleQuickNoteWithGraph(
-				ctx,
-				selectedModel,
-				userMessage,
-				userID,
-				chatID,
-				traceID,
-				progress.Emit,
-			)
-			if quickErr != nil {
-				log.Printf("随口记 graph 执行失败，回退普通聊天 trace_id=%s chat_id=%s err=%v", traceID, chatID, quickErr)
-			}
-
-			if quickHandled {
-				progress.Emit("quick_note.reply.polishing", "正在结合你的话题润色回复。")
-				quickReply := buildQuickNoteFinalReply(ctx, selectedModel, userMessage, quickState)
-				if emitErr := emitSingleAssistantCompletion(outChan, resolvedModelName, quickReply); emitErr != nil {
-					pushErrNonBlocking(errChan, emitErr)
-					return
-				}
-
-				s.persistChatAfterReply(ctx, userID, chatID, userMessage, quickReply, errChan)
-				return
-			}
-
-			progress.Emit("quick_note.fallback", "当前输入不是随口记请求，切换到普通对话。")
+		routing := s.decideQuickNoteRouting(ctx, selectedModel, userMessage)
+		if !routing.EnterQuickNote {
 			s.runNormalChatFlow(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
-		}()
-		return outChan, errChan
-	}
+			return
+		}
 
-	// 4) 无阶段推送模式：保持原逻辑，先尝试随口记，不命中再走普通聊天。
-	quickHandled, quickState, quickErr := s.tryHandleQuickNoteWithGraph(
-		ctx,
-		selectedModel,
-		userMessage,
-		userID,
-		chatID,
-		traceID,
-		nil,
-	)
-	if quickErr != nil {
-		log.Printf("随口记 graph 执行失败，回退普通聊天 trace_id=%s chat_id=%s err=%v", traceID, chatID, quickErr)
-	}
-	if quickHandled {
-		go func() {
-			defer close(outChan)
+		progress := newQuickNoteProgressEmitter(outChan, resolvedModelName, true)
+		progress.Emit("request.accepted", routing.Detail)
 
+		quickHandled, quickState, quickErr := s.tryHandleQuickNoteWithGraph(
+			ctx,
+			selectedModel,
+			userMessage,
+			userID,
+			chatID,
+			traceID,
+			routing.TrustRoute,
+			progress.Emit,
+		)
+		if quickErr != nil {
+			log.Printf("随口记 graph 执行失败，回退普通聊天 trace_id=%s chat_id=%s err=%v", traceID, chatID, quickErr)
+		}
+
+		if quickHandled {
+			progress.Emit("quick_note.reply.polishing", "正在结合你的话题润色回复。")
 			quickReply := buildQuickNoteFinalReply(ctx, selectedModel, userMessage, quickState)
 			if emitErr := emitSingleAssistantCompletion(outChan, resolvedModelName, quickReply); emitErr != nil {
 				pushErrNonBlocking(errChan, emitErr)
@@ -260,13 +236,10 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 			}
 
 			s.persistChatAfterReply(ctx, userID, chatID, userMessage, quickReply, errChan)
-		}()
-		return outChan, errChan
-	}
+			return
+		}
 
-	// 5) 普通流式聊天。
-	go func() {
-		defer close(outChan)
+		progress.Emit("quick_note.fallback", "当前输入不是随口记请求，切换到普通对话。")
 		s.runNormalChatFlow(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
 	}()
 

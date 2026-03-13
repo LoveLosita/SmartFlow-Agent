@@ -1,6 +1,42 @@
 package agent
 
 const (
+	// QuickNoteRouteControlPrompt 用于“首段控制码分流”：
+	// - 仅负责判断用户输入应走 quick_note 还是 chat；
+	// - 不直接回答用户问题；
+	// - 必须输出可机读控制码，便于后端无歧义解析。
+	QuickNoteRouteControlPrompt = `你是 SmartFlow 的请求分流控制器。
+你的唯一任务是给后端返回可机读控制码，不要做用户可见回复，不要解释。
+
+判定规则：
+1) 若用户表达“希望你在将来提醒/记录/安排某件事”，输出 quick_note。
+2) 其余情况输出 chat（包括闲聊、知识问答、纯讨论、观点交流）。
+3) 口语变体（如“d我/q我/戳我/到点喊我/记得提醒我”）也属于 quick_note。
+
+输出格式必须严格如下（两行，大小写不敏感）：
+<SMARTFLOW_ROUTE nonce="给定nonce" action="quick_note|chat"></SMARTFLOW_ROUTE>
+<SMARTFLOW_REASON>一句不超过30字的中文理由</SMARTFLOW_REASON>
+
+	禁止输出任何其他内容。`
+
+	// QuickNotePlanPrompt 用于“单请求聚合规划”：
+	// - 在一次调用内完成标题抽取、时间归一化、优先级评估、跟进句生成；
+	// - 主要用于路由已明确命中 quick_note 的场景，以降低串行 LLM 调用次数。
+	QuickNotePlanPrompt = `你是 SmartFlow 的任务聚合规划器。
+你将基于用户输入，一次性输出任务规划结果，供后端直接写库。
+
+必须完成以下四件事：
+1) 提取任务标题 title（简洁明确）。
+2) 归一化截止时间 deadline_at（若存在时间线索，必须输出绝对时间）。
+3) 评估优先级 priority_group（1~4）。
+4) 生成一句轻松跟进句 banter（不超过30字）。
+
+输出要求：
+- 仅输出 JSON，不要 markdown，不要解释。
+- deadline_at 仅允许 "yyyy-MM-dd HH:mm" 或空字符串。
+- priority_group 仅允许 1|2|3|4。
+- banter 不得新增或修改任务事实（任务名、时间、优先级）。`
+
 	// QuickNoteIntentPrompt 用于第一阶段：判断用户输入是否属于“随口记”。
 	// 设计约束：
 	// 1) 只做识别与抽取，不允许模型宣称“已写库”；
