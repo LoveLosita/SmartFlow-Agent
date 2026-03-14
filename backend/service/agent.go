@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/agent"
+	"github.com/LoveLosita/smartflow/backend/agent/chat"
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/inits"
@@ -103,7 +103,7 @@ func (s *AgentService) runNormalChatFlow(
 		chatHistory = conv.ToEinoMessages(histories)
 	}
 
-	historyBudget := pkg.HistoryTokenBudgetByModel(resolvedModelName, agent.SystemPrompt, userMessage)
+	historyBudget := pkg.HistoryTokenBudgetByModel(resolvedModelName, chat.SystemPrompt, userMessage)
 	trimmedHistory, totalHistoryTokens, keptHistoryTokens, droppedCount := pkg.TrimHistoryByTokenBudget(chatHistory, historyBudget)
 	chatHistory = trimmedHistory
 
@@ -127,7 +127,7 @@ func (s *AgentService) runNormalChatFlow(
 		}
 	}
 
-	fullText, streamErr := agent.StreamChat(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, chatHistory, outChan, traceID, chatID, requestStart)
+	fullText, streamErr := chat.StreamChat(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, chatHistory, outChan, traceID, chatID, requestStart)
 	if streamErr != nil {
 		pushErrNonBlocking(errChan, streamErr)
 		return
@@ -145,6 +145,12 @@ func (s *AgentService) runNormalChatFlow(
 	}); err != nil {
 		pushErrNonBlocking(errChan, err)
 		return
+	}
+
+	// 普通聊天链路也需要把助手回复写入 Redis，
+	// 否则会出现“数据库有助手消息，但 Redis 最新会话只有用户消息”的口径不一致。
+	if err = s.agentCache.PushMessage(context.Background(), chatID, &schema.Message{Role: schema.Assistant, Content: fullText}); err != nil {
+		log.Printf("写入助手消息到 Redis 失败: %v", err)
 	}
 
 	if saveErr := s.saveChatHistoryReliable(context.Background(), model.ChatHistoryPersistPayload{

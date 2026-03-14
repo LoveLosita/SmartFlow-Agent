@@ -1,4 +1,4 @@
-package agent
+package quicknote
 
 const (
 	// QuickNoteRouteControlPrompt 用于“首段控制码分流”：

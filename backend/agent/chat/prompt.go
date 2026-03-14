@@ -1,4 +1,4 @@
-package agent
+package chat
 
 const (
 	// SystemPrompt 全局系统人设：定义 SmartFlow 的基本调性

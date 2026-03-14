@@ -1,4 +1,4 @@
-package agent
+package quicknote
 
 import "time"
 
