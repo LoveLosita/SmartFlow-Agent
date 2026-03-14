@@ -358,44 +358,51 @@ $$Gap = \frac{TotalAvailableSlots - (TaskCount \times 2)}{TaskCount + 1}$$
 flowchart TD
     A[用户消息进入 /agent/chat] --> B[规范会话ID + 选模型]
     B --> C[确保会话存在<br/>Redis会话状态检查<br/>必要时回源DB创建]
-    C --> D[quick_note.request.accepted<br/>推送reasoning状态块]
-    D --> E[意图识别节点<br/>quick_note.intent.analyzing]
-    E --> F{是否随口记意图}
-    F -- 否 --> X[回落普通聊天链路]
-    F -- 是 --> G[时间抽取与校验<br/>quick_note.deadline.validating]
-    G --> H{时间是否有效}
-    H -- 否 --> I[返回纠错文案<br/>不写库<br/>quick_note.failed]
-    H -- 是 --> J[优先级评估<br/>quick_note.priority.evaluating]
-    J --> K[调用写库工具<br/>quick_note.persisting]
-    K --> L{写入是否成功}
-    L -- 否 --> M[按重试策略处理<br/>最终失败则返回错误文案]
-    L -- 是 --> N[quick_note.persisted]
-    N --> O[quick_note.reply.polishing<br/>AI生成贴题轻松跟进句]
-    O --> P[拼接最终正文<br/>一次性content输出]
-    P --> Q[后置持久化<br/>user+assistant写Redis<br/>并写outbox/DB]
+    C --> D[模型控制码路由<br/>action=quick_note/chat]
+    D --> E{route是否命中quick_note}
+    E -- 否 --> X[普通聊天链路<br/>StreamChat流式输出]
+    E -- 是 --> F[quick_note.request.accepted<br/>推送reasoning状态块]
+    F --> G[跳过二次意图判定<br/>直接进入聚合规划]
+    G --> H[单请求聚合规划<br/>生成title/deadline/priority/banter]
+    H --> I[时间校验<br/>quick_note.deadline.validating]
+    I --> J{时间是否有效}
+    J -- 否 --> K[返回纠错文案<br/>不写库<br/>quick_note.failed]
+    J -- 是 --> L{优先级是否有效}
+    L -- 是 --> M[复用聚合优先级]
+    L -- 否 --> N[本地优先级兜底<br/>不再二次调用模型]
+    M --> O[调用写库工具<br/>quick_note.persisting]
+    N --> O
+    O --> P{task_id是否有效}
+    P -- 否 --> Q[按重试策略处理<br/>最终返回失败文案]
+    P -- 是 --> R[quick_note.persisted]
+    R --> S[拼接最终正文<br/>优先复用聚合banter<br/>一次性content输出]
+    S --> T[后置持久化<br/>user+assistant写Redis<br/>并写outbox/DB]
+    X --> T
 ```
 
 ### 2) 总分流图（消息识别后的去向）
 
 ```mermaid
 flowchart TD
-    A[用户消息进入 AgentChat] --> B{是否命中任务/提醒关键词}
+    A[用户消息进入 AgentChat] --> B[模型控制码路由<br/>action=quick_note/chat]
+    B --> C{路由是否成功解析}
 
-    B -- 否 --> C[尝试随口记graph（静默）]
-    C --> D{是随口记意图?}
-    D -- 是 --> E[执行随口记写库链路<br/>返回一次性正文]
-    D -- 否 --> F[普通聊天链路<br/>StreamChat token流式输出]
+    C -- 是 --> D{action=quick_note?}
+    D -- 否 --> E[普通聊天链路<br/>StreamChat token流式输出]
+    D -- 是 --> F[随口记快路径<br/>跳过二次意图判定]
+    F --> G[单请求聚合规划<br/>+本地时间校验/优先级兜底]
+    G --> H[写库工具落库<br/>task_id有效校验]
+    H --> I[返回一次性正文]
 
-    B -- 是 --> G[开启reasoning状态推送]
-    G --> H[执行随口记graph（带阶段状态）]
-    H --> I{是随口记意图?}
-    I -- 是 --> J[执行随口记写库链路<br/>返回一次性正文]
-    I -- 否 --> K[推送fallback状态<br/>回落普通聊天StreamChat]
+    C -- 否 --> J[随口记兜底路径<br/>恢复二次意图判定]
+    J --> K{是否随口记意图}
+    K -- 否 --> L[普通聊天链路<br/>StreamChat token流式输出]
+    K -- 是 --> M[执行随口记写库链路<br/>返回一次性正文]
 
     E --> Z[后置持久化<br/>Redis + outbox/DB]
-    F --> Z
-    J --> Z
-    K --> Z
+    I --> Z
+    L --> Z
+    M --> Z
 ```
 
 # 6 前端实现
