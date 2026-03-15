@@ -104,6 +104,7 @@ type QuickNoteState struct {
 
 // NewQuickNoteState 创建随口记状态对象并初始化默认重试次数。
 func NewQuickNoteState(traceID string, userID int, conversationID, userInput string) *QuickNoteState {
+	// 1. 在“进入链路”这一刻固化时间基准，后续所有相对时间都以它为准。
 	requestNow := quickNoteNowToMinute()
 	return &QuickNoteState{
 		TraceID:        traceID,
@@ -118,27 +119,36 @@ func NewQuickNoteState(traceID string, userID int, conversationID, userInput str
 
 // CanRetryTool 判断当前是否还能继续重试工具调用。
 func (s *QuickNoteState) CanRetryTool() bool {
+	// 规则：已尝试次数 < 最大重试次数 才允许继续。
+	// 这里不做 <=，是为了让“第 MaxToolRetry 次失败后”及时停机并给用户明确反馈。
 	return s.ToolAttemptCount < s.MaxToolRetry
 }
 
 // RecordToolError 记录一次工具调用失败。
 func (s *QuickNoteState) RecordToolError(errMsg string) {
+	// 1. 每失败一次都要累加计数，供分支节点判断是否继续重试。
 	s.ToolAttemptCount++
+	// 2. 保留最后一次错误，便于日志与排障定位“最终失败原因”。
 	s.LastToolError = errMsg
 }
 
 // RecordToolSuccess 记录一次工具调用成功。
 func (s *QuickNoteState) RecordToolSuccess(taskID int) {
+	// 1. 成功同样计入尝试次数，便于还原完整调用轨迹。
 	s.ToolAttemptCount++
+	// 2. 回填 task_id 和成功标志，供后续节点拼接成功回复。
 	s.PersistedTaskID = taskID
 	s.Persisted = true
+	// 3. 成功后清空错误，避免后续误读历史失败信息。
 	s.LastToolError = ""
 }
 
 // quickNoteLocation 返回随口记链路使用的业务时区。
 func quickNoteLocation() *time.Location {
+	// 1. 优先加载业务固定时区，保证“明天/今晚”等语义与用户预期一致。
 	loc, err := time.LoadLocation(quickNoteTimezoneName)
 	if err != nil {
+		// 2. 极端情况下回退到系统本地时区，避免因时区加载失败导致链路整体不可用。
 		return time.Local
 	}
 	return loc
@@ -146,10 +156,12 @@ func quickNoteLocation() *time.Location {
 
 // quickNoteNowToMinute 返回当前时间并截断到分钟级。
 func quickNoteNowToMinute() time.Time {
+	// 统一截断到分钟，避免秒级抖动导致“同一次请求前后解析口径不一致”。
 	return time.Now().In(quickNoteLocation()).Truncate(time.Minute)
 }
 
 // formatQuickNoteTimeToMinute 将时间格式化为分钟级字符串。
 func formatQuickNoteTimeToMinute(t time.Time) string {
+	// 输出前统一转换到业务时区，避免日志和 prompt 出现跨时区混淆。
 	return t.In(quickNoteLocation()).Format(QuickNoteDatetimeMinuteLayout)
 }

@@ -7,8 +7,9 @@ import (
 
 	"github.com/LoveLosita/smartflow/backend/api"
 	"github.com/LoveLosita/smartflow/backend/dao"
+	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
+	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
 	"github.com/LoveLosita/smartflow/backend/inits"
-	kafkabus "github.com/LoveLosita/smartflow/backend/kafka"
 	"github.com/LoveLosita/smartflow/backend/middleware"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/LoveLosita/smartflow/backend/routers"
@@ -58,14 +59,14 @@ func Start() {
 	scheduleRepo := dao.NewScheduleDAO(db)
 	manager := dao.NewManager(db)
 	agentRepo := dao.NewAgentDAO(db)
-	outboxRepo := dao.NewOutboxDAO(db)
+	outboxRepo := outboxinfra.NewRepository(db)
 
 	// outbox 异步链路接线：
 	// - 读取 Kafka 配置
-	// - 初始化 producer/consumer
-	// - 启动 dispatch/consume 两个后台循环
+	// - 创建基础设施级 outbox 异步引擎
+	// - 引擎内部负责 dispatch/consume 两个后台循环
 	kafkaCfg := kafkabus.LoadConfig()
-	asyncPipeline, err := service.NewAgentAsyncPipeline(outboxRepo, kafkaCfg)
+	asyncPipeline, err := outboxinfra.NewChatHistoryAsync(outboxRepo, kafkaCfg)
 	if err != nil {
 		log.Fatalf("Failed to initialize Kafka async pipeline: %v", err)
 	}
