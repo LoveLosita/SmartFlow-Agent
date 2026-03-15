@@ -194,6 +194,10 @@ func (s *AgentService) runNormalChatFlow(
 	}); saveErr != nil {
 		pushErrNonBlocking(errChan, saveErr)
 	}
+
+	// 9. 在主回复完成后异步尝试生成会话标题（仅首次、仅标题为空时生效）。
+	//    该步骤不影响当前请求返回时延，也不影响聊天主链路成功与否。
+	s.ensureConversationTitleAsync(userID, chatID)
 }
 
 func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThinking bool, modelName string, userID int, chatID string) (<-chan string, <-chan error) {
@@ -289,10 +293,12 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 
 			// 3.6 对随口记回复执行统一后置持久化（Redis + outbox/DB）。
 			s.persistChatAfterReply(ctx, userID, chatID, userMessage, quickReply, errChan)
+			// 3.7 随口记链路同样异步生成会话标题（仅首次写入）。
+			s.ensureConversationTitleAsync(userID, chatID)
 			return
 		}
 
-		// 3.7 路由误判或 graph 判定非随口记时，回落普通聊天，保证“能聊”。
+		// 3.8 路由误判或 graph 判定非随口记时，回落普通聊天，保证“能聊”。
 		progress.Emit("quick_note.fallback", "当前输入不是随口记请求，切换到普通对话。")
 		s.runNormalChatFlow(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
 	}()

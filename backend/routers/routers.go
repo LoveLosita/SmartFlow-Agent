@@ -88,6 +88,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, limiter *pk
 		{
 			agentGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
 			agentGroup.POST("/chat", handlers.AgentHandler.ChatAgent)
+			agentGroup.GET("/conversation-meta", handlers.AgentHandler.GetConversationMeta)
 		}
 	}
 	// 初始化Gin引擎

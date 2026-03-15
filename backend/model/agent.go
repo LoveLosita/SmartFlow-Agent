@@ -9,6 +9,20 @@ type UserSendMessageRequest struct {
 	Thinking       bool   `json:"thinking,omitempty"`
 }
 
+// GetConversationMetaResponse 是会话元信息查询接口的返回结构。
+// 说明：
+// 1) title 可能为空字符串（表示标题尚未生成）；
+// 2) has_title 便于前端快速判断是否需要展示默认占位文案；
+// 3) 保留 message_count/last_message_at，方便前端后续扩展会话列表排序或角标。
+type GetConversationMetaResponse struct {
+	ConversationID string     `json:"conversation_id"`
+	Title          string     `json:"title"`
+	HasTitle       bool       `json:"has_title"`
+	MessageCount   int        `json:"message_count"`
+	LastMessageAt  *time.Time `json:"last_message_at,omitempty"`
+	Status         string     `json:"status"`
+}
+
 type SSEResponse struct {
 	Event string         `json:"event"`
 	ID    int            `json:"id,omitempty"`

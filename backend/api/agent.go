@@ -1,16 +1,20 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
 	"github.com/LoveLosita/smartflow/backend/service"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type AgentHandler struct {
@@ -81,4 +85,40 @@ func (api *AgentHandler) ChatAgent(c *gin.Context) {
 			return false
 		}
 	})
+}
+
+// GetConversationMeta 返回单个会话的元信息（标题、消息数、最近消息时间等）。
+// 设计说明：
+// 1) 该接口用于配合 SSE 聊天链路：标题异步生成后，前端可通过 conversation_id 拉取；
+// 2) 不依赖 SSE header 动态更新，避免“header 必须首包前写入”的协议限制；
+// 3) 会话不存在时返回 400，避免前端把无效会话当成系统错误。
+func (api *AgentHandler) GetConversationMeta(c *gin.Context) {
+	// 1. 读取 query 参数并做基础校验。
+	conversationID := strings.TrimSpace(c.Query("conversation_id"))
+	if conversationID == "" {
+		c.JSON(http.StatusBadRequest, respond.MissingParam)
+		return
+	}
+
+	// 2. 统一透传 user_id，避免越权读取他人会话。
+	userID := c.GetInt("user_id")
+
+	// 3. 设置短超时，避免该查询接口被慢查询长时间占用。
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel()
+
+	// 4. 调 service 查询会话元信息。
+	meta, err := api.svc.GetConversationMeta(ctx, userID, conversationID)
+	if err != nil {
+		// 会话不存在按参数错误处理，返回 400 给前端更直观。
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusBadRequest, respond.WrongParamType)
+			return
+		}
+		respond.DealWithError(c, err)
+		return
+	}
+
+	// 5. 返回统一响应结构。
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, meta))
 }
