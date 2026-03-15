@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/model"
@@ -224,9 +225,28 @@ func (d *Repository) PersistChatHistoryAndMarkConsumed(ctx context.Context, outb
 			return err
 		}
 
-		// 3. 业务写入成功后，把 outbox 推进到 consumed 最终态。
-		//    并清理错误与重试字段，表示该消息生命周期结束。
+		// 3. 同一事务内原子更新会话统计信息：
+		//    - message_count + 1
+		//    - last_message_at = now
+		// 这样可以保证 message_count 与 chat_histories 的真实落库条数一致。
 		now := time.Now()
+		chatUpdates := map[string]interface{}{
+			"message_count":   gorm.Expr("message_count + ?", 1),
+			"last_message_at": &now,
+		}
+		chatResult := tx.Model(&model.AgentChat{}).
+			Where("user_id = ? AND chat_id = ?", payload.UserID, payload.ConversationID).
+			Updates(chatUpdates)
+		if chatResult.Error != nil {
+			return chatResult.Error
+		}
+		if chatResult.RowsAffected == 0 {
+			// 会话不存在时回滚，让 outbox 继续重试/告警，而不是吞掉不一致。
+			return fmt.Errorf("conversation not found when updating stats: user_id=%d chat_id=%s", payload.UserID, payload.ConversationID)
+		}
+
+		// 4. 业务写入成功后，把 outbox 推进到 consumed 最终态。
+		//    并清理错误与重试字段，表示该消息生命周期结束。
 		updates := map[string]interface{}{
 			"status":        model.OutboxStatusConsumed,
 			"consumed_at":   &now,

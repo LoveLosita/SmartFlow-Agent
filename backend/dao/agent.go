@@ -3,7 +3,9 @@ package dao
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/LoveLosita/smartflow/backend/model"
 	"gorm.io/gorm"
@@ -18,16 +20,41 @@ func NewAgentDAO(db *gorm.DB) *AgentDAO {
 }
 
 func (a *AgentDAO) SaveChatHistory(ctx context.Context, userID int, conversationID string, role, message string) error {
-	userChat := model.ChatHistory{
-		UserID:         userID,
-		MessageContent: &message,
-		Role:           &role,
-		ChatID:         conversationID,
-	}
-	if err := a.db.WithContext(ctx).Create(&userChat).Error; err != nil {
-		return err
-	}
-	return nil
+	// 1. 同步落库路径也要保证“消息写入”和“会话计数更新”原子一致。
+	//    因此这里使用事务，避免出现“有消息但 message_count 没加”或反过来的不一致状态。
+	return a.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 1.1 先写 chat_histories。
+		userChat := model.ChatHistory{
+			UserID:         userID,
+			MessageContent: &message,
+			Role:           &role,
+			ChatID:         conversationID,
+		}
+		if err := tx.Create(&userChat).Error; err != nil {
+			return err
+		}
+
+		// 1.2 再原子更新 agent_chats 的统计字段：
+		//     - message_count: +1
+		//     - last_message_at: 当前时间
+		// 这样 message_count 语义就稳定等于“已成功落库的消息条数”。
+		now := time.Now()
+		updates := map[string]interface{}{
+			"message_count":   gorm.Expr("message_count + ?", 1),
+			"last_message_at": &now,
+		}
+		result := tx.Model(&model.AgentChat{}).
+			Where("user_id = ? AND chat_id = ?", userID, conversationID).
+			Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			// 会话不存在视为数据不一致，回滚事务，防止产生“孤儿历史记录”。
+			return fmt.Errorf("conversation not found when updating stats: user_id=%d chat_id=%s", userID, conversationID)
+		}
+		return nil
+	})
 }
 
 func (a *AgentDAO) CreateNewChat(userID int, chatID string) (int64, error) {
