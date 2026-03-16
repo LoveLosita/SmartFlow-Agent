@@ -79,6 +79,9 @@ func Start() {
 		if err = eventsvc.RegisterChatHistoryPersistHandler(eventBus, outboxRepo, manager); err != nil {
 			log.Fatalf("Failed to register chat history event handler: %v", err)
 		}
+		if err = eventsvc.RegisterTaskUrgencyPromoteHandler(eventBus, outboxRepo, manager); err != nil {
+			log.Fatalf("Failed to register task urgency promote event handler: %v", err)
+		}
 		eventBus.Start(context.Background())
 		defer eventBus.Close()
 		log.Println("Outbox event bus started")
@@ -88,7 +91,7 @@ func Start() {
 
 	// Service 层初始化。
 	userService := service.NewUserService(userRepo, cacheRepo)
-	taskSv := service.NewTaskService(taskRepo, cacheRepo)
+	taskSv := service.NewTaskService(taskRepo, cacheRepo, eventBus)
 	courseService := service.NewCourseService(courseRepo, scheduleRepo)
 	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo, manager)
 	scheduleService := service.NewScheduleService(scheduleRepo, userRepo, taskClassRepo, manager, cacheRepo)

@@ -24,24 +24,26 @@ const (
 	禁止输出任何其他内容。`
 
 	// QuickNotePlanPrompt 用于“单请求聚合规划”：
-	// - 在一次调用内完成标题抽取、时间归一化、优先级评估、跟进句生成；
+	// - 在一次调用内完成标题抽取、时间归一化、紧急分界线评估、优先级评估、跟进句生成；
 	// - 主要用于路由已明确命中 quick_note 的场景，以降低串行 LLM 调用次数。
 	// 额外说明：
 	// 1) 强制 JSON 输出，减少后端解析分支复杂度；
-	// 2) deadline_at 统一分钟级，方便直接映射到数据库时间字段；
+	// 2) deadline_at / urgency_threshold_at 统一分钟级，方便直接映射到数据库时间字段；
 	// 3) banter 与事实分离，避免润色文案污染结构化字段。
 	QuickNotePlanPrompt = `你是 SmartFlow 的任务聚合规划器。
 你将基于用户输入，一次性输出任务规划结果，供后端直接写库。
 
-必须完成以下四件事：
+必须完成以下五件事：
 1) 提取任务标题 title（简洁明确）。
 2) 归一化截止时间 deadline_at（若存在时间线索，必须输出绝对时间）。
-3) 评估优先级 priority_group（1~4）。
-4) 生成一句轻松跟进句 banter（不超过30字）。
+3) 评估紧急分界时间 urgency_threshold_at（何时从不紧急象限自动平移到紧急象限，可为空）。
+4) 评估优先级 priority_group（1~4）。
+5) 生成一句轻松跟进句 banter（不超过30字）。
 
 输出要求：
 - 仅输出 JSON，不要 markdown，不要解释。
 - deadline_at 仅允许 "yyyy-MM-dd HH:mm" 或空字符串。
+- urgency_threshold_at 仅允许 "yyyy-MM-dd HH:mm" 或空字符串。
 - priority_group 仅允许 1|2|3|4。
 - banter 不得新增或修改任务事实（任务名、时间、优先级）。`
 
@@ -58,13 +60,14 @@ const (
 - 若不是，请明确返回“非随口记意图”。
 - 不要声称已经写入数据库。`
 
-	// QuickNotePriorityPrompt 用于第二阶段：将任务归类到四象限优先级。
+	// QuickNotePriorityPrompt 用于第二阶段：将任务归类到四象限优先级，并评估紧急分界线。
 	// 输出会直接映射到 tasks.priority（1~4），因此要求结果必须可解释。
 	// 这里强调“理由必须可解释”，是为了后续日志复盘时能看懂模型为何这么判。
 	QuickNotePriorityPrompt = `你是 SmartFlow 的任务优先级评估器。
 根据任务内容、时间约束和执行成本，输出优先级 priority_group：
 1=重要且紧急，2=重要不紧急，3=简单不重要，4=不简单不重要。
-请给出简短理由，理由必须可解释。`
+请给出简短理由，理由必须可解释。
+若你认为该任务需要后续自动平移，请额外输出 urgency_threshold_at（绝对时间，yyyy-MM-dd HH:mm）；否则输出空字符串。`
 
 	// QuickNoteReplyBanterPrompt 用于随口记成功后的“轻松跟进句”生成。
 	// 约束重点：

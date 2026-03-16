@@ -124,11 +124,12 @@ func (s *AgentService) tryHandleQuickNoteWithGraph(
 			CreateTask: func(ctx context.Context, req quicknote.QuickNoteCreateTaskRequest) (*quicknote.QuickNoteCreateTaskResult, error) {
 				// 3.2.1 把 quick note 的工具入参映射成项目 Task 模型。
 				taskModel := &model.Task{
-					UserID:      req.UserID,
-					Title:       req.Title,
-					Priority:    req.PriorityGroup,
-					IsCompleted: false,
-					DeadlineAt:  req.DeadlineAt,
+					UserID:             req.UserID,
+					Title:              req.Title,
+					Priority:           req.PriorityGroup,
+					IsCompleted:        false,
+					DeadlineAt:         req.DeadlineAt,
+					UrgencyThresholdAt: req.UrgencyThresholdAt,
 				}
 
 				// 3.2.2 调用 DAO 写库。
@@ -139,10 +140,11 @@ func (s *AgentService) tryHandleQuickNoteWithGraph(
 
 				// 3.2.3 把写库结果回填给 graph 状态，用于后续回复拼装。
 				return &quicknote.QuickNoteCreateTaskResult{
-					TaskID:        created.ID,
-					Title:         created.Title,
-					PriorityGroup: created.Priority,
-					DeadlineAt:    created.DeadlineAt,
+					TaskID:             created.ID,
+					Title:              created.Title,
+					PriorityGroup:      created.Priority,
+					DeadlineAt:         created.DeadlineAt,
+					UrgencyThresholdAt: created.UrgencyThresholdAt,
 				}, nil
 			},
 		},

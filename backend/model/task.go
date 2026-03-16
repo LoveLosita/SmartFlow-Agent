@@ -2,13 +2,43 @@ package model
 
 import "time"
 
+// Task 是任务表的领域模型。
+//
+// 职责边界：
+// 1. 负责映射 tasks 表字段；
+// 2. 不负责接口入参校验和业务规则判断；
+// 3. 不负责“自动平移”执行（自动平移由 Service + Outbox 事件链路负责）。
 type Task struct {
-	ID          int        `gorm:"primaryKey;autoIncrement"`
-	UserID      int        `gorm:"column:user_id;index"`
-	Title       string     `gorm:"type:varchar(255)"`
-	Priority    int        `gorm:"not null"`
-	IsCompleted bool       `gorm:"column:is_completed;default:false"`
-	DeadlineAt  *time.Time `gorm:"column:deadline_at"`
+	// 1. 主键。
+	ID int `gorm:"primaryKey;autoIncrement"`
+	// 2. 归属用户 ID。
+	// 2.1 单列索引用于常规按用户查任务；
+	// 2.2 同时参与“懒触发平移”复合索引的最左前缀。
+	UserID int `gorm:"column:user_id;index;index:idx_user_done_threshold_priority,priority:1"`
+	// 3. 任务标题。
+	Title string `gorm:"type:varchar(255)"`
+	// 4. 四象限优先级：
+	// 4.1 1=重要且紧急；
+	// 4.2 2=重要不紧急；
+	// 4.3 3=简单不重要；
+	// 4.4 4=不简单不重要。
+	//
+	// 说明：该字段参与“懒触发平移”复合索引。
+	Priority int `gorm:"not null;index:idx_user_done_threshold_priority,priority:4"`
+	// 5. 完成状态。
+	//
+	// 说明：已完成任务不参与自动平移；该字段参与复合索引。
+	IsCompleted bool `gorm:"column:is_completed;default:false;index:idx_user_done_threshold_priority,priority:2"`
+	// 6. 任务业务截止时间。
+	DeadlineAt *time.Time `gorm:"column:deadline_at"`
+	// 7. 紧急分界时间（自动平移阈值）。
+	//
+	// 规则：
+	// 7.1 到达该时间后，任务可从“不紧急象限”自动平移到“紧急象限”；
+	// 7.2 该值由上游（例如 LLM 规划）给出，不在模型层做推断；
+	// 7.3 为空表示该任务不参与自动平移；
+	// 7.4 该字段参与“懒触发平移”复合索引。
+	UrgencyThresholdAt *time.Time `gorm:"column:urgency_threshold_at;index:idx_user_done_threshold_priority,priority:3"`
 }
 
 type UserAddTaskResponse struct {
@@ -34,4 +64,16 @@ type GetUserTaskResp struct {
 	Status        string `json:"status"`
 	Deadline      string `json:"deadline"`
 	IsCompleted   bool   `json:"is_completed"`
+}
+
+// TaskUrgencyPromoteRequestedPayload 是“任务紧急性平移请求”事件载荷。
+//
+// 职责边界：
+// 1. 只承载“哪个用户的哪些任务需要尝试平移”；
+// 2. 不包含 outbox/kafka 协议字段（这些由基础设施层统一封装）；
+// 3. TriggeredAt 只用于追踪触发时间，最终是否更新仍以消费时数据库条件为准。
+type TaskUrgencyPromoteRequestedPayload struct {
+	UserID      int       `json:"user_id"`
+	TaskIDs     []int     `json:"task_ids"`
+	TriggeredAt time.Time `json:"triggered_at"`
 }

@@ -75,7 +75,14 @@ type QuickNoteState struct {
 	ExtractedTitle        string
 	ExtractedDeadline     *time.Time
 	ExtractedDeadlineText string
-	ExtractedPriority     int
+	// ExtractedUrgencyThreshold 表示“进入紧急象限的分界时间”。
+	//
+	// 语义说明：
+	// 1. 该时间由模型规划后给出，并在后端做解析校验；
+	// 2. 到达该时间后，任务可在“读时派生 + 异步落库”链路中被自动平移；
+	// 3. 为空表示该任务不参与自动平移。
+	ExtractedUrgencyThreshold *time.Time
+	ExtractedPriority         int
 	// ExtractedBanter 是聚合规划阶段生成的“轻松跟进句”。
 	// 该字段非空时，最终回复阶段可直接复用，避免再触发一次独立润色模型调用。
 	ExtractedBanter string

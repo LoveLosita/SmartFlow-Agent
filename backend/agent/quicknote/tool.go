@@ -96,14 +96,17 @@ type QuickNoteCreateTaskRequest struct {
 	Title         string
 	PriorityGroup int
 	DeadlineAt    *time.Time
+	// UrgencyThresholdAt 是“进入紧急象限”的分界时间，允许为空。
+	UrgencyThresholdAt *time.Time
 }
 
 // QuickNoteCreateTaskResult 是业务层返回给工具层的结构化结果。
 type QuickNoteCreateTaskResult struct {
-	TaskID        int
-	Title         string
-	PriorityGroup int
-	DeadlineAt    *time.Time
+	TaskID             int
+	Title              string
+	PriorityGroup      int
+	DeadlineAt         *time.Time
+	UrgencyThresholdAt *time.Time
 }
 
 // QuickNoteCreateTaskToolInput 是提供给大模型的工具参数定义。
@@ -114,6 +117,9 @@ type QuickNoteCreateTaskToolInput struct {
 	PriorityGroup int `json:"priority_group" jsonschema:"required,enum=1,enum=2,enum=3,enum=4,description=优先级分组(1重要且紧急,2重要不紧急,3简单不重要,4不简单不重要)"`
 	// DeadlineAt 支持绝对时间与常见相对时间（如明天/后天/下周一/今晚），内部会归一化为绝对时间。
 	DeadlineAt string `json:"deadline_at,omitempty" jsonschema:"description=可选截止时间，支持RFC3339、yyyy-MM-dd HH:mm:ss、yyyy-MM-dd HH:mm 以及常见中文相对时间"`
+	// UrgencyThresholdAt 表示“何时从不紧急象限自动平移到紧急象限”。
+	// 允许为空；非空时会走同样的时间解析与合法性校验。
+	UrgencyThresholdAt string `json:"urgency_threshold_at,omitempty" jsonschema:"description=可选紧急分界时间，支持与deadline_at相同格式"`
 }
 
 // QuickNoteCreateTaskToolOutput 是返回给大模型的工具结果。
@@ -162,6 +168,10 @@ func BuildQuickNoteToolBundle(ctx context.Context, deps QuickNoteToolDeps) (*Qui
 			if err != nil {
 				return nil, err
 			}
+			urgencyThresholdAt, err := parseOptionalDeadline(input.UrgencyThresholdAt)
+			if err != nil {
+				return nil, err
+			}
 
 			// 2.3 user_id 一律来自鉴权上下文，不信任模型侧入参，防止越权写别人的任务。
 			userID, err := deps.ResolveUserID(ctx)
@@ -174,10 +184,11 @@ func BuildQuickNoteToolBundle(ctx context.Context, deps QuickNoteToolDeps) (*Qui
 
 			// 2.4 走业务层写库。
 			result, err := deps.CreateTask(ctx, QuickNoteCreateTaskRequest{
-				UserID:        userID,
-				Title:         title,
-				PriorityGroup: input.PriorityGroup,
-				DeadlineAt:    deadline,
+				UserID:             userID,
+				Title:              title,
+				PriorityGroup:      input.PriorityGroup,
+				DeadlineAt:         deadline,
+				UrgencyThresholdAt: urgencyThresholdAt,
 			})
 			if err != nil {
 				return nil, err

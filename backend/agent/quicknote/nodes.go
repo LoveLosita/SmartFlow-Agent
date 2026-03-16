@@ -24,17 +24,19 @@ type quickNoteIntentModelOutput struct {
 }
 
 type quickNotePriorityModelOutput struct {
-	PriorityGroup int    `json:"priority_group"`
-	Reason        string `json:"reason"`
+	PriorityGroup      int    `json:"priority_group"`
+	Reason             string `json:"reason"`
+	UrgencyThresholdAt string `json:"urgency_threshold_at"`
 }
 
 // quickNotePlanModelOutput 是“单请求聚合规划”节点的模型输出。
 type quickNotePlanModelOutput struct {
-	Title          string `json:"title"`
-	DeadlineAt     string `json:"deadline_at"`
-	PriorityGroup  int    `json:"priority_group"`
-	PriorityReason string `json:"priority_reason"`
-	Banter         string `json:"banter"`
+	Title              string `json:"title"`
+	DeadlineAt         string `json:"deadline_at"`
+	UrgencyThresholdAt string `json:"urgency_threshold_at"`
+	PriorityGroup      int    `json:"priority_group"`
+	PriorityReason     string `json:"priority_reason"`
+	Banter             string `json:"banter"`
 }
 
 // runQuickNoteIntentNode 负责“意图识别 + 聚合规划 + 时间校验”。
@@ -69,6 +71,9 @@ func runQuickNoteIntentNode(ctx context.Context, st *QuickNoteState, input Quick
 				st.ExtractedDeadline = plan.Deadline
 			}
 			st.ExtractedDeadlineText = strings.TrimSpace(plan.DeadlineText)
+			if plan.UrgencyThreshold != nil {
+				st.ExtractedUrgencyThreshold = normalizeUrgencyThreshold(plan.UrgencyThreshold, plan.Deadline)
+			}
 			if IsValidTaskPriority(plan.PriorityGroup) {
 				st.ExtractedPriority = plan.PriorityGroup
 				st.ExtractedPriorityReason = strings.TrimSpace(plan.PriorityReason)
@@ -229,8 +234,15 @@ func runQuickNotePriorityNode(ctx context.Context, st *QuickNoteState, input Qui
 请仅输出 JSON（不要 markdown，不要解释）：
 {
   "priority_group": 1|2|3|4,
-  "reason": "简短理由"
-}`,
+  "reason": "简短理由",
+  "urgency_threshold_at": "yyyy-MM-dd HH:mm 或空字符串"
+}
+
+额外约束：
+1) urgency_threshold_at 表示“何时从不紧急象限自动平移到紧急象限”；
+2) 若该任务不需要自动平移，可输出空字符串；
+3) 若任务已在紧急象限（priority_group=1 或 3），优先输出空字符串；
+4) 若输出非空时间，必须是绝对时间，且不晚于归一化截止时间（若有）。`,
 		st.RequestNowText,
 		st.ExtractedTitle,
 		st.UserInput,
@@ -256,6 +268,12 @@ func runQuickNotePriorityNode(ctx context.Context, st *QuickNoteState, input Qui
 
 	st.ExtractedPriority = parsed.PriorityGroup
 	st.ExtractedPriorityReason = strings.TrimSpace(parsed.Reason)
+	if strings.TrimSpace(parsed.UrgencyThresholdAt) != "" {
+		urgencyThreshold, thresholdErr := parseOptionalDeadlineWithNow(strings.TrimSpace(parsed.UrgencyThresholdAt), st.RequestNow)
+		if thresholdErr == nil {
+			st.ExtractedUrgencyThreshold = normalizeUrgencyThreshold(urgencyThreshold, st.ExtractedDeadline)
+		}
+	}
 	return st, nil
 }
 
@@ -283,12 +301,17 @@ func runQuickNotePersistNodeInternal(ctx context.Context, st *QuickNoteState, cr
 	if st.ExtractedDeadline != nil {
 		deadlineText = st.ExtractedDeadline.In(quickNoteLocation()).Format(time.RFC3339)
 	}
+	urgencyThresholdText := ""
+	if st.ExtractedUrgencyThreshold != nil {
+		urgencyThresholdText = st.ExtractedUrgencyThreshold.In(quickNoteLocation()).Format(time.RFC3339)
+	}
 
 	// 3. 工具参数序列化失败视作一次失败尝试，交由重试分支处理。
 	toolInput := QuickNoteCreateTaskToolInput{
-		Title:         st.ExtractedTitle,
-		PriorityGroup: priority,
-		DeadlineAt:    deadlineText,
+		Title:              st.ExtractedTitle,
+		PriorityGroup:      priority,
+		DeadlineAt:         deadlineText,
+		UrgencyThresholdAt: urgencyThresholdText,
 	}
 	rawInput, marshalErr := json.Marshal(toolInput)
 	if marshalErr != nil {
@@ -444,12 +467,14 @@ func callModelForJSONWithMaxTokens(ctx context.Context, chatModel *ark.ChatModel
 }
 
 type quickNotePlannedResult struct {
-	Title          string
-	Deadline       *time.Time
-	DeadlineText   string
-	PriorityGroup  int
-	PriorityReason string
-	Banter         string
+	Title                string
+	Deadline             *time.Time
+	DeadlineText         string
+	UrgencyThreshold     *time.Time
+	UrgencyThresholdText string
+	PriorityGroup        int
+	PriorityReason       string
+	Banter               string
 }
 
 // planQuickNoteInSingleCall 在一次模型调用里完成“时间/优先级/banter”聚合规划。
@@ -468,6 +493,7 @@ func planQuickNoteInSingleCall(
 {
   "title": string,
   "deadline_at": string,
+  "urgency_threshold_at": string,
   "priority_group": 1|2|3|4,
   "priority_reason": string,
   "banter": string
@@ -475,8 +501,10 @@ func planQuickNoteInSingleCall(
 
 约束：
 1) deadline_at 只允许 "yyyy-MM-dd HH:mm" 或空字符串；
-2) 若用户给了相对时间（如明天/今晚/下周一），必须换算为绝对时间；
-3) banter 只允许一句中文，不超过30字，不得改动任务事实。`,
+2) urgency_threshold_at 只允许 "yyyy-MM-dd HH:mm" 或空字符串；
+3) 若用户给了相对时间（如明天/今晚/下周一），必须换算为绝对时间；
+4) 若任务不需要自动平移，可让 urgency_threshold_at 为空；
+5) banter 只允许一句中文，不超过30字，不得改动任务事实。`,
 		nowText,
 		strings.TrimSpace(userInput),
 	)
@@ -493,11 +521,12 @@ func planQuickNoteInSingleCall(
 	}
 
 	result := &quickNotePlannedResult{
-		Title:          strings.TrimSpace(parsed.Title),
-		DeadlineText:   strings.TrimSpace(parsed.DeadlineAt),
-		PriorityGroup:  parsed.PriorityGroup,
-		PriorityReason: strings.TrimSpace(parsed.PriorityReason),
-		Banter:         strings.TrimSpace(parsed.Banter),
+		Title:                strings.TrimSpace(parsed.Title),
+		DeadlineText:         strings.TrimSpace(parsed.DeadlineAt),
+		UrgencyThresholdText: strings.TrimSpace(parsed.UrgencyThresholdAt),
+		PriorityGroup:        parsed.PriorityGroup,
+		PriorityReason:       strings.TrimSpace(parsed.PriorityReason),
+		Banter:               strings.TrimSpace(parsed.Banter),
 	}
 
 	// 4. banter 只保留首行，防止模型输出多行破坏最终回复风格。
@@ -511,6 +540,12 @@ func planQuickNoteInSingleCall(
 	if result.DeadlineText != "" {
 		if deadline, deadlineErr := parseOptionalDeadlineWithNow(result.DeadlineText, now); deadlineErr == nil {
 			result.Deadline = deadline
+		}
+	}
+	// 6. 对 urgency_threshold_at 做本地二次校验，并与 deadline 做上界约束。
+	if result.UrgencyThresholdText != "" {
+		if urgencyThreshold, thresholdErr := parseOptionalDeadlineWithNow(result.UrgencyThresholdText, now); thresholdErr == nil {
+			result.UrgencyThreshold = normalizeUrgencyThreshold(urgencyThreshold, result.Deadline)
 		}
 	}
 	return result, nil
@@ -557,6 +592,26 @@ func extractJSONObject(text string) string {
 		return ""
 	}
 	return text[start : end+1]
+}
+
+// normalizeUrgencyThreshold 归一化“紧急分界线时间”。
+//
+// 规则：
+// 1. 分界线为空时直接返回空；
+// 2. 存在 deadline 且分界线晚于 deadline 时，收敛到 deadline；
+// 3. 其余情况保持原值。
+func normalizeUrgencyThreshold(threshold *time.Time, deadline *time.Time) *time.Time {
+	if threshold == nil {
+		return nil
+	}
+	if deadline == nil {
+		return threshold
+	}
+	if threshold.After(*deadline) {
+		normalized := *deadline
+		return &normalized
+	}
+	return threshold
 }
 
 func fallbackPriority(st *QuickNoteState) int {
