@@ -14,6 +14,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/LoveLosita/smartflow/backend/routers"
 	"github.com/LoveLosita/smartflow/backend/service"
+	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 	"github.com/spf13/viper"
 )
 
@@ -61,21 +62,28 @@ func Start() {
 	agentRepo := dao.NewAgentDAO(db)
 	outboxRepo := outboxinfra.NewRepository(db)
 
-	// outbox 异步链路接线：
-	// - 读取 Kafka 配置
-	// - 创建基础设施级 outbox 异步引擎
-	// - 引擎内部负责 dispatch/consume 两个后台循环
+	// outbox 通用事件总线接线（第二阶段）：
+	// 1. 读取 Kafka 配置；
+	// 2. 创建 infra 级 EventBus；
+	// 3. 显式注册“聊天持久化”事件处理器；
+	// 4. 启动总线后台 dispatch/consume 循环。
 	kafkaCfg := kafkabus.LoadConfig()
-	asyncPipeline, err := outboxinfra.NewChatHistoryAsync(outboxRepo, kafkaCfg)
+	eventBus, err := outboxinfra.NewEventBus(outboxRepo, kafkaCfg)
 	if err != nil {
-		log.Fatalf("Failed to initialize Kafka async pipeline: %v", err)
+		log.Fatalf("Failed to initialize outbox event bus: %v", err)
 	}
-	if asyncPipeline != nil {
-		asyncPipeline.Start(context.Background())
-		defer asyncPipeline.Close()
-		log.Println("Kafka async pipeline started")
+	if eventBus != nil {
+		// 3. 在启动前完成“业务事件处理器”注册。
+		// 3.1 这里显式调用 service/events，保证 infra 层不承载业务语义。
+		// 3.2 若注册失败直接中止启动，避免“消息已入队但无人消费”的隐性故障。
+		if err = eventsvc.RegisterChatHistoryPersistHandler(eventBus, outboxRepo, manager); err != nil {
+			log.Fatalf("Failed to register chat history event handler: %v", err)
+		}
+		eventBus.Start(context.Background())
+		defer eventBus.Close()
+		log.Println("Outbox event bus started")
 	} else {
-		log.Println("Kafka async pipeline is disabled")
+		log.Println("Outbox event bus is disabled")
 	}
 
 	// Service 层初始化。
@@ -84,7 +92,7 @@ func Start() {
 	courseService := service.NewCourseService(courseRepo, scheduleRepo)
 	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo, manager)
 	scheduleService := service.NewScheduleService(scheduleRepo, userRepo, taskClassRepo, manager, cacheRepo)
-	agentService := service.NewAgentService(aiHub, agentRepo, taskRepo, agentCacheRepo, asyncPipeline)
+	agentService := service.NewAgentService(aiHub, agentRepo, taskRepo, agentCacheRepo, eventBus)
 
 	// API 层初始化。
 	userApi := api.NewUserHandler(userService)

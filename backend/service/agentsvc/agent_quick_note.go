@@ -351,7 +351,7 @@ func (s *AgentService) persistChatAfterReply(
 	}
 
 	// 2. 再把用户消息写入可靠持久化通道（outbox 或同步 DB）。
-	if err := s.saveChatHistoryReliable(ctx, model.ChatHistoryPersistPayload{
+	if err := s.PersistChatHistory(ctx, model.ChatHistoryPersistPayload{
 		UserID:         userID,
 		ConversationID: chatID,
 		Role:           "user",
@@ -367,7 +367,7 @@ func (s *AgentService) persistChatAfterReply(
 	}
 
 	// 4. 助手消息持久化失败不阻断主流程，通过 errChan 异步上报。
-	if err := s.saveChatHistoryReliable(context.Background(), model.ChatHistoryPersistPayload{
+	if err := s.PersistChatHistory(context.Background(), model.ChatHistoryPersistPayload{
 		UserID:         userID,
 		ConversationID: chatID,
 		Role:           "assistant",

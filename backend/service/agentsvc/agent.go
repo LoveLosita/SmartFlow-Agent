@@ -13,29 +13,30 @@ import (
 	"github.com/LoveLosita/smartflow/backend/inits"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/pkg"
+	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 	"github.com/cloudwego/eino-ext/components/model/ark"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 )
 
 type AgentService struct {
-	AIHub         *inits.AIHub
-	repo          *dao.AgentDAO
-	taskRepo      *dao.TaskDAO
-	agentCache    *dao.AgentCache
-	asyncPipeline *outboxinfra.ChatHistoryAsync
+	AIHub          *inits.AIHub
+	repo           *dao.AgentDAO
+	taskRepo       *dao.TaskDAO
+	agentCache     *dao.AgentCache
+	eventPublisher outboxinfra.EventPublisher
 }
 
 // NewAgentService 构造 AgentService。
 // 这里通过依赖注入把“模型、仓储、缓存、异步持久化通道”统一交给服务层管理，
 // 便于后续在单测中替换实现，或在启动流程中按环境切换配置。
-func NewAgentService(aiHub *inits.AIHub, repo *dao.AgentDAO, taskRepo *dao.TaskDAO, agentRedis *dao.AgentCache, asyncPipeline *outboxinfra.ChatHistoryAsync) *AgentService {
+func NewAgentService(aiHub *inits.AIHub, repo *dao.AgentDAO, taskRepo *dao.TaskDAO, agentRedis *dao.AgentCache, eventPublisher outboxinfra.EventPublisher) *AgentService {
 	return &AgentService{
-		AIHub:         aiHub,
-		repo:          repo,
-		taskRepo:      taskRepo,
-		agentCache:    agentRedis,
-		asyncPipeline: asyncPipeline,
+		AIHub:          aiHub,
+		repo:           repo,
+		taskRepo:       taskRepo,
+		agentCache:     agentRedis,
+		eventPublisher: eventPublisher,
 	}
 }
 
@@ -63,17 +64,28 @@ func (s *AgentService) pickChatModel(requestModel string) (*ark.ChatModel, strin
 	return s.AIHub.Worker, "worker"
 }
 
-// saveChatHistoryReliable 统一封装“聊天记录持久化入口”：
-// 1) 开启异步链路时，走 outbox + Kafka；
-// 2) 未开启时，直接同步写库。
-func (s *AgentService) saveChatHistoryReliable(ctx context.Context, payload model.ChatHistoryPersistPayload) error {
-	// 1. 未注入异步通道时（例如本地极简环境），直接同步写 DB。
+// PersistChatHistory 是 Agent 聊天链路唯一的“消息持久化入口”。
+//
+// 职责边界：
+// 1. 负责根据当前部署模式选择“异步 outbox”或“同步直写 DB”；
+// 2. 负责把统一 DTO（ChatHistoryPersistPayload）交给下游基础设施；
+// 3. 不负责 Redis 上下文写入（Redis 由调用方在链路中先行处理）；
+// 4. 不负责消费完成回调（异步模式下由 outbox 消费者负责最终落库）。
+func (s *AgentService) PersistChatHistory(ctx context.Context, payload model.ChatHistoryPersistPayload) error {
+	// 1. 未注入事件发布器时（例如本地极简环境），直接同步写 DB。
 	//    这样可以保证功能不依赖 Kafka 也能跑通。
-	if s.asyncPipeline == nil {
+	if s.eventPublisher == nil {
 		return s.repo.SaveChatHistory(ctx, payload.UserID, payload.ConversationID, payload.Role, payload.Message)
 	}
-	// 2. 已启用异步通道时，只入 outbox，不在请求路径阻塞 Kafka。
-	return s.asyncPipeline.EnqueueChatHistoryPersist(ctx, payload)
+	// 2. 已启用异步总线时，只发布“持久化请求事件”，不在请求路径阻塞 Kafka。
+	// 2.1 发布成功仅代表“事件安全入队”，实际落库由消费者异步完成。
+	return eventsvc.PublishChatHistoryPersistRequested(ctx, s.eventPublisher, payload)
+}
+
+// saveChatHistoryReliable 是历史兼容别名。
+// 迁移策略：先保留旧方法名，避免同轮改动跨文件过大；后续可统一替换为 PersistChatHistory。
+func (s *AgentService) saveChatHistoryReliable(ctx context.Context, payload model.ChatHistoryPersistPayload) error {
+	return s.PersistChatHistory(ctx, payload)
 }
 
 // pushErrNonBlocking 向错误通道“尽力投递”错误。
@@ -167,7 +179,7 @@ func (s *AgentService) runNormalChatFlow(
 		log.Printf("写入用户消息到 Redis 失败: %v", err)
 	}
 
-	if err = s.saveChatHistoryReliable(ctx, model.ChatHistoryPersistPayload{
+	if err = s.PersistChatHistory(ctx, model.ChatHistoryPersistPayload{
 		UserID:         userID,
 		ConversationID: chatID,
 		Role:           "user",
@@ -186,7 +198,7 @@ func (s *AgentService) runNormalChatFlow(
 		log.Printf("写入助手消息到 Redis 失败: %v", err)
 	}
 
-	if saveErr := s.saveChatHistoryReliable(context.Background(), model.ChatHistoryPersistPayload{
+	if saveErr := s.PersistChatHistory(context.Background(), model.ChatHistoryPersistPayload{
 		UserID:         userID,
 		ConversationID: chatID,
 		Role:           "assistant",

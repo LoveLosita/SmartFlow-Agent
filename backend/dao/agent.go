@@ -19,41 +19,68 @@ func NewAgentDAO(db *gorm.DB) *AgentDAO {
 	return &AgentDAO{db: db}
 }
 
-func (a *AgentDAO) SaveChatHistory(ctx context.Context, userID int, conversationID string, role, message string) error {
-	// 1. 同步落库路径也要保证“消息写入”和“会话计数更新”原子一致。
-	//    因此这里使用事务，避免出现“有消息但 message_count 没加”或反过来的不一致状态。
-	return a.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 1.1 先写 chat_histories。
-		userChat := model.ChatHistory{
-			UserID:         userID,
-			MessageContent: &message,
-			Role:           &role,
-			ChatID:         conversationID,
-		}
-		if err := tx.Create(&userChat).Error; err != nil {
-			return err
-		}
+func (r *AgentDAO) WithTx(tx *gorm.DB) *AgentDAO {
+	return &AgentDAO{db: tx}
+}
 
-		// 1.2 再原子更新 agent_chats 的统计字段：
-		//     - message_count: +1
-		//     - last_message_at: 当前时间
-		// 这样 message_count 语义就稳定等于“已成功落库的消息条数”。
-		now := time.Now()
-		updates := map[string]interface{}{
-			"message_count":   gorm.Expr("message_count + ?", 1),
-			"last_message_at": &now,
-		}
-		result := tx.Model(&model.AgentChat{}).
-			Where("user_id = ? AND chat_id = ?", userID, conversationID).
-			Updates(updates)
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			// 会话不存在视为数据不一致，回滚事务，防止产生“孤儿历史记录”。
-			return fmt.Errorf("conversation not found when updating stats: user_id=%d chat_id=%s", userID, conversationID)
-		}
-		return nil
+// saveChatHistoryCore 是“聊天消息落库 + 会话统计更新”的核心实现。
+//
+// 职责边界：
+// 1. 只执行当前 DAO 句柄上的数据库写入动作；
+// 2. 不主动开启事务（事务由调用方决定）；
+// 3. 保证 chat_histories 与 agent_chats.message_count 的一致性口径。
+//
+// 失败处理：
+// 1. 任一步骤失败都返回 error；
+// 2. 若调用方处于事务中，返回 error 会触发事务回滚。
+func (a *AgentDAO) saveChatHistoryCore(ctx context.Context, userID int, conversationID string, role, message string) error {
+	// 1. 先写 chat_histories 原始消息。
+	userChat := model.ChatHistory{
+		UserID:         userID,
+		MessageContent: &message,
+		Role:           &role,
+		ChatID:         conversationID,
+	}
+	if err := a.db.WithContext(ctx).Create(&userChat).Error; err != nil {
+		return err
+	}
+
+	// 2. 再更新会话统计（message_count +1, last_message_at=now）。
+	now := time.Now()
+	updates := map[string]interface{}{
+		"message_count":   gorm.Expr("message_count + ?", 1),
+		"last_message_at": &now,
+	}
+	result := a.db.WithContext(ctx).Model(&model.AgentChat{}).
+		Where("user_id = ? AND chat_id = ?", userID, conversationID).
+		Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		// 会话不存在时直接失败，避免出现“孤儿历史消息”。
+		return fmt.Errorf("conversation not found when updating stats: user_id=%d chat_id=%s", userID, conversationID)
+	}
+	return nil
+}
+
+// SaveChatHistoryInTx 在调用方“已开启事务”的场景下写入聊天历史。
+//
+// 设计目的：
+// 1. 给服务层组合多个 DAO 操作时复用，避免嵌套事务；
+// 2. 让 outbox 消费处理器可以和业务写入共享同一个 tx。
+func (a *AgentDAO) SaveChatHistoryInTx(ctx context.Context, userID int, conversationID string, role, message string) error {
+	return a.saveChatHistoryCore(ctx, userID, conversationID, role, message)
+}
+
+// SaveChatHistory 在同步直写路径下写入聊天历史。
+//
+// 说明：
+// 1. 该方法会自行开启事务；
+// 2. 内部复用 saveChatHistoryCore，确保和 SaveChatHistoryInTx 的业务口径完全一致。
+func (a *AgentDAO) SaveChatHistory(ctx context.Context, userID int, conversationID string, role, message string) error {
+	return a.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return a.WithTx(tx).saveChatHistoryCore(ctx, userID, conversationID, role, message)
 	})
 }
 
@@ -80,7 +107,7 @@ func (a *AgentDAO) GetUserChatHistories(ctx context.Context, userID, limit int, 
 	if err != nil {
 		return nil, err
 	}
-	// 保留“最近 N 条”的前提下，反转为时间正序，便于模型消费
+	// 保留“最近 N 条”后，反转成时间正序，方便模型消费。
 	for i, j := 0, len(histories)-1; i < j; i, j = i+1, j-1 {
 		histories[i], histories[j] = histories[j], histories[i]
 	}
@@ -92,17 +119,14 @@ func (a *AgentDAO) IfChatExists(ctx context.Context, userID int, chatID string) 
 	err := a.db.WithContext(ctx).Where("user_id = ? AND chat_id = ?", userID, chatID).First(&chat).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return false, nil // 没有找到记录，表示会话不存在
+			return false, nil
 		}
 		return false, err
 	}
 	return true, nil
 }
 
-// GetConversationMeta 查询单个会话的元信息。
-// 用途：
-// 1) 给前端提供“当前会话标题/消息数/最近消息时间”等展示字段；
-// 2) 与流式聊天接口解耦，避免在 SSE 头部里塞动态标题。
+// GetConversationMeta 查询单个会话元信息。
 func (a *AgentDAO) GetConversationMeta(ctx context.Context, userID int, chatID string) (*model.AgentChat, error) {
 	var chat model.AgentChat
 	err := a.db.WithContext(ctx).
@@ -116,10 +140,6 @@ func (a *AgentDAO) GetConversationMeta(ctx context.Context, userID int, chatID s
 }
 
 // GetConversationTitle 读取当前会话标题。
-// 返回值说明：
-// 1) title：标题内容（若为空表示尚未生成）；
-// 2) exists：会话是否存在；
-// 3) err：数据库错误。
 func (a *AgentDAO) GetConversationTitle(ctx context.Context, userID int, chatID string) (title string, exists bool, err error) {
 	var chat model.AgentChat
 	queryErr := a.db.WithContext(ctx).
@@ -138,10 +158,7 @@ func (a *AgentDAO) GetConversationTitle(ctx context.Context, userID int, chatID 
 	return strings.TrimSpace(*chat.Title), true, nil
 }
 
-// UpdateConversationTitleIfEmpty 仅在标题为空时写入会话标题。
-// 设计目的：
-// 1) 避免每轮对话都覆盖已有标题；
-// 2) 并发下保持幂等：多个 goroutine 同时尝试写标题，最终只会成功一次。
+// UpdateConversationTitleIfEmpty 仅在标题为空时更新会话标题。
 func (a *AgentDAO) UpdateConversationTitleIfEmpty(ctx context.Context, userID int, chatID, title string) error {
 	normalized := strings.TrimSpace(title)
 	if normalized == "" {

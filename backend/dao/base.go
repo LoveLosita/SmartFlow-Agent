@@ -6,7 +6,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// RepoManager 囊括了所有的 Repo
+// RepoManager 聚合所有 DAO，供服务层做跨仓储事务编排。
 type RepoManager struct {
 	db        *gorm.DB
 	Schedule  *ScheduleDAO
@@ -14,6 +14,7 @@ type RepoManager struct {
 	Course    *CourseDAO
 	TaskClass *TaskClassDAO
 	User      *UserDAO
+	Agent     *AgentDAO
 }
 
 func NewManager(db *gorm.DB) *RepoManager {
@@ -24,21 +25,37 @@ func NewManager(db *gorm.DB) *RepoManager {
 		Course:    NewCourseDAO(db),
 		TaskClass: NewTaskClassDAO(db),
 		User:      NewUserDAO(db),
+		Agent:     NewAgentDAO(db),
 	}
 }
 
-// Transaction 核心函数：开启一个带事务的“新管理器”
+// WithTx 基于外部事务句柄构造“同事务 RepoManager”。
+//
+// 职责边界：
+// 1. 只做 DAO 依赖重绑定，不开启/提交/回滚事务；
+// 2. 让服务层在一个 tx 内调用多个 DAO 方法；
+// 3. 适用于 outbox 消费处理器这类“基础设施事务 + 业务事务合并”的场景。
+func (m *RepoManager) WithTx(tx *gorm.DB) *RepoManager {
+	return &RepoManager{
+		db:        tx,
+		Schedule:  m.Schedule.WithTx(tx),
+		Task:      m.Task.WithTx(tx),
+		TaskClass: m.TaskClass.WithTx(tx),
+		Course:    m.Course.WithTx(tx),
+		User:      m.User.WithTx(tx),
+		Agent:     m.Agent.WithTx(tx),
+	}
+}
+
+// Transaction 开启事务并把“同事务 RepoManager”传给回调。
+//
+// 使用约束：
+// 1. 回调里应只使用 txM 下挂 DAO，避免混入事务外句柄；
+// 2. 回调返回 error 会触发整体回滚；
+// 3. 回调返回 nil 表示提交事务。
 func (m *RepoManager) Transaction(ctx context.Context, fn func(txM *RepoManager) error) error {
 	return m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 💡 关键：创建一个新的 RepoManager，里面的 Repo 全部注入这个 tx 句柄
-		txM := &RepoManager{
-			db:        tx,
-			Schedule:  m.Schedule.WithTx(tx),
-			Task:      m.Task.WithTx(tx),
-			TaskClass: m.TaskClass.WithTx(tx),
-			Course:    m.Course.WithTx(tx),
-			User:      m.User.WithTx(tx),
-		}
+		txM := m.WithTx(tx)
 		return fn(txM)
 	})
 }

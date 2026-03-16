@@ -9,6 +9,19 @@ type UserSendMessageRequest struct {
 	Thinking       bool   `json:"thinking,omitempty"`
 }
 
+// ChatHistoryPersistPayload 是“聊天消息持久化请求”业务 DTO。
+//
+// 职责边界：
+// 1. 只描述聊天业务需要落库的核心字段；
+// 2. 可被同步直写路径与异步事件路径复用；
+// 3. 不包含 outbox/kafka 协议字段（这些字段由 infra 层统一封装）。
+type ChatHistoryPersistPayload struct {
+	UserID         int    `json:"user_id"`
+	ConversationID string `json:"conversation_id"`
+	Role           string `json:"role"`
+	Message        string `json:"message"`
+}
+
 // GetConversationMetaResponse 是会话元信息查询接口的返回结构。
 // 说明：
 // 1) title 可能为空字符串（表示标题尚未生成）；

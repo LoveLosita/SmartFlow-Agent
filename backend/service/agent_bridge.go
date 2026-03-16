@@ -17,6 +17,6 @@ type AgentService = agentsvc.AgentService
 // 说明：
 // 1) 外部调用签名保持不变；
 // 2) 真实构造逻辑已下沉到 service/agentsvc 包。
-func NewAgentService(aiHub *inits.AIHub, repo *dao.AgentDAO, taskRepo *dao.TaskDAO, agentRedis *dao.AgentCache, asyncPipeline *outboxinfra.ChatHistoryAsync) *AgentService {
-	return agentsvc.NewAgentService(aiHub, repo, taskRepo, agentRedis, asyncPipeline)
+func NewAgentService(aiHub *inits.AIHub, repo *dao.AgentDAO, taskRepo *dao.TaskDAO, agentRedis *dao.AgentCache, eventPublisher outboxinfra.EventPublisher) *AgentService {
+	return agentsvc.NewAgentService(aiHub, repo, taskRepo, agentRedis, eventPublisher)
 }
