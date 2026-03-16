@@ -23,11 +23,31 @@ func TestParseQuickNoteRouteControlTag_QuickNote(t *testing.T) {
 	if decision == nil {
 		t.Fatalf("decision 不应为空")
 	}
-	if decision.Action != route.ActionQuickNote {
-		t.Fatalf("action 解析错误，期望=%s 实际=%s", route.ActionQuickNote, decision.Action)
+	// 兼容逻辑：历史 quick_note 会被统一映射到 quick_note_create。
+	if decision.Action != route.ActionQuickNoteCreate {
+		t.Fatalf("action 解析错误，期望=%s 实际=%s", route.ActionQuickNoteCreate, decision.Action)
 	}
 	if strings.TrimSpace(decision.Reason) == "" {
 		t.Fatalf("reason 不应为空")
+	}
+}
+
+// TestParseRouteControlTag_TaskQuery
+// 目的：验证通用分流中 action=task_query 的控制码可稳定解析。
+func TestParseRouteControlTag_TaskQuery(t *testing.T) {
+	nonce := "taskquerynonce"
+	raw := `<SMARTFLOW_ROUTE nonce="taskquerynonce" action="task_query"></SMARTFLOW_ROUTE>
+<SMARTFLOW_REASON>用户在查最紧急任务</SMARTFLOW_REASON>`
+
+	decision, err := route.ParseRouteControlTag(raw, nonce)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if decision == nil {
+		t.Fatalf("decision 不应为空")
+	}
+	if decision.Action != route.ActionTaskQuery {
+		t.Fatalf("action 解析错误，期望=%s 实际=%s", route.ActionTaskQuery, decision.Action)
 	}
 }
 

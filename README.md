@@ -352,7 +352,35 @@ $$Gap = \frac{TotalAvailableSlots - (TaskCount \times 2)}{TaskCount + 1}$$
 
 ## 5.4 Agent范式实现细节
 
-### 1) 命中“添加日程/随口记”后的业务流转
+### 1) 总分流图（消息识别后的去向）
+
+```mermaid
+flowchart TD
+    A["用户消息进入 AgentChat"] --> B["通用控制码分流<br/>action=chat/quick_note_create/task_query"]
+    B --> C{"路由是否成功解析"}
+
+    C -- 否 --> D["兜底普通聊天链路<br/>StreamChat token流式输出"]
+    C -- 是 --> E{"action 类型"}
+
+    E -- chat --> F["普通聊天链路<br/>StreamChat token流式输出"]
+
+    E -- quick_note_create --> G["随口记链路<br/>单请求聚合规划 + 本地校验"]
+    G --> H["写库工具落库<br/>task_id有效校验 + 失败重试"]
+    H --> I["一次性正文回复"]
+
+    E -- task_query --> J["随口问链路<br/>进入 TaskQueryGraph"]
+    J --> K["plan -> quadrant -> time_anchor"]
+    K --> L["tool_query 调用 query_tasks"]
+    L --> M["reflect 判断是否满足<br/>不满足则 patch 重试(<=2)"]
+    M --> N["后端确定性渲染列表<br/>严格按 limit 输出条数"]
+
+    D --> Z["后置持久化<br/>Redis + outbox/DB"]
+    F --> Z
+    I --> Z
+    N --> Z
+```
+
+### 2) 命中“添加日程/随口记”后的业务流转
 
 ```mermaid
 flowchart TD
@@ -380,29 +408,29 @@ flowchart TD
     X --> T
 ```
 
-### 2) 总分流图（消息识别后的去向）
+### 3) 命中“随口问/任务查询”后的业务流转
 
 ```mermaid
 flowchart TD
-    A[用户消息进入 AgentChat] --> B[模型控制码路由<br/>action=quick_note/chat]
-    B --> C{路由是否成功解析}
-
-    C -- 是 --> D{action=quick_note?}
-    D -- 否 --> E[普通聊天链路<br/>StreamChat token流式输出]
-    D -- 是 --> F[随口记快路径<br/>跳过二次意图判定]
-    F --> G[单请求聚合规划<br/>+本地时间校验/优先级兜底]
-    G --> H[写库工具落库<br/>task_id有效校验]
-    H --> I[返回一次性正文]
-
-    C -- 否 --> J[随口记兜底路径<br/>恢复二次意图判定]
-    J --> K{是否随口记意图}
-    K -- 否 --> L[普通聊天链路<br/>StreamChat token流式输出]
-    K -- 是 --> M[执行随口记写库链路<br/>返回一次性正文]
-
-    E --> Z[后置持久化<br/>Redis + outbox/DB]
-    I --> Z
-    L --> Z
-    M --> Z
+    A["用户消息进入 /agent/chat"] --> B["通用控制码分流<br/>action=chat/quick_note_create/task_query"]
+    B --> C{"action 是否为 task_query"}
+    C -- 否 --> D["走其它分支<br/>普通聊天或随口记"]
+    C -- 是 --> E["进入 TaskQueryGraph"]
+    E --> F["节点1: plan<br/>一次模型调用产出查询计划"]
+    F --> G["节点2: quadrant<br/>归一化象限范围"]
+    G --> H["节点3: time_anchor<br/>锁定时间过滤边界"]
+    H --> I["节点4: tool_query<br/>调用 query_tasks 工具查询"]
+    I --> J{"首次结果是否为空"}
+    J -- 是 --> K["自动放宽一次<br/>仅放宽关键词/完成状态/时间边界"]
+    K --> L["再次调用 query_tasks"]
+    J -- 否 --> M["进入反思节点"]
+    L --> M
+    M --> N["节点5: reflect<br/>模型判断结果是否满足用户诉求"]
+    N --> O{"need_retry 且未超上限"}
+    O -- 是 --> P["应用 retry_patch<br/>重试次数+1"]
+    P --> I
+    O -- 否 --> Q["后端确定性渲染最终回复<br/>严格按 limit 输出条数"]
+    Q --> R["后置持久化<br/>user+assistant 写 Redis + outbox/DB"]
 ```
 
 # 6 前端实现

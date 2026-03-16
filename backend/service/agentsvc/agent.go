@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/agent/chat"
+	"github.com/LoveLosita/smartflow/backend/agent/route"
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
@@ -260,58 +261,87 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 	}
 
 	// 3) 统一异步分流：
-	// - 先走“模型控制码路由”决定 quick_note / chat；
-	// - 路由命中 quick_note 时推阶段状态并执行 graph；
-	// - 路由命中 chat 时直接普通流式聊天。
+	// 3.1 先走“通用控制码路由”决定 action（chat / quick_note_create / task_query）；
+	// 3.2 quick_note_create 进入随口记 graph；
+	// 3.3 task_query 进入任务查询 tool-calling；
+	// 3.4 chat 直接普通流式聊天。
 	go func() {
 		defer close(outChan)
 
-		// 3.1 先走轻量路由，判断是否进入“随口记”图。
-		routing := s.decideQuickNoteRouting(ctx, selectedModel, userMessage)
-		if !routing.EnterQuickNote {
-			// 3.2 非随口记：直接走普通聊天主链路。
+		// 3.1 先走轻量路由，拿到统一 action。
+		routing := s.decideActionRouting(ctx, selectedModel, userMessage)
+
+		// 3.2 chat：直接走普通聊天主链路。
+		if routing.Action == route.ActionChat {
 			s.runNormalChatFlow(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
 			return
 		}
 
-		// 3.3 随口记：先发阶段状态，减少用户等待时的“无反馈感”。
+		// 3.3 非 chat 分支统一先发“接收成功”阶段，减少用户等待时的“无反馈感”。
 		progress := newQuickNoteProgressEmitter(outChan, resolvedModelName, true)
 		progress.Emit("request.accepted", routing.Detail)
 
-		// 3.4 执行随口记 graph。
-		quickHandled, quickState, quickErr := s.tryHandleQuickNoteWithGraph(
-			ctx,
-			selectedModel,
-			userMessage,
-			userID,
-			chatID,
-			traceID,
-			routing.TrustRoute,
-			progress.Emit,
-		)
-		if quickErr != nil {
-			// graph 出错不直接中断用户请求，而是回退普通聊天，保证可用性优先。
-			log.Printf("随口记 graph 执行失败，回退普通聊天 trace_id=%s chat_id=%s err=%v", traceID, chatID, quickErr)
-		}
+		// 3.4 quick_note_create：执行随口记 graph。
+		if routing.Action == route.ActionQuickNoteCreate {
+			quickHandled, quickState, quickErr := s.tryHandleQuickNoteWithGraph(
+				ctx,
+				selectedModel,
+				userMessage,
+				userID,
+				chatID,
+				traceID,
+				routing.TrustRoute,
+				progress.Emit,
+			)
+			if quickErr != nil {
+				// graph 出错不直接中断用户请求，而是回退普通聊天，保证可用性优先。
+				log.Printf("随口记 graph 执行失败，回退普通聊天 trace_id=%s chat_id=%s err=%v", traceID, chatID, quickErr)
+			}
 
-		if quickHandled {
-			// 3.5 随口记处理成功：组织最终回复并按 OpenAI 兼容格式输出。
-			progress.Emit("quick_note.reply.polishing", "正在结合你的话题润色回复。")
-			quickReply := buildQuickNoteFinalReply(ctx, selectedModel, userMessage, quickState)
-			if emitErr := emitSingleAssistantCompletion(outChan, resolvedModelName, quickReply); emitErr != nil {
-				pushErrNonBlocking(errChan, emitErr)
+			if quickHandled {
+				// 3.4.1 随口记处理成功：组织最终回复并按 OpenAI 兼容格式输出。
+				progress.Emit("quick_note.reply.polishing", "正在结合你的话题润色回复。")
+				quickReply := buildQuickNoteFinalReply(ctx, selectedModel, userMessage, quickState)
+				if emitErr := emitSingleAssistantCompletion(outChan, resolvedModelName, quickReply); emitErr != nil {
+					pushErrNonBlocking(errChan, emitErr)
+					return
+				}
+
+				// 3.4.2 对随口记回复执行统一后置持久化（Redis + outbox/DB）。
+				s.persistChatAfterReply(ctx, userID, chatID, userMessage, quickReply, errChan)
+				// 3.4.3 随口记链路同样异步生成会话标题（仅首次写入）。
+				s.ensureConversationTitleAsync(userID, chatID)
 				return
 			}
 
-			// 3.6 对随口记回复执行统一后置持久化（Redis + outbox/DB）。
-			s.persistChatAfterReply(ctx, userID, chatID, userMessage, quickReply, errChan)
-			// 3.7 随口记链路同样异步生成会话标题（仅首次写入）。
+			// 3.4.4 路由误判或 graph 判定非随口记时，回落普通聊天，保证“能聊”。
+			progress.Emit("quick_note.fallback", "当前输入不是随口记请求，切换到普通对话。")
+			s.runNormalChatFlow(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
+			return
+		}
+
+		// 3.5 task_query：执行任务查询 tool-calling。
+		if routing.Action == route.ActionTaskQuery {
+			reply, queryErr := s.runTaskQueryFlow(ctx, selectedModel, userMessage, userID, progress.Emit)
+			if queryErr != nil {
+				// 3.5.1 任务查询失败时回退普通聊天，避免请求直接中断。
+				log.Printf("任务查询 tool-calling 执行失败，回退普通聊天 trace_id=%s chat_id=%s err=%v", traceID, chatID, queryErr)
+				progress.Emit("task_query.fallback", "任务查询暂不可用，先切回普通对话。")
+				s.runNormalChatFlow(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
+				return
+			}
+
+			// 3.5.2 查询成功后按 OpenAI 兼容格式输出，并执行统一后置持久化。
+			if emitErr := emitSingleAssistantCompletion(outChan, resolvedModelName, reply); emitErr != nil {
+				pushErrNonBlocking(errChan, emitErr)
+				return
+			}
+			s.persistChatAfterReply(ctx, userID, chatID, userMessage, reply, errChan)
 			s.ensureConversationTitleAsync(userID, chatID)
 			return
 		}
 
-		// 3.8 路由误判或 graph 判定非随口记时，回落普通聊天，保证“能聊”。
-		progress.Emit("quick_note.fallback", "当前输入不是随口记请求，切换到普通对话。")
+		// 3.6 未知 action 兜底：走普通聊天，保证可用性。
 		s.runNormalChatFlow(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
 	}()
 

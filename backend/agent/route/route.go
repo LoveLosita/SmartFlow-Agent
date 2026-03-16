@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/agent/quicknote"
 	"github.com/cloudwego/eino-ext/components/model/ark"
 	einoModel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -17,86 +16,135 @@ import (
 )
 
 const (
-	// ControlTimeout 是“模型控制码分流”步骤的额外子超时。
-	// 设为 0 表示完全跟随父请求上下文，不额外截断。
+	// ControlTimeout 是“模型控制码分流”这一步的额外超时预算。
+	//
+	// 约束说明：
+	// 1. 设为 0 代表完全继承父 ctx 的 deadline，不额外截断；
+	// 2. 若后续线上观测到分流偶发超时，可再加一个小预算（例如 2s）做隔离。
 	ControlTimeout = 0 * time.Second
 )
 
 var (
-	// 控制头格式：
-	// <SMARTFLOW_ROUTE nonce="xxx" action="quick_note|chat"></SMARTFLOW_ROUTE>
-	routeHeaderRegex = regexp.MustCompile(`(?is)<\s*smartflow_route\b[^>]*\bnonce\s*=\s*["']?([a-zA-Z0-9\-]+)["']?[^>]*\baction\s*=\s*["']?(quick_note|chat)["']?[^>]*>`)
-	// 可选理由块：
-	// <SMARTFLOW_REASON>...</SMARTFLOW_REASON>
+	// routeHeaderRegex 用于解析控制码头部。
+	//
+	// 支持动作：
+	// 1. quick_note_create：新增随口记任务；
+	// 2. task_query：查询任务；
+	// 3. chat：普通聊天；
+	// 4. quick_note：历史兼容别名，解析后会映射到 quick_note_create。
+	routeHeaderRegex = regexp.MustCompile(`(?is)<\s*smartflow_route\b[^>]*\bnonce\s*=\s*["']?([a-zA-Z0-9\-]+)["']?[^>]*\baction\s*=\s*["']?(quick_note_create|task_query|quick_note|chat)["']?[^>]*>`)
+	// routeReasonRegex 用于提取可选的理由块，方便日志排障。
 	routeReasonRegex = regexp.MustCompile(`(?is)<\s*smartflow_reason\s*>(.*?)<\s*/\s*smartflow_reason\s*>`)
 )
 
-// Action 表示控制码路由动作。
+const routeControlPrompt = `你是 SmartFlow 的请求分流控制器。
+你的唯一任务是给后端返回“可机读控制码”，不要做用户可见回复，不要解释。
+
+动作定义：
+1) quick_note_create：用户明确希望“记录/安排/提醒某件未来要做的事”。
+2) task_query：用户想“查看/筛选/排序/获取”已有任务（如最紧急、按DDL、某象限、关键词）。
+3) chat：其余全部普通对话（包括闲聊、知识问答、纯讨论“怎么安排任务”但未要求你真的去操作）。
+
+判定优先级（冲突时按顺序）：
+1) 若句子核心诉求是“帮我记一件事”，选 quick_note_create。
+2) 若核心诉求是“帮我查任务列表/某类任务”，选 task_query。
+3) 其他情况选 chat。
+
+输出格式必须严格如下（两行）：
+<SMARTFLOW_ROUTE nonce="给定nonce" action="quick_note_create|task_query|chat"></SMARTFLOW_ROUTE>
+<SMARTFLOW_REASON>一句不超过30字的中文理由</SMARTFLOW_REASON>
+
+禁止输出任何其他内容。`
+
+// Action 表示分流动作。
 type Action string
 
 const (
-	ActionChat      Action = "chat"
+	ActionChat            Action = "chat"
+	ActionQuickNoteCreate Action = "quick_note_create"
+	ActionTaskQuery       Action = "task_query"
+
+	// ActionQuickNote 是历史兼容别名，只用于解析旧 action 值。
 	ActionQuickNote Action = "quick_note"
 )
 
-// ControlDecision 是“控制码解析结果”。
+// ControlDecision 是“模型控制码解析结果”。
 type ControlDecision struct {
 	Action Action
 	Reason string
 	Raw    string
 }
 
-// RoutingDecision 是服务层最终使用的路由结果。
+// RoutingDecision 是服务层使用的统一分流结果。
+//
+// 职责边界：
+// 1. Action：最终动作（chat/quick_note_create/task_query）；
+// 2. TrustRoute：是否允许下游跳过二次意图判定；
+// 3. Detail：可选说明，用于阶段提示或日志。
 type RoutingDecision struct {
-	EnterQuickNote bool
-	TrustRoute     bool
-	Detail         string
+	Action     Action
+	TrustRoute bool
+	Detail     string
 }
 
-// DecideQuickNoteRouting 通过“模型控制码”决定本次请求走向。
+// DecideActionRouting 通过“模型控制码”决定本次请求走向。
+//
 // 返回语义：
-// 1) EnterQuickNote=true：进入 quick_note graph；
-// 2) TrustRoute=true：表示可跳过 graph 二次意图判定。
-func DecideQuickNoteRouting(ctx context.Context, selectedModel *ark.ChatModel, userMessage string) RoutingDecision {
+// 1. Action=quick_note_create：进入随口记写入图；
+// 2. Action=task_query：进入任务查询 tool-calling；
+// 3. Action=chat：进入普通聊天流；
+// 4. 路由失败时回落 chat，保证可用性优先。
+func DecideActionRouting(ctx context.Context, selectedModel *ark.ChatModel, userMessage string) RoutingDecision {
 	decision, err := routeByModelControlTag(ctx, selectedModel, userMessage)
 	if err != nil {
 		if deadline, ok := ctx.Deadline(); ok {
-			log.Printf("quick note 路由控制码失败，进入 graph 兜底: err=%v parent_deadline_in_ms=%d route_timeout_ms=%d",
+			log.Printf("通用分流控制码失败，回落 chat: err=%v parent_deadline_in_ms=%d route_timeout_ms=%d",
 				err, time.Until(deadline).Milliseconds(), ControlTimeout.Milliseconds())
 		} else {
-			log.Printf("quick note 路由控制码失败，进入 graph 兜底: err=%v parent_deadline=none route_timeout_ms=%d",
+			log.Printf("通用分流控制码失败，回落 chat: err=%v parent_deadline=none route_timeout_ms=%d",
 				err, ControlTimeout.Milliseconds())
 		}
 		return RoutingDecision{
-			EnterQuickNote: true,
-			TrustRoute:     false,
-			Detail:         "路由判定暂不可用，已进入任务识别兜底流程。",
+			Action:     ActionChat,
+			TrustRoute: false,
+			Detail:     "",
 		}
 	}
 
 	switch decision.Action {
-	case ActionQuickNote:
+	case ActionQuickNoteCreate:
 		reason := strings.TrimSpace(decision.Reason)
 		if reason == "" {
-			reason = "模型识别到任务安排请求，准备执行随口记。"
+			reason = "识别到新增任务请求，准备执行随口记流程。"
 		}
 		return RoutingDecision{
-			EnterQuickNote: true,
-			TrustRoute:     true,
-			Detail:         reason,
+			Action:     ActionQuickNoteCreate,
+			TrustRoute: true,
+			Detail:     reason,
+		}
+	case ActionTaskQuery:
+		reason := strings.TrimSpace(decision.Reason)
+		if reason == "" {
+			reason = "识别到任务查询请求，准备调用任务查询工具。"
+		}
+		return RoutingDecision{
+			Action:     ActionTaskQuery,
+			TrustRoute: true,
+			Detail:     reason,
 		}
 	case ActionChat:
 		return RoutingDecision{
-			EnterQuickNote: false,
-			TrustRoute:     false,
-			Detail:         "",
+			Action:     ActionChat,
+			TrustRoute: false,
+			Detail:     "",
 		}
 	default:
-		log.Printf("quick note 未知路由动作，进入 graph 兜底: action=%s raw=%s", decision.Action, decision.Raw)
+		// 兜底：未知动作一律回落 chat，避免误入错误分支。
+		log.Printf("通用分流出现未知动作，回落 chat: action=%s raw=%s", decision.Action, decision.Raw)
 		return RoutingDecision{
-			EnterQuickNote: true,
-			TrustRoute:     false,
-			Detail:         "路由结果异常，已进入任务识别兜底流程。",
+			Action:     ActionChat,
+			TrustRoute: false,
+			Detail:     "",
 		}
 	}
 }
@@ -114,12 +162,12 @@ func routeByModelControlTag(ctx context.Context, selectedModel *ark.ChatModel, u
 	userPrompt := fmt.Sprintf("nonce=%s\n当前时间=%s\n用户输入=%s", nonce, nowText, strings.TrimSpace(userMessage))
 
 	resp, err := selectedModel.Generate(routeCtx, []*schema.Message{
-		schema.SystemMessage(quicknote.QuickNoteRouteControlPrompt),
+		schema.SystemMessage(routeControlPrompt),
 		schema.UserMessage(userPrompt),
 	},
 		ark.WithThinking(&arkModel.Thinking{Type: arkModel.ThinkingTypeDisabled}),
 		einoModel.WithTemperature(0),
-		einoModel.WithMaxTokens(80),
+		einoModel.WithMaxTokens(120),
 	)
 	if err != nil {
 		return nil, err
@@ -133,13 +181,14 @@ func routeByModelControlTag(ctx context.Context, selectedModel *ark.ChatModel, u
 		return nil, fmt.Errorf("empty route content")
 	}
 
-	return ParseQuickNoteRouteControlTag(raw, nonce)
+	return ParseRouteControlTag(raw, nonce)
 }
 
 // deriveRouteControlContext 为“控制码路由”创建子上下文。
+//
 // 设计要点：
-// 1) timeout<=0 时不加额外 deadline，仅继承父上下文；
-// 2) 父 ctx deadline 更紧时，沿用父上下文，避免过早超时误判。
+// 1. timeout<=0 时不加额外 deadline，仅继承父上下文；
+// 2. 父 ctx deadline 更紧时，沿用父上下文，避免过早超时误判。
 func deriveRouteControlContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if timeout <= 0 {
 		return context.WithCancel(parent)
@@ -152,12 +201,13 @@ func deriveRouteControlContext(parent context.Context, timeout time.Duration) (c
 	return context.WithTimeout(parent, timeout)
 }
 
-// ParseQuickNoteRouteControlTag 解析控制码返回。
+// ParseRouteControlTag 解析通用控制码返回。
+//
 // 容错策略：
-// 1) 允许大小写、属性顺序、额外属性差异；
-// 2) nonce 必须精确匹配；
-// 3) action 仅允许 quick_note/chat。
-func ParseQuickNoteRouteControlTag(raw, expectedNonce string) (*ControlDecision, error) {
+// 1. 允许大小写、属性顺序、额外属性差异；
+// 2. nonce 必须精确匹配；
+// 3. action 仅允许 quick_note_create/task_query/chat（兼容 quick_note）。
+func ParseRouteControlTag(raw, expectedNonce string) (*ControlDecision, error) {
 	text := strings.TrimSpace(raw)
 	if text == "" {
 		return nil, fmt.Errorf("route content is empty")
@@ -175,7 +225,13 @@ func ParseQuickNoteRouteControlTag(raw, expectedNonce string) (*ControlDecision,
 
 	actionText := strings.ToLower(strings.TrimSpace(header[2]))
 	action := Action(actionText)
-	if action != ActionQuickNote && action != ActionChat {
+	switch action {
+	case ActionQuickNoteCreate, ActionTaskQuery, ActionChat:
+		// 合法动作直接通过。
+	case ActionQuickNote:
+		// 兼容旧动作值：统一映射到 quick_note_create。
+		action = ActionQuickNoteCreate
+	default:
 		return nil, fmt.Errorf("invalid route action: %s", actionText)
 	}
 
@@ -190,4 +246,30 @@ func ParseQuickNoteRouteControlTag(raw, expectedNonce string) (*ControlDecision,
 		Reason: reason,
 		Raw:    text,
 	}, nil
+}
+
+// DecideQuickNoteRouting 是历史兼容入口。
+//
+// 说明：
+// 1. 旧代码只区分“进不进 quick_note”；
+// 2. 新分流里 task_query 不应进入 quick_note，因此这里会映射为 false。
+func DecideQuickNoteRouting(ctx context.Context, selectedModel *ark.ChatModel, userMessage string) RoutingDecision {
+	decision := DecideActionRouting(ctx, selectedModel, userMessage)
+	if decision.Action == ActionQuickNoteCreate {
+		return decision
+	}
+	return RoutingDecision{
+		Action:     ActionChat,
+		TrustRoute: false,
+		Detail:     "",
+	}
+}
+
+// ParseQuickNoteRouteControlTag 是历史兼容解析入口。
+//
+// 说明：
+// 1. 旧测试仍调用该函数名；
+// 2. 新实现统一委托给 ParseRouteControlTag。
+func ParseQuickNoteRouteControlTag(raw, expectedNonce string) (*ControlDecision, error) {
+	return ParseRouteControlTag(raw, expectedNonce)
 }
