@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/LoveLosita/smartflow/backend/model"
+	"github.com/LoveLosita/smartflow/backend/respond"
 	"github.com/cloudwego/eino-ext/components/model/ark"
 	einoModel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -25,6 +26,12 @@ const (
 	// conversationTitleMaxChars 是标题最大字符数（按 rune 计）。
 	// 控制标题长度，避免前端展示溢出。
 	conversationTitleMaxChars = 24
+	// conversationListDefaultPage 是会话列表默认页码。
+	conversationListDefaultPage = 1
+	// conversationListDefaultPageSize 是会话列表默认分页大小。
+	conversationListDefaultPageSize = 20
+	// conversationListMaxPageSize 是会话列表单页上限，避免超大分页压垮数据库。
+	conversationListMaxPageSize = 100
 )
 
 const conversationTitlePrompt = `你是 SmartFlow 的会话标题生成器。
@@ -59,6 +66,89 @@ func (s *AgentService) GetConversationMeta(ctx context.Context, userID int, chat
 		LastMessageAt:  chat.LastMessageAt,
 		Status:         chat.Status,
 	}, nil
+}
+
+// GetConversationList 返回“当前用户会话列表（分页）”。
+//
+// 职责边界：
+// 1. 负责分页参数规范化（默认值、上限保护）；
+// 2. 负责状态过滤值校验（仅允许 active/archived）；
+// 3. 负责把 DAO 模型转换成前端响应 DTO；
+// 4. 不负责缓存（由上层架构决策按需引入）。
+func (s *AgentService) GetConversationList(ctx context.Context, userID, page, pageSize int, status string) (*model.GetConversationListResponse, error) {
+	// 1. 先做参数规范化，保证 DAO 层始终收到安全参数。
+	normalizedPage := normalizeConversationListPage(page)
+	normalizedPageSize := normalizeConversationListPageSize(pageSize)
+
+	// 2. 校验状态过滤器：
+	// 2.1 允许空值（表示不过滤）；
+	// 2.2 仅接受 active/archived，避免把任意字符串下推到 SQL。
+	normalizedStatus, valid := normalizeConversationStatus(status)
+	if !valid {
+		return nil, respond.WrongParamType
+	}
+
+	// 3. 查库拿分页结果。
+	chats, total, err := s.repo.GetConversationList(ctx, userID, normalizedPage, normalizedPageSize, normalizedStatus)
+	if err != nil {
+		return nil, err
+	}
+
+	// 4. 转换为响应 DTO，统一 title/has_title 语义，避免前端重复处理空指针。
+	items := make([]model.GetConversationListItem, 0, len(chats))
+	for _, chatItem := range chats {
+		title := ""
+		if chatItem.Title != nil {
+			title = strings.TrimSpace(*chatItem.Title)
+		}
+		items = append(items, model.GetConversationListItem{
+			ConversationID: chatItem.ChatID,
+			Title:          title,
+			HasTitle:       title != "",
+			MessageCount:   chatItem.MessageCount,
+			LastMessageAt:  chatItem.LastMessageAt,
+			Status:         chatItem.Status,
+			CreatedAt:      chatItem.CreatedAt,
+		})
+	}
+
+	// 5. 计算 has_more 语义，前端可直接用于“继续加载”按钮。
+	hasMore := int64(normalizedPage*normalizedPageSize) < total
+	return &model.GetConversationListResponse{
+		List:     items,
+		Page:     normalizedPage,
+		PageSize: normalizedPageSize,
+		Total:    total,
+		HasMore:  hasMore,
+	}, nil
+}
+
+func normalizeConversationListPage(page int) int {
+	if page <= 0 {
+		return conversationListDefaultPage
+	}
+	return page
+}
+
+func normalizeConversationListPageSize(pageSize int) int {
+	if pageSize <= 0 {
+		return conversationListDefaultPageSize
+	}
+	if pageSize > conversationListMaxPageSize {
+		return conversationListMaxPageSize
+	}
+	return pageSize
+}
+
+func normalizeConversationStatus(status string) (string, bool) {
+	normalized := strings.TrimSpace(strings.ToLower(status))
+	if normalized == "" {
+		return "", true
+	}
+	if normalized == "active" || normalized == "archived" {
+		return normalized, true
+	}
+	return "", false
 }
 
 // ensureConversationTitleAsync 在后台异步生成并写入会话标题。

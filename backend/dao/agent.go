@@ -169,3 +169,48 @@ func (a *AgentDAO) UpdateConversationTitleIfEmpty(ctx context.Context, userID in
 		Where("user_id = ? AND chat_id = ? AND (title IS NULL OR title = '')", userID, chatID).
 		Update("title", normalized).Error
 }
+
+// GetConversationList 按分页查询指定用户的会话列表。
+//
+// 职责边界：
+// 1. 只负责读库，不负责缓存；
+// 2. 只负责 user_id 数据隔离，不负责参数合法性兜底（由 service 负责）；
+// 3. 返回总数 total 供上层计算 has_more。
+func (a *AgentDAO) GetConversationList(ctx context.Context, userID, page, pageSize int, status string) ([]model.AgentChat, int64, error) {
+	// 1. 先构造统一过滤条件，保证 total 与 list 的统计口径一致。
+	baseQuery := a.db.WithContext(ctx).Model(&model.AgentChat{}).Where("user_id = ?", userID)
+	if strings.TrimSpace(status) != "" {
+		baseQuery = baseQuery.Where("status = ?", status)
+	}
+
+	// 2. 先查总条数，给前端分页器提供完整元信息。
+	var total int64
+	if err := baseQuery.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	if total == 0 {
+		return make([]model.AgentChat, 0), 0, nil
+	}
+
+	// 3. 再查当前页数据：
+	// 3.1 按最近消息时间倒序，保证“最近活跃”优先展示；
+	// 3.2 同时间戳下按 id 倒序，避免翻页时顺序抖动。
+	offset := (page - 1) * pageSize
+	var chats []model.AgentChat
+	query := a.db.WithContext(ctx).
+		Model(&model.AgentChat{}).
+		Select("id", "chat_id", "title", "message_count", "last_message_at", "status", "created_at").
+		Where("user_id = ?", userID)
+	if strings.TrimSpace(status) != "" {
+		query = query.Where("status = ?", status)
+	}
+
+	if err := query.Order("last_message_at DESC").
+		Order("id DESC").
+		Offset(offset).
+		Limit(pageSize).
+		Find(&chats).Error; err != nil {
+		return nil, 0, err
+	}
+	return chats, total, nil
+}

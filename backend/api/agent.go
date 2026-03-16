@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -121,4 +122,53 @@ func (api *AgentHandler) GetConversationMeta(c *gin.Context) {
 
 	// 5. 返回统一响应结构。
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, meta))
+}
+
+// GetConversationList 返回当前登录用户的会话列表（分页）。
+//
+// 设计说明：
+// 1) 接口只返回“列表元信息”，不返回消息正文，避免列表接口过重；
+// 2) page/page_size 为可选参数，缺省值由 service 层统一兜底；
+// 3) status 可选，支持 active/archived，非法值直接返回 400。
+func (api *AgentHandler) GetConversationList(c *gin.Context) {
+	// 1. 从 JWT 上下文读取 user_id，保证只查“当前用户自己的会话”。
+	userID := c.GetInt("user_id")
+
+	// 2. 解析分页参数（可选）：
+	// 2.1 参数不存在时保持 0，让 service 使用默认值；
+	// 2.2 参数存在但格式非法时直接返回 400，避免脏参数下沉。
+	page := 0
+	if rawPage := strings.TrimSpace(c.Query("page")); rawPage != "" {
+		parsedPage, err := strconv.Atoi(rawPage)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, respond.WrongParamType)
+			return
+		}
+		page = parsedPage
+	}
+
+	pageSize := 0
+	if rawPageSize := strings.TrimSpace(c.Query("page_size")); rawPageSize != "" {
+		parsedPageSize, err := strconv.Atoi(rawPageSize)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, respond.WrongParamType)
+			return
+		}
+		pageSize = parsedPageSize
+	}
+
+	// 3. status 过滤器可选，最终合法性由 service 层统一校验。
+	status := strings.TrimSpace(c.Query("status"))
+
+	// 4. 读接口设置短超时，避免慢查询占用连接。
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel()
+
+	// 5. 调 service 查询并返回统一响应结构。
+	resp, err := api.svc.GetConversationList(ctx, userID, page, pageSize, status)
+	if err != nil {
+		respond.DealWithError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
 }

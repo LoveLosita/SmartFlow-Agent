@@ -36,6 +36,36 @@ type GetConversationMetaResponse struct {
 	Status         string     `json:"status"`
 }
 
+// GetConversationListItem 是“会话列表”中的单项数据。
+//
+// 职责边界：
+// 1. 仅承载列表展示所需的轻量字段，不承载具体消息正文；
+// 2. title 允许为空字符串，has_title 用于前端快速判断占位文案；
+// 3. message_count/last_message_at 用于排序展示与角标扩展。
+type GetConversationListItem struct {
+	ConversationID string     `json:"conversation_id"`
+	Title          string     `json:"title"`
+	HasTitle       bool       `json:"has_title"`
+	MessageCount   int        `json:"message_count"`
+	LastMessageAt  *time.Time `json:"last_message_at,omitempty"`
+	Status         string     `json:"status"`
+	CreatedAt      *time.Time `json:"created_at,omitempty"`
+}
+
+// GetConversationListResponse 是“获取用户会话列表”接口的统一响应体。
+//
+// 职责边界：
+// 1. list 承载当前页数据；
+// 2. page/page_size/total/has_more 承载分页语义；
+// 3. 不负责返回会话正文明细（正文仍由聊天历史接口承担）。
+type GetConversationListResponse struct {
+	List     []GetConversationListItem `json:"list"`
+	Page     int                       `json:"page"`
+	PageSize int                       `json:"page_size"`
+	Total    int64                     `json:"total"`
+	HasMore  bool                      `json:"has_more"`
+}
+
 type SSEResponse struct {
 	Event string         `json:"event"`
 	ID    int            `json:"id,omitempty"`
