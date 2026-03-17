@@ -53,6 +53,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, limiter *pk
 		{
 			taskGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
 			taskGroup.POST("/create", middleware.IdempotencyMiddleware(cache), handlers.TaskHandler.AddTask)
+			taskGroup.PUT("/complete", middleware.IdempotencyMiddleware(cache), handlers.TaskHandler.CompleteTask)
 			taskGroup.GET("/get", handlers.TaskHandler.GetUserTasks)
 		}
 		courseGroup := apiGroup.Group("/course")

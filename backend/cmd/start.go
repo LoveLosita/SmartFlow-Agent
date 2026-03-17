@@ -82,6 +82,9 @@ func Start() {
 		if err = eventsvc.RegisterTaskUrgencyPromoteHandler(eventBus, outboxRepo, manager); err != nil {
 			log.Fatalf("Failed to register task urgency promote event handler: %v", err)
 		}
+		if err = eventsvc.RegisterChatTokenUsageAdjustHandler(eventBus, outboxRepo, manager); err != nil {
+			log.Fatalf("Failed to register chat token usage adjust event handler: %v", err)
+		}
 		eventBus.Start(context.Background())
 		defer eventBus.Close()
 		log.Println("Outbox event bus started")

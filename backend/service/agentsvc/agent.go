@@ -32,6 +32,11 @@ type AgentService struct {
 // 这里通过依赖注入把“模型、仓储、缓存、异步持久化通道”统一交给服务层管理，
 // 便于后续在单测中替换实现，或在启动流程中按环境切换配置。
 func NewAgentService(aiHub *inits.AIHub, repo *dao.AgentDAO, taskRepo *dao.TaskDAO, agentRedis *dao.AgentCache, eventPublisher outboxinfra.EventPublisher) *AgentService {
+	// 全局注册一次 token 采集 callback：
+	// 1. 只注册一次，避免重复处理；
+	// 2. 只有带 RequestTokenMeter 的请求上下文才会真正累加。
+	ensureTokenMeterCallbackRegistered()
+
 	return &AgentService{
 		AIHub:          aiHub,
 		repo:           repo,
@@ -76,7 +81,7 @@ func (s *AgentService) PersistChatHistory(ctx context.Context, payload model.Cha
 	// 1. 未注入事件发布器时（例如本地极简环境），直接同步写 DB。
 	//    这样可以保证功能不依赖 Kafka 也能跑通。
 	if s.eventPublisher == nil {
-		return s.repo.SaveChatHistory(ctx, payload.UserID, payload.ConversationID, payload.Role, payload.Message)
+		return s.repo.SaveChatHistory(ctx, payload.UserID, payload.ConversationID, payload.Role, payload.Message, payload.TokensConsumed)
 	}
 	// 2. 已启用异步总线时，只发布“持久化请求事件”，不在请求路径阻塞 Kafka。
 	// 2.1 发布成功仅代表“事件安全入队”，实际落库由消费者异步完成。
@@ -167,10 +172,21 @@ func (s *AgentService) runNormalChatFlow(
 
 	// 6. 执行真正的流式聊天。
 	//    fullText 用于后续写 Redis/持久化，outChan 用于把流片段实时推给前端。
-	fullText, streamErr := chat.StreamChat(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, chatHistory, outChan, traceID, chatID, requestStart)
+	fullText, streamUsage, streamErr := chat.StreamChat(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, chatHistory, outChan, traceID, chatID, requestStart)
 	if streamErr != nil {
 		pushErrNonBlocking(errChan, streamErr)
 		return
+	}
+
+	// 6.1 流式 usage 并入请求级 token 统计器：
+	// 6.1.1 route/quicknote/taskquery 等 Generate 调用由 callback 自动累加；
+	// 6.1.2 主对话 Stream usage 在这里手动补齐。
+	addSchemaUsageIntoRequest(ctx, streamUsage)
+	requestTokenSnapshot := snapshotRequestTokenMeter(ctx)
+	requestTotalTokens := requestTokenSnapshot.TotalTokens
+	if requestTotalTokens <= 0 && streamUsage != nil {
+		// 兜底：若 callback/meter 未生效，至少使用流式 usage 保底记账。
+		requestTotalTokens = normalizeUsageTotal(streamUsage.TotalTokens, streamUsage.PromptTokens, streamUsage.CompletionTokens)
 	}
 
 	// 7. 后置持久化（用户消息）：
@@ -185,6 +201,8 @@ func (s *AgentService) runNormalChatFlow(
 		ConversationID: chatID,
 		Role:           "user",
 		Message:        userMessage,
+		// 口径B：用户消息固定记 0；本轮总 token 统一记在助手消息。
+		TokensConsumed: 0,
 	}); err != nil {
 		pushErrNonBlocking(errChan, err)
 		return
@@ -204,6 +222,8 @@ func (s *AgentService) runNormalChatFlow(
 		ConversationID: chatID,
 		Role:           "assistant",
 		Message:        fullText,
+		// 口径B：助手消息记录“本轮请求总 token”。
+		TokensConsumed: requestTotalTokens,
 	}); saveErr != nil {
 		pushErrNonBlocking(errChan, saveErr)
 	}
@@ -223,13 +243,16 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 	outChan := make(chan string, 8)
 	errChan := make(chan error, 1)
 
+	// 0. 初始化“请求级 token 统计器”，用于聚合本次请求所有模型开销。
+	requestCtx, _ := withRequestTokenMeter(ctx)
+
 	// 1) 规范会话 ID，选择模型。
 	chatID = normalizeConversationID(chatID)
 	selectedModel, resolvedModelName := s.pickChatModel(modelName)
 
 	// 2) 确保会话存在（优先缓存，必要时回源 DB 并创建）。
 	// 2.1 先查 Redis 会话标记，命中则可跳过 DB 存在性校验。
-	result, err := s.agentCache.GetConversationStatus(ctx, chatID)
+	result, err := s.agentCache.GetConversationStatus(requestCtx, chatID)
 	if err != nil {
 		errChan <- err
 		close(outChan)
@@ -238,7 +261,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 	}
 	if !result {
 		// 2.2 缓存未命中时回源 DB：确认会话是否存在。
-		innerResult, ifErr := s.repo.IfChatExists(ctx, userID, chatID)
+		innerResult, ifErr := s.repo.IfChatExists(requestCtx, userID, chatID)
 		if ifErr != nil {
 			errChan <- ifErr
 			close(outChan)
@@ -255,7 +278,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 			}
 		}
 		// 2.4 补写 Redis 会话标记，优化下次访问。
-		if err = s.agentCache.SetConversationStatus(ctx, chatID); err != nil {
+		if err = s.agentCache.SetConversationStatus(requestCtx, chatID); err != nil {
 			log.Printf("设置会话状态缓存失败 chat=%s: %v", chatID, err)
 		}
 	}
@@ -269,11 +292,11 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 		defer close(outChan)
 
 		// 3.1 先走轻量路由，拿到统一 action。
-		routing := s.decideActionRouting(ctx, selectedModel, userMessage)
+		routing := s.decideActionRouting(requestCtx, selectedModel, userMessage)
 
 		// 3.2 chat：直接走普通聊天主链路。
 		if routing.Action == route.ActionChat {
-			s.runNormalChatFlow(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
+			s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
 			return
 		}
 
@@ -284,7 +307,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 		// 3.4 quick_note_create：执行随口记 graph。
 		if routing.Action == route.ActionQuickNoteCreate {
 			quickHandled, quickState, quickErr := s.tryHandleQuickNoteWithGraph(
-				ctx,
+				requestCtx,
 				selectedModel,
 				userMessage,
 				userID,
@@ -301,14 +324,15 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 			if quickHandled {
 				// 3.4.1 随口记处理成功：组织最终回复并按 OpenAI 兼容格式输出。
 				progress.Emit("quick_note.reply.polishing", "正在结合你的话题润色回复。")
-				quickReply := buildQuickNoteFinalReply(ctx, selectedModel, userMessage, quickState)
+				quickReply := buildQuickNoteFinalReply(requestCtx, selectedModel, userMessage, quickState)
 				if emitErr := emitSingleAssistantCompletion(outChan, resolvedModelName, quickReply); emitErr != nil {
 					pushErrNonBlocking(errChan, emitErr)
 					return
 				}
 
 				// 3.4.2 对随口记回复执行统一后置持久化（Redis + outbox/DB）。
-				s.persistChatAfterReply(ctx, userID, chatID, userMessage, quickReply, errChan)
+				requestTotalTokens := snapshotRequestTokenMeter(requestCtx).TotalTokens
+				s.persistChatAfterReply(requestCtx, userID, chatID, userMessage, quickReply, 0, requestTotalTokens, errChan)
 				// 3.4.3 随口记链路同样异步生成会话标题（仅首次写入）。
 				s.ensureConversationTitleAsync(userID, chatID)
 				return
@@ -316,18 +340,18 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 
 			// 3.4.4 路由误判或 graph 判定非随口记时，回落普通聊天，保证“能聊”。
 			progress.Emit("quick_note.fallback", "当前输入不是随口记请求，切换到普通对话。")
-			s.runNormalChatFlow(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
+			s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
 			return
 		}
 
 		// 3.5 task_query：执行任务查询 tool-calling。
 		if routing.Action == route.ActionTaskQuery {
-			reply, queryErr := s.runTaskQueryFlow(ctx, selectedModel, userMessage, userID, progress.Emit)
+			reply, queryErr := s.runTaskQueryFlow(requestCtx, selectedModel, userMessage, userID, progress.Emit)
 			if queryErr != nil {
 				// 3.5.1 任务查询失败时回退普通聊天，避免请求直接中断。
 				log.Printf("任务查询 tool-calling 执行失败，回退普通聊天 trace_id=%s chat_id=%s err=%v", traceID, chatID, queryErr)
 				progress.Emit("task_query.fallback", "任务查询暂不可用，先切回普通对话。")
-				s.runNormalChatFlow(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
+				s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
 				return
 			}
 
@@ -336,13 +360,14 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 				pushErrNonBlocking(errChan, emitErr)
 				return
 			}
-			s.persistChatAfterReply(ctx, userID, chatID, userMessage, reply, errChan)
+			requestTotalTokens := snapshotRequestTokenMeter(requestCtx).TotalTokens
+			s.persistChatAfterReply(requestCtx, userID, chatID, userMessage, reply, 0, requestTotalTokens, errChan)
 			s.ensureConversationTitleAsync(userID, chatID)
 			return
 		}
 
 		// 3.6 未知 action 兜底：走普通聊天，保证可用性。
-		s.runNormalChatFlow(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
+		s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
 	}()
 
 	return outChan, errChan

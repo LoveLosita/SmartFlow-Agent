@@ -313,4 +313,9 @@ var ( //请求相关的响应
 		Status: "40049",
 		Info:   "task class item trying to insert out of time range",
 	}
+
+	WrongTaskID = Response{ //任务ID错误
+		Status: "40050",
+		Info:   "wrong task id",
+	}
 )

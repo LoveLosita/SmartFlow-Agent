@@ -10,6 +10,7 @@ import (
 
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
+	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 	"github.com/cloudwego/eino-ext/components/model/ark"
 	einoModel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -32,6 +33,9 @@ const (
 	conversationListDefaultPageSize = 20
 	// conversationListMaxPageSize 是会话列表单页上限，避免超大分页压垮数据库。
 	conversationListMaxPageSize = 100
+	// conversationTitleTokenAdjustReason 是“标题异步生成 token 账本调整”原因码。
+	// 用于日志和后续审计归因。
+	conversationTitleTokenAdjustReason = "conversation_title_async"
 )
 
 const conversationTitlePrompt = `你是 SmartFlow 的会话标题生成器。
@@ -190,13 +194,35 @@ func (s *AgentService) ensureConversationTitleAsync(userID int, chatID string) {
 		}
 
 		// 4. 调用模型生成标题，并做格式清洗。
-		generated, err := s.generateConversationTitle(ctx, history)
+		generated, titleTokens, err := s.generateConversationTitle(ctx, history)
 		if err != nil {
 			log.Printf("异步生成会话标题失败(模型生成失败) chat=%s err=%v", chatID, err)
 			return
 		}
 		if strings.TrimSpace(generated) == "" {
 			return
+		}
+
+		// 4.1 标题生成成功后，把本次异步模型 token 记账：
+		// 4.1.1 启用 outbox 时走 adjust 事件，异步可靠入账；
+		// 4.1.2 未启用 outbox 时走同步兜底，直接更新账本。
+		if titleTokens > 0 {
+			if s.eventPublisher != nil {
+				publishErr := eventsvc.PublishChatTokenUsageAdjustRequested(ctx, s.eventPublisher, model.ChatTokenUsageAdjustPayload{
+					UserID:         userID,
+					ConversationID: chatID,
+					TokensDelta:    titleTokens,
+					Reason:         conversationTitleTokenAdjustReason,
+					TriggeredAt:    time.Now(),
+				})
+				if publishErr != nil {
+					log.Printf("异步标题 token 记账事件发布失败 chat=%s tokens=%d err=%v", chatID, titleTokens, publishErr)
+				}
+			} else {
+				if adjustErr := s.repo.AdjustTokenUsage(ctx, userID, chatID, titleTokens); adjustErr != nil {
+					log.Printf("异步标题 token 同步记账失败 chat=%s tokens=%d err=%v", chatID, titleTokens, adjustErr)
+				}
+			}
 		}
 
 		// 5. 只在标题仍为空时写入，保证并发幂等。
@@ -207,17 +233,17 @@ func (s *AgentService) ensureConversationTitleAsync(userID int, chatID string) {
 }
 
 // generateConversationTitle 使用聊天模型从近期历史生成标题。
-func (s *AgentService) generateConversationTitle(ctx context.Context, history []*schema.Message) (string, error) {
+func (s *AgentService) generateConversationTitle(ctx context.Context, history []*schema.Message) (string, int, error) {
 	modelInst := s.pickTitleModel()
 	if modelInst == nil {
-		return "", fmt.Errorf("标题生成模型未初始化")
+		return "", 0, fmt.Errorf("标题生成模型未初始化")
 	}
 
 	// 1. 只取最近 N 条，降低 token 并聚焦当前会话主题。
 	trimmed := tailMessages(history, conversationTitleHistoryLimit)
 	prompt := buildConversationTitleUserPrompt(trimmed)
 	if strings.TrimSpace(prompt) == "" {
-		return "", fmt.Errorf("缺少可用历史内容")
+		return "", 0, fmt.Errorf("缺少可用历史内容")
 	}
 
 	messages := []*schema.Message{
@@ -232,12 +258,22 @@ func (s *AgentService) generateConversationTitle(ctx context.Context, history []
 		einoModel.WithMaxTokens(40),
 	)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if resp == nil {
-		return "", fmt.Errorf("标题生成模型返回为空")
+		return "", 0, fmt.Errorf("标题生成模型返回为空")
 	}
-	return normalizeConversationTitle(resp.Content), nil
+
+	// 2.1 标题链路的 token 从模型响应 usage 中提取；缺失则按 0 处理，不影响主流程。
+	titleTokens := 0
+	if resp.ResponseMeta != nil && resp.ResponseMeta.Usage != nil {
+		titleTokens = normalizeUsageTotal(
+			resp.ResponseMeta.Usage.TotalTokens,
+			resp.ResponseMeta.Usage.PromptTokens,
+			resp.ResponseMeta.Usage.CompletionTokens,
+		)
+	}
+	return normalizeConversationTitle(resp.Content), titleTokens, nil
 }
 
 // pickTitleModel 选择用于标题生成的模型。

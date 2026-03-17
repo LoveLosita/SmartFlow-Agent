@@ -345,6 +345,8 @@ func (s *AgentService) persistChatAfterReply(
 	chatID string,
 	userMessage string,
 	assistantReply string,
+	userTokens int,
+	assistantTokens int,
 	errChan chan error,
 ) {
 	// 1. 先把用户消息写入 Redis，保证会话上下文“马上可见”。
@@ -358,6 +360,7 @@ func (s *AgentService) persistChatAfterReply(
 		ConversationID: chatID,
 		Role:           "user",
 		Message:        userMessage,
+		TokensConsumed: userTokens,
 	}); err != nil {
 		pushErrNonBlocking(errChan, err)
 		return
@@ -374,6 +377,7 @@ func (s *AgentService) persistChatAfterReply(
 		ConversationID: chatID,
 		Role:           "assistant",
 		Message:        assistantReply,
+		TokensConsumed: assistantTokens,
 	}); err != nil {
 		pushErrNonBlocking(errChan, err)
 	}

@@ -56,6 +56,31 @@ type UserAddTaskRequest struct {
 	DeadlineAt    *time.Time `json:"deadline_at"`
 }
 
+// UserCompleteTaskRequest 是“标记任务完成”接口的请求体。
+//
+// 职责边界：
+// 1. 只承载目标任务 ID；
+// 2. 不承载 user_id（user_id 一律由鉴权中间件注入，避免越权）。
+type UserCompleteTaskRequest struct {
+	TaskID int `json:"task_id"`
+}
+
+// UserCompleteTaskResponse 是“标记任务完成”接口的响应体。
+//
+// 字段语义：
+//  1. TaskID：本次操作的目标任务；
+//  2. IsCompleted：操作后的完成状态（成功时恒为 true）；
+//  3. AlreadyCompleted：
+//     3.1 true：任务原本就已完成，本次请求命中幂等语义；
+//     3.2 false：任务由未完成切换为完成；
+//  4. Status：给前端的简短状态文案。
+type UserCompleteTaskResponse struct {
+	TaskID           int    `json:"task_id"`
+	IsCompleted      bool   `json:"is_completed"`
+	AlreadyCompleted bool   `json:"already_completed"`
+	Status           string `json:"status"`
+}
+
 type GetUserTaskResp struct {
 	ID            int    `json:"id"`
 	UserID        int    `json:"user_id"`

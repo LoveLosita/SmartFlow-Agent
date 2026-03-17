@@ -68,6 +68,7 @@ func RegisterChatHistoryPersistHandler(
 				payload.ConversationID,
 				payload.Role,
 				payload.Message,
+				payload.TokensConsumed,
 			)
 		})
 	}

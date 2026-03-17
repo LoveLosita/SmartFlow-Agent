@@ -103,7 +103,7 @@ func StreamChat(
 	traceID string,
 	chatID string,
 	requestStart time.Time,
-) (string, error) {
+) (string, *schema.TokenUsage, error) {
 	/*callStart := time.Now()*/
 
 	messages := make([]*schema.Message, 0)
@@ -123,7 +123,7 @@ func StreamChat(
 	/*connectStart := time.Now()*/
 	reader, err := llm.Stream(ctx, messages, ark.WithThinking(thinking))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	defer reader.Close()
 
@@ -134,6 +134,7 @@ func StreamChat(
 	created := time.Now().Unix()
 	firstChunk := true
 	chunkCount := 0
+	var tokenUsage *schema.TokenUsage
 	/*streamRecvStart := time.Now()
 
 	log.Printf("打点|流连接建立|trace_id=%s|chat_id=%s|request_id=%s|本步耗时_ms=%d|请求累计_ms=%d|history_len=%d",
@@ -152,14 +153,19 @@ func StreamChat(
 			break
 		}
 		if err != nil {
-			return "", err
+			return "", nil, err
+		}
+
+		// 优先记录模型真实 usage（通常在尾块返回，部分模型也可能中途返回）。
+		if chunk != nil && chunk.ResponseMeta != nil && chunk.ResponseMeta.Usage != nil {
+			tokenUsage = mergeTokenUsage(tokenUsage, chunk.ResponseMeta.Usage)
 		}
 
 		fullText.WriteString(chunk.Content)
 
 		payload, err := ToOpenAIStream(chunk, requestID, modelName, created, firstChunk)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		if payload != "" {
 			outChan <- payload
@@ -179,7 +185,7 @@ func StreamChat(
 
 	finishChunk, err := ToOpenAIFinishStream(requestID, modelName, created)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	outChan <- finishChunk
 	outChan <- "[DONE]"
@@ -194,5 +200,39 @@ func StreamChat(
 		time.Since(requestStart).Milliseconds(),
 	)*/
 
-	return fullText.String(), nil
+	return fullText.String(), tokenUsage, nil
+}
+
+// mergeTokenUsage 合并流式分片中的 usage。
+//
+// 设计说明：
+// 1. 不同模型的 usage 回传时机不同（中间块/尾块）；
+// 2. 这里按“更大值覆盖”合并，确保最终拿到完整统计；
+// 3. 只用于统计，不影响流式正文输出。
+func mergeTokenUsage(base *schema.TokenUsage, incoming *schema.TokenUsage) *schema.TokenUsage {
+	if incoming == nil {
+		return base
+	}
+	if base == nil {
+		copied := *incoming
+		return &copied
+	}
+
+	merged := *base
+	if incoming.PromptTokens > merged.PromptTokens {
+		merged.PromptTokens = incoming.PromptTokens
+	}
+	if incoming.CompletionTokens > merged.CompletionTokens {
+		merged.CompletionTokens = incoming.CompletionTokens
+	}
+	if incoming.TotalTokens > merged.TotalTokens {
+		merged.TotalTokens = incoming.TotalTokens
+	}
+	if incoming.PromptTokenDetails.CachedTokens > merged.PromptTokenDetails.CachedTokens {
+		merged.PromptTokenDetails.CachedTokens = incoming.PromptTokenDetails.CachedTokens
+	}
+	if incoming.CompletionTokensDetails.ReasoningTokens > merged.CompletionTokensDetails.ReasoningTokens {
+		merged.CompletionTokensDetails.ReasoningTokens = incoming.CompletionTokensDetails.ReasoningTokens
+	}
+	return &merged
 }

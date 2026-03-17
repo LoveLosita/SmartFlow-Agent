@@ -14,6 +14,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/respond"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 	"github.com/go-redis/redis/v8"
+	"gorm.io/gorm"
 )
 
 const (
@@ -70,6 +71,46 @@ func (ts *TaskService) AddTask(ctx context.Context, req *model.UserAddTaskReques
 	// 4. 返回对外响应 DTO。
 	response := conv.ModelToUserAddTaskResponse(createdTask)
 	return response, nil
+}
+
+// CompleteTask 将用户指定任务标记为“已完成”。
+//
+// 职责边界：
+// 1. 负责入参校验与业务错误映射；
+// 2. 负责调用 DAO 执行状态更新；
+// 3. 不负责幂等键校验（幂等由中间件处理）；
+// 4. 不负责缓存删除细节（缓存删除由 GORM cache_deleter 回调触发）。
+func (ts *TaskService) CompleteTask(ctx context.Context, req *model.UserCompleteTaskRequest, userID int) (*model.UserCompleteTaskResponse, error) {
+	// 1. 参数兜底：请求体为空、非法 user 或非法 task_id 直接返回业务错误。
+	if req == nil || userID <= 0 || req.TaskID <= 0 {
+		return nil, respond.WrongTaskID
+	}
+
+	// 2. 调用 DAO 执行“查询 + 必要时更新”。
+	updatedTask, alreadyCompleted, err := ts.dao.CompleteTaskByID(ctx, userID, req.TaskID)
+	if err != nil {
+		// 2.1 任务不存在或不属于当前用户时，统一映射为 WrongTaskID。
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, respond.WrongTaskID
+		}
+		// 2.2 其余数据库异常向上透传，交由统一错误处理器返回 500。
+		return nil, err
+	}
+	if updatedTask == nil {
+		// 3. 极端防御：DAO 不应返回 nil，若发生则视为内部异常。
+		return nil, errors.New("complete task succeeded but task is nil")
+	}
+
+	// 4. 构造响应：
+	// 4.1 already_completed=true 表示本次命中幂等，不影响最终成功状态；
+	// 4.2 is_completed 始终为 true，便于前端直接刷新状态。
+	resp := &model.UserCompleteTaskResponse{
+		TaskID:           updatedTask.ID,
+		IsCompleted:      true,
+		AlreadyCompleted: alreadyCompleted,
+		Status:           "completed",
+	}
+	return resp, nil
 }
 
 // GetUserTasks 获取用户任务列表（含“读时紧急性派生”与“异步平移触发”）。

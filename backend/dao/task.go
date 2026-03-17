@@ -2,6 +2,7 @@ package dao
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/model"
@@ -43,6 +44,76 @@ func (dao *TaskDAO) GetTasksByUserID(userID int) ([]model.Task, error) {
 		return nil, respond.UserTasksEmpty
 	}
 	return tasks, nil
+}
+
+// CompleteTaskByID 将指定任务标记为“已完成”。
+//
+// 职责边界：
+// 1. 只负责“当前用户 + 指定 task_id”的完成状态更新；
+// 2. 不负责幂等中间件（由路由层统一挂载）；
+// 3. 不负责业务层响应包装（由 Service 层处理）。
+//
+// 返回语义：
+//  1. 第一个返回值 *model.Task：返回更新后的任务快照（至少含 ID/UserID/IsCompleted）；
+//  2. 第二个返回值 bool：
+//     2.1 true：任务原本就已完成，本次属于幂等命中；
+//     2.2 false：本次从未完成成功更新为已完成；
+//  3. error：
+//     3.1 gorm.ErrRecordNotFound：任务不存在或不属于当前用户；
+//     3.2 其他 error：数据库异常。
+func (dao *TaskDAO) CompleteTaskByID(ctx context.Context, userID int, taskID int) (*model.Task, bool, error) {
+	// 1. 基础兜底：非法参数直接返回“记录不存在”语义，避免下游误写。
+	if userID <= 0 || taskID <= 0 {
+		return nil, false, gorm.ErrRecordNotFound
+	}
+
+	// 2. 先查询目标任务，明确区分“已完成”与“不存在”。
+	var target model.Task
+	findErr := dao.db.WithContext(ctx).
+		Where("id = ? AND user_id = ?", taskID, userID).
+		First(&target).Error
+	if findErr != nil {
+		return nil, false, findErr
+	}
+
+	// 3. 若任务已完成，直接按幂等成功返回，不再写库。
+	if target.IsCompleted {
+		return &target, true, nil
+	}
+
+	// 4. 若任务未完成，执行状态更新。
+	//
+	// 4.1 使用 Model(&model.Task{UserID:userID}) 的目的：
+	//     让 cache_deleter 在 GORM Update 回调里拿到 user_id，从而正确删除任务缓存。
+	// 4.2 更新条件继续限定 user_id + id，避免误更新其他用户数据。
+	updateResult := dao.db.WithContext(ctx).
+		Model(&model.Task{UserID: userID}).
+		Where("id = ? AND user_id = ?", taskID, userID).
+		Update("is_completed", true)
+	if updateResult.Error != nil {
+		return nil, false, updateResult.Error
+	}
+
+	// 5. 极端并发兜底：
+	// 5.1 若 RowsAffected=0，可能是并发请求已先一步更新；
+	// 5.2 此时二次读取任务状态，若已完成则按幂等成功返回，否则视为不存在/异常。
+	if updateResult.RowsAffected == 0 {
+		var check model.Task
+		checkErr := dao.db.WithContext(ctx).
+			Where("id = ? AND user_id = ?", taskID, userID).
+			First(&check).Error
+		if checkErr != nil {
+			return nil, false, checkErr
+		}
+		if check.IsCompleted {
+			return &check, true, nil
+		}
+		return nil, false, errors.New("任务状态更新失败")
+	}
+
+	// 6. 返回更新后的快照给 Service 层组装响应。
+	target.IsCompleted = true
+	return &target, false, nil
 }
 
 // PromoteTaskUrgencyByIDs 批量执行“任务紧急性平移”。

@@ -388,7 +388,7 @@ flowchart TD
     B --> C[确保会话存在<br/>Redis会话状态检查<br/>必要时回源DB创建]
     C --> D[模型控制码路由<br/>action=quick_note/chat]
     D --> E{route是否命中quick_note}
-    E -- 否 --> X[普通聊天链路<br/>StreamChat流式输出]
+    E -- 否 --> X[普通聊天链路<br/>StreamChat流式输出<br/>或者其它分支]
     E -- 是 --> F[quick_note.request.accepted<br/>推送reasoning状态块]
     F --> G[跳过二次意图判定<br/>直接进入聚合规划]
     G --> H[单请求聚合规划<br/>生成title/deadline/priority/banter]

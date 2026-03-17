@@ -20,6 +20,21 @@ type ChatHistoryPersistPayload struct {
 	ConversationID string `json:"conversation_id"`
 	Role           string `json:"role"`
 	Message        string `json:"message"`
+	TokensConsumed int    `json:"tokens_consumed"`
+}
+
+// ChatTokenUsageAdjustPayload 是“会话 token 账本增量调整”事件载荷。
+//
+// 职责边界：
+// 1. 只表达“对哪个用户/会话增加多少 token”；
+// 2. 不承载 chat_histories 落库语义（消息正文由聊天持久化事件负责）；
+// 3. 不包含 outbox/kafka 协议字段（由基础设施层统一封装）。
+type ChatTokenUsageAdjustPayload struct {
+	UserID         int       `json:"user_id"`
+	ConversationID string    `json:"conversation_id"`
+	TokensDelta    int       `json:"tokens_delta"`
+	Reason         string    `json:"reason"`
+	TriggeredAt    time.Time `json:"triggered_at"`
 }
 
 // GetConversationMetaResponse 是会话元信息查询接口的返回结构。

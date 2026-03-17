@@ -23,3 +23,4 @@ backend/config.yaml
 .vscode/
 .DS_Store # Mac 用户必加
 .gocache/
+.gomodcache/

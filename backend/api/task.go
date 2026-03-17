@@ -62,3 +62,36 @@ func (th *TaskHandler) GetUserTasks(c *gin.Context) {
 	//3. 返回响应
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
 }
+
+// CompleteTask 标记任务为已完成。
+//
+// 职责边界：
+// 1. 负责解析请求与读取 user_id；
+// 2. 负责调用 Service 执行业务；
+// 3. 不负责幂等校验（幂等由路由中间件处理）。
+func (th *TaskHandler) CompleteTask(c *gin.Context) {
+	// 1. 绑定请求参数。
+	var req model.UserCompleteTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		fmt.Println(err)
+		return
+	}
+
+	// 2. 从鉴权上下文获取 user_id，保证只能操作自己的任务。
+	userID := c.GetInt("user_id")
+
+	// 3. 设置短超时，避免该写接口长期占用连接。
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel()
+
+	// 4. 调用 Service 执行“标记完成”逻辑。
+	resp, err := th.svc.CompleteTask(ctx, &req, userID)
+	if err != nil {
+		respond.DealWithError(c, err)
+		return
+	}
+
+	// 5. 返回统一响应结构。
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
+}
