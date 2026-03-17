@@ -54,6 +54,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, userRepo *d
 			taskGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
 			taskGroup.POST("/create", middleware.IdempotencyMiddleware(cache), handlers.TaskHandler.AddTask)
 			taskGroup.PUT("/complete", middleware.IdempotencyMiddleware(cache), handlers.TaskHandler.CompleteTask)
+			taskGroup.PUT("/undo-complete", middleware.IdempotencyMiddleware(cache), handlers.TaskHandler.UndoCompleteTask)
 			taskGroup.GET("/get", handlers.TaskHandler.GetUserTasks)
 		}
 		courseGroup := apiGroup.Group("/course")

@@ -116,6 +116,74 @@ func (dao *TaskDAO) CompleteTaskByID(ctx context.Context, userID int, taskID int
 	return &target, false, nil
 }
 
+// UndoCompleteTaskByID 将指定任务从“已完成”恢复为“未完成”。
+//
+// 职责边界：
+// 1. 只负责当前用户(user_id)下指定 task_id 的状态恢复；
+// 2. 若任务本就未完成，按业务要求返回明确错误，不做幂等成功；
+// 3. 不负责响应文案拼装（由 Service 层处理）。
+//
+// 返回语义：
+//  1. *model.Task：恢复后的任务快照；
+//  2. error：
+//     2.1 gorm.ErrRecordNotFound：任务不存在或不属于当前用户；
+//     2.2 respond.TaskNotCompleted：任务当前不是“已完成”状态，不能执行取消勾选；
+//     2.3 其他 error：数据库异常。
+func (dao *TaskDAO) UndoCompleteTaskByID(ctx context.Context, userID int, taskID int) (*model.Task, error) {
+	// 1. 参数兜底：非法 user/task 参数统一按“记录不存在”处理，避免误写。
+	if userID <= 0 || taskID <= 0 {
+		return nil, gorm.ErrRecordNotFound
+	}
+
+	// 2. 先读取目标任务，明确区分“不存在”和“状态不允许恢复”。
+	var target model.Task
+	findErr := dao.db.WithContext(ctx).
+		Where("id = ? AND user_id = ?", taskID, userID).
+		First(&target).Error
+	if findErr != nil {
+		return nil, findErr
+	}
+
+	// 3. 严格业务约束：若任务当前未完成，直接返回业务错误。
+	// 3.1 这是本接口和“标记完成”接口的关键差异：这里不做幂等成功。
+	if !target.IsCompleted {
+		return nil, respond.TaskNotCompleted
+	}
+
+	// 4. 执行状态恢复（is_completed=true -> false）。
+	//
+	// 4.1 使用 Model(&model.Task{UserID:userID}) 的目的是让 cache_deleter 拿到 user_id，
+	//     从而在回调中正确删除该用户任务缓存。
+	updateResult := dao.db.WithContext(ctx).
+		Model(&model.Task{UserID: userID}).
+		Where("id = ? AND user_id = ?", taskID, userID).
+		Update("is_completed", false)
+	if updateResult.Error != nil {
+		return nil, updateResult.Error
+	}
+
+	// 5. 并发兜底：
+	// 5.1 若 RowsAffected=0，说明可能被并发请求先一步恢复；
+	// 5.2 重新读取当前状态，若已是未完成则按业务规则返回“任务未完成”错误。
+	if updateResult.RowsAffected == 0 {
+		var check model.Task
+		checkErr := dao.db.WithContext(ctx).
+			Where("id = ? AND user_id = ?", taskID, userID).
+			First(&check).Error
+		if checkErr != nil {
+			return nil, checkErr
+		}
+		if !check.IsCompleted {
+			return nil, respond.TaskNotCompleted
+		}
+		return nil, errors.New("取消任务完成状态失败")
+	}
+
+	// 6. 回填恢复后状态并返回。
+	target.IsCompleted = false
+	return &target, nil
+}
+
 // PromoteTaskUrgencyByIDs 批量执行“任务紧急性平移”。
 //
 // 职责边界：

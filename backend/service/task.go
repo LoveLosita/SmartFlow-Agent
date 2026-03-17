@@ -113,6 +113,47 @@ func (ts *TaskService) CompleteTask(ctx context.Context, req *model.UserComplete
 	return resp, nil
 }
 
+// UndoCompleteTask 取消用户任务的“已完成勾选”。
+//
+// 职责边界：
+// 1. 负责入参校验与业务错误映射；
+// 2. 负责调用 DAO 执行状态恢复；
+// 3. 不负责幂等缓存（本接口按需求要求：任务未完成时必须报错）；
+// 4. 不负责缓存删除细节（由 GORM cache_deleter 回调自动处理）。
+func (ts *TaskService) UndoCompleteTask(ctx context.Context, req *model.UserUndoCompleteTaskRequest, userID int) (*model.UserUndoCompleteTaskResponse, error) {
+	// 1. 参数兜底：请求体为空、非法 user 或非法 task_id 直接返回业务错误。
+	if req == nil || userID <= 0 || req.TaskID <= 0 {
+		return nil, respond.WrongTaskID
+	}
+
+	// 2. 调用 DAO 执行“恢复未完成”逻辑。
+	updatedTask, err := ts.dao.UndoCompleteTaskByID(ctx, userID, req.TaskID)
+	if err != nil {
+		// 2.1 任务不存在或不属于当前用户，统一映射为 WrongTaskID。
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, respond.WrongTaskID
+		}
+		// 2.2 任务本来就未完成：按需求返回明确业务错误。
+		if errors.Is(err, respond.TaskNotCompleted) {
+			return nil, respond.TaskNotCompleted
+		}
+		// 2.3 其余数据库异常继续向上透传。
+		return nil, err
+	}
+	if updatedTask == nil {
+		// 3. 极端防御：DAO 成功但返回 nil，视为内部异常。
+		return nil, errors.New("undo complete task succeeded but task is nil")
+	}
+
+	// 4. 组装响应：恢复成功后 is_completed 恒为 false。
+	resp := &model.UserUndoCompleteTaskResponse{
+		TaskID:      updatedTask.ID,
+		IsCompleted: false,
+		Status:      "uncompleted",
+	}
+	return resp, nil
+}
+
 // GetUserTasks 获取用户任务列表（含“读时紧急性派生”与“异步平移触发”）。
 //
 // 核心流程（步骤化）：

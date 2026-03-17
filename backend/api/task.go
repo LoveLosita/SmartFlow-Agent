@@ -95,3 +95,36 @@ func (th *TaskHandler) CompleteTask(c *gin.Context) {
 	// 5. 返回统一响应结构。
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
 }
+
+// UndoCompleteTask 取消任务“已完成”勾选。
+//
+// 职责边界：
+// 1. 负责解析请求与读取 user_id；
+// 2. 负责调用 Service 执行业务恢复；
+// 3. 不负责“任务是否已完成”的业务判断（由 Service/DAO 负责）。
+func (th *TaskHandler) UndoCompleteTask(c *gin.Context) {
+	// 1. 绑定请求参数。
+	var req model.UserUndoCompleteTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		fmt.Println(err)
+		return
+	}
+
+	// 2. 从鉴权上下文读取 user_id，保证只操作当前用户任务。
+	userID := c.GetInt("user_id")
+
+	// 3. 设置短超时，避免该写接口占用连接过久。
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel()
+
+	// 4. 调用 Service 执行“取消已完成勾选”逻辑。
+	resp, err := th.svc.UndoCompleteTask(ctx, &req, userID)
+	if err != nil {
+		respond.DealWithError(c, err)
+		return
+	}
+
+	// 5. 返回统一响应结构。
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
+}

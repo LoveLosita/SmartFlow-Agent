@@ -81,6 +81,27 @@ type UserCompleteTaskResponse struct {
 	Status           string `json:"status"`
 }
 
+// UserUndoCompleteTaskRequest 是“取消任务已完成勾选”接口请求体。
+//
+// 职责边界：
+// 1. 只承载目标 task_id；
+// 2. 不承载 user_id（user_id 始终由鉴权中间件注入，防止越权操作）。
+type UserUndoCompleteTaskRequest struct {
+	TaskID int `json:"task_id"`
+}
+
+// UserUndoCompleteTaskResponse 是“取消任务已完成勾选”接口响应体。
+//
+// 字段语义：
+// 1. TaskID：本次操作目标任务；
+// 2. IsCompleted：操作后完成状态（成功时恒为 false）；
+// 3. Status：给前端的简短状态文案。
+type UserUndoCompleteTaskResponse struct {
+	TaskID      int    `json:"task_id"`
+	IsCompleted bool   `json:"is_completed"`
+	Status      string `json:"status"`
+}
+
 type GetUserTaskResp struct {
 	ID            int    `json:"id"`
 	UserID        int    `json:"user_id"`

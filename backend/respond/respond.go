@@ -323,4 +323,9 @@ var ( //请求相关的响应
 		Status: "40051",
 		Info:   "token usage exceeds limit",
 	}
+
+	TaskNotCompleted = Response{ //任务未完成，无法取消勾选
+		Status: "40052",
+		Info:   "task is not completed",
+	}
 )
