@@ -318,4 +318,9 @@ var ( //请求相关的响应
 		Status: "40050",
 		Info:   "wrong task id",
 	}
+
+	TokenUsageExceedsLimit = Response{ //token 使用量超过限额
+		Status: "40051",
+		Info:   "token usage exceeds limit",
+	}
 )

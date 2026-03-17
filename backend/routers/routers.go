@@ -28,7 +28,7 @@ func StartEngine(r *gin.Engine) {
 	}
 }
 
-func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, limiter *pkg.RateLimiter) *gin.Engine {
+func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, userRepo *dao.UserDAO, limiter *pkg.RateLimiter) *gin.Engine {
 	// 初始化Gin引擎
 	r := gin.Default()
 	// 在这里注册所有的路由和路由组
@@ -88,7 +88,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, limiter *pk
 		agentGroup := apiGroup.Group("/agent")
 		{
 			agentGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
-			agentGroup.POST("/chat", handlers.AgentHandler.ChatAgent)
+			agentGroup.POST("/chat", middleware.TokenQuotaGuard(cache, userRepo), handlers.AgentHandler.ChatAgent)
 			agentGroup.GET("/conversation-meta", handlers.AgentHandler.GetConversationMeta)
 			agentGroup.GET("/conversation-list", handlers.AgentHandler.GetConversationList)
 		}

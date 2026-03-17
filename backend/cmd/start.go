@@ -116,6 +116,6 @@ func Start() {
 		AgentHandler:     agentApi,
 	}
 
-	r := routers.RegisterRouters(handlers, cacheRepo, limiter)
+	r := routers.RegisterRouters(handlers, cacheRepo, userRepo, limiter)
 	routers.StartEngine(r)
 }

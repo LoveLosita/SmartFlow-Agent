@@ -1,6 +1,7 @@
 package dao
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -84,4 +85,48 @@ func (r *UserDAO) GetUserByID(id int) (*model.User, error) {
 		return nil, err
 	}
 	return &user, nil
+}
+
+// GetUserTokenQuotaByID 查询用户 token 配额快照（仅查询配额相关字段）。
+//
+// 职责边界：
+// 1. 只返回 token_limit / token_usage / last_reset_at 等“额度判断必需字段”；
+// 2. 不负责做超额判断与重置判断（由中间件统一决策）；
+// 3. 不返回密码等敏感字段，避免把无关信息带入鉴权链路。
+func (r *UserDAO) GetUserTokenQuotaByID(ctx context.Context, id int) (*model.User, error) {
+	var user model.User
+	err := r.db.WithContext(ctx).
+		Select("id", "token_limit", "token_usage", "last_reset_at").
+		Where("id = ?", id).
+		First(&user).Error
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+// ResetUserTokenUsageIfDue 在“已到重置窗口”时执行懒重置。
+//
+// 输入输出语义：
+// 1. dueBefore：判定“到期可重置”的截止时间（通常是 now-7d）；
+// 2. resetAt：本次重置写入的时间戳；
+// 3. 返回值 bool：
+//   - true  表示本次调用实际执行了重置；
+//   - false 表示条件未命中（尚未到期或记录不存在）。
+//
+// 并发与幂等说明：
+// 1. 使用条件更新（WHERE last_reset_at <= dueBefore）保证并发下最多一次成功重置；
+// 2. 重复调用是安全的，未命中条件时不会破坏现有统计。
+func (r *UserDAO) ResetUserTokenUsageIfDue(ctx context.Context, id int, dueBefore time.Time, resetAt time.Time) (bool, error) {
+	result := r.db.WithContext(ctx).
+		Model(&model.User{}).
+		Where("id = ? AND (last_reset_at IS NULL OR last_reset_at <= ?)", id, dueBefore).
+		Updates(map[string]interface{}{
+			"token_usage":   0,
+			"last_reset_at": resetAt,
+		})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
 }
