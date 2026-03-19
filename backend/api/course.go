@@ -54,7 +54,7 @@ func (sa *CourseHandler) AddUserCourses(c *gin.Context) {
 	userIDInterface := c.GetInt("user_id")
 	//3.调用 service 层的 AddUserCoursesIntoSchedule 方法添加课程
 	// 创建一个带 1 秒超时的上下文
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel() // 记得释放资源
 	conflicts, err := sa.service.AddUserCourses(ctx, req, userIDInterface)
 	if err != nil {

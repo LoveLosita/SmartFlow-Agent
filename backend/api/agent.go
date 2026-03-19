@@ -57,7 +57,7 @@ func (api *AgentHandler) ChatAgent(c *gin.Context) {
 	c.Writer.Header().Set("X-Conversation-ID", conversationID)
 
 	userID := c.GetInt("user_id")
-	outChan, errChan := api.svc.AgentChat(c.Request.Context(), req.Message, req.Thinking, req.Model, userID, conversationID)
+	outChan, errChan := api.svc.AgentChat(c.Request.Context(), req.Message, req.Thinking, req.Model, userID, conversationID, req.Extra)
 
 	// 4) 转发 SSE 流
 	c.Stream(func(w io.Writer) bool {

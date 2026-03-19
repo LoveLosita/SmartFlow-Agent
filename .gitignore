@@ -24,3 +24,5 @@ backend/config.yaml
 .DS_Store # Mac 用户必加
 .gocache/
 .gomodcache/
+.claude/
+.omc/

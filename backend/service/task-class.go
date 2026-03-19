@@ -315,6 +315,15 @@ func (sv *TaskClassService) DeleteTaskClass(ctx context.Context, userID int, tas
 	return nil
 }
 
+// GetCompleteTaskClassByID 获取任务类完整详情（含关联的 TaskClassItem 列表）。
+//
+// 职责边界：
+// 1) 直接委托 DAO 层查询，不做额外业务逻辑；
+// 2) 主要供 Agent 排程链路使用，获取 Items 用于 materialize 节点映射。
+func (sv *TaskClassService) GetCompleteTaskClassByID(ctx context.Context, taskClassID, userID int) (*model.TaskClass, error) {
+	return sv.taskClassRepo.GetCompleteTaskClassByID(ctx, taskClassID, userID)
+}
+
 func (sv *TaskClassService) BatchApplyPlans(ctx context.Context, taskClassID int, userID int, plans *model.UserInsertTaskClassItemToScheduleRequestBatch) error {
 	//1.通过任务类id获取任务类详情
 	taskClass, err := sv.taskClassRepo.GetCompleteTaskClassByID(ctx, taskClassID, userID)

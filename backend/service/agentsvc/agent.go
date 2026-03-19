@@ -26,6 +26,21 @@ type AgentService struct {
 	taskRepo       *dao.TaskDAO
 	agentCache     *dao.AgentCache
 	eventPublisher outboxinfra.EventPublisher
+
+	// ── 排程计划依赖（函数注入，避免 service 包循环依赖）──
+
+	// SmartPlanningRawFunc 调用粗排算法，同时返回展示结构和已分配的任务项。
+	// 由 service/agent_bridge.go 在构造时注入 ScheduleService.SmartPlanningRaw。
+	SmartPlanningRawFunc func(ctx context.Context, userID, taskClassID int) ([]model.UserWeekSchedule, []model.TaskClassItem, error)
+	// BatchApplyPlansFunc 将排程方案批量落库。
+	// 由 service/agent_bridge.go 在构造时注入 TaskClassService.BatchApplyPlans。
+	BatchApplyPlansFunc func(ctx context.Context, taskClassID, userID int, plans *model.UserInsertTaskClassItemToScheduleRequestBatch) error
+	// GetTaskClassByIDFunc 获取任务类详情（含 Items）。
+	// 由 service/agent_bridge.go 在构造时注入。
+	GetTaskClassByIDFunc func(ctx context.Context, taskClassID, userID int) (*model.TaskClass, error)
+	// HybridScheduleWithPlanFunc 构建混合日程（既有日程 + 粗排建议），供 ReAct 精排使用。
+	// 由 service/agent_bridge.go 在构造时注入。可选：未注入时走原有 materialize 路径。
+	HybridScheduleWithPlanFunc func(ctx context.Context, userID, taskClassID int) ([]model.HybridScheduleEntry, []model.TaskClassItem, error)
 }
 
 // NewAgentService 构造 AgentService。
@@ -233,7 +248,7 @@ func (s *AgentService) runNormalChatFlow(
 	s.ensureConversationTitleAsync(userID, chatID)
 }
 
-func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThinking bool, modelName string, userID int, chatID string) (<-chan string, <-chan error) {
+func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThinking bool, modelName string, userID int, chatID string, extra map[string]any) (<-chan string, <-chan error) {
 	requestStart := time.Now()
 	traceID := uuid.NewString()
 
@@ -366,7 +381,27 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 			return
 		}
 
-		// 3.6 未知 action 兜底：走普通聊天，保证可用性。
+		// 3.6 schedule_plan：执行智能排程 graph。
+		if routing.Action == route.ActionSchedulePlan {
+			reply, planErr := s.runSchedulePlanFlow(requestCtx, selectedModel, userMessage, userID, chatID, traceID, extra, progress.Emit, outChan, resolvedModelName)
+			if planErr != nil {
+				log.Printf("智能排程 graph 执行失败，回退普通聊天 trace_id=%s chat_id=%s err=%v", traceID, chatID, planErr)
+				progress.Emit("schedule_plan.fallback", "智能排程暂不可用，先切回普通对话。")
+				s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
+				return
+			}
+
+			if emitErr := emitSingleAssistantCompletion(outChan, resolvedModelName, reply); emitErr != nil {
+				pushErrNonBlocking(errChan, emitErr)
+				return
+			}
+			requestTotalTokens := snapshotRequestTokenMeter(requestCtx).TotalTokens
+			s.persistChatAfterReply(requestCtx, userID, chatID, userMessage, reply, 0, requestTotalTokens, errChan)
+			s.ensureConversationTitleAsync(userID, chatID)
+			return
+		}
+
+		// 3.7 未知 action 兜底：走普通聊天，保证可用性。
 		s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
 	}()
 

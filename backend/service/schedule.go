@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/conv"
@@ -406,4 +407,163 @@ func (ss *ScheduleService) SmartPlanning(ctx context.Context, userID, taskClassI
 	}
 	//5.将推荐的时间安排转换为前端需要的格式返回
 	return result, nil
+}
+
+// SmartPlanningRaw 执行粗排算法并同时返回展示结构和已分配的任务项。
+//
+// 职责边界：
+// 1) 与 SmartPlanning 共享完全相同的前置校验和粗排逻辑；
+// 2) 额外返回 allocatedItems（每项的 EmbeddedTime 已由算法回填），
+//    供 Agent 排程链路直接转换为 BatchApplyPlans 请求，无需再让模型"二次分配"。
+func (ss *ScheduleService) SmartPlanningRaw(ctx context.Context, userID, taskClassID int) ([]model.UserWeekSchedule, []model.TaskClassItem, error) {
+	// 1. 获取任务类详情。
+	taskClass, err := ss.taskClassDAO.GetCompleteTaskClassByID(ctx, taskClassID, userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if taskClass == nil {
+		return nil, nil, respond.WrongTaskClassID
+	}
+	if *taskClass.Mode != "auto" {
+		return nil, nil, respond.TaskClassModeNotAuto
+	}
+
+	// 2. 获取时间范围内的全部日程。
+	schedules, err := ss.scheduleDAO.GetUserSchedulesByTimeRange(ctx, userID, conv.CalculateFirstDayOfWeek(*taskClass.StartDate), conv.CalculateLastDayOfWeek(*taskClass.EndDate))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// 3. 执行粗排算法，拿到已分配的 items（EmbeddedTime 已回填）。
+	allocatedItems, err := logic.SmartPlanningRawItems(schedules, taskClass)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// 4. 同时生成展示结构，供 SSE 阶段推送给前端预览。
+	displayResult := conv.PlanningResultToUserWeekSchedules(schedules, allocatedItems)
+	return displayResult, allocatedItems, nil
+}
+
+// HybridScheduleWithPlan 构建"混合日程"：将既有日程与粗排建议合并为统一结构。
+//
+// 职责边界：
+// 1) 获取 TaskClass 时间范围内的既有日程（课程 + 已落库任务）；
+// 2) 调用粗排算法获取建议分配；
+// 3) 将两者合并为 []HybridScheduleEntry，供 ReAct 精排引擎在内存中操作。
+//
+// 返回值：
+// - entries：混合日程条目（existing + suggested）
+// - allocatedItems：粗排已分配的任务项（用于后续落库）
+// - error
+func (ss *ScheduleService) HybridScheduleWithPlan(
+	ctx context.Context, userID, taskClassID int,
+) ([]model.HybridScheduleEntry, []model.TaskClassItem, error) {
+	// 1. 获取任务类详情。
+	taskClass, err := ss.taskClassDAO.GetCompleteTaskClassByID(ctx, taskClassID, userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if taskClass == nil {
+		return nil, nil, respond.WrongTaskClassID
+	}
+	if *taskClass.Mode != "auto" {
+		return nil, nil, respond.TaskClassModeNotAuto
+	}
+
+	// 2. 获取时间范围内的既有日程。
+	schedules, err := ss.scheduleDAO.GetUserSchedulesByTimeRange(
+		ctx, userID,
+		conv.CalculateFirstDayOfWeek(*taskClass.StartDate),
+		conv.CalculateLastDayOfWeek(*taskClass.EndDate),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// 3. 执行粗排算法。
+	allocatedItems, err := logic.SmartPlanningRawItems(schedules, taskClass)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// 4. 合并为 HybridScheduleEntry 切片。
+	entries := make([]model.HybridScheduleEntry, 0, len(schedules)/2+len(allocatedItems))
+
+	// 4.1 既有日程：按 EventID+Week+DayOfWeek 分组，合并连续节次。
+	type eventGroupKey struct {
+		EventID   int
+		Week      int
+		DayOfWeek int
+	}
+	type eventGroup struct {
+		Key      eventGroupKey
+		Name     string
+		Type     string
+		Sections []int
+	}
+	groupMap := make(map[eventGroupKey]*eventGroup)
+	for _, s := range schedules {
+		key := eventGroupKey{EventID: s.EventID, Week: s.Week, DayOfWeek: s.DayOfWeek}
+		g, ok := groupMap[key]
+		if !ok {
+			name := "未知"
+			typ := "course"
+			if s.Event != nil {
+				name = s.Event.Name
+				typ = s.Event.Type
+			}
+			g = &eventGroup{Key: key, Name: name, Type: typ}
+			groupMap[key] = g
+		}
+		g.Sections = append(g.Sections, s.Section)
+	}
+	for _, g := range groupMap {
+		if len(g.Sections) == 0 {
+			continue
+		}
+		// 排序后取首尾作为 SectionFrom/SectionTo
+		minS, maxS := g.Sections[0], g.Sections[0]
+		for _, s := range g.Sections[1:] {
+			if s < minS {
+				minS = s
+			}
+			if s > maxS {
+				maxS = s
+			}
+		}
+		entries = append(entries, model.HybridScheduleEntry{
+			Week:        g.Key.Week,
+			DayOfWeek:   g.Key.DayOfWeek,
+			SectionFrom: minS,
+			SectionTo:   maxS,
+			Name:        g.Name,
+			Type:        g.Type,
+			Status:      "existing",
+			EventID:     g.Key.EventID,
+		})
+	}
+
+	// 4.2 粗排建议：每个已分配的 TaskClassItem 转为一条 suggested 条目。
+	for _, item := range allocatedItems {
+		if item.EmbeddedTime == nil {
+			continue
+		}
+		name := "未命名任务"
+		if item.Content != nil && strings.TrimSpace(*item.Content) != "" {
+			name = strings.TrimSpace(*item.Content)
+		}
+		entries = append(entries, model.HybridScheduleEntry{
+			Week:        item.EmbeddedTime.Week,
+			DayOfWeek:   item.EmbeddedTime.DayOfWeek,
+			SectionFrom: item.EmbeddedTime.SectionFrom,
+			SectionTo:   item.EmbeddedTime.SectionTo,
+			Name:        name,
+			Type:        "task",
+			Status:      "suggested",
+			TaskItemID:  item.ID,
+		})
+	}
+
+	return entries, allocatedItems, nil
 }

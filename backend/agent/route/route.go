@@ -30,28 +30,31 @@ var (
 	// 支持动作：
 	// 1. quick_note_create：新增随口记任务；
 	// 2. task_query：查询任务；
-	// 3. chat：普通聊天；
-	// 4. quick_note：历史兼容别名，解析后会映射到 quick_note_create。
-	routeHeaderRegex = regexp.MustCompile(`(?is)<\s*smartflow_route\b[^>]*\bnonce\s*=\s*["']?([a-zA-Z0-9\-]+)["']?[^>]*\baction\s*=\s*["']?(quick_note_create|task_query|quick_note|chat)["']?[^>]*>`)
+	// 3. schedule_plan：智能排程（生成/微调排程计划）；
+	// 4. chat：普通聊天；
+	// 5. quick_note：历史兼容别名，解析后会映射到 quick_note_create。
+	routeHeaderRegex = regexp.MustCompile(`(?is)<\s*smartflow_route\b[^>]*\bnonce\s*=\s*["']?([a-zA-Z0-9\-]+)["']?[^>]*\baction\s*=\s*["']?(quick_note_create|task_query|schedule_plan|quick_note|chat)["']?[^>]*>`)
 	// routeReasonRegex 用于提取可选的理由块，方便日志排障。
 	routeReasonRegex = regexp.MustCompile(`(?is)<\s*smartflow_reason\s*>(.*?)<\s*/\s*smartflow_reason\s*>`)
 )
 
 const routeControlPrompt = `你是 SmartFlow 的请求分流控制器。
-你的唯一任务是给后端返回“可机读控制码”，不要做用户可见回复，不要解释。
+你的唯一任务是给后端返回”可机读控制码”，不要做用户可见回复，不要解释。
 
 动作定义：
-1) quick_note_create：用户明确希望“记录/安排/提醒某件未来要做的事”。
-2) task_query：用户想“查看/筛选/排序/获取”已有任务（如最紧急、按DDL、某象限、关键词）。
-3) chat：其余全部普通对话（包括闲聊、知识问答、纯讨论“怎么安排任务”但未要求你真的去操作）。
+1) quick_note_create：用户明确希望”记录/安排/提醒某件未来要做的事”。
+2) task_query：用户想”查看/筛选/排序/获取”已有任务（如最紧急、按DDL、某象限、关键词）。
+3) schedule_plan：用户想”生成/调整/微调日程排程”（如”帮我排个学习计划”、”把早八的课调走”、”我不想周末学习”）。
+4) chat：其余全部普通对话（包括闲聊、知识问答、纯讨论”怎么安排任务”但未要求你真的去操作）。
 
 判定优先级（冲突时按顺序）：
-1) 若句子核心诉求是“帮我记一件事”，选 quick_note_create。
-2) 若核心诉求是“帮我查任务列表/某类任务”，选 task_query。
-3) 其他情况选 chat。
+1) 若句子核心诉求是”帮我记一件事”，选 quick_note_create。
+2) 若核心诉求是”帮我查任务列表/某类任务”，选 task_query。
+3) 若核心诉求是”帮我排日程/调整日程/生成学习计划/修改排程”，选 schedule_plan。
+4) 其他情况选 chat。
 
 输出格式必须严格如下（两行）：
-<SMARTFLOW_ROUTE nonce="给定nonce" action="quick_note_create|task_query|chat"></SMARTFLOW_ROUTE>
+<SMARTFLOW_ROUTE nonce=”给定nonce” action=”quick_note_create|task_query|schedule_plan|chat”></SMARTFLOW_ROUTE>
 <SMARTFLOW_REASON>一句不超过30字的中文理由</SMARTFLOW_REASON>
 
 禁止输出任何其他内容。`
@@ -63,6 +66,7 @@ const (
 	ActionChat            Action = "chat"
 	ActionQuickNoteCreate Action = "quick_note_create"
 	ActionTaskQuery       Action = "task_query"
+	ActionSchedulePlan    Action = "schedule_plan"
 
 	// ActionQuickNote 是历史兼容别名，只用于解析旧 action 值。
 	ActionQuickNote Action = "quick_note"
@@ -129,6 +133,16 @@ func DecideActionRouting(ctx context.Context, selectedModel *ark.ChatModel, user
 		}
 		return RoutingDecision{
 			Action:     ActionTaskQuery,
+			TrustRoute: true,
+			Detail:     reason,
+		}
+	case ActionSchedulePlan:
+		reason := strings.TrimSpace(decision.Reason)
+		if reason == "" {
+			reason = "识别到排程请求，准备执行智能排程流程。"
+		}
+		return RoutingDecision{
+			Action:     ActionSchedulePlan,
 			TrustRoute: true,
 			Detail:     reason,
 		}
@@ -226,7 +240,7 @@ func ParseRouteControlTag(raw, expectedNonce string) (*ControlDecision, error) {
 	actionText := strings.ToLower(strings.TrimSpace(header[2]))
 	action := Action(actionText)
 	switch action {
-	case ActionQuickNoteCreate, ActionTaskQuery, ActionChat:
+	case ActionQuickNoteCreate, ActionTaskQuery, ActionSchedulePlan, ActionChat:
 		// 合法动作直接通过。
 	case ActionQuickNote:
 		// 兼容旧动作值：统一映射到 quick_note_create。

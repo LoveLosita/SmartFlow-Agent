@@ -174,8 +174,18 @@ func SmartPlanningMainLogic(schedules []model.Schedule, taskClass *model.TaskCla
 	if err != nil {
 		return nil, err
 	}
-	//3.把这些时间通过DTO函数回填到涉及周的 UserWeekSchedule 结构中，供前端展示
+	//3.把这些时间通过DTO函数回填到涉��周的 UserWeekSchedule 结构中，供前端展示
 	return conv.PlanningResultToUserWeekSchedules(schedules, allocatedItems), nil
+}
+
+// SmartPlanningRawItems 执行粗排算法并直接返回已分配的任务项列表。
+//
+// 与 SmartPlanningMainLogic 共享完全相同的构建网格和分配逻辑，
+// 但不做展示格式转换，直接返回 allocatedItems（每项的 EmbeddedTime 已回填）。
+// 供 Agent 排程链路使用，避免从展示结构反向解析导致信息丢失。
+func SmartPlanningRawItems(schedules []model.Schedule, taskClass *model.TaskClass) ([]model.TaskClassItem, error) {
+	g := buildTimeGrid(schedules, taskClass)
+	return computeAllocation(g, taskClass.Items, *taskClass.Strategy)
 }
 
 // buildTimeGrid 构建一个时间格子，标记出哪些时间段被占用、哪些被屏蔽、哪些是水课

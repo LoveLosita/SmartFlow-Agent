@@ -3,10 +3,11 @@ package model
 import "time"
 
 type UserSendMessageRequest struct {
-	ConversationID string `json:"conversation_id,omitempty"`
-	Message        string `json:"message" binding:"required"`
-	Model          string `json:"model,omitempty"`
-	Thinking       bool   `json:"thinking,omitempty"`
+	ConversationID string         `json:"conversation_id,omitempty"`
+	Message        string         `json:"message" binding:"required"`
+	Model          string         `json:"model,omitempty"`
+	Thinking       bool           `json:"thinking,omitempty"`
+	Extra          map[string]any `json:"extra,omitempty"` // 附加参数（如 task_class_id），供 agent 分支链路使用
 }
 
 // ChatHistoryPersistPayload 是“聊天消息持久化请求”业务 DTO。

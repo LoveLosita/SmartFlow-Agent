@@ -98,7 +98,7 @@ func Start() {
 	courseService := service.NewCourseService(courseRepo, scheduleRepo)
 	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo, manager)
 	scheduleService := service.NewScheduleService(scheduleRepo, userRepo, taskClassRepo, manager, cacheRepo)
-	agentService := service.NewAgentService(aiHub, agentRepo, taskRepo, agentCacheRepo, eventBus)
+	agentService := service.NewAgentServiceWithSchedule(aiHub, agentRepo, taskRepo, agentCacheRepo, eventBus, scheduleService, taskClassService)
 
 	// API 层初始化。
 	userApi := api.NewUserHandler(userService)

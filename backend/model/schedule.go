@@ -118,6 +118,27 @@ type OngoingSchedule struct {
 	EndTime    time.Time `json:"end_time"`
 }
 
+// HybridScheduleEntry 表示"混合日程"中的一个时间块。
+//
+// 设计目标：
+// 将既有日程（课程/已落库任务）与粗排建议的任务统一到同一结构中，
+// 供 ReAct 精排引擎在内存中操作。
+//
+// Status 语义：
+// - "existing"：已确定的日程，LLM 不可移动；
+// - "suggested"：粗排建议的任务，LLM 可通过 Tool 调整时间。
+type HybridScheduleEntry struct {
+	Week        int    `json:"week"`
+	DayOfWeek   int    `json:"day_of_week"`
+	SectionFrom int    `json:"section_from"`
+	SectionTo   int    `json:"section_to"`
+	Name        string `json:"name"`
+	Type        string `json:"type"`                   // "course" | "task"
+	Status      string `json:"status"`                 // "existing" | "suggested"
+	TaskItemID  int    `json:"task_item_id,omitempty"` // 仅 suggested 的 task 有值
+	EventID     int    `json:"event_id,omitempty"`     // 仅 existing 有值
+}
+
 func (ScheduleEvent) TableName() string { return "schedule_events" }
 
 func (Schedule) TableName() string { return "schedules" }
