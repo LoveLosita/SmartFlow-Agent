@@ -44,7 +44,7 @@ type SchedulePlanState struct {
 
 	// CandidatePlans 是粗排算法生成的候选方案（展示型结构，供 SSE 推送给前端预览）。
 	CandidatePlans []model.UserWeekSchedule
-	// AllocatedItems 是粗排算法已分配的任务项（EmbeddedTime 已回填），供 materialize 直接转换。
+	// AllocatedItems 是粗排算法已分配的任务项（EmbeddedTime 已回填），供 ReAct 精排使用。
 	AllocatedItems []model.TaskClassItem
 
 	// ── ReAct 精排阶段 ──
@@ -60,27 +60,6 @@ type SchedulePlanState struct {
 	ReactSummary string
 	// ReactDone 标记 ReAct 是否已完成。
 	ReactDone bool
-
-	// ── materialize 节点输出 ──
-
-	// ApplyRequest 是转换后的落库请求体。
-	ApplyRequest *model.UserInsertTaskClassItemToScheduleRequestBatch
-
-	// ── apply 节点输出 ──
-
-	// Applied 标记是否落库成功。
-	Applied bool
-	// ApplyError 记录落库失败的错误信息，供 reflect 节点分析。
-	ApplyError string
-
-	// ── reflect 节点状态 ──
-
-	// RetryCount 记录当前重试次数。
-	RetryCount int
-	// MaxRetry 是最大重试次数（建议 = 2）。
-	MaxRetry int
-	// ReflectAction 记录模型给出的修补动作（retry_with_patch / partial_apply / give_up）。
-	ReflectAction string
 
 	// ── 连续对话微调 ──
 
@@ -107,21 +86,9 @@ func NewSchedulePlanState(traceID string, userID int, conversationID string) *Sc
 		ConversationID: conversationID,
 		RequestNow:     now,
 		RequestNowText: now.In(schedulePlanLocation()).Format(schedulePlanDatetimeLayout),
-		MaxRetry:       2,
 		Strategy:       "steady",
 		ReactMaxRound:  3,
 	}
-}
-
-// CanRetry 判断当前是否还能继续重试落库。
-func (s *SchedulePlanState) CanRetry() bool {
-	return s.RetryCount < s.MaxRetry
-}
-
-// RecordApplyError 记录一次落库失败。
-func (s *SchedulePlanState) RecordApplyError(errMsg string) {
-	s.RetryCount++
-	s.ApplyError = errMsg
 }
 
 // schedulePlanLocation 返回排程链路使用的业务时区。

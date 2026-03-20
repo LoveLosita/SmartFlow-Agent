@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/cloudwego/eino-ext/components/model/ark"
-	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -60,27 +59,6 @@ func (r *schedulePlanRunner) previewNode(ctx context.Context, st *SchedulePlanSt
 	return runPreviewNode(ctx, st, r.deps, r.emitStage)
 }
 
-func (r *schedulePlanRunner) materializeNode(ctx context.Context, st *SchedulePlanState) (*SchedulePlanState, error) {
-	return runMaterializeNode(ctx, st, r.chatModel, r.deps, r.emitStage)
-}
-
-func (r *schedulePlanRunner) applyNode(ctx context.Context, st *SchedulePlanState) (*SchedulePlanState, error) {
-	return runApplyNode(ctx, st, r.deps, r.emitStage)
-}
-
-func (r *schedulePlanRunner) reflectNode(ctx context.Context, st *SchedulePlanState) (*SchedulePlanState, error) {
-	return runReflectNode(ctx, st, r.chatModel, r.emitStage)
-}
-
-func (r *schedulePlanRunner) finalizeNode(ctx context.Context, st *SchedulePlanState) (*SchedulePlanState, error) {
-	return runFinalizeNode(ctx, st, r.chatModel, r.emitStage)
-}
-
-func (r *schedulePlanRunner) exitNode(_ context.Context, st *SchedulePlanState) (*SchedulePlanState, error) {
-	// exit 节点不做任何业务逻辑，仅把当前状态原样透传到 END。
-	return st, nil
-}
-
 // ── ReAct 精排节点适配层 ──
 
 func (r *schedulePlanRunner) hybridBuildNode(ctx context.Context, st *SchedulePlanState) (*SchedulePlanState, error) {
@@ -95,42 +73,27 @@ func (r *schedulePlanRunner) returnPreviewNode(ctx context.Context, st *Schedule
 	return runReturnPreviewNode(ctx, st, r.emitStage)
 }
 
+func (r *schedulePlanRunner) exitNode(_ context.Context, st *SchedulePlanState) (*SchedulePlanState, error) {
+	// exit 节点不做任何业务逻辑，仅把当前状态原样透传到 END。
+	return st, nil
+}
+
 // ── 分支决策适配层 ──
 
 func (r *schedulePlanRunner) nextAfterPlan(_ context.Context, st *SchedulePlanState) (string, error) {
 	return selectNextAfterPlan(st), nil
 }
 
-func (r *schedulePlanRunner) nextAfterMaterialize(_ context.Context, st *SchedulePlanState) (string, error) {
-	// materialize 后：有 ApplyRequest 则去 apply，否则去 exit。
-	if st == nil || st.ApplyRequest == nil || len(st.ApplyRequest.Items) == 0 {
-		return schedulePlanGraphNodeExit, nil
-	}
-	return schedulePlanGraphNodeApply, nil
-}
-
-func (r *schedulePlanRunner) nextAfterApply(_ context.Context, st *SchedulePlanState) (string, error) {
-	return selectNextAfterApply(st), nil
-}
-
-func (r *schedulePlanRunner) nextAfterReflect(_ context.Context, st *SchedulePlanState) (string, error) {
-	return selectNextAfterReflect(st), nil
-}
-
 // nextAfterPreview 根据 preview 结果决定下一步。
 //
 // 分支规则：
 // 1) preview 失败（无候选方案）-> exit
-// 2) HybridScheduleWithPlan 已注入 -> hybridBuild（走 ReAct 精排路径）
-// 3) 否则 -> materialize（走原有落库路径，向后兼容）
+// 2) 否则 -> hybridBuild（进入 ReAct 精排路径）
 func (r *schedulePlanRunner) nextAfterPreview(_ context.Context, st *SchedulePlanState) (string, error) {
 	if st == nil || len(st.CandidatePlans) == 0 {
 		return schedulePlanGraphNodeExit, nil
 	}
-	if r.deps.HybridScheduleWithPlan != nil {
-		return schedulePlanGraphNodeHybridBuild, nil
-	}
-	return schedulePlanGraphNodeMaterialize, nil
+	return schedulePlanGraphNodeHybridBuild, nil
 }
 
 // nextAfterHybridBuild 根据 hybridBuild 结果决定下一步。
@@ -139,9 +102,4 @@ func (r *schedulePlanRunner) nextAfterHybridBuild(_ context.Context, st *Schedul
 		return schedulePlanGraphNodeExit, nil
 	}
 	return schedulePlanGraphNodeReactRefine, nil
-}
-
-// nextAfterFinalize 用于 finalize 分支——固定结束。
-func (r *schedulePlanRunner) nextAfterFinalize(_ context.Context, _ *SchedulePlanState) (string, error) {
-	return compose.END, nil
 }

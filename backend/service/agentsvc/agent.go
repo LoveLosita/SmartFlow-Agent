@@ -32,14 +32,8 @@ type AgentService struct {
 	// SmartPlanningRawFunc 调用粗排算法，同时返回展示结构和已分配的任务项。
 	// 由 service/agent_bridge.go 在构造时注入 ScheduleService.SmartPlanningRaw。
 	SmartPlanningRawFunc func(ctx context.Context, userID, taskClassID int) ([]model.UserWeekSchedule, []model.TaskClassItem, error)
-	// BatchApplyPlansFunc 将排程方案批量落库。
-	// 由 service/agent_bridge.go 在构造时注入 TaskClassService.BatchApplyPlans。
-	BatchApplyPlansFunc func(ctx context.Context, taskClassID, userID int, plans *model.UserInsertTaskClassItemToScheduleRequestBatch) error
-	// GetTaskClassByIDFunc 获取任务类详情（含 Items）。
-	// 由 service/agent_bridge.go 在构造时注入。
-	GetTaskClassByIDFunc func(ctx context.Context, taskClassID, userID int) (*model.TaskClass, error)
 	// HybridScheduleWithPlanFunc 构建混合日程（既有日程 + 粗排建议），供 ReAct 精排使用。
-	// 由 service/agent_bridge.go 在构造时注入。可选：未注入时走原有 materialize 路径。
+	// 由 service/agent_bridge.go 在构造时注入。
 	HybridScheduleWithPlanFunc func(ctx context.Context, userID, taskClassID int) ([]model.HybridScheduleEntry, []model.TaskClassItem, error)
 }
 

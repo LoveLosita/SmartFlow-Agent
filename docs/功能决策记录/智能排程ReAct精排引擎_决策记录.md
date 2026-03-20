@@ -62,10 +62,95 @@
 ### 6.1 新流程（graph 结构）
 ```
 plan → preview(粗排) → hybridBuild(混合日程) → reactRefine(ReAct循环) → returnPreview → END
-                              ↑                        |
-                              └────────────────────────┘ (tool失败重试，最多N轮)
 ```
-当 `HybridScheduleWithPlan` 依赖未注入时，preview 后自动走原有 materialize → apply 路径。
+智能排程仅返回预览结果，不自动落库。用户确认后由前端调用独立落库接口完成持久化。
+
+#### 6.1.1 整体 Graph 流程图
+
+> 下图展示完整的 SchedulePlanGraph 编排结构（ReAct 精排路径）。
+
+```mermaid
+flowchart TD
+    START([START]) --> plan["plan<br/>意图识别 + 约束提取<br/><i>callScheduleModelForJSON</i>"]
+
+    plan --> plan_br{{"FinalSummary 非空<br/>或 TaskClassID ≤ 0 ?"}}
+    plan_br -- 是 --> exit_a["exit → END<br/><i>提前终止</i>"]
+    plan_br -- 否 --> preview["preview<br/>调用粗排算法<br/><i>SmartPlanningRaw</i>"]
+
+    preview --> pv_br{{"preview 结果？"}}
+    pv_br -- "失败 / 无候选" --> exit_b["exit → END"]
+    pv_br -- "成功" --> hybridBuild["hybridBuild<br/>构建混合日程<br/><i>existing + suggested</i>"]
+
+    hybridBuild --> hb_br{{"HybridEntries 非空？"}}
+    hb_br -- 空 --> exit_c["exit → END"]
+    hb_br -- 非空 --> reactRefine["reactRefine<br/>ReAct 精排循环<br/><i>最多 3 轮 × 5min/轮</i>"]
+    reactRefine --> returnPreview["returnPreview<br/>HybridEntries → 预览格式<br/><i>不落库，等用户确认</i>"]
+    returnPreview --> END_A([END])
+
+    %% ═══ 样式 ═══
+    style reactRefine fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style hybridBuild fill:#e8f5e9,stroke:#2e7d32
+    style returnPreview fill:#e8f5e9,stroke:#2e7d32
+```
+
+#### 6.1.2 ReAct 精排内部循环
+
+> 下图展开 `reactRefine` 节点内部的 ReAct 循环逻辑（`react.go`）。
+> 每轮独立设置 5 分钟超时（`reactRoundTimeout`），reasoning_content 实时推送到 SSE。
+
+```mermaid
+flowchart TD
+    enter([进入 reactRefine]) --> init["构造初始 messages<br/>system: ReAct 优化 prompt<br/>user: 混合日程 JSON + 约束"]
+
+    init --> round_gate{{"ReactRound < ReactMaxRound (3) ?"}}
+
+    round_gate -- 否 --> max_round["标记完成<br/>'已达最大轮次，使用当前结果'"]
+    max_round --> to_return([退出 → returnPreview])
+
+    round_gate -- 是 --> inc["ReactRound++<br/>创建 roundCtx<br/><i>context.WithTimeout(ctx, 5min)</i>"]
+
+    inc --> stream["chatModel.Stream(roundCtx, messages)<br/><i>ThinkingTypeEnabled</i>"]
+
+    stream --> recv_loop["循环 reader.Recv()"]
+    recv_loop --> has_reasoning{{"有 reasoning_content ?"}}
+    has_reasoning -- 是 --> push_sse["推送到 outChan<br/><i>前端实时可见思考过程</i>"]
+    push_sse --> has_content
+    has_reasoning -- 否 --> has_content{{"有 content ?"}}
+    has_content -- 是 --> acc["累积到 contentBuilder"]
+    acc --> recv_more{{"EOF ?"}}
+    has_content -- 否 --> recv_more
+    recv_more -- 否 --> recv_loop
+    recv_more -- 是 --> parse
+
+    stream -- "超时 / 错误" --> timeout["ReactDone = true<br/>'模型调用超时或失败，<br/>使用粗排结果'"]
+    timeout --> to_return
+
+    parse["解析 LLM JSON 输出<br/><i>parseReactLLMOutput</i>"]
+    parse --> parse_br{{"解析结果？"}}
+
+    parse_br -- 解析失败 --> parse_fail["ReactDone = true<br/>'LLM 输出格式异常'"]
+    parse_fail --> to_return
+
+    parse_br -- "done: true" --> done["ReactDone = true<br/>ReactSummary = summary"]
+    done --> to_return
+
+    parse_br -- "无 tool_calls<br/>且 done ≠ true" --> auto_done["ReactDone = true<br/>'排程优化已完成'"]
+    auto_done --> to_return
+
+    parse_br -- "有 tool_calls" --> dispatch["依次分发 Tool 调用<br/><i>dispatchReactTool</i>"]
+
+    dispatch --> tools["执行工具（纯内存操作）<br/>Swap ─ 交换两个 suggested 时间<br/>Move ─ 移动到新时间段<br/>TimeAvailable ─ 查询是否空闲<br/>GetAvailableSlots ─ 列出可用槽"]
+
+    tools --> append["messages += assistant 输出<br/>messages += tool 结果（user msg）"]
+    append --> round_gate
+
+    %% ═══ 样式 ═══
+    style stream fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    style dispatch fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style tools fill:#e8f5e9,stroke:#2e7d32
+    style push_sse fill:#fce4ec,stroke:#c62828
+    style timeout fill:#ffebee,stroke:#b71c1c
+```
 
 ### 6.2 混合日程（HybridScheduleEntry）
 将既有日程（existing）和粗排建议（suggested）统一到同一结构：

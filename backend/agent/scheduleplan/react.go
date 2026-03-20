@@ -16,7 +16,7 @@ import (
 
 // reactRoundTimeout 是单轮 ReAct 的超时时间。
 // 深度思考模式下 reasoning 阶段可能耗时较长，需要给足时间。
-const reactRoundTimeout = 5 * time.Minute
+const reactRoundTimeout = 15 * time.Minute
 
 // runReactRefineNode 执行 ReAct 精排循环。
 //

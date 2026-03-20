@@ -18,22 +18,10 @@ type SchedulePlanToolDeps struct {
 	// SmartPlanningRaw 调用粗排算法，同时返回展示结构和已分配的任务项。
 	// 返回值：
 	// - []UserWeekSchedule：展示型结构，供 SSE 阶段推送给前端预览；
-	// - []TaskClassItem：已分配的任务项（EmbeddedTime 已回填），供 materialize 直接转换。
+	// - []TaskClassItem：已分配的任务项（EmbeddedTime 已回填），供 ReAct 精排使用。
 	SmartPlanningRaw func(ctx context.Context, userID, taskClassID int) ([]model.UserWeekSchedule, []model.TaskClassItem, error)
 
-	// BatchApplyPlans 将排程方案批量落库。
-	// 输入：taskClassID、userID、落库请求体。
-	// 输出：error（nil 表示全部成功）。
-	BatchApplyPlans func(ctx context.Context, taskClassID, userID int, plans *model.UserInsertTaskClassItemToScheduleRequestBatch) error
-
-	// GetTaskClassByID 获取任务类详情（含关联的 Items）。
-	// 用于：
-	// 1) 校验 task_class_id 合法性；
-	// 2) 获取 Items 列表，为连续对话微调提供上下文。
-	GetTaskClassByID func(ctx context.Context, taskClassID, userID int) (*model.TaskClass, error)
-
 	// HybridScheduleWithPlan 构建混合日程（既有日程 + 粗排建议），供 ReAct 精排使用。
-	// 可选依赖：未注入时 ReAct 精排阶段不可用，走原有 materialize 路径。
 	HybridScheduleWithPlan func(ctx context.Context, userID, taskClassID int) ([]model.HybridScheduleEntry, []model.TaskClassItem, error)
 }
 
@@ -42,11 +30,8 @@ func (d SchedulePlanToolDeps) validate() error {
 	if d.SmartPlanningRaw == nil {
 		return errors.New("schedule plan tool deps: SmartPlanningRaw is nil")
 	}
-	if d.BatchApplyPlans == nil {
-		return errors.New("schedule plan tool deps: BatchApplyPlans is nil")
-	}
-	if d.GetTaskClassByID == nil {
-		return errors.New("schedule plan tool deps: GetTaskClassByID is nil")
+	if d.HybridScheduleWithPlan == nil {
+		return errors.New("schedule plan tool deps: HybridScheduleWithPlan is nil")
 	}
 	return nil
 }

@@ -33,7 +33,7 @@ func (s *AgentService) runSchedulePlanFlow(
 	modelName string,
 ) (string, error) {
 	// 1. 依赖预检：排程依赖函数必须注入，否则无法完成排程链路。
-	if s.SmartPlanningRawFunc == nil || s.BatchApplyPlansFunc == nil || s.GetTaskClassByIDFunc == nil {
+	if s.SmartPlanningRawFunc == nil || s.HybridScheduleWithPlanFunc == nil {
 		return "", errors.New("schedule plan service dependencies are not ready")
 	}
 	if selectedModel == nil {
@@ -71,8 +71,6 @@ func (s *AgentService) runSchedulePlanFlow(
 		State: state,
 		Deps: scheduleplan.SchedulePlanToolDeps{
 			SmartPlanningRaw:       s.SmartPlanningRawFunc,
-			BatchApplyPlans:        s.BatchApplyPlansFunc,
-			GetTaskClassByID:       s.GetTaskClassByIDFunc,
 			HybridScheduleWithPlan: s.HybridScheduleWithPlanFunc,
 		},
 		UserMessage: userMessage,
