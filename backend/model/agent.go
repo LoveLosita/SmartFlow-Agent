@@ -82,6 +82,52 @@ type GetConversationListResponse struct {
 	HasMore  bool                      `json:"has_more"`
 }
 
+// SchedulePlanPreviewCache 是“排程预览”在 Redis 中的缓存结构。
+//
+// 职责边界：
+// 1. 负责承载排程完成后的结构化预览快照（summary + candidate_plans）；
+// 2. 通过 user_id 做查询归属校验，避免跨用户越权读取；
+// 3. 仅用于缓存层读写，不表示已落库或已应用到正式日程；
+// 4. 通过 trace_id 标识本次预览来源，便于排查链路问题。
+type SchedulePlanPreviewCache struct {
+	UserID         int                `json:"user_id"`
+	ConversationID string             `json:"conversation_id"`
+	TraceID        string             `json:"trace_id,omitempty"`
+	Summary        string             `json:"summary"`
+	CandidatePlans []UserWeekSchedule `json:"candidate_plans"`
+	// TaskClassIDs 记录本次预览对应的任务类集合。
+	// 作用：
+	// 1. 连续对话微调时，若本轮请求未显式传 task_class_ids，可用该字段兜底；
+	// 2. 仅用于会话内上下文承接，不表示用户最终确认后的持久化状态。
+	TaskClassIDs []int `json:"task_class_ids,omitempty"`
+	// HybridEntries 保存“可优化的混合日程底板”。
+	// 作用：
+	// 1. 连续对话微调时复用上轮结果作为起点，避免每轮都从粗排重算；
+	// 2. 仅缓存态，生命周期受 Redis TTL 控制。
+	HybridEntries []HybridScheduleEntry `json:"hybrid_entries,omitempty"`
+	// AllocatedItems 保存建议任务块的当前分配状态。
+	// 作用：
+	// 1. 保证 final_check 的数量核对口径在连续微调场景下可持续；
+	// 2. return_preview 节点可继续回填 embedded_time。
+	AllocatedItems []TaskClassItem `json:"allocated_items,omitempty"`
+	GeneratedAt    time.Time       `json:"generated_at"`
+}
+
+// GetSchedulePlanPreviewResponse 是“按会话查询排程预览”接口返回结构。
+//
+// 职责边界：
+// 1. conversation_id：标识该预览属于哪个会话；
+// 2. summary：给用户展示的终审自然语言总结；
+// 3. candidate_plans：给前端渲染课表/时间轴用的结构化 JSON；
+// 4. generated_at：预览生成时间，便于前端判断是否是最新结果。
+type GetSchedulePlanPreviewResponse struct {
+	ConversationID string             `json:"conversation_id"`
+	TraceID        string             `json:"trace_id,omitempty"`
+	Summary        string             `json:"summary"`
+	CandidatePlans []UserWeekSchedule `json:"candidate_plans"`
+	GeneratedAt    time.Time          `json:"generated_at"`
+}
+
 type SSEResponse struct {
 	Event string         `json:"event"`
 	ID    int            `json:"id,omitempty"`

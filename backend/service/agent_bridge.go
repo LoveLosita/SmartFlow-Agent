@@ -40,8 +40,9 @@ func NewAgentServiceWithSchedule(
 
 	// 注入排程依赖：将 service 层方法包装为函数闭包，避免循环依赖。
 	if scheduleSvc != nil {
-		svc.SmartPlanningRawFunc = scheduleSvc.SmartPlanningRaw
-		svc.HybridScheduleWithPlanFunc = scheduleSvc.HybridScheduleWithPlan
+		svc.SmartPlanningMultiRawFunc = scheduleSvc.SmartPlanningMultiRaw
+		svc.HybridScheduleWithPlanMultiFunc = scheduleSvc.HybridScheduleWithPlanMulti
+		svc.ResolvePlanningWindowFunc = scheduleSvc.ResolvePlanningWindowByTaskClasses
 	}
 
 	return svc

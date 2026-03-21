@@ -85,6 +85,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, userRepo *d
 			scheduleGroup.GET("/current", handlers.ScheduleHandler.GetUserOngoingSchedule)
 			scheduleGroup.DELETE("/undo-task-item", middleware.IdempotencyMiddleware(cache), handlers.ScheduleHandler.UserRevocateTaskItemFromSchedule)
 			scheduleGroup.GET("/smart-planning", handlers.ScheduleHandler.SmartPlanning)
+			scheduleGroup.POST("/smart-planning-multi", handlers.ScheduleHandler.SmartPlanningMulti)
 		}
 		agentGroup := apiGroup.Group("/agent")
 		{
@@ -92,6 +93,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, userRepo *d
 			agentGroup.POST("/chat", middleware.TokenQuotaGuard(cache, userRepo), handlers.AgentHandler.ChatAgent)
 			agentGroup.GET("/conversation-meta", handlers.AgentHandler.GetConversationMeta)
 			agentGroup.GET("/conversation-list", handlers.AgentHandler.GetConversationList)
+			agentGroup.GET("/schedule-preview", handlers.AgentHandler.GetSchedulePlanPreview)
 		}
 	}
 	// 初始化Gin引擎

@@ -356,28 +356,47 @@ $$Gap = \frac{TotalAvailableSlots - (TaskCount \times 2)}{TaskCount + 1}$$
 
 ```mermaid
 flowchart TD
-    A["用户消息进入 AgentChat"] --> B["通用控制码分流<br/>action=chat/quick_note_create/task_query"]
-    B --> C{"路由是否成功解析"}
+    A["/api/v1/agent/chat<br/>解析请求体 + 规范 conversation_id<br/>Header 写入 X-Conversation-ID"] --> B["AgentService.AgentChat<br/>创建 outChan / errChan"]
+    B --> C["规范 chat_id + 选择模型(worker/strategist)"]
+    C --> D["确保会话存在<br/>先查 Redis 状态<br/>未命中回源 DB + 必要时创建"]
+    D --> E["模型控制码路由<br/>route.DecideActionRouting<br/>action=chat/quick_note_create/task_query/schedule_plan"]
+    E --> F{"RouteFailed?"}
 
-    C -- 否 --> D["兜底普通聊天链路<br/>StreamChat token流式输出"]
-    C -- 是 --> E{"action 类型"}
+    F -- "是" --> G["pushErrNonBlocking(errChan, RouteControlInternalError)<br/>API 侧 SSE 输出 error + [DONE]"]
+    F -- "否" --> H{"action 类型"}
 
-    E -- chat --> F["普通聊天链路<br/>StreamChat token流式输出"]
+    H -- "chat" --> I["runNormalChatFlow<br/>Redis 取历史 -> miss 回源 DB + 回填<br/>裁剪上下文窗口 -> StreamChat 流式输出"]
+    I --> I2["后置持久化收口<br/>user/assistant 先写 Redis<br/>再 PersistChatHistory(outbox 或同步DB)<br/>异步尝试生成标题"]
 
-    E -- quick_note_create --> G["随口记链路<br/>单请求聚合规划 + 本地校验"]
-    G --> H["写库工具落库<br/>task_id有效校验 + 失败重试"]
-    H --> I["一次性正文回复"]
+    H -- "quick_note_create" --> J["发阶段块 request.accepted<br/>tryHandleQuickNoteWithGraph"]
+    J --> J1{"graph 出错?"}
+    J1 -- "是" --> J2["记录日志 + 发 fallback 阶段块<br/>回退 runNormalChatFlow"]
+    J1 -- "否" --> J3{"handled=true?"}
+    J3 -- "否" --> J2
+    J3 -- "是" --> J4["buildQuickNoteFinalReply<br/>emitSingleAssistantCompletion"]
+    J4 --> J5["persistChatAfterReply<br/>统一后置持久化 + 异步标题"]
 
-    E -- task_query --> J["随口问链路<br/>进入 TaskQueryGraph"]
-    J --> K["plan -> quadrant -> time_anchor"]
-    K --> L["tool_query 调用 query_tasks"]
-    L --> M["reflect 判断是否满足<br/>不满足则 patch 重试(<=2)"]
-    M --> N["后端确定性渲染列表<br/>严格按 limit 输出条数"]
+    H -- "task_query" --> K["runTaskQueryFlow -> TaskQueryGraph<br/>plan/quadrant/time_anchor/tool_query/reflect"]
+    K --> K1{"查询链路报错?"}
+    K1 -- "是" --> K2["记录日志 + 发 fallback 阶段块<br/>回退 runNormalChatFlow"]
+    K1 -- "否" --> K3["emitSingleAssistantCompletion<br/>persistChatAfterReply + 异步标题"]
 
-    D --> Z["后置持久化<br/>Redis + outbox/DB"]
-    F --> Z
-    I --> Z
-    N --> Z
+    H -- "schedule_plan" --> L["runSchedulePlanFlow -> SchedulePlanGraph<br/>并写入排程预览缓存"]
+    L --> L1{"排程链路报错?"}
+    L1 -- "是" --> L2["记录日志 + 发 fallback 阶段块<br/>回退 runNormalChatFlow"]
+    L1 -- "否" --> L3["emitSingleAssistantCompletion<br/>persistChatAfterReply + 异步标题"]
+
+    H -- "未知 action" --> M["兜底回退 runNormalChatFlow"]
+
+    I2 --> Z["API c.Stream 转发 outChan/errChan<br/>正常收尾或错误收尾"]
+    J2 --> Z
+    J5 --> Z
+    K2 --> Z
+    K3 --> Z
+    L2 --> Z
+    L3 --> Z
+    M --> Z
+    G --> Z
 ```
 
 ### 2) 命中“添加日程/随口记”后的业务流转
@@ -412,7 +431,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["用户消息进入 /agent/chat"] --> B["通用控制码分流<br/>action=chat/quick_note_create/task_query"]
+    A["用户消息进入 /agent/chat"] --> B["通用控制码分流<br/>action=chat/quick_note_create/task_query/schedule_plan"]
     B --> C{"action 是否为 task_query"}
     C -- 否 --> D["走其它分支<br/>普通聊天或随口记"]
     C -- 是 --> E["进入 TaskQueryGraph"]
@@ -431,6 +450,52 @@ flowchart TD
     P --> I
     O -- 否 --> Q["后端确定性渲染最终回复<br/>严格按 limit 输出条数"]
     Q --> R["后置持久化<br/>user+assistant 写 Redis + outbox/DB"]
+```
+
+### 4) 命中“智能排程”后的业务流转图
+
+```mermaid
+flowchart TD
+    A["命中 action=schedule_plan<br/>发 request.accepted 阶段块"] --> B["runSchedulePlanFlow 入口"]
+    B --> B1{"依赖齐全?<br/>model + 3个函数注入"}
+    B1 -- "否" --> B2["返回 error 给上层<br/>上层回退普通聊天"]
+    B1 -- "是" --> C["清理旧预览缓存<br/>DeleteSchedulePlanPreview<br/>失败仅记日志"]
+    C --> D["加载对话历史<br/>Redis 优先 -> miss 回源 DB<br/>失败降级为空历史继续"]
+    D --> E["RunSchedulePlanGraph<br/>注入并发度与预算配置"]
+
+    E --> P1["plan 节点<br/>合并 extra.task_class_ids + 模型提取约束/策略/标签<br/>模型失败时可用 extra 兜底"]
+    P1 --> P1B{"FinalSummary 非空<br/>或 task_class_ids 为空?"}
+    P1B -- "是" --> PX["exit 节点 -> END<br/>直接返回已有失败文案"]
+    P1B -- "否" --> P2["rough_build 节点<br/>HybridScheduleWithPlanMulti 构建 HybridEntries<br/>可选解析全局窗口(起止周/天)"]
+
+    P2 --> P2B{"HybridEntries 为空<br/>或构建失败?"}
+    P2B -- "是" --> PX
+    P2B -- "否" --> P3{"len(task_class_ids) >= 2 ?"}
+
+    P3 -- "是" --> P4["daily_split<br/>按周天拆 DayGroup + 注入 ContextTag<br/>suggested<=2 标记 SkipRefine"]
+    P4 --> P5["daily_refine(并发)<br/>按天并发 ReAct<br/>单天失败回退原天结果"]
+    P5 --> P6["merge<br/>合并 DailyResults<br/>冲突则整体回退 merge 前快照"]
+    P6 --> P7["weekly_refine(并发按周)<br/>有效周保底预算 + 负载加权分配"]
+
+    P3 -- "否" --> P7
+    P7 --> P7A["单周 worker 循环<br/>每轮只允许 1 个 Move/Swap 或 done<br/>总预算(成功/失败都扣) + 有效预算(仅成功扣)<br/>Move 受本周与全局窗口硬约束"]
+
+    P7A --> P8["final_check<br/>physicsCheck(冲突/节次越界/数量核对)<br/>失败回退 MergeSnapshot<br/>再生成自然语言总结"]
+    P8 --> P9["return_preview<br/>回填 AllocatedItems 嵌入时间<br/>生成 CandidatePlans + FinalSummary + Completed"]
+    P9 --> F1["saveSchedulePlanPreview<br/>写 Redis 结构化快照<br/>失败仅记日志"]
+    F1 --> F2["返回 FinalSummary 给 AgentChat"]
+
+    F2 --> G1["emitSingleAssistantCompletion<br/>SSE 输出终审文本"]
+    G1 --> G2["persistChatAfterReply<br/>user/assistant 写 Redis + outbox/DB"]
+    G2 --> G3["ensureConversationTitleAsync"]
+
+    F1 --> H1["结构化通道<br/>GET /api/v1/agent/schedule-preview?conversation_id=..."]
+    H1 --> H2["GetSchedulePlanPreview<br/>按 user_id + conversation_id 读 Redis 快照<br/>未命中返回业务错误码"]
+
+    B2 --> Z["上层发 fallback 阶段块<br/>回退 runNormalChatFlow"]
+    PX --> F1
+    G3 --> Z
+    H2 --> Z
 ```
 
 # 6 前端实现

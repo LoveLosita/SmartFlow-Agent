@@ -146,6 +146,52 @@ func (dao *TaskClassDAO) GetCompleteTaskClassByID(ctx context.Context, id int, u
 	return &taskClass, nil
 }
 
+// GetCompleteTaskClassesByIDs 批量获取“完整任务类”（含 Items）。
+//
+// 职责边界：
+// 1. 负责按 user_id + ids 过滤，保证数据归属安全；
+// 2. 负责预加载 Items，供智能粗排直接使用；
+// 3. 不负责排序策略，返回结果顺序由 service 层决定；
+// 4. 若存在任一 id 不存在或不属于该用户，返回 WrongTaskClassID。
+func (dao *TaskClassDAO) GetCompleteTaskClassesByIDs(ctx context.Context, userID int, ids []int) ([]model.TaskClass, error) {
+	if len(ids) == 0 {
+		return []model.TaskClass{}, nil
+	}
+
+	// 1. 先做去重与合法值过滤，避免无效 ID 放大数据库压力。
+	uniqueIDs := make([]int, 0, len(ids))
+	seen := make(map[int]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniqueIDs = append(uniqueIDs, id)
+	}
+	if len(uniqueIDs) == 0 {
+		return nil, respond.WrongTaskClassID
+	}
+
+	// 2. 批量查询并预加载任务项。
+	var taskClasses []model.TaskClass
+	err := dao.db.WithContext(ctx).
+		Preload("Items").
+		Where("user_id = ? AND id IN ?", userID, uniqueIDs).
+		Find(&taskClasses).Error
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. 数量校验：少一条都视为“存在非法/越权 ID”，统一按业务错误返回。
+	if len(taskClasses) != len(uniqueIDs) {
+		return nil, respond.WrongTaskClassID
+	}
+	return taskClasses, nil
+}
+
 func (dao *TaskClassDAO) GetTaskClassItemByID(ctx context.Context, id int) (*model.TaskClassItem, error) {
 	var item model.TaskClassItem
 	err := dao.db.WithContext(ctx).

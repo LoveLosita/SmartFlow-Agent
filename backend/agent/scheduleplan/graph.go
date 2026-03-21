@@ -12,24 +12,31 @@ import (
 const (
 	// 图节点：意图识别与约束提取
 	schedulePlanGraphNodePlan = "schedule_plan_plan"
-	// 图节点：调用粗排算法生成候选方案
-	schedulePlanGraphNodePreview = "schedule_plan_preview"
-	// 图节点：退出（用于提前终止分支）
+	// 图节点：粗排构建（替代旧 preview + hybridBuild）
+	schedulePlanGraphNodeRoughBuild = "schedule_plan_rough_build"
+	// 图节点：提前退出
 	schedulePlanGraphNodeExit = "schedule_plan_exit"
-	// 图节点：构建混合日程（ReAct 精排前置）
-	schedulePlanGraphNodeHybridBuild = "schedule_plan_hybrid_build"
-	// 图节点：ReAct 精排循环
-	schedulePlanGraphNodeReactRefine = "schedule_plan_react_refine"
-	// 图节点：返回精排预览结果（不落库）
+	// 图节点：按天拆分并注入上下文标签
+	schedulePlanGraphNodeDailySplit = "schedule_plan_daily_split"
+	// 图节点：并发日内优化
+	schedulePlanGraphNodeDailyRefine = "schedule_plan_daily_refine"
+	// 图节点：合并日内优化结果
+	schedulePlanGraphNodeMerge = "schedule_plan_merge"
+	// 图节点：周级配平优化（单步动作模式，输出阶段状态）
+	schedulePlanGraphNodeWeeklyRefine = "schedule_plan_weekly_refine"
+	// 图节点：终审校验
+	schedulePlanGraphNodeFinalCheck = "schedule_plan_final_check"
+	// 图节点：返回预览结果（不落库）
 	schedulePlanGraphNodeReturnPreview = "schedule_plan_return_preview"
 )
 
-// SchedulePlanGraphRunInput 是运行"智能排程 graph"所需的输入依赖。
+// SchedulePlanGraphRunInput 是执行“智能排程 graph”所需输入。
 //
-// 说明：
-// 1) EmitStage 可选，用于把节点进度推送给外层（例如 SSE 状态块）；
-// 2) Extra 传递前端附加参数（如 task_class_id）；
-// 3) ChatHistory 用于连续对话微调场景。
+// 字段说明：
+// 1. Extra：前端附加参数（重点是 task_class_ids）；
+// 2. ChatHistory：支持连续对话微调；
+// 3. OutChan/ModelName：保留兼容字段（当前 weekly refine 主要输出阶段状态）；
+// 4. DailyRefineConcurrency/WeeklyAdjustBudget：可选运行参数覆盖。
 type SchedulePlanGraphRunInput struct {
 	Model       *ark.ChatModel
 	State       *SchedulePlanState
@@ -38,22 +45,30 @@ type SchedulePlanGraphRunInput struct {
 	Extra       map[string]any
 	ChatHistory []*schema.Message
 	EmitStage   func(stage, detail string)
-	// ── ReAct 精排所需 ──
-	OutChan   chan<- string // SSE 流式输出通道，用于推送 reasoning_content
-	ModelName string        // 模型名称，用于构造 OpenAI 兼容 chunk
+
+	OutChan   chan<- string
+	ModelName string
+
+	DailyRefineConcurrency int
+	WeeklyAdjustBudget     int
 }
 
-// RunSchedulePlanGraph 执行"智能排程"图编排。
+// RunSchedulePlanGraph 执行“智能排程”图编排。
 //
-// 图结构：
+// 当前链路：
+// START
+// -> plan
+// -> roughBuild
+// -> (len(task_class_ids)>=2 ? dailySplit -> dailyRefine -> merge : weeklyRefine)
+// -> finalCheck
+// -> returnPreview
+// -> END
 //
-//	START -> plan -> [branch] -> preview -> [branch] -> hybridBuild -> [branch] -> reactRefine -> returnPreview -> END
-//	                    |                      |                          |
-//	                   exit                   exit                       exit
-//
-// 该文件只负责"连线与分支"，节点内部逻辑全部下沉到 nodes.go。
+// 说明：
+// 1. exit 分支可从 plan/roughBuild 直接提前终止；
+// 2. 本文件只负责“连线与分支”，节点内业务都在 nodes/daily/weekly 文件中。
 func RunSchedulePlanGraph(ctx context.Context, input SchedulePlanGraphRunInput) (*SchedulePlanState, error) {
-	// 1. 启动前硬校验：模型、状态、依赖缺一不可。
+	// 1. 启动前硬校验。
 	if input.Model == nil {
 		return nil, errors.New("schedule plan graph: model is nil")
 	}
@@ -64,14 +79,20 @@ func RunSchedulePlanGraph(ctx context.Context, input SchedulePlanGraphRunInput) 
 		return nil, err
 	}
 
-	// 2. 统一封装阶段推送函数，避免各节点反复判空。
+	// 2. 注入运行时配置（可选覆盖）。
+	if input.DailyRefineConcurrency > 0 {
+		input.State.DailyRefineConcurrency = input.DailyRefineConcurrency
+	}
+	if input.WeeklyAdjustBudget > 0 {
+		input.State.WeeklyAdjustBudget = input.WeeklyAdjustBudget
+	}
+
 	emitStage := func(stage, detail string) {
 		if input.EmitStage != nil {
 			input.EmitStage(stage, detail)
 		}
 	}
 
-	// 3. 构造 runner，收口节点依赖。
 	runner := newSchedulePlanRunner(
 		input.Model,
 		input.Deps,
@@ -81,100 +102,100 @@ func RunSchedulePlanGraph(ctx context.Context, input SchedulePlanGraphRunInput) 
 		input.ChatHistory,
 		input.OutChan,
 		input.ModelName,
+		input.State.DailyRefineConcurrency,
 	)
 
-	// 4. 创建状态图容器：输入/输出类型都为 *SchedulePlanState。
 	graph := compose.NewGraph[*SchedulePlanState, *SchedulePlanState]()
 
-	// 5. 注册节点。
+	// 3. 注册节点。
 	if err := graph.AddLambdaNode(schedulePlanGraphNodePlan, compose.InvokableLambda(runner.planNode)); err != nil {
 		return nil, err
 	}
-	if err := graph.AddLambdaNode(schedulePlanGraphNodePreview, compose.InvokableLambda(runner.previewNode)); err != nil {
+	if err := graph.AddLambdaNode(schedulePlanGraphNodeRoughBuild, compose.InvokableLambda(runner.roughBuildNode)); err != nil {
 		return nil, err
 	}
 	if err := graph.AddLambdaNode(schedulePlanGraphNodeExit, compose.InvokableLambda(runner.exitNode)); err != nil {
 		return nil, err
 	}
-	if err := graph.AddLambdaNode(schedulePlanGraphNodeHybridBuild, compose.InvokableLambda(runner.hybridBuildNode)); err != nil {
+	if err := graph.AddLambdaNode(schedulePlanGraphNodeDailySplit, compose.InvokableLambda(runner.dailySplitNode)); err != nil {
 		return nil, err
 	}
-	if err := graph.AddLambdaNode(schedulePlanGraphNodeReactRefine, compose.InvokableLambda(runner.reactRefineNode)); err != nil {
+	if err := graph.AddLambdaNode(schedulePlanGraphNodeDailyRefine, compose.InvokableLambda(runner.dailyRefineNode)); err != nil {
+		return nil, err
+	}
+	if err := graph.AddLambdaNode(schedulePlanGraphNodeMerge, compose.InvokableLambda(runner.mergeNode)); err != nil {
+		return nil, err
+	}
+	if err := graph.AddLambdaNode(schedulePlanGraphNodeWeeklyRefine, compose.InvokableLambda(runner.weeklyRefineNode)); err != nil {
+		return nil, err
+	}
+	if err := graph.AddLambdaNode(schedulePlanGraphNodeFinalCheck, compose.InvokableLambda(runner.finalCheckNode)); err != nil {
 		return nil, err
 	}
 	if err := graph.AddLambdaNode(schedulePlanGraphNodeReturnPreview, compose.InvokableLambda(runner.returnPreviewNode)); err != nil {
 		return nil, err
 	}
 
-	// ── 连线 ──
-
-	// 6. START -> plan
+	// 4. 连线：START -> plan
 	if err := graph.AddEdge(compose.START, schedulePlanGraphNodePlan); err != nil {
 		return nil, err
 	}
 
-	// 7. plan -> [branch] -> preview | exit
+	// 5. plan 分支：roughBuild | exit
 	if err := graph.AddBranch(schedulePlanGraphNodePlan, compose.NewGraphBranch(
 		runner.nextAfterPlan,
 		map[string]bool{
-			schedulePlanGraphNodePreview: true,
-			schedulePlanGraphNodeExit:    true,
+			schedulePlanGraphNodeRoughBuild: true,
+			schedulePlanGraphNodeExit:       true,
 		},
 	)); err != nil {
 		return nil, err
 	}
 
-	// 8. preview -> [branch] -> hybridBuild | exit
-	if err := graph.AddBranch(schedulePlanGraphNodePreview, compose.NewGraphBranch(
-		runner.nextAfterPreview,
+	// 6. roughBuild 分支：dailySplit | weeklyRefine | exit
+	if err := graph.AddBranch(schedulePlanGraphNodeRoughBuild, compose.NewGraphBranch(
+		runner.nextAfterRoughBuild,
 		map[string]bool{
-			schedulePlanGraphNodeHybridBuild: true,
-			schedulePlanGraphNodeExit:        true,
+			schedulePlanGraphNodeDailySplit:   true,
+			schedulePlanGraphNodeWeeklyRefine: true,
+			schedulePlanGraphNodeExit:         true,
 		},
 	)); err != nil {
 		return nil, err
 	}
 
-	// 9. hybridBuild -> [branch] -> reactRefine | exit
-	if err := graph.AddBranch(schedulePlanGraphNodeHybridBuild, compose.NewGraphBranch(
-		runner.nextAfterHybridBuild,
-		map[string]bool{
-			schedulePlanGraphNodeReactRefine: true,
-			schedulePlanGraphNodeExit:        true,
-		},
-	)); err != nil {
+	// 7. 固定边：dailySplit -> dailyRefine -> merge -> weeklyRefine -> finalCheck -> returnPreview -> END
+	if err := graph.AddEdge(schedulePlanGraphNodeDailySplit, schedulePlanGraphNodeDailyRefine); err != nil {
 		return nil, err
 	}
-
-	// 10. reactRefine -> returnPreview（固定边）
-	if err := graph.AddEdge(schedulePlanGraphNodeReactRefine, schedulePlanGraphNodeReturnPreview); err != nil {
+	if err := graph.AddEdge(schedulePlanGraphNodeDailyRefine, schedulePlanGraphNodeMerge); err != nil {
 		return nil, err
 	}
-
-	// 11. returnPreview -> END
+	if err := graph.AddEdge(schedulePlanGraphNodeMerge, schedulePlanGraphNodeWeeklyRefine); err != nil {
+		return nil, err
+	}
+	if err := graph.AddEdge(schedulePlanGraphNodeWeeklyRefine, schedulePlanGraphNodeFinalCheck); err != nil {
+		return nil, err
+	}
+	if err := graph.AddEdge(schedulePlanGraphNodeFinalCheck, schedulePlanGraphNodeReturnPreview); err != nil {
+		return nil, err
+	}
 	if err := graph.AddEdge(schedulePlanGraphNodeReturnPreview, compose.END); err != nil {
 		return nil, err
 	}
-
-	// 12. exit -> END
 	if err := graph.AddEdge(schedulePlanGraphNodeExit, compose.END); err != nil {
 		return nil, err
 	}
 
-	// 13. 运行步数上限：plan + preview + hybridBuild + reactRefine + returnPreview = 5 步，
-	//     加余量到 15，防止异常分支导致无限循环。
-	maxSteps := 15
-
-	// 15. 编译图得到可执行实例。
+	// 8. 编译并执行。
+	// 路径最多约 8~9 个节点，保守预留 20 步避免误判。
 	runnable, err := graph.Compile(ctx,
 		compose.WithGraphName("SchedulePlanGraph"),
-		compose.WithMaxRunSteps(maxSteps),
+		compose.WithMaxRunSteps(20),
 		compose.WithNodeTriggerMode(compose.AnyPredecessor),
 	)
 	if err != nil {
 		return nil, err
 	}
-
-	// 16. 执行图并返回最终状态。
 	return runnable.Invoke(ctx, input.State)
 }

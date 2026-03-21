@@ -31,6 +31,20 @@ type reactLLMOutput struct {
 	ToolCalls []reactToolCall `json:"tool_calls"`
 }
 
+// weeklyPlanningWindow 表示周级优化可用的全局周/天窗口。
+//
+// 语义：
+// 1. Enabled=false：不启用窗口硬边界，仅做基础合法性校验；
+// 2. Enabled=true：Move 必须落在 [StartWeek/StartDay, EndWeek/EndDay] 内；
+// 3. 该窗口用于处理“首尾不足一周”场景下的越界移动问题。
+type weeklyPlanningWindow struct {
+	Enabled   bool
+	StartWeek int
+	StartDay  int
+	EndWeek   int
+	EndDay    int
+}
+
 // ── 工具分发器 ──
 
 // dispatchReactTool 根据工具名分发调用，返回（可能修改后的）entries 和执行结果。
@@ -47,6 +61,88 @@ func dispatchReactTool(entries []model.HybridScheduleEntry, call reactToolCall) 
 	default:
 		return entries, reactToolResult{Tool: call.Tool, Success: false, Result: fmt.Sprintf("未知工具: %s", call.Tool)}
 	}
+}
+
+// dispatchWeeklySingleActionTool 是“周级单步动作模式”的专用分发器。
+//
+// 职责边界：
+// 1. 仅允许 Move / Swap 两个工具，禁止 TimeAvailable / GetAvailableSlots；
+// 2. 强制 Move 的目标周必须等于 currentWeek，避免并发周优化时发生跨周写穿；
+// 3. 统一返回工具执行结果，供上层决定预算扣减与下一轮上下文拼接。
+func dispatchWeeklySingleActionTool(entries []model.HybridScheduleEntry, call reactToolCall, currentWeek int, window weeklyPlanningWindow) ([]model.HybridScheduleEntry, reactToolResult) {
+	tool := strings.TrimSpace(call.Tool)
+	switch tool {
+	case "Swap":
+		return reactToolSwap(entries, call.Params)
+	case "Move":
+		// 1. 周级并发模式下，每个 worker 只负责单周数据。
+		// 2. 为避免“一个 worker 改到别的周”导致并发写冲突，这里做硬约束。
+		// 3. 失败时不抛异常，返回工具失败结果，让上层继续下一轮决策。
+		toWeek, ok := paramInt(call.Params, "to_week")
+		if !ok {
+			return entries, reactToolResult{Tool: "Move", Success: false, Result: "参数缺失：需要 to_week"}
+		}
+		if toWeek != currentWeek {
+			return entries, reactToolResult{
+				Tool:    "Move",
+				Success: false,
+				Result:  fmt.Sprintf("当前仅允许优化本周：worker_week=%d，目标周=%d", currentWeek, toWeek),
+			}
+		}
+		// 4. 若已配置全局窗口边界，再做“首尾不足一周”硬校验。
+		// 4.1 这样可避免把任务移动到窗口外的天数（例如起始周的起始日前、结束周的结束日后）。
+		// 4.2 窗口未启用时不阻断，保持兼容旧链路。
+		if window.Enabled {
+			toDay, ok := paramInt(call.Params, "to_day")
+			if !ok {
+				return entries, reactToolResult{Tool: "Move", Success: false, Result: "参数缺失：需要 to_day"}
+			}
+			allowed, dayFrom, dayTo := isDayWithinPlanningWindow(window, toWeek, toDay)
+			if !allowed {
+				return entries, reactToolResult{
+					Tool:    "Move",
+					Success: false,
+					Result:  fmt.Sprintf("目标日期超出排程窗口：W%d 仅允许 D%d-D%d，当前目标为 D%d", toWeek, dayFrom, dayTo, toDay),
+				}
+			}
+		}
+		return reactToolMove(entries, call.Params)
+	default:
+		return entries, reactToolResult{
+			Tool:    tool,
+			Success: false,
+			Result:  fmt.Sprintf("周级单步模式不支持工具: %s，仅允许 Move/Swap", tool),
+		}
+	}
+}
+
+// isDayWithinPlanningWindow 判断目标 week/day 是否落在窗口范围内。
+//
+// 返回值：
+// 1. allowed：是否允许；
+// 2. dayFrom/dayTo：该周允许的 day 区间（用于错误提示）。
+func isDayWithinPlanningWindow(window weeklyPlanningWindow, week int, day int) (allowed bool, dayFrom int, dayTo int) {
+	// 1. 窗口未启用时默认允许（调用方会跳过此分支，这里是兜底）。
+	if !window.Enabled {
+		return true, 1, 7
+	}
+	// 2. 先做周范围校验。
+	if week < window.StartWeek || week > window.EndWeek {
+		return false, 1, 7
+	}
+	// 3. 计算当前周允许的 day 边界。
+	from := 1
+	to := 7
+	if week == window.StartWeek {
+		from = window.StartDay
+	}
+	if week == window.EndWeek {
+		to = window.EndDay
+	}
+	if day < from || day > to {
+		return false, from, to
+	}
+	return true, from, to
 }
 
 // ── 参数提取辅助 ──
@@ -81,10 +177,33 @@ func sectionsOverlap(aFrom, aTo, bFrom, bTo int) bool {
 	return aFrom <= bTo && bFrom <= aTo
 }
 
+// entryBlocksSuggested 判断某条目是否应阻塞 suggested 任务占位。
+//
+// 规则：
+// 1. suggested 任务永远阻塞（任务之间不能重叠）；
+// 2. existing 条目按 BlockForSuggested 字段决定；
+// 3. 其余场景默认阻塞（保守策略，避免放出脏可用槽）。
+func entryBlocksSuggested(entry model.HybridScheduleEntry) bool {
+	if entry.Status == "suggested" {
+		return true
+	}
+	// existing 走显式字段语义。
+	if entry.Status == "existing" {
+		return entry.BlockForSuggested
+	}
+	// 未知状态兜底：按阻塞处理。
+	return true
+}
+
 // hasConflict 检查目标时间段是否与 entries 中任何条目冲突（排除 excludeIdx）。
 func hasConflict(entries []model.HybridScheduleEntry, week, day, sf, st, excludeIdx int) (bool, string) {
 	for i, e := range entries {
 		if i == excludeIdx {
+			continue
+		}
+		// 1. 可嵌入且未占用的课程槽（BlockForSuggested=false）不参与冲突判断。
+		// 2. 这样可以避免把“水课可嵌入位”误判为硬冲突。
+		if !entryBlocksSuggested(e) {
 			continue
 		}
 		if e.Week == week && e.DayOfWeek == day && sectionsOverlap(e.SectionFrom, e.SectionTo, sf, st) {
@@ -231,6 +350,9 @@ func reactToolGetAvailableSlots(entries []model.HybridScheduleEntry, params map[
 	type slotKey struct{ W, D, S int }
 	occupied := make(map[slotKey]bool)
 	for _, e := range entries {
+		if !entryBlocksSuggested(e) {
+			continue
+		}
 		for s := e.SectionFrom; s <= e.SectionTo; s++ {
 			occupied[slotKey{e.Week, e.DayOfWeek, s}] = true
 		}

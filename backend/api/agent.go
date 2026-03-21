@@ -64,11 +64,19 @@ func (api *AgentHandler) ChatAgent(c *gin.Context) {
 		select {
 		case err, ok := <-errChan:
 			if ok && err != nil {
+				// 4.1 统一 SSE 错误体：
+				// 4.1.1 默认按内部错误输出 message/type；
+				// 4.1.2 若是 respond.Response（含业务码），额外透传 code，便于前端识别 5xxxx 等自定义错误。
+				errorBody := map[string]any{
+					"message": err.Error(),
+					"type":    "server_error",
+				}
+				var respErr respond.Response
+				if errors.As(err, &respErr) {
+					errorBody["code"] = respErr.Status
+				}
 				errPayload, _ := json.Marshal(map[string]any{
-					"error": map[string]any{
-						"message": err.Error(),
-						"type":    "server_error",
-					},
+					"error": errorBody,
 				})
 				_ = writeSSEData(w, string(errPayload))
 				_ = writeSSEData(w, "[DONE]")
@@ -171,4 +179,34 @@ func (api *AgentHandler) GetConversationList(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
+}
+
+// GetSchedulePlanPreview 返回“指定会话”的排程结构化预览。
+//
+// 设计说明：
+// 1) 该接口只读 Redis 预览快照，不修改聊天主链路协议；
+// 2) 按 conversation_id + user_id 读取，避免跨用户越权访问；
+// 3) 预览受 TTL 影响，若不存在会返回业务错误码。
+func (api *AgentHandler) GetSchedulePlanPreview(c *gin.Context) {
+	// 1. 参数校验：conversation_id 必填。
+	conversationID := strings.TrimSpace(c.Query("conversation_id"))
+	if conversationID == "" {
+		c.JSON(http.StatusBadRequest, respond.MissingParam)
+		return
+	}
+
+	// 2. 从鉴权上下文取当前用户 ID，保证查询范围只在“本人会话”内。
+	userID := c.GetInt("user_id")
+
+	// 3. 设置短超时，防止缓存抖动时占用连接过久。
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel()
+
+	// 4. 调 service 查询并返回统一响应结构。
+	preview, err := api.svc.GetSchedulePlanPreview(ctx, userID, conversationID)
+	if err != nil {
+		respond.DealWithError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, preview))
 }

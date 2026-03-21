@@ -73,6 +73,9 @@ func (e *quickNoteProgressEmitter) Emit(stage, detail string) {
 	if detail != "" {
 		reasoning += "\n" + detail
 	}
+	// 2.1 每条阶段消息末尾补双换行，避免客户端把多条 chunk 紧贴在同一行显示。
+	//     这里统一在 emitter 层处理，所有接入 emitStage 的链路都会受益。
+	reasoning += "\n\n"
 
 	// 3. 复用 OpenAI 兼容封装：把阶段文本伪装成 reasoning_content。
 	chunk, err := chat.ToOpenAIStream(&schema.Message{ReasoningContent: reasoning}, e.requestID, e.modelName, e.created, false)

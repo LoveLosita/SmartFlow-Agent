@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/go-redis/redis/v8"
 )
@@ -38,6 +39,10 @@ func (m *AgentCache) historyKey(sessionID string) string {
 
 func (m *AgentCache) historyWindowKey(sessionID string) string {
 	return fmt.Sprintf("smartflow:history_window:%s", sessionID)
+}
+
+func (m *AgentCache) schedulePreviewKey(userID int, sessionID string) string {
+	return fmt.Sprintf("smartflow:schedule_preview:u:%d:c:%s", userID, sessionID)
 }
 
 func (m *AgentCache) normalizeWindowSize(size int) int {
@@ -94,17 +99,15 @@ func (m *AgentCache) PushMessage(ctx context.Context, sessionID string, msg *sch
 		return err
 	}
 
-	// 1. 序列化 Eino 消息
+	// 1. 序列化 Eino 消息。
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("marshal message failed: %w", err)
 	}
 
-	// 2. 利用 Pipeline 保证原子操作
+	// 2. 使用 Pipeline 保证“写入+裁剪+续期”原子执行。
 	pipe := m.client.Pipeline()
-	// 往左侧推入最新消息（LIFO）
 	pipe.LPush(ctx, key, data)
-	// 只保留最新 size 条
 	pipe.LTrim(ctx, key, 0, int64(size-1))
 	pipe.Expire(ctx, key, m.expiration)
 
@@ -129,10 +132,9 @@ func (m *AgentCache) GetHistory(ctx context.Context, sessionID string) ([]*schem
 		if err := json.Unmarshal([]byte(val), &msg); err != nil {
 			return nil, err
 		}
-		// LRANGE 返回 [最新..最旧]，这里反转成 [最旧..最新]
+		// LRANGE 返回 [最新...最旧]，这里反转成 [最旧...最新]
 		messages[len(vals)-1-i] = &msg
 	}
-
 	return messages, nil
 }
 
@@ -159,11 +161,9 @@ func (m *AgentCache) BackfillHistory(ctx context.Context, sessionID string, mess
 
 	pipe := m.client.Pipeline()
 	pipe.Del(ctx, key)
-	// 输入是 [最旧..最新]，LPUSH 后变成 [最新..最旧]
 	pipe.LPush(ctx, key, values...)
 	pipe.LTrim(ctx, key, 0, int64(size-1))
 	pipe.Expire(ctx, key, m.expiration)
-
 	_, err = pipe.Exec(ctx)
 	return err
 }
@@ -185,11 +185,63 @@ func (m *AgentCache) GetConversationStatus(ctx context.Context, sessionID string
 
 func (m *AgentCache) SetConversationStatus(ctx context.Context, sessionID string) error {
 	key := fmt.Sprintf("smartflow:conversation_status:%s", sessionID)
-	// 仅用于“存在性”标记：只有不存在时才写入，避免重复写
+	// 仅用于“存在性”标记：只有不存在时才写入，避免重复写。
 	return m.client.SetNX(ctx, key, 1, m.expiration).Err()
 }
 
 func (m *AgentCache) DeleteConversationStatus(ctx context.Context, sessionID string) error {
 	key := fmt.Sprintf("smartflow:conversation_status:%s", sessionID)
 	return m.client.Del(ctx, key).Err()
+}
+
+// SetSchedulePlanPreview 写入“排程预览”缓存。
+//
+// 步骤化说明：
+// 1. 先把结构化预览序列化成 JSON，避免缓存层结构漂移。
+// 2. 再按 user_id + conversation_id 写入，确保用户间数据隔离。
+// 3. 最后带 TTL 写入，保证预览是短期临时态而非长期状态。
+//
+// 失败处理：
+// 1. preview 为空时直接返回错误，避免写入无意义空值。
+// 2. 序列化失败或 Redis 写入失败都返回 error，由上层决定是否降级。
+func (m *AgentCache) SetSchedulePlanPreview(ctx context.Context, userID int, sessionID string, preview *model.SchedulePlanPreviewCache) error {
+	if preview == nil {
+		return fmt.Errorf("schedule preview is nil")
+	}
+	data, err := json.Marshal(preview)
+	if err != nil {
+		return fmt.Errorf("marshal schedule preview failed: %w", err)
+	}
+	return m.client.Set(ctx, m.schedulePreviewKey(userID, sessionID), data, m.expiration).Err()
+}
+
+// GetSchedulePlanPreview 读取“排程预览”缓存。
+//
+// 语义约定：
+// 1. 未命中返回 (nil, nil)，上层可区分“未生成”与“已过期”。
+// 2. 反序列化失败返回 error，避免把脏缓存当成正常结果。
+// 3. 不做 DB 回源，预览缓存失效后由业务侧重新生成。
+func (m *AgentCache) GetSchedulePlanPreview(ctx context.Context, userID int, sessionID string) (*model.SchedulePlanPreviewCache, error) {
+	raw, err := m.client.Get(ctx, m.schedulePreviewKey(userID, sessionID)).Result()
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var preview model.SchedulePlanPreviewCache
+	if err = json.Unmarshal([]byte(raw), &preview); err != nil {
+		return nil, fmt.Errorf("unmarshal schedule preview failed: %w", err)
+	}
+	return &preview, nil
+}
+
+// DeleteSchedulePlanPreview 删除“排程预览”缓存。
+//
+// 说明：
+// 1. 删除是幂等操作，key 不存在也视为成功。
+// 2. 用于新一轮排程前清理旧快照，避免前端读到过期结果。
+func (m *AgentCache) DeleteSchedulePlanPreview(ctx context.Context, userID int, sessionID string) error {
+	return m.client.Del(ctx, m.schedulePreviewKey(userID, sessionID)).Err()
 }

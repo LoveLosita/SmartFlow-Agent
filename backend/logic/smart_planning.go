@@ -1,6 +1,8 @@
 package logic
 
 import (
+	"fmt"
+
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
@@ -186,6 +188,131 @@ func SmartPlanningMainLogic(schedules []model.Schedule, taskClass *model.TaskCla
 func SmartPlanningRawItems(schedules []model.Schedule, taskClass *model.TaskClass) ([]model.TaskClassItem, error) {
 	g := buildTimeGrid(schedules, taskClass)
 	return computeAllocation(g, taskClass.Items, *taskClass.Strategy)
+}
+
+// SmartPlanningRawItemsMulti 执行“多任务类共享资源池”粗排。
+//
+// 职责边界：
+// 1. 复用现有 SmartPlanningRawItems 的单任务类分配能力，不重写核心算法；
+// 2. 通过“增量占位”把前一个任务类的建议结果写入共享工作日程，供后续任务类避让；
+// 3. 返回聚合后的 allocatedItems（每项 EmbeddedTime 已回填）；
+// 4. 不负责展示结构转换（由 service/conv 层处理）。
+func SmartPlanningRawItemsMulti(schedules []model.Schedule, taskClasses []*model.TaskClass) ([]model.TaskClassItem, error) {
+	if len(taskClasses) == 0 {
+		return []model.TaskClassItem{}, nil
+	}
+
+	// 1. 构建“工作副本”：
+	// 1.1 原始 schedules 不直接修改，避免污染调用方数据；
+	// 1.2 后续每完成一个任务类分配，就把结果增量写入 workingSchedules。
+	workingSchedules := cloneSchedulesForPlanning(schedules)
+	allAllocated := make([]model.TaskClassItem, 0)
+
+	// 2. syntheticEventID 用于给“虚拟占位任务”分配唯一 EventID。
+	// 2.1 采用负数区间，避免和数据库自增正数 EventID 冲突；
+	// 2.2 每个任务块占用一个 synthetic event，跨节次共享同一 eventID。
+	nextSyntheticEventID := -1
+
+	for _, taskClass := range taskClasses {
+		if taskClass == nil {
+			continue
+		}
+		if taskClass.Strategy == nil {
+			return nil, fmt.Errorf("task_class_id=%d 缺少 strategy 配置", taskClass.ID)
+		}
+
+		// 3. 复用单任务类粗排。
+		allocatedItems, err := SmartPlanningRawItems(workingSchedules, taskClass)
+		if err != nil {
+			// 3.1 明确标注失败任务类，便于上层快速定位。
+			return nil, fmt.Errorf("task_class_id=%d 粗排失败: %w", taskClass.ID, err)
+		}
+		allAllocated = append(allAllocated, allocatedItems...)
+
+		// 4. 把本任务类分配结果转成“虚拟 Schedule 占位”追加回工作副本。
+		// 4.1 目的：让后续任务类把这些已分配任务当成 Occupied，避免重叠；
+		// 4.2 若某任务块没有 EmbeddedTime，直接跳过，不阻断后续。
+		virtualSchedules, nextID := buildVirtualSchedulesFromAllocated(allocatedItems, taskClass, nextSyntheticEventID)
+		nextSyntheticEventID = nextID
+		if len(virtualSchedules) > 0 {
+			workingSchedules = append(workingSchedules, virtualSchedules...)
+		}
+	}
+
+	return allAllocated, nil
+}
+
+// cloneSchedulesForPlanning 深拷贝 schedules，确保后续在算法中安全修改。
+//
+// 说明：
+// 1. 主要拷贝 Schedule 结构体本身；
+// 2. Event 指针做浅字段复制，避免共享同一 Event 指针导致意外改写；
+// 3. EmbeddedTask 在粗排阶段不参与状态写入，保留原值即可。
+func cloneSchedulesForPlanning(src []model.Schedule) []model.Schedule {
+	if len(src) == 0 {
+		return []model.Schedule{}
+	}
+	dst := make([]model.Schedule, len(src))
+	for i := range src {
+		dst[i] = src[i]
+		if src[i].Event != nil {
+			eventCopy := *src[i].Event
+			dst[i].Event = &eventCopy
+		}
+	}
+	return dst
+}
+
+// buildVirtualSchedulesFromAllocated 将已分配任务块转成“虚拟占位 schedules”。
+//
+// 设计目的：
+// 1. 让后续任务类在共享资源池里自动避让已分配任务；
+// 2. 不落库，仅用于内存中的粗排冲突控制；
+// 3. 通过 Type=task + CanBeEmbedded=false 强制标记为不可再嵌入。
+func buildVirtualSchedulesFromAllocated(allocatedItems []model.TaskClassItem, taskClass *model.TaskClass, eventIDStart int) ([]model.Schedule, int) {
+	if len(allocatedItems) == 0 {
+		return []model.Schedule{}, eventIDStart
+	}
+
+	userID := 0
+	if taskClass != nil && taskClass.UserID != nil {
+		userID = *taskClass.UserID
+	}
+
+	virtual := make([]model.Schedule, 0)
+	nextEventID := eventIDStart
+	for _, item := range allocatedItems {
+		if item.EmbeddedTime == nil {
+			continue
+		}
+
+		taskName := "未命名任务"
+		if item.Content != nil && *item.Content != "" {
+			taskName = *item.Content
+		}
+		location := ""
+		event := &model.ScheduleEvent{
+			ID:            nextEventID,
+			UserID:        userID,
+			Name:          taskName,
+			Location:      &location,
+			Type:          "task",
+			CanBeEmbedded: false,
+		}
+		for section := item.EmbeddedTime.SectionFrom; section <= item.EmbeddedTime.SectionTo; section++ {
+			virtual = append(virtual, model.Schedule{
+				EventID:   nextEventID,
+				UserID:    userID,
+				Week:      item.EmbeddedTime.Week,
+				DayOfWeek: item.EmbeddedTime.DayOfWeek,
+				Section:   section,
+				Event:     event,
+				Status:    "normal",
+			})
+		}
+		nextEventID--
+	}
+	return virtual, nextEventID
 }
 
 // buildTimeGrid 构建一个时间格子，标记出哪些时间段被占用、哪些被屏蔽、哪些是水课
@@ -376,33 +503,51 @@ func computeAllocation(g *grid, items []model.TaskClassItem, strategy string) ([
 		startLoc := coords[cursor]
 		w, d, s := startLoc.w, startLoc.d, startLoc.s
 
-		// 4. 容器长度探测 (顺着你的逻辑)
+		// 4. 计算本次任务块的落点区间。
+		// 4.1 默认按 2 节处理（普通空闲位优先遵循“每任务2节”的主策略）；
+		// 4.2 命中 Filler（可嵌入课程）时，必须先回溯到同课程块起点，再计算完整连续跨度；
+		// 4.3 失败兜底：若普通空闲位后继不可用，只能退化为 1 节，避免越界或覆盖占用位。
 		node := g.getNode(w, d, s)
+		sectionFrom := s
 		slotLen := 2
 		if node.Status == Filler {
-			slotLen = 1
+			// 4.2.1 先向左回溯到“同一课程块”的起点。
+			// 目的：修复“指针落在课程中间节次时被错误切成 1 节”的问题。
+			// 例如课程占 9-10 节，若 cursor 命中 10 节，必须回溯到 9 节再整体计算。
 			currID := node.EventID
-			for checkS := s + 1; checkS <= 12; checkS++ {
+			for checkS := s - 1; checkS >= 1; checkS-- {
+				prev := g.getNode(w, d, checkS)
+				if prev.Status == Filler && prev.EventID == currID {
+					sectionFrom = checkS
+					continue
+				}
+				break
+			}
+
+			// 4.2.2 再从起点向右扩展，拿到同一课程块的完整连续节次长度。
+			sectionTo := sectionFrom
+			for checkS := sectionFrom + 1; checkS <= 12; checkS++ {
 				if next := g.getNode(w, d, checkS); next.Status == Filler && next.EventID == currID {
-					slotLen++
+					sectionTo = checkS
 				} else {
 					break
 				}
 			}
+			slotLen = sectionTo - sectionFrom + 1
 		} else if s == 12 || !g.isAvailable(w, d, s+1) {
 			// 如果是 Free 区域，但下一节不可用，则被迫设为 1 节
 			slotLen = 1
 		}
 
 		// 回填时间
-		endS := s + slotLen - 1
+		endS := sectionFrom + slotLen - 1
 		items[i].EmbeddedTime = &model.TargetTime{
-			SectionFrom: s, SectionTo: endS,
+			SectionFrom: sectionFrom, SectionTo: endS,
 			Week: w, DayOfWeek: d,
 		}
 
 		// 标记占用 (物理网格)
-		for sec := s; sec <= endS; sec++ {
+		for sec := sectionFrom; sec <= endS; sec++ {
 			g.setNode(w, d, sec, slotNode{Status: Occupied})
 		}
 

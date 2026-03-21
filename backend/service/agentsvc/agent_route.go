@@ -19,7 +19,7 @@ type actionRoutingDecision = route.RoutingDecision
 // 职责边界：
 // 1. 只负责调用 route 包拿分流结论；
 // 2. 不负责执行任何业务节点；
-// 3. route 层失败时的兜底策略由 route 包内部统一处理（当前为回落 chat）。
+// 3. route 层失败会通过 RoutingDecision.RouteFailed 向上层显式暴露。
 func (s *AgentService) decideActionRouting(ctx context.Context, selectedModel *ark.ChatModel, userMessage string) actionRoutingDecision {
 	// 这里保留方法封装，是为了避免上层直接依赖 route 包，降低耦合。
 	_ = s

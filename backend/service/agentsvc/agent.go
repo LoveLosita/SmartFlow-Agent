@@ -14,6 +14,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/inits"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/pkg"
+	"github.com/LoveLosita/smartflow/backend/respond"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 	"github.com/cloudwego/eino-ext/components/model/ark"
 	"github.com/cloudwego/eino/schema"
@@ -29,12 +30,20 @@ type AgentService struct {
 
 	// ── 排程计划依赖（函数注入，避免 service 包循环依赖）──
 
-	// SmartPlanningRawFunc 调用粗排算法，同时返回展示结构和已分配的任务项。
-	// 由 service/agent_bridge.go 在构造时注入 ScheduleService.SmartPlanningRaw。
-	SmartPlanningRawFunc func(ctx context.Context, userID, taskClassID int) ([]model.UserWeekSchedule, []model.TaskClassItem, error)
-	// HybridScheduleWithPlanFunc 构建混合日程（既有日程 + 粗排建议），供 ReAct 精排使用。
-	// 由 service/agent_bridge.go 在构造时注入。
-	HybridScheduleWithPlanFunc func(ctx context.Context, userID, taskClassID int) ([]model.HybridScheduleEntry, []model.TaskClassItem, error)
+	// SmartPlanningMultiRawFunc 是可选注入能力：
+	// 1. 负责多任务类粗排；
+	// 2. 当前主链路主要依赖 HybridScheduleWithPlanMultiFunc，可不强制使用。
+	SmartPlanningMultiRawFunc func(ctx context.Context, userID int, taskClassIDs []int) ([]model.UserWeekSchedule, []model.TaskClassItem, error)
+	// HybridScheduleWithPlanMultiFunc 是排程链路核心依赖：
+	// 1. 负责把“多任务类粗排结果 + 既有日程”合并成 HybridEntries；
+	// 2. daily/weekly ReAct 全部基于这个结果继续优化。
+	HybridScheduleWithPlanMultiFunc func(ctx context.Context, userID int, taskClassIDs []int) ([]model.HybridScheduleEntry, []model.TaskClassItem, error)
+	// ResolvePlanningWindowFunc 负责把 task_class_ids 解析成“全局排程窗口”的相对周/天边界。
+	//
+	// 作用：
+	// 1. 给周级 Move 增加硬边界，避免首尾不足一周时移出有效日期范围；
+	// 2. 该函数只做“窗口解析”，不负责粗排与混排计算。
+	ResolvePlanningWindowFunc func(ctx context.Context, userID int, taskClassIDs []int) (startWeek, startDay, endWeek, endDay int, err error)
 }
 
 // NewAgentService 构造 AgentService。
@@ -302,6 +311,12 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 
 		// 3.1 先走轻量路由，拿到统一 action。
 		routing := s.decideActionRouting(requestCtx, selectedModel, userMessage)
+		if routing.RouteFailed {
+			// 3.1.1 路由码失败不再回落聊天。
+			// 3.1.2 直接返回内部错误，避免误进入业务分支导致“吐错内容”（例如吐排程 JSON）。
+			pushErrNonBlocking(errChan, respond.RouteControlInternalError)
+			return
+		}
 
 		// 3.2 chat：直接走普通聊天主链路。
 		if routing.Action == route.ActionChat {

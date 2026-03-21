@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -412,9 +413,9 @@ func (ss *ScheduleService) SmartPlanning(ctx context.Context, userID, taskClassI
 // SmartPlanningRaw 执行粗排算法并同时返回展示结构和已分配的任务项。
 //
 // 职责边界：
-// 1) 与 SmartPlanning 共享完全相同的前置校验和粗排逻辑；
-// 2) 额外返回 allocatedItems（每项的 EmbeddedTime 已由算法回填），
-//    供 Agent 排程链路直接转换为 BatchApplyPlans 请求，无需再让模型"二次分配"。
+//  1. 与 SmartPlanning 共享完全相同的前置校验和粗排逻辑；
+//  2. 额外返回 allocatedItems（每项的 EmbeddedTime 已由算法回填），
+//     供 Agent 排程链路直接转换为 BatchApplyPlans 请求，无需再让模型"二次分配"。
 func (ss *ScheduleService) SmartPlanningRaw(ctx context.Context, userID, taskClassID int) ([]model.UserWeekSchedule, []model.TaskClassItem, error) {
 	// 1. 获取任务类详情。
 	taskClass, err := ss.taskClassDAO.GetCompleteTaskClassByID(ctx, taskClassID, userID)
@@ -445,21 +446,222 @@ func (ss *ScheduleService) SmartPlanningRaw(ctx context.Context, userID, taskCla
 	return displayResult, allocatedItems, nil
 }
 
-// HybridScheduleWithPlan 构建"混合日程"：将既有日程与粗排建议合并为统一结构。
+// SmartPlanningMulti 执行“多任务类智能粗排”，仅返回前端展示结构。
 //
 // 职责边界：
-// 1) 获取 TaskClass 时间范围内的既有日程（课程 + 已落库任务）；
-// 2) 调用粗排算法获取建议分配；
-// 3) 将两者合并为 []HybridScheduleEntry，供 ReAct 精排引擎在内存中操作。
+// 1. 负责把多任务类请求收口到统一粗排流程；
+// 2. 负责返回展示结构；
+// 3. 不返回底层分配细节（由 SmartPlanningMultiRaw 提供）。
+func (ss *ScheduleService) SmartPlanningMulti(ctx context.Context, userID int, taskClassIDs []int) ([]model.UserWeekSchedule, error) {
+	displayResult, _, err := ss.SmartPlanningMultiRaw(ctx, userID, taskClassIDs)
+	if err != nil {
+		return nil, err
+	}
+	return displayResult, nil
+}
+
+// SmartPlanningMultiRaw 执行“多任务类智能粗排”，同时返回展示结构和已分配任务项。
 //
-// 返回值：
-// - entries：混合日程条目（existing + suggested）
-// - allocatedItems：粗排已分配的任务项（用于后续落库）
-// - error
+// 职责边界：
+// 1. 负责多任务类请求的完整前置处理（归一化/校验/排序/时间窗收敛）；
+// 2. 负责调用多任务类粗排主逻辑（共享资源池）；
+// 3. 只计算建议，不负责落库。
+func (ss *ScheduleService) SmartPlanningMultiRaw(ctx context.Context, userID int, taskClassIDs []int) ([]model.UserWeekSchedule, []model.TaskClassItem, error) {
+	// 1. 输入归一化。
+	normalizedIDs := normalizeTaskClassIDsForMultiPlanning(taskClassIDs)
+	if len(normalizedIDs) == 0 {
+		return nil, nil, respond.WrongTaskClassID
+	}
+
+	// 2. 批量读取完整任务类（含 Items）。
+	taskClasses, err := ss.taskClassDAO.GetCompleteTaskClassesByIDs(ctx, userID, normalizedIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// 3. 校验任务类并计算全局时间窗。
+	orderedTaskClasses, globalStartDate, globalEndDate, err := prepareTaskClassesForMultiPlanning(taskClasses, normalizedIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// 4. 拉取全局时间窗内的既有日程底板。
+	schedules, err := ss.scheduleDAO.GetUserSchedulesByTimeRange(
+		ctx,
+		userID,
+		conv.CalculateFirstDayOfWeek(globalStartDate),
+		conv.CalculateLastDayOfWeek(globalEndDate),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// 5. 执行多任务类粗排（共享资源池 + 增量占位）。
+	allocatedItems, err := logic.SmartPlanningRawItemsMulti(schedules, orderedTaskClasses)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// 6. 转换前端展示结构。
+	displayResult := conv.PlanningResultToUserWeekSchedules(schedules, allocatedItems)
+	return displayResult, allocatedItems, nil
+}
+
+// ResolvePlanningWindowByTaskClasses 解析“多任务类排程窗口”的相对周/天边界。
+//
+// 职责边界：
+// 1. 只负责根据 task_class_ids 计算全局起止日期并转换成相对周/天；
+// 2. 不执行粗排、不查询课表、不生成 HybridEntries；
+// 3. 供 Agent 周级 Move 工具做硬边界校验，防止越界移动。
+//
+// 返回语义：
+// 1. startWeek/startDay：允许排程的起点（含）；
+// 2. endWeek/endDay：允许排程的终点（含）；
+// 3. error：任何校验或日期转换失败都返回错误。
+func (ss *ScheduleService) ResolvePlanningWindowByTaskClasses(ctx context.Context, userID int, taskClassIDs []int) (int, int, int, int, error) {
+	// 1. 输入归一化：过滤非法值并去重。
+	normalizedIDs := normalizeTaskClassIDsForMultiPlanning(taskClassIDs)
+	if len(normalizedIDs) == 0 {
+		return 0, 0, 0, 0, respond.WrongTaskClassID
+	}
+
+	// 2. 批量查询任务类并复用统一校验逻辑，拿到全局起止日期。
+	taskClasses, err := ss.taskClassDAO.GetCompleteTaskClassesByIDs(ctx, userID, normalizedIDs)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	_, globalStartDate, globalEndDate, err := prepareTaskClassesForMultiPlanning(taskClasses, normalizedIDs)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+
+	// 3. 把绝对日期转换为“相对周/天”。
+	// 3.1 这里统一复用 conv.RealDateToRelativeDate，确保和现有排程口径一致；
+	// 3.2 若日期超出学期配置范围，直接返回错误，避免错误边界进入工具层。
+	startWeek, startDay, err := conv.RealDateToRelativeDate(globalStartDate.Format(conv.DateFormat))
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	endWeek, endDay, err := conv.RealDateToRelativeDate(globalEndDate.Format(conv.DateFormat))
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	if endWeek < startWeek || (endWeek == startWeek && endDay < startDay) {
+		return 0, 0, 0, 0, respond.InvalidDateRange
+	}
+	return startWeek, startDay, endWeek, endDay, nil
+}
+
+// normalizeTaskClassIDsForMultiPlanning 归一化 task_class_ids（过滤非法值、去重并保序）。
+func normalizeTaskClassIDsForMultiPlanning(ids []int) []int {
+	if len(ids) == 0 {
+		return []int{}
+	}
+	normalized := make([]int, 0, len(ids))
+	seen := make(map[int]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+	return normalized
+}
+
+// prepareTaskClassesForMultiPlanning 把 DAO 结果转成可直接粗排的数据集。
+//
+// 职责边界：
+// 1. 校验每个任务类可参与自动排程；
+// 2. 计算全局时间窗（最早开始 ~ 最晚结束）；
+// 3. 执行多任务类排序策略。
+func prepareTaskClassesForMultiPlanning(taskClasses []model.TaskClass, orderedIDs []int) ([]*model.TaskClass, time.Time, time.Time, error) {
+	if len(orderedIDs) == 0 {
+		return nil, time.Time{}, time.Time{}, respond.WrongTaskClassID
+	}
+
+	classByID := make(map[int]*model.TaskClass, len(taskClasses))
+	for i := range taskClasses {
+		tc := &taskClasses[i]
+		classByID[tc.ID] = tc
+	}
+
+	ordered := make([]*model.TaskClass, 0, len(orderedIDs))
+	var globalStart time.Time
+	var globalEnd time.Time
+	for idx, id := range orderedIDs {
+		taskClass, exists := classByID[id]
+		if !exists || taskClass == nil {
+			return nil, time.Time{}, time.Time{}, respond.WrongTaskClassID
+		}
+		if taskClass.Mode == nil || *taskClass.Mode != "auto" {
+			return nil, time.Time{}, time.Time{}, respond.TaskClassModeNotAuto
+		}
+		if taskClass.StartDate == nil || taskClass.EndDate == nil {
+			return nil, time.Time{}, time.Time{}, respond.InvalidDateRange
+		}
+		start := *taskClass.StartDate
+		end := *taskClass.EndDate
+		if end.Before(start) {
+			return nil, time.Time{}, time.Time{}, respond.InvalidDateRange
+		}
+		if idx == 0 || start.Before(globalStart) {
+			globalStart = start
+		}
+		if idx == 0 || end.After(globalEnd) {
+			globalEnd = end
+		}
+		ordered = append(ordered, taskClass)
+	}
+
+	sortTaskClassesForMultiPlanning(ordered, orderedIDs)
+	return ordered, globalStart, globalEnd, nil
+}
+
+// sortTaskClassesForMultiPlanning 执行稳定排序：
+// 1. end_date 早优先；
+// 2. rapid 优先于 steady；
+// 3. 输入顺序兜底。
+func sortTaskClassesForMultiPlanning(taskClasses []*model.TaskClass, inputOrder []int) {
+	if len(taskClasses) <= 1 {
+		return
+	}
+	orderIndex := make(map[int]int, len(inputOrder))
+	for idx, id := range inputOrder {
+		orderIndex[id] = idx
+	}
+
+	sort.SliceStable(taskClasses, func(i, j int) bool {
+		left := taskClasses[i]
+		right := taskClasses[j]
+		if left == nil || right == nil {
+			return left != nil
+		}
+		if left.EndDate != nil && right.EndDate != nil && !left.EndDate.Equal(*right.EndDate) {
+			return left.EndDate.Before(*right.EndDate)
+		}
+		leftRapid := left.Strategy != nil && *left.Strategy == "rapid"
+		rightRapid := right.Strategy != nil && *right.Strategy == "rapid"
+		if leftRapid != rightRapid {
+			return leftRapid
+		}
+		leftOrder, leftOK := orderIndex[left.ID]
+		rightOrder, rightOK := orderIndex[right.ID]
+		if leftOK && rightOK && leftOrder != rightOrder {
+			return leftOrder < rightOrder
+		}
+		return left.ID < right.ID
+	})
+}
+
+// HybridScheduleWithPlan 构建“单任务类”混合日程（existing + suggested）。
 func (ss *ScheduleService) HybridScheduleWithPlan(
 	ctx context.Context, userID, taskClassID int,
 ) ([]model.HybridScheduleEntry, []model.TaskClassItem, error) {
-	// 1. 获取任务类详情。
+	// 1. 校验并读取任务类。
 	taskClass, err := ss.taskClassDAO.GetCompleteTaskClassByID(ctx, taskClassID, userID)
 	if err != nil {
 		return nil, nil, err
@@ -467,11 +669,14 @@ func (ss *ScheduleService) HybridScheduleWithPlan(
 	if taskClass == nil {
 		return nil, nil, respond.WrongTaskClassID
 	}
-	if *taskClass.Mode != "auto" {
+	if taskClass.Mode == nil || *taskClass.Mode != "auto" {
 		return nil, nil, respond.TaskClassModeNotAuto
 	}
+	if taskClass.StartDate == nil || taskClass.EndDate == nil {
+		return nil, nil, respond.InvalidDateRange
+	}
 
-	// 2. 获取时间范围内的既有日程。
+	// 2. 拉取时间窗内既有日程。
 	schedules, err := ss.scheduleDAO.GetUserSchedulesByTimeRange(
 		ctx, userID,
 		conv.CalculateFirstDayOfWeek(*taskClass.StartDate),
@@ -481,20 +686,79 @@ func (ss *ScheduleService) HybridScheduleWithPlan(
 		return nil, nil, err
 	}
 
-	// 3. 执行粗排算法。
+	// 3. 执行粗排。
 	allocatedItems, err := logic.SmartPlanningRawItems(schedules, taskClass)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// 4. 合并为 HybridScheduleEntry 切片。
+	// 4. 统一合并。
+	entries := buildHybridEntriesFromSchedulesAndAllocated(schedules, allocatedItems)
+	return entries, allocatedItems, nil
+}
+
+// HybridScheduleWithPlanMulti 构建“多任务类”混合日程（existing + suggested）。
+func (ss *ScheduleService) HybridScheduleWithPlanMulti(
+	ctx context.Context,
+	userID int,
+	taskClassIDs []int,
+) ([]model.HybridScheduleEntry, []model.TaskClassItem, error) {
+	// 1. 归一化任务类 ID。
+	normalizedIDs := normalizeTaskClassIDsForMultiPlanning(taskClassIDs)
+	if len(normalizedIDs) == 0 {
+		return nil, nil, respond.WrongTaskClassID
+	}
+
+	// 2. 拉取任务类并做校验/排序。
+	taskClasses, err := ss.taskClassDAO.GetCompleteTaskClassesByIDs(ctx, userID, normalizedIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	orderedTaskClasses, globalStartDate, globalEndDate, err := prepareTaskClassesForMultiPlanning(taskClasses, normalizedIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// 3. 拉取全局时间窗内既有日程。
+	schedules, err := ss.scheduleDAO.GetUserSchedulesByTimeRange(
+		ctx,
+		userID,
+		conv.CalculateFirstDayOfWeek(globalStartDate),
+		conv.CalculateLastDayOfWeek(globalEndDate),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// 4. 多任务类粗排。
+	allocatedItems, err := logic.SmartPlanningRawItemsMulti(schedules, orderedTaskClasses)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// 5. 统一合并。
+	entries := buildHybridEntriesFromSchedulesAndAllocated(schedules, allocatedItems)
+	return entries, allocatedItems, nil
+}
+
+// buildHybridEntriesFromSchedulesAndAllocated 合并 existing/suggested 条目。
+//
+// 说明：
+// 1. existing 按“事件 + 天 + 可嵌入语义 + 阻塞语义”分组，再按连续节次切块；
+// 2. suggested 直接根据 allocatedItems 生成；
+// 3. 仅做内存组装，不做数据库操作。
+func buildHybridEntriesFromSchedulesAndAllocated(
+	schedules []model.Schedule,
+	allocatedItems []model.TaskClassItem,
+) []model.HybridScheduleEntry {
 	entries := make([]model.HybridScheduleEntry, 0, len(schedules)/2+len(allocatedItems))
 
-	// 4.1 既有日程：按 EventID+Week+DayOfWeek 分组，合并连续节次。
 	type eventGroupKey struct {
-		EventID   int
-		Week      int
-		DayOfWeek int
+		EventID           int
+		Week              int
+		DayOfWeek         int
+		CanBeEmbedded     bool
+		BlockForSuggested bool
 	}
 	type eventGroup struct {
 		Key      eventGroupKey
@@ -503,48 +767,82 @@ func (ss *ScheduleService) HybridScheduleWithPlan(
 		Sections []int
 	}
 	groupMap := make(map[eventGroupKey]*eventGroup)
+
+	// 1. 先处理 existing。
 	for _, s := range schedules {
-		key := eventGroupKey{EventID: s.EventID, Week: s.Week, DayOfWeek: s.DayOfWeek}
-		g, ok := groupMap[key]
+		name := "未知"
+		typ := "course"
+		canBeEmbedded := false
+		if s.Event != nil {
+			name = s.Event.Name
+			typ = s.Event.Type
+			canBeEmbedded = s.Event.CanBeEmbedded
+		}
+
+		// 1.1 阻塞语义：
+		// 1.1.1 task 默认阻塞；
+		// 1.1.2 course 且不可嵌入时阻塞；
+		// 1.1.3 course 且可嵌入时，若当前原子格未被 embedded_task 占用，则不阻塞。
+		blockForSuggested := true
+		if typ == "course" && canBeEmbedded && s.EmbeddedTaskID == nil {
+			blockForSuggested = false
+		}
+
+		key := eventGroupKey{
+			EventID:           s.EventID,
+			Week:              s.Week,
+			DayOfWeek:         s.DayOfWeek,
+			CanBeEmbedded:     canBeEmbedded,
+			BlockForSuggested: blockForSuggested,
+		}
+		group, ok := groupMap[key]
 		if !ok {
-			name := "未知"
-			typ := "course"
-			if s.Event != nil {
-				name = s.Event.Name
-				typ = s.Event.Type
+			group = &eventGroup{
+				Key:  key,
+				Name: name,
+				Type: typ,
 			}
-			g = &eventGroup{Key: key, Name: name, Type: typ}
-			groupMap[key] = g
+			groupMap[key] = group
 		}
-		g.Sections = append(g.Sections, s.Section)
-	}
-	for _, g := range groupMap {
-		if len(g.Sections) == 0 {
-			continue
-		}
-		// 排序后取首尾作为 SectionFrom/SectionTo
-		minS, maxS := g.Sections[0], g.Sections[0]
-		for _, s := range g.Sections[1:] {
-			if s < minS {
-				minS = s
-			}
-			if s > maxS {
-				maxS = s
-			}
-		}
-		entries = append(entries, model.HybridScheduleEntry{
-			Week:        g.Key.Week,
-			DayOfWeek:   g.Key.DayOfWeek,
-			SectionFrom: minS,
-			SectionTo:   maxS,
-			Name:        g.Name,
-			Type:        g.Type,
-			Status:      "existing",
-			EventID:     g.Key.EventID,
-		})
+		group.Sections = append(group.Sections, s.Section)
 	}
 
-	// 4.2 粗排建议：每个已分配的 TaskClassItem 转为一条 suggested 条目。
+	for _, group := range groupMap {
+		if len(group.Sections) == 0 {
+			continue
+		}
+		sort.Ints(group.Sections)
+
+		runStart := group.Sections[0]
+		prev := group.Sections[0]
+		flushRun := func(from, to int) {
+			entries = append(entries, model.HybridScheduleEntry{
+				Week:              group.Key.Week,
+				DayOfWeek:         group.Key.DayOfWeek,
+				SectionFrom:       from,
+				SectionTo:         to,
+				Name:              group.Name,
+				Type:              group.Type,
+				Status:            "existing",
+				EventID:           group.Key.EventID,
+				CanBeEmbedded:     group.Key.CanBeEmbedded,
+				BlockForSuggested: group.Key.BlockForSuggested,
+			})
+		}
+		for i := 1; i < len(group.Sections); i++ {
+			cur := group.Sections[i]
+			if cur == prev+1 {
+				prev = cur
+				continue
+			}
+			flushRun(runStart, prev)
+			runStart = cur
+			prev = cur
+		}
+		flushRun(runStart, prev)
+	}
+
+	// 2. 再处理 suggested。
 	for _, item := range allocatedItems {
 		if item.EmbeddedTime == nil {
 			continue
@@ -554,16 +852,17 @@ func (ss *ScheduleService) HybridScheduleWithPlan(
 			name = strings.TrimSpace(*item.Content)
 		}
 		entries = append(entries, model.HybridScheduleEntry{
-			Week:        item.EmbeddedTime.Week,
-			DayOfWeek:   item.EmbeddedTime.DayOfWeek,
-			SectionFrom: item.EmbeddedTime.SectionFrom,
-			SectionTo:   item.EmbeddedTime.SectionTo,
-			Name:        name,
-			Type:        "task",
-			Status:      "suggested",
-			TaskItemID:  item.ID,
+			Week:              item.EmbeddedTime.Week,
+			DayOfWeek:         item.EmbeddedTime.DayOfWeek,
+			SectionFrom:       item.EmbeddedTime.SectionFrom,
+			SectionTo:         item.EmbeddedTime.SectionTo,
+			Name:              name,
+			Type:              "task",
+			Status:            "suggested",
+			TaskItemID:        item.ID,
+			BlockForSuggested: true,
 		})
 	}
 
-	return entries, allocatedItems, nil
+	return entries
 }

@@ -52,3 +52,5 @@ agent:
   workerModel: "doubao-seed-1-6-lite-251015" # 智能体使用的Worker模型，需根据实际情况调整
   strategistModel: "deepseek-v3-2-251201" # 策略师使用的Worker模型，需根据实际情况调整
   baseURL: "https://ark.cn-beijing.volces.com/api/v3" # Worker服务的基础URL，需根据实际情况调整
+  dailyRefineConcurrency: 3 # 日内并发优化并发度，建议按模型配额调整
+  weeklyAdjustBudget: 5 # 周级跨天配平额度上限，防止过度调整

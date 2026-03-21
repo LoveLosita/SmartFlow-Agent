@@ -97,6 +97,16 @@ type UserDeleteScheduleEvent struct {
 	DeleteEmbeddedTask bool `json:"delete_embedded_task"`
 }
 
+// UserSmartPlanningMultiRequest 是“多任务类智能粗排”接口的请求体。
+//
+// 设计说明：
+// 1. TaskClassIDs 至少包含 1 个任务类 ID；
+// 2. 实际业务建议传入 >=2 个，用于多任务类混排；
+// 3. 服务层会做去重与合法值过滤，接口层只做基础绑定校验。
+type UserSmartPlanningMultiRequest struct {
+	TaskClassIDs []int `json:"task_class_ids" binding:"required,min=1,dive,min=1"`
+}
+
 type UserRecentCompletedScheduleResponse struct {
 	Events []RecentCompletedEventBrief `json:"events"`
 }
@@ -137,6 +147,25 @@ type HybridScheduleEntry struct {
 	Status      string `json:"status"`                 // "existing" | "suggested"
 	TaskItemID  int    `json:"task_item_id,omitempty"` // 仅 suggested 的 task 有值
 	EventID     int    `json:"event_id,omitempty"`     // 仅 existing 有值
+	// CanBeEmbedded 表示该条 existing 课程块是否允许嵌入任务。
+	// 仅课程条目有意义，task 条目默认 false。
+	CanBeEmbedded bool `json:"can_be_embedded,omitempty"`
+	// BlockForSuggested 表示该条目是否应当阻塞 suggested 任务占位。
+	//
+	// 语义说明：
+	// 1. suggested 条目默认 true（任务之间不能重叠）；
+	// 2. existing 课程若是“可嵌入且当前格子未被嵌入任务占用”，则为 false；
+	// 3. existing 课程若不可嵌入，或该格子已有嵌入任务，则为 true。
+	//
+	// 该字段用于工具层冲突判断，避免把“可嵌入课位”误判为硬冲突。
+	BlockForSuggested bool `json:"block_for_suggested,omitempty"`
+	// ContextTag 是任务认知类型标签，仅在 suggested 任务中使用。
+	// 该标签用于日内优化时的“认知负荷分配”，例如：
+	// 1. High-Logic：数学、编程、逻辑推理；
+	// 2. Memory：记忆/背诵类；
+	// 3. Review：复习/回顾类；
+	// 4. General：通用任务。
+	ContextTag string `json:"context_tag,omitempty"`
 }
 
 func (ScheduleEvent) TableName() string { return "schedule_events" }

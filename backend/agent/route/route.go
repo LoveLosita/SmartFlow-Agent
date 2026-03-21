@@ -89,6 +89,16 @@ type RoutingDecision struct {
 	Action     Action
 	TrustRoute bool
 	Detail     string
+	// RouteFailed 标记“控制码路由是否失败”。
+	//
+	// 语义：
+	// 1. true：路由阶段发生异常（模型调用失败、控制码解析失败等）；
+	// 2. false：路由阶段正常完成（无论最终 action 是 chat 还是其它分支）。
+	//
+	// 说明：
+	// 1. 该字段用于让上层决定“是否直接报错而不是回落聊天”；
+	// 2. 历史行为是失败回落 chat，本字段用于支持新的“失败即报错”策略。
+	RouteFailed bool
 }
 
 // DecideActionRouting 通过“模型控制码”决定本次请求走向。
@@ -97,21 +107,22 @@ type RoutingDecision struct {
 // 1. Action=quick_note_create：进入随口记写入图；
 // 2. Action=task_query：进入任务查询 tool-calling；
 // 3. Action=chat：进入普通聊天流；
-// 4. 路由失败时回落 chat，保证可用性优先。
+// 4. 路由失败时会标记 RouteFailed=true，由上层直接返回内部错误。
 func DecideActionRouting(ctx context.Context, selectedModel *ark.ChatModel, userMessage string) RoutingDecision {
 	decision, err := routeByModelControlTag(ctx, selectedModel, userMessage)
 	if err != nil {
 		if deadline, ok := ctx.Deadline(); ok {
-			log.Printf("通用分流控制码失败，回落 chat: err=%v parent_deadline_in_ms=%d route_timeout_ms=%d",
+			log.Printf("通用分流控制码失败，标记路由失败并等待上层报错: err=%v parent_deadline_in_ms=%d route_timeout_ms=%d",
 				err, time.Until(deadline).Milliseconds(), ControlTimeout.Milliseconds())
 		} else {
-			log.Printf("通用分流控制码失败，回落 chat: err=%v parent_deadline=none route_timeout_ms=%d",
+			log.Printf("通用分流控制码失败，标记路由失败并等待上层报错: err=%v parent_deadline=none route_timeout_ms=%d",
 				err, ControlTimeout.Milliseconds())
 		}
 		return RoutingDecision{
-			Action:     ActionChat,
-			TrustRoute: false,
-			Detail:     "",
+			Action:      ActionChat,
+			TrustRoute:  false,
+			Detail:      "",
+			RouteFailed: true,
 		}
 	}
 
@@ -122,9 +133,10 @@ func DecideActionRouting(ctx context.Context, selectedModel *ark.ChatModel, user
 			reason = "识别到新增任务请求，准备执行随口记流程。"
 		}
 		return RoutingDecision{
-			Action:     ActionQuickNoteCreate,
-			TrustRoute: true,
-			Detail:     reason,
+			Action:      ActionQuickNoteCreate,
+			TrustRoute:  true,
+			Detail:      reason,
+			RouteFailed: false,
 		}
 	case ActionTaskQuery:
 		reason := strings.TrimSpace(decision.Reason)
@@ -132,9 +144,10 @@ func DecideActionRouting(ctx context.Context, selectedModel *ark.ChatModel, user
 			reason = "识别到任务查询请求，准备调用任务查询工具。"
 		}
 		return RoutingDecision{
-			Action:     ActionTaskQuery,
-			TrustRoute: true,
-			Detail:     reason,
+			Action:      ActionTaskQuery,
+			TrustRoute:  true,
+			Detail:      reason,
+			RouteFailed: false,
 		}
 	case ActionSchedulePlan:
 		reason := strings.TrimSpace(decision.Reason)
@@ -142,23 +155,26 @@ func DecideActionRouting(ctx context.Context, selectedModel *ark.ChatModel, user
 			reason = "识别到排程请求，准备执行智能排程流程。"
 		}
 		return RoutingDecision{
-			Action:     ActionSchedulePlan,
-			TrustRoute: true,
-			Detail:     reason,
+			Action:      ActionSchedulePlan,
+			TrustRoute:  true,
+			Detail:      reason,
+			RouteFailed: false,
 		}
 	case ActionChat:
 		return RoutingDecision{
-			Action:     ActionChat,
-			TrustRoute: false,
-			Detail:     "",
+			Action:      ActionChat,
+			TrustRoute:  false,
+			Detail:      "",
+			RouteFailed: false,
 		}
 	default:
-		// 兜底：未知动作一律回落 chat，避免误入错误分支。
-		log.Printf("通用分流出现未知动作，回落 chat: action=%s raw=%s", decision.Action, decision.Raw)
+		// 兜底：未知动作视为路由异常，标记 RouteFailed 让上层统一报错。
+		log.Printf("通用分流出现未知动作，标记路由失败并等待上层报错: action=%s raw=%s", decision.Action, decision.Raw)
 		return RoutingDecision{
-			Action:     ActionChat,
-			TrustRoute: false,
-			Detail:     "",
+			Action:      ActionChat,
+			TrustRoute:  false,
+			Detail:      "",
+			RouteFailed: true,
 		}
 	}
 }
@@ -273,9 +289,10 @@ func DecideQuickNoteRouting(ctx context.Context, selectedModel *ark.ChatModel, u
 		return decision
 	}
 	return RoutingDecision{
-		Action:     ActionChat,
-		TrustRoute: false,
-		Detail:     "",
+		Action:      ActionChat,
+		TrustRoute:  false,
+		Detail:      "",
+		RouteFailed: decision.RouteFailed,
 	}
 }
 

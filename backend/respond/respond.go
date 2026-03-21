@@ -328,4 +328,14 @@ var ( //请求相关的响应
 		Status: "40052",
 		Info:   "task is not completed",
 	}
+
+	SchedulePlanPreviewNotFound = Response{ //排程预览不存在或已过期
+		Status: "40053",
+		Info:   "schedule plan preview not found",
+	}
+
+	RouteControlInternalError = Response{ //路由控制码内部错误
+		Status: "50001",
+		Info:   "route control failed",
+	}
 )

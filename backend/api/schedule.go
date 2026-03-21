@@ -26,7 +26,6 @@ func (s *ScheduleAPI) GetUserTodaySchedule(c *gin.Context) {
 	// 1. 从请求上下文中获取用户ID
 	userID := c.GetInt("user_id")
 	//2.调用服务层方法获取用户当天的日程安排
-	// 创建一个带 1 秒超时的上下文
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
 	defer cancel() // 记得释放资源
 	todaySchedules, err := s.scheduleService.GetUserTodaySchedule(ctx, userID)
@@ -133,8 +132,6 @@ func (s *ScheduleAPI) UserRevocateTaskItemFromSchedule(c *gin.Context) {
 		return
 	}
 	//3.调用服务层方法撤销任务块的安排
-	/*ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
-	defer cancel() // 记得释放资源*/
 	err = s.scheduleService.RevocateUserTaskClassItem(context.Background(), userID, intEventID)
 	if err != nil {
 		respond.DealWithError(c, err)
@@ -147,7 +144,7 @@ func (s *ScheduleAPI) UserRevocateTaskItemFromSchedule(c *gin.Context) {
 func (s *ScheduleAPI) SmartPlanning(c *gin.Context) {
 	// 1. 从请求上下文中获取用户ID
 	userID := c.GetInt("user_id")
-	// 2. 从请求体中获取智能规划的参数
+	// 2. 从请求参数中获取智能规划的 task_class_id
 	taskClassID := c.Query("task_class_id")
 	intTaskClassID, err := strconv.Atoi(taskClassID)
 	if err != nil {
@@ -163,5 +160,35 @@ func (s *ScheduleAPI) SmartPlanning(c *gin.Context) {
 		return
 	}
 	//4.返回智能规划成功的响应给前端
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, res))
+}
+
+// SmartPlanningMulti 处理“多任务类智能粗排”请求。
+//
+// 职责边界：
+// 1. 只负责参数绑定、超时控制、错误透传；
+// 2. 具体业务校验与排序策略由 service 层统一处理；
+// 3. 保留已有单任务类接口，不与其互斥。
+func (s *ScheduleAPI) SmartPlanningMulti(c *gin.Context) {
+	// 1. 从请求上下文中读取登录用户 ID。
+	userID := c.GetInt("user_id")
+
+	// 2. 绑定多任务类请求体。
+	var req model.UserSmartPlanningMultiRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		return
+	}
+
+	// 3. 调用服务层执行多任务类粗排。
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel()
+	res, err := s.scheduleService.SmartPlanningMulti(ctx, userID, req.TaskClassIDs)
+	if err != nil {
+		respond.DealWithError(c, err)
+		return
+	}
+
+	// 4. 返回成功响应。
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, res))
 }
