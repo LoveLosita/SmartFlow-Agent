@@ -1,0 +1,768 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SmartFlow 排程预览调试页</title>
+  <style>
+    :root {
+      --bg: #f4f6fb;
+      --panel: #ffffff;
+      --line: #dfe5f2;
+      --text: #1f2430;
+      --sub: #5b6477;
+      --accent: #2b6ef2;
+      --ok: #1f8f4f;
+      --warn: #d96b00;
+      --existing: #2962ff;
+      --suggested: #ff8a00;
+      --embedded: #1f8f4f;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+      background: radial-gradient(circle at 0 0, #eef3ff 0, var(--bg) 45%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .page {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 14px;
+      padding: 14px;
+      min-height: 100vh;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      box-shadow: 0 8px 28px rgba(21, 40, 78, 0.08);
+      overflow: hidden;
+    }
+
+    .left {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .panel-header {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, #f8faff 0%, #f5f8ff 100%);
+    }
+
+    .panel-header h1 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .panel-header p {
+      margin: 6px 0 0;
+      color: var(--sub);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .input-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px;
+      min-height: 0;
+      flex: 1;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 420px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      font-family: "Consolas", "Monaco", monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      color: #1f2430;
+      background: #fbfcff;
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      background: #fff;
+      color: var(--text);
+    }
+
+    button.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+
+    .error {
+      color: #c62828;
+      font-size: 12px;
+      min-height: 16px;
+    }
+
+    .right {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    .meta {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      display: grid;
+      gap: 8px;
+    }
+
+    .meta-row {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      color: var(--sub);
+      font-size: 12px;
+    }
+
+    .meta label {
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    select {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 6px 10px;
+      background: #fff;
+      font-size: 13px;
+    }
+
+    .summary {
+      background: #f8fbff;
+      border: 1px dashed #c9d9ff;
+      border-radius: 10px;
+      padding: 8px 10px;
+      color: #2f3a4f;
+      font-size: 13px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+
+    .grid-wrap {
+      overflow: auto;
+      padding: 12px;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .week-grid {
+      min-width: 980px;
+      display: grid;
+      grid-template-columns: 74px repeat(7, minmax(120px, 1fr));
+      grid-template-rows: 38px repeat(12, 52px);
+      gap: 0;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+      background: #fff;
+      position: relative;
+    }
+
+    .cell {
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      padding: 6px;
+      font-size: 12px;
+      color: var(--sub);
+      background: #fff;
+    }
+
+    .head {
+      background: #f7f9ff;
+      font-weight: 700;
+      color: #344058;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .section {
+      background: #fafbff;
+      text-align: center;
+      padding-top: 10px;
+      font-size: 11px;
+      color: #56607b;
+    }
+
+    .slot {
+      background: #fcfdff;
+    }
+
+    .event {
+      margin: 2px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      color: #fff;
+      padding: 6px 7px;
+      overflow: hidden;
+      font-size: 11px;
+      line-height: 1.35;
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
+      z-index: 2;
+    }
+
+    .event.existing {
+      background: linear-gradient(180deg, #4c80ff 0%, #2f63de 100%);
+      border-color: #1f53d7;
+    }
+
+    .event.suggested {
+      background: linear-gradient(180deg, #ff9f3b 0%, #f27d07 100%);
+      border-color: #dc6e00;
+    }
+
+    .event.task {
+      background: linear-gradient(180deg, #32b56b 0%, #1d924f 100%);
+      border-color: #177a42;
+    }
+
+    .event .title {
+      font-weight: 700;
+      margin-bottom: 3px;
+      word-break: break-all;
+    }
+
+    .event .meta-text {
+      opacity: 0.95;
+    }
+
+    .embedded-list {
+      margin-top: 4px;
+      display: grid;
+      gap: 3px;
+    }
+
+    .embedded-item {
+      background: rgba(255, 255, 255, 0.17);
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      border-radius: 6px;
+      padding: 2px 4px;
+      font-size: 10px;
+    }
+
+    .legend {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      font-size: 12px;
+      color: var(--sub);
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 4px;
+    }
+
+    .unplaced {
+      margin-top: 10px;
+      border: 1px dashed var(--line);
+      border-radius: 10px;
+      padding: 8px;
+      font-size: 12px;
+      color: #37445f;
+      background: #fcfdff;
+    }
+
+    .empty {
+      padding: 18px;
+      text-align: center;
+      color: #7a849a;
+      font-size: 13px;
+    }
+
+    @media (max-width: 960px) {
+      .page {
+        grid-template-columns: 1fr;
+      }
+      textarea {
+        min-height: 280px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="panel left">
+      <div class="panel-header">
+        <h1>排程预览 JSON 输入</h1>
+        <p>粘贴 <code>/api/v1/agent/schedule-preview</code> 响应，点击“解析并渲染”。</p>
+      </div>
+      <div class="input-wrap">
+        <textarea id="jsonInput" spellcheck="false"></textarea>
+        <div class="btn-row">
+          <button class="primary" id="renderBtn">解析并渲染</button>
+          <button id="exampleBtn">填入示例</button>
+          <button id="clearBtn">清空</button>
+        </div>
+        <div class="error" id="errorText"></div>
+      </div>
+    </div>
+
+    <div class="panel right">
+      <div class="meta">
+        <div class="meta-row">
+          <label for="weekSelect">当前周</label>
+          <select id="weekSelect"></select>
+          <span id="conversationMeta">conversation_id: -</span>
+          <span id="traceMeta">trace_id: -</span>
+          <span id="timeMeta">generated_at: -</span>
+        </div>
+        <div class="summary" id="summaryText">这里会显示排程摘要。</div>
+        <div class="legend">
+          <span><i class="dot" style="background:#2f63de"></i>existing（课程/已存在安排）</span>
+          <span><i class="dot" style="background:#f27d07"></i>suggested（建议任务）</span>
+          <span><i class="dot" style="background:#1d924f"></i>task（普通任务）</span>
+          <span><i class="dot" style="background:#1f8f4f"></i>嵌入任务（显示在课程块内）</span>
+        </div>
+      </div>
+      <div class="grid-wrap" id="gridWrap">
+        <div class="empty">先粘贴 JSON 再渲染课表。</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const DAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+    const SECTION_TIME = {
+      1: ["08:00", "08:45"],
+      2: ["08:55", "09:40"],
+      3: ["10:15", "11:00"],
+      4: ["11:10", "11:55"],
+      5: ["14:00", "14:45"],
+      6: ["14:55", "15:40"],
+      7: ["16:15", "17:00"],
+      8: ["17:10", "17:55"],
+      9: ["19:00", "19:45"],
+      10: ["19:55", "20:40"],
+      11: ["20:50", "21:35"],
+      12: ["21:45", "22:30"]
+    };
+    const START_TIME_TO_SECTION = Object.fromEntries(
+      Object.entries(SECTION_TIME).map(([s, [start]]) => [start, Number(s)])
+    );
+
+    const state = {
+      raw: null,
+      weekMap: new Map()
+    };
+
+    const jsonInput = document.getElementById("jsonInput");
+    const renderBtn = document.getElementById("renderBtn");
+    const exampleBtn = document.getElementById("exampleBtn");
+    const clearBtn = document.getElementById("clearBtn");
+    const errorText = document.getElementById("errorText");
+    const weekSelect = document.getElementById("weekSelect");
+    const summaryText = document.getElementById("summaryText");
+    const conversationMeta = document.getElementById("conversationMeta");
+    const traceMeta = document.getElementById("traceMeta");
+    const timeMeta = document.getElementById("timeMeta");
+    const gridWrap = document.getElementById("gridWrap");
+
+    function setError(message) {
+      errorText.textContent = message || "";
+    }
+
+    function isObject(v) {
+      return v && typeof v === "object" && !Array.isArray(v);
+    }
+
+    function normalizeEvent(raw, index) {
+      const e = isObject(raw) ? raw : {};
+      const day = Number(e.day_of_week);
+      const span = Math.max(1, Number(e.span) || 1);
+      const guessedFrom = START_TIME_TO_SECTION[String(e.start_time || "").trim()];
+      const sectionFrom = Number.isFinite(guessedFrom) ? guessedFrom : null;
+      const sectionTo = sectionFrom !== null ? sectionFrom + span - 1 : null;
+      const embedded = isObject(e.embedded_task_info) ? e.embedded_task_info : null;
+
+      return {
+        __index: index,
+        id: e.id,
+        order: Number(e.order) || 0,
+        dayOfWeek: Number.isFinite(day) ? day : null,
+        name: String(e.name || "未命名"),
+        startTime: String(e.start_time || ""),
+        endTime: String(e.end_time || ""),
+        type: String(e.type || ""),
+        status: String(e.status || ""),
+        span,
+        sectionFrom,
+        sectionTo,
+        embeddedTaskInfo: embedded,
+        embeddedTasks: []
+      };
+    }
+
+    function parseInput(text) {
+      const root = JSON.parse(text);
+      if (!isObject(root)) {
+        throw new Error("根对象必须是 JSON Object。");
+      }
+
+      // 1. 兼容两种结构：
+      // 1.1 新结构：{ status, info, data: { ...真正字段... } }
+      // 1.2 旧结构：{ conversation_id, summary, candidate_plans, ... }
+      // 2. 若 data 存在则优先使用 data，避免误读外层字段。
+      const payload = isObject(root.data) ? root.data : root;
+
+      const candidatePlans = Array.isArray(payload.candidate_plans) ? payload.candidate_plans : [];
+      if (!Array.isArray(payload.candidate_plans)) {
+        throw new Error("缺少 data.candidate_plans 数组。");
+      }
+      return {
+        conversationId: String(payload.conversation_id || ""),
+        traceId: String(payload.trace_id || ""),
+        generatedAt: String(payload.generated_at || ""),
+        summary: String(payload.summary || ""),
+        candidatePlans
+      };
+    }
+
+    function buildWeekMap(candidatePlans) {
+      const map = new Map();
+      for (const plan of candidatePlans) {
+        const weekNo = Number(plan?.week);
+        if (!Number.isFinite(weekNo)) continue;
+        const events = Array.isArray(plan?.events) ? plan.events : [];
+        map.set(
+          weekNo,
+          events.map((e, i) => normalizeEvent(e, i)).filter((e) => Number.isFinite(e.dayOfWeek) && e.dayOfWeek >= 1 && e.dayOfWeek <= 7)
+        );
+      }
+      return map;
+    }
+
+    function mergeEmbeddedEvents(events) {
+      // 1. 先按“同一天 + 同时间段”聚合，识别课程与任务重叠场景。
+      // 2. 如果同槽位同时出现 existing 课程 + 任务，则把任务并入课程卡片中显示。
+      // 3. 兜底：不满足合并条件的事件保持原样，避免误吞数据。
+      const slotMap = new Map();
+      for (const e of events) {
+        const key = `${e.dayOfWeek}_${e.sectionFrom}_${e.sectionTo}`;
+        if (!slotMap.has(key)) slotMap.set(key, []);
+        slotMap.get(key).push(e);
+      }
+
+      const merged = [];
+      for (const list of slotMap.values()) {
+        const course = list.find((e) => e.type === "course" || e.status === "existing");
+        const tasks = list.filter((e) => !course || e !== course);
+        if (course && tasks.length > 0) {
+          const taskLines = [];
+          if (course.embeddedTaskInfo?.name) {
+            taskLines.push({
+              id: course.embeddedTaskInfo.id,
+              name: course.embeddedTaskInfo.name,
+              type: course.embeddedTaskInfo.type || "task",
+              from: "embedded_task_info"
+            });
+          }
+          for (const t of tasks) {
+            taskLines.push({
+              id: t.id,
+              name: t.name,
+              type: t.type || "task",
+              status: t.status || "",
+              from: "overlap_event"
+            });
+          }
+          course.embeddedTasks = taskLines;
+          merged.push(course);
+          continue;
+        }
+        if (course && course.embeddedTaskInfo?.name) {
+          course.embeddedTasks = [{
+            id: course.embeddedTaskInfo.id,
+            name: course.embeddedTaskInfo.name,
+            type: course.embeddedTaskInfo.type || "task",
+            from: "embedded_task_info"
+          }];
+          merged.push(course);
+          continue;
+        }
+        merged.push(...list);
+      }
+      return merged;
+    }
+
+    function assignLanesByDay(events) {
+      // 1. 按“每天”独立分配 lane，避免跨天互相影响宽度。
+      // 2. 用贪心法给重叠区间分轨：能复用轨道就复用，否则开新轨道。
+      // 3. 最后给每个事件附上 dayLaneCount，渲染时按轨道等分宽度。
+      const byDay = new Map();
+      for (const e of events) {
+        if (!byDay.has(e.dayOfWeek)) byDay.set(e.dayOfWeek, []);
+        byDay.get(e.dayOfWeek).push(e);
+      }
+
+      for (const [, dayEvents] of byDay) {
+        dayEvents.sort((a, b) => {
+          if (a.sectionFrom !== b.sectionFrom) return a.sectionFrom - b.sectionFrom;
+          if (a.sectionTo !== b.sectionTo) return a.sectionTo - b.sectionTo;
+          return a.order - b.order;
+        });
+        const laneEnds = [];
+        for (const e of dayEvents) {
+          let lane = -1;
+          for (let i = 0; i < laneEnds.length; i += 1) {
+            if (e.sectionFrom > laneEnds[i]) {
+              lane = i;
+              break;
+            }
+          }
+          if (lane === -1) {
+            lane = laneEnds.length;
+            laneEnds.push(0);
+          }
+          laneEnds[lane] = e.sectionTo;
+          e.__lane = lane;
+        }
+        const laneCount = Math.max(1, laneEnds.length);
+        for (const e of dayEvents) e.__laneCount = laneCount;
+      }
+    }
+
+    function buildWeekGrid(events) {
+      const weekGrid = document.createElement("div");
+      weekGrid.className = "week-grid";
+
+      const topLeft = document.createElement("div");
+      topLeft.className = "cell head";
+      topLeft.textContent = "节次";
+      weekGrid.appendChild(topLeft);
+
+      for (let i = 0; i < 7; i += 1) {
+        const head = document.createElement("div");
+        head.className = "cell head";
+        head.style.gridColumn = String(i + 2);
+        head.style.gridRow = "1";
+        head.textContent = DAYS[i];
+        weekGrid.appendChild(head);
+      }
+
+      for (let section = 1; section <= 12; section += 1) {
+        const [start, end] = SECTION_TIME[section];
+        const label = document.createElement("div");
+        label.className = "cell section";
+        label.style.gridColumn = "1";
+        label.style.gridRow = String(section + 1);
+        label.innerHTML = `<div>${section}</div><div>${start}-${end}</div>`;
+        weekGrid.appendChild(label);
+
+        for (let day = 1; day <= 7; day += 1) {
+          const slot = document.createElement("div");
+          slot.className = "cell slot";
+          slot.style.gridColumn = String(day + 1);
+          slot.style.gridRow = String(section + 1);
+          weekGrid.appendChild(slot);
+        }
+      }
+
+      const unplaced = [];
+      for (const e of events) {
+        if (!Number.isFinite(e.sectionFrom) || !Number.isFinite(e.sectionTo)) {
+          unplaced.push(e);
+          continue;
+        }
+        const rowStart = e.sectionFrom + 1;
+        const rowEnd = e.sectionTo + 2;
+        const col = e.dayOfWeek + 1;
+        const laneCount = e.__laneCount || 1;
+        const lane = e.__lane || 0;
+        const gap = 4;
+        const width = `calc((100% - ${(laneCount - 1) * gap}px) / ${laneCount})`;
+        const left = `calc(${lane} * (${width} + ${gap}px))`;
+
+        const card = document.createElement("div");
+        card.className = "event";
+        if (e.status === "existing" || e.type === "course") {
+          card.classList.add("existing");
+        } else if (e.status === "suggested") {
+          card.classList.add("suggested");
+        } else {
+          card.classList.add("task");
+        }
+        card.style.gridColumn = String(col);
+        card.style.gridRow = `${rowStart}/${rowEnd}`;
+        card.style.width = width;
+        card.style.marginLeft = left;
+
+        const header = document.createElement("div");
+        header.className = "title";
+        header.textContent = e.name;
+        card.appendChild(header);
+
+        const detail = document.createElement("div");
+        detail.className = "meta-text";
+        detail.textContent = `${e.startTime || "-"} - ${e.endTime || "-"} ｜ ${e.type || "-"} ｜ ${e.status || "-"}`;
+        card.appendChild(detail);
+
+        if (Array.isArray(e.embeddedTasks) && e.embeddedTasks.length > 0) {
+          const list = document.createElement("div");
+          list.className = "embedded-list";
+          for (const task of e.embeddedTasks) {
+            const item = document.createElement("div");
+            item.className = "embedded-item";
+            item.textContent = `嵌入：${task.name}${task.status ? `（${task.status}）` : ""}`;
+            list.appendChild(item);
+          }
+          card.appendChild(list);
+        }
+
+        weekGrid.appendChild(card);
+      }
+
+      const container = document.createElement("div");
+      container.appendChild(weekGrid);
+
+      if (unplaced.length > 0) {
+        const box = document.createElement("div");
+        box.className = "unplaced";
+        box.innerHTML = `<strong>未定位到节次的事件（无法映射 start_time）</strong><br>${unplaced.map((e) => `- D${e.dayOfWeek} ${e.name} (${e.startTime || "?"} - ${e.endTime || "?"})`).join("<br>")}`;
+        container.appendChild(box);
+      }
+      return container;
+    }
+
+    function renderWeek(weekNo) {
+      const weekEvents = state.weekMap.get(weekNo) || [];
+      const merged = mergeEmbeddedEvents(weekEvents.map((e) => ({ ...e })));
+      assignLanesByDay(merged.filter((e) => Number.isFinite(e.sectionFrom) && Number.isFinite(e.sectionTo)));
+
+      gridWrap.innerHTML = "";
+      if (merged.length === 0) {
+        gridWrap.innerHTML = `<div class="empty">第 ${weekNo} 周没有可显示的事件。</div>`;
+        return;
+      }
+      gridWrap.appendChild(buildWeekGrid(merged));
+    }
+
+    function fillMeta(parsed) {
+      conversationMeta.textContent = `conversation_id: ${parsed.conversationId || "-"}`;
+      traceMeta.textContent = `trace_id: ${parsed.traceId || "-"}`;
+      timeMeta.textContent = `generated_at: ${parsed.generatedAt || "-"}`;
+      summaryText.textContent = parsed.summary || "（无摘要）";
+    }
+
+    function fillWeekSelector() {
+      const weeks = Array.from(state.weekMap.keys()).sort((a, b) => a - b);
+      weekSelect.innerHTML = "";
+      for (const week of weeks) {
+        const op = document.createElement("option");
+        op.value = String(week);
+        op.textContent = `第 ${week} 周`;
+        weekSelect.appendChild(op);
+      }
+      if (weeks.length > 0) renderWeek(weeks[0]);
+    }
+
+    function renderFromInput() {
+      setError("");
+      try {
+        const parsed = parseInput(jsonInput.value.trim());
+        const map = buildWeekMap(parsed.candidatePlans);
+        state.raw = parsed;
+        state.weekMap = map;
+        fillMeta(parsed);
+        if (map.size === 0) {
+          weekSelect.innerHTML = "";
+          gridWrap.innerHTML = `<div class="empty">candidate_plans 为空，当前没有可渲染的周课表。</div>`;
+        } else {
+          fillWeekSelector();
+        }
+      } catch (err) {
+        setError(`解析失败：${err.message || err}`);
+      }
+    }
+
+    function setExample() {
+      jsonInput.value = JSON.stringify({
+        status: "10000",
+        info: "success",
+        data: {
+          conversation_id: "demo-conv-001",
+          trace_id: "demo-trace-001",
+          summary: "本周建议将高强度任务集中在上午，课程空档用于轻量复习。",
+          generated_at: "2026-03-22T15:12:00+08:00",
+          candidate_plans: [
+            {
+              week: 13,
+              events: [
+                { day_of_week: 1, name: "高等数学", start_time: "08:00", end_time: "09:40", type: "course", span: 2, status: "existing" },
+                { day_of_week: 1, name: "数电错题整理", start_time: "08:00", end_time: "09:40", type: "task", span: 2, status: "suggested" },
+                { day_of_week: 1, name: "数据结构复习", start_time: "10:15", end_time: "11:55", type: "task", span: 2, status: "suggested" },
+                { day_of_week: 2, name: "英语阅读", start_time: "19:00", end_time: "20:40", type: "task", span: 2, status: "suggested" },
+                {
+                  day_of_week: 3,
+                  name: "离散数学",
+                  start_time: "14:00",
+                  end_time: "15:40",
+                  type: "course",
+                  span: 2,
+                  status: "existing",
+                  embedded_task_info: { id: 99, name: "离散小测回顾", type: "task" }
+                }
+              ]
+            }
+          ]
+        }
+      }, null, 2);
+    }
+
+    renderBtn.addEventListener("click", renderFromInput);
+    weekSelect.addEventListener("change", () => renderWeek(Number(weekSelect.value)));
+    exampleBtn.addEventListener("click", () => {
+      setExample();
+      renderFromInput();
+    });
+    clearBtn.addEventListener("click", () => {
+      jsonInput.value = "";
+      setError("");
+      state.raw = null;
+      state.weekMap = new Map();
+      summaryText.textContent = "这里会显示排程摘要。";
+      conversationMeta.textContent = "conversation_id: -";
+      traceMeta.textContent = "trace_id: -";
+      timeMeta.textContent = "generated_at: -";
+      weekSelect.innerHTML = "";
+      gridWrap.innerHTML = `<div class="empty">先粘贴 JSON 再渲染课表。</div>`;
+    });
+
+    setExample();
+  </script>
+</body>
+</html>

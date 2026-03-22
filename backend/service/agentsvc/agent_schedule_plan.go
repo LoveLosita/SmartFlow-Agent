@@ -51,15 +51,32 @@ func (s *AgentService) runSchedulePlanFlow(
 	// 2.1.2 先读可让本轮在内存中复用上轮 HybridEntries。
 	// 2.2 清理旧 key 仍然保留，避免前端在本轮进行中误读到旧结果。
 	var previousPreview *model.SchedulePlanPreviewCache
-	if s.agentCache != nil {
-		preview, getErr := s.agentCache.GetSchedulePlanPreview(ctx, userID, chatID)
+	if s.cacheDAO != nil {
+		preview, getErr := s.cacheDAO.GetSchedulePlanPreviewFromCache(ctx, userID, chatID)
 		if getErr != nil {
 			log.Printf("读取上一版排程预览失败 chat_id=%s: %v", chatID, getErr)
 		} else {
 			previousPreview = preview
 		}
-		if delErr := s.agentCache.DeleteSchedulePlanPreview(ctx, userID, chatID); delErr != nil {
+		if delErr := s.cacheDAO.DeleteSchedulePlanPreviewFromCache(ctx, userID, chatID); delErr != nil {
 			log.Printf("清理旧排程预览失败 chat_id=%s: %v", chatID, delErr)
+		}
+	}
+	// 2.3 Redis miss 时回落 MySQL 快照：
+	// 2.3.1 目的：即使 Redis TTL 过期，也能延续同会话微调语境；
+	// 2.3.2 回填：命中 DB 后尝试回填 Redis，提高后续读取命中率；
+	// 2.3.3 失败策略：DB 读取异常只打日志，链路继续按“无历史快照”执行。
+	if previousPreview == nil && s.repo != nil {
+		snapshot, snapshotErr := s.repo.GetScheduleStateSnapshot(ctx, userID, chatID)
+		if snapshotErr != nil {
+			log.Printf("从 MySQL 读取排程快照失败 chat_id=%s: %v", chatID, snapshotErr)
+		} else if snapshot != nil {
+			previousPreview = snapshotToSchedulePlanPreviewCache(snapshot)
+			if s.cacheDAO != nil && previousPreview != nil {
+				if setErr := s.cacheDAO.SetSchedulePlanPreviewToCache(ctx, userID, chatID, previousPreview); setErr != nil {
+					log.Printf("回填排程预览缓存失败 chat_id=%s: %v", chatID, setErr)
+				}
+			}
 		}
 	}
 
@@ -99,6 +116,7 @@ func (s *AgentService) runSchedulePlanFlow(
 		state.PreviousTaskClassIDs = append([]int(nil), previousPreview.TaskClassIDs...)
 		state.PreviousHybridEntries = cloneHybridEntries(previousPreview.HybridEntries)
 		state.PreviousAllocatedItems = cloneTaskClassItems(previousPreview.AllocatedItems)
+		state.PreviousCandidatePlans = cloneWeekSchedules(previousPreview.CandidatePlans)
 	}
 	finalState, runErr := scheduleplan.RunSchedulePlanGraph(ctx, scheduleplan.SchedulePlanGraphRunInput{
 		Model: selectedModel,

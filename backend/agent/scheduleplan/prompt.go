@@ -11,7 +11,8 @@ const (
 	// 输出约束：
 	// 1. 必须只输出 JSON，禁止附加解释文本；
 	// 2. task_class_ids 是主语义；
-	// 3. task_class_id 仅作为兼容字段保留，便于老链路平滑过渡。
+	// 3. task_class_id 仅作为兼容字段保留，便于老链路平滑过渡；
+	// 4. 需要额外给出 restart + adjustment_scope，用于图分流。
 	SchedulePlanIntentPrompt = `你是 SmartFlow 的排程意图分析器。
 请根据用户输入，提取排程意图与约束条件。
 
@@ -26,6 +27,14 @@ const (
    - 兼容键：任务名称（例如 "高数复习"）
    - 值只能是：High-Logic / Memory / Review / General
    - 如果无法判断，输出空对象 {}
+7) 判定本轮是否要求“强制重排” restart：
+   - 用户明确表达“重新排/推倒重来/忽略之前方案/全部重来”时，restart=true；
+   - 否则 restart=false。
+8) 判定微调力度 adjustment_scope（small / medium / large）：
+   - small：局部微调，通常只改少量时段，不需要重建全局。
+   - medium：中等调整，需要周级再平衡，但不必全量重粗排。
+   - large：大范围调整，或首次创建排程，或约束变化很大，需要完整重排。
+9) 输出 reason（简短中文理由，<=30字）与 confidence（0~1）。
 
 输出要求：
 - 仅输出 JSON，不要 markdown，不要解释。
@@ -36,7 +45,11 @@ const (
   "task_class_ids": [12, 13],
   "task_class_id": 12,
   "strategy": "steady",
-  "task_tags": {"12":"High-Logic","英语阅读":"Memory"}
+  "task_tags": {"12":"High-Logic","英语阅读":"Memory"},
+  "restart": false,
+  "adjustment_scope": "medium",
+  "reason": "本次只调整局部时段",
+  "confidence": 0.86
 }`
 
 	// SchedulePlanDailyReactPrompt 用于 daily_refine 节点。

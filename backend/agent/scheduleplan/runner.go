@@ -67,6 +67,10 @@ func (r *schedulePlanRunner) dailySplitNode(ctx context.Context, st *SchedulePla
 	return runDailySplitNode(ctx, st, r.emitStage)
 }
 
+func (r *schedulePlanRunner) quickRefineNode(ctx context.Context, st *SchedulePlanState) (*SchedulePlanState, error) {
+	return runQuickRefineNode(ctx, st, r.emitStage)
+}
+
 func (r *schedulePlanRunner) dailyRefineNode(ctx context.Context, st *SchedulePlanState) (*SchedulePlanState, error) {
 	return runDailyRefineNode(ctx, st, r.chatModel, r.dailyRefineConcurrency, r.emitStage)
 }
@@ -107,6 +111,16 @@ func (r *schedulePlanRunner) nextAfterRoughBuild(_ context.Context, st *Schedule
 	if st == nil || len(st.HybridEntries) == 0 {
 		return schedulePlanGraphNodeExit, nil
 	}
+
+	// 1. 连续微调且判定为 small：先走快速微调节点，收缩预算后再进 weekly。
+	if st.IsAdjustment && st.AdjustmentScope == schedulePlanAdjustmentScopeSmall {
+		return schedulePlanGraphNodeQuickRefine, nil
+	}
+	// 2. 连续微调且判定为 medium：直接走 weekly，跳过 daily。
+	if st.IsAdjustment && st.AdjustmentScope == schedulePlanAdjustmentScopeMedium {
+		return schedulePlanGraphNodeWeeklyRefine, nil
+	}
+	// 3. large 或非微调：保持原有逻辑，多任务类走 daily，单任务类直达 weekly。
 	if len(st.TaskClassIDs) >= 2 {
 		return schedulePlanGraphNodeDailySplit, nil
 	}

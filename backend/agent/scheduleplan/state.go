@@ -1,6 +1,7 @@
 package scheduleplan
 
 import (
+	"strings"
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/model"
@@ -38,6 +39,16 @@ const (
 	// 1. 周级输入规模通常比单天更大，默认并发度不宜过高，避免触发模型侧限流；
 	// 2. 可在运行时按请求状态覆盖。
 	schedulePlanDefaultWeeklyRefineConcurrency = 2
+
+	// schedulePlanAdjustmentScopeSmall 表示“小改动微调”。
+	// 语义：优先走快速路径，只做轻量周级调整。
+	schedulePlanAdjustmentScopeSmall = "small"
+	// schedulePlanAdjustmentScopeMedium 表示“中等改动微调”。
+	// 语义：跳过日内拆分，直接进入周级配平。
+	schedulePlanAdjustmentScopeMedium = "medium"
+	// schedulePlanAdjustmentScopeLarge 表示“大改动重排”。
+	// 语义：必要时重新走全量路径（日内并发 + 周级配平）。
+	schedulePlanAdjustmentScopeLarge = "large"
 )
 
 // DayGroup 是“按天拆分后”的最小优化单元。
@@ -168,6 +179,23 @@ type SchedulePlanState struct {
 	PreviousPlanJSON string
 	// IsAdjustment 标记本次是否为微调请求（而非全新排程）。
 	IsAdjustment bool
+	// RestartRequested 标记本轮是否要求“放弃历史快照并重新排程”。
+	//
+	// 语义：
+	// 1. true：强制清空 Previous* 并走全新构建；
+	// 2. false：允许按同会话历史快照做增量微调。
+	RestartRequested bool
+	// AdjustmentScope 表示本轮改动力度分级（small/medium/large）。
+	//
+	// 分流语义：
+	// 1. small：走快速微调节点，再进入周级优化；
+	// 2. medium：跳过 daily，直接周级优化；
+	// 3. large：优先走全量路径（多任务类时会经过 daily 并发）。
+	AdjustmentScope string
+	// AdjustmentReason 是模型给出的力度判定理由，用于日志排障与 review。
+	AdjustmentReason string
+	// AdjustmentConfidence 是模型给出的力度判定置信度（0-1）。
+	AdjustmentConfidence float64
 	// HasPreviousPreview 标记是否命中“同会话上一次排程预览快照”。
 	//
 	// 语义：
@@ -192,6 +220,12 @@ type SchedulePlanState struct {
 	// 1. 保持 final_check 的数量核对口径稳定；
 	// 2. return_preview 阶段可继续回填 embedded_time。
 	PreviousAllocatedItems []model.TaskClassItem
+	// PreviousCandidatePlans 是上一版预览保存的周视图结构化结果。
+	//
+	// 用途：
+	// 1. 连续微调时可直接复用，避免重复转换；
+	// 2. 兜底展示层（即使本轮未走全量粗排，仍可给前端稳定结构）。
+	PreviousCandidatePlans []model.UserWeekSchedule
 
 	// ── 最终输出 ──
 
@@ -215,6 +249,7 @@ func NewSchedulePlanState(traceID string, userID int, conversationID string) *Sc
 		TaskTagHintsByName:      make(map[string]string),
 		DailyRefineConcurrency:  schedulePlanDefaultDailyRefineConcurrency,
 		WeeklyRefineConcurrency: schedulePlanDefaultWeeklyRefineConcurrency,
+		AdjustmentScope:         schedulePlanAdjustmentScopeLarge,
 		ReactMaxRound:           2,
 		WeeklyAdjustBudget:      schedulePlanDefaultWeeklyAdjustBudget,
 		WeeklyTotalBudget:       schedulePlanDefaultWeeklyTotalBudget,
@@ -233,4 +268,20 @@ func schedulePlanLocation() *time.Location {
 // schedulePlanNowToMinute 返回当前时间并截断到分钟级。
 func schedulePlanNowToMinute() time.Time {
 	return time.Now().In(schedulePlanLocation()).Truncate(time.Minute)
+}
+
+// normalizeAdjustmentScope 归一化排程微调力度字段。
+//
+// 兜底策略：
+// 1. 只接受 small/medium/large；
+// 2. 任何未知值都回退为 large，保证不会误走“过轻”路径。
+func normalizeAdjustmentScope(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case schedulePlanAdjustmentScopeSmall:
+		return schedulePlanAdjustmentScopeSmall
+	case schedulePlanAdjustmentScopeMedium:
+		return schedulePlanAdjustmentScopeMedium
+	default:
+		return schedulePlanAdjustmentScopeLarge
+	}
 }

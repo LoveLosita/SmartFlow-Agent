@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/model"
@@ -28,6 +29,10 @@ type UserTokenQuotaSnapshot struct {
 
 func NewCacheDAO(client *redis.Client) *CacheDAO {
 	return &CacheDAO{client: client}
+}
+
+func (d *CacheDAO) schedulePreviewKey(userID int, conversationID string) string {
+	return fmt.Sprintf("smartflow:schedule_preview:u:%d:c:%s", userID, conversationID)
 }
 
 // SetBlacklist 鎶?Token 鎵旇繘榛戝悕鍗?
@@ -352,4 +357,89 @@ func (d *CacheDAO) SetUserTokenBlocked(ctx context.Context, userID int, ttl time
 // DeleteUserTokenBlocked 清理用户“额度封禁键”。
 func (d *CacheDAO) DeleteUserTokenBlocked(ctx context.Context, userID int) error {
 	return d.client.Del(ctx, userTokenBlockedKey(userID)).Err()
+}
+
+// SetSchedulePlanPreviewToCache 写入“排程预览”缓存。
+//
+// 职责边界：
+// 1. 负责按 user_id + conversation_id 写入结构化预览快照；
+// 2. 负责 preview 入库前的基础参数校验，避免无效 key；
+// 3. 不负责 DB 回源，不负责业务重试策略。
+//
+// 步骤化说明：
+// 1. 先校验 user_id / conversation_id / preview，防止脏写；
+// 2. 再序列化 preview 为 JSON，保证缓存结构稳定；
+// 3. 最后按固定 TTL 写入 Redis，超时后自动失效。
+func (d *CacheDAO) SetSchedulePlanPreviewToCache(ctx context.Context, userID int, conversationID string, preview *model.SchedulePlanPreviewCache) error {
+	if d == nil || d.client == nil {
+		return errors.New("cache dao is not initialized")
+	}
+	if userID <= 0 {
+		return fmt.Errorf("invalid user_id: %d", userID)
+	}
+	normalizedConversationID := strings.TrimSpace(conversationID)
+	if normalizedConversationID == "" {
+		return errors.New("conversation_id is empty")
+	}
+	if preview == nil {
+		return errors.New("schedule preview is nil")
+	}
+
+	data, err := json.Marshal(preview)
+	if err != nil {
+		return fmt.Errorf("marshal schedule preview failed: %w", err)
+	}
+	return d.client.Set(ctx, d.schedulePreviewKey(userID, normalizedConversationID), data, 1*time.Hour).Err()
+}
+
+// GetSchedulePlanPreviewFromCache 读取“排程预览”缓存。
+//
+// 输入输出语义：
+// 1. 命中时返回 (*SchedulePlanPreviewCache, nil)；
+// 2. 未命中时返回 (nil, nil)；
+// 3. Redis 异常或反序列化失败时返回 error。
+func (d *CacheDAO) GetSchedulePlanPreviewFromCache(ctx context.Context, userID int, conversationID string) (*model.SchedulePlanPreviewCache, error) {
+	if d == nil || d.client == nil {
+		return nil, errors.New("cache dao is not initialized")
+	}
+	if userID <= 0 {
+		return nil, fmt.Errorf("invalid user_id: %d", userID)
+	}
+	normalizedConversationID := strings.TrimSpace(conversationID)
+	if normalizedConversationID == "" {
+		return nil, errors.New("conversation_id is empty")
+	}
+
+	raw, err := d.client.Get(ctx, d.schedulePreviewKey(userID, normalizedConversationID)).Result()
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var preview model.SchedulePlanPreviewCache
+	if err = json.Unmarshal([]byte(raw), &preview); err != nil {
+		return nil, fmt.Errorf("unmarshal schedule preview failed: %w", err)
+	}
+	return &preview, nil
+}
+
+// DeleteSchedulePlanPreviewFromCache 删除“排程预览”缓存。
+//
+// 说明：
+// 1. 删除操作是幂等的，key 不存在也视为成功；
+// 2. 该方法用于新排程前清旧预览，或状态快照更新后触发失效。
+func (d *CacheDAO) DeleteSchedulePlanPreviewFromCache(ctx context.Context, userID int, conversationID string) error {
+	if d == nil || d.client == nil {
+		return errors.New("cache dao is not initialized")
+	}
+	if userID <= 0 {
+		return fmt.Errorf("invalid user_id: %d", userID)
+	}
+	normalizedConversationID := strings.TrimSpace(conversationID)
+	if normalizedConversationID == "" {
+		return errors.New("conversation_id is empty")
+	}
+	return d.client.Del(ctx, d.schedulePreviewKey(userID, normalizedConversationID)).Err()
 }

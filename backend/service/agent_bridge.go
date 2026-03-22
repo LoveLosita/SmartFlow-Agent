@@ -18,8 +18,8 @@ type AgentService = agentsvc.AgentService
 // 说明：
 // 1) 外部调用签名不变，新增排程依赖通过可选方式注入（见 NewAgentServiceWithSchedule）；
 // 2) 真实构造逻辑已下沉到 service/agentsvc 包。
-func NewAgentService(aiHub *inits.AIHub, repo *dao.AgentDAO, taskRepo *dao.TaskDAO, agentRedis *dao.AgentCache, eventPublisher outboxinfra.EventPublisher) *AgentService {
-	return agentsvc.NewAgentService(aiHub, repo, taskRepo, agentRedis, eventPublisher)
+func NewAgentService(aiHub *inits.AIHub, repo *dao.AgentDAO, taskRepo *dao.TaskDAO, cacheDAO *dao.CacheDAO, agentRedis *dao.AgentCache, eventPublisher outboxinfra.EventPublisher) *AgentService {
+	return agentsvc.NewAgentService(aiHub, repo, taskRepo, cacheDAO, agentRedis, eventPublisher)
 }
 
 // NewAgentServiceWithSchedule 在基础 AgentService 上注入排程依赖。
@@ -32,11 +32,12 @@ func NewAgentServiceWithSchedule(
 	aiHub *inits.AIHub,
 	repo *dao.AgentDAO,
 	taskRepo *dao.TaskDAO,
+	cacheDAO *dao.CacheDAO,
 	agentRedis *dao.AgentCache,
 	eventPublisher outboxinfra.EventPublisher,
 	scheduleSvc *ScheduleService,
 ) *AgentService {
-	svc := agentsvc.NewAgentService(aiHub, repo, taskRepo, agentRedis, eventPublisher)
+	svc := agentsvc.NewAgentService(aiHub, repo, taskRepo, cacheDAO, agentRedis, eventPublisher)
 
 	// 注入排程依赖：将 service 层方法包装为函数闭包，避免循环依赖。
 	if scheduleSvc != nil {

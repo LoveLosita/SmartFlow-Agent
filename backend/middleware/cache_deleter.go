@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"reflect"
+	"strings"
 
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/model"
@@ -62,6 +63,8 @@ func (p *GormCachePlugin) dispatchCacheLogic(modelObj interface{}, db *gorm.DB) 
 		p.invalidTaskClassCache(*m.UserID)
 	case model.Task:
 		p.invalidTaskCache(m.UserID)
+	case model.AgentScheduleState:
+		p.invalidSchedulePlanPreviewCache(m.UserID, m.ConversationID)
 	case model.AgentOutboxMessage, model.ChatHistory, model.AgentChat, model.User:
 		// 这些模型目前没有定义缓存逻辑，先不处理
 	default:
@@ -102,5 +105,22 @@ func (p *GormCachePlugin) invalidTaskCache(userID int) {
 	go func() {
 		_ = p.cacheDAO.DeleteUserTasksFromCache(context.Background(), userID)
 		log.Printf("[GORM-Cache] Invalidated task list cache for user %d", userID)
+	}()
+}
+
+func (p *GormCachePlugin) invalidSchedulePlanPreviewCache(userID int, conversationID string) {
+	normalizedConversationID := strings.TrimSpace(conversationID)
+	if userID == 0 || normalizedConversationID == "" {
+		return
+	}
+	go func() {
+		// 1. 这里的调用目的：当排程状态快照发生覆盖写入时，主动删除对应会话预览缓存。
+		// 2. 这样可以避免“Redis 里还是旧预览，但 MySQL 已经是新快照”的短暂口径不一致。
+		// 3. 失败策略：缓存删除失败只记日志，不影响主事务提交。
+		if err := p.cacheDAO.DeleteSchedulePlanPreviewFromCache(context.Background(), userID, normalizedConversationID); err != nil {
+			log.Printf("[GORM-Cache] Failed to invalidate schedule preview cache for user %d conversation %s: %v", userID, normalizedConversationID, err)
+			return
+		}
+		log.Printf("[GORM-Cache] Invalidated schedule preview cache for user %d conversation %s", userID, normalizedConversationID)
 	}()
 }

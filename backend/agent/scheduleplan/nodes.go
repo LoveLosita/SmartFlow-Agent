@@ -24,12 +24,16 @@ import (
 //     3.1 推荐：task_item_id（例如 "12"）；
 //     3.2 兼容：任务名称（例如 "高数复习"）。
 type schedulePlanIntentOutput struct {
-	Intent       string            `json:"intent"`
-	Constraints  []string          `json:"constraints"`
-	TaskClassIDs []int             `json:"task_class_ids"`
-	TaskClassID  int               `json:"task_class_id"`
-	Strategy     string            `json:"strategy"`
-	TaskTags     map[string]string `json:"task_tags"`
+	Intent          string            `json:"intent"`
+	Constraints     []string          `json:"constraints"`
+	TaskClassIDs    []int             `json:"task_class_ids"`
+	TaskClassID     int               `json:"task_class_id"`
+	Strategy        string            `json:"strategy"`
+	TaskTags        map[string]string `json:"task_tags"`
+	Restart         bool              `json:"restart"`
+	AdjustmentScope string            `json:"adjustment_scope"`
+	Reason          string            `json:"reason"`
+	Confidence      float64           `json:"confidence"`
 }
 
 // runPlanNode 负责“识别排程意图 + 提取约束 + 收敛任务类 ID”。
@@ -50,6 +54,10 @@ func runPlanNode(
 	if st == nil {
 		return nil, errors.New("schedule plan graph: nil state in plan node")
 	}
+	st.RestartRequested = false
+	st.AdjustmentReason = ""
+	st.AdjustmentConfidence = 0
+	st.AdjustmentScope = schedulePlanAdjustmentScopeLarge
 
 	emitStage("schedule_plan.plan.analyzing", "正在分析你的排程需求。")
 
@@ -80,11 +88,13 @@ func runPlanNode(
 	// 2.2 探测失败不影响主链路，只是少一个 prompt hint。
 	if st.HasPreviousPreview && len(st.PreviousHybridEntries) > 0 {
 		st.IsAdjustment = true
+		st.AdjustmentScope = schedulePlanAdjustmentScopeMedium
 	}
 	previousPlan := extractPreviousPlanFromHistory(chatHistory)
 	if previousPlan != "" {
 		st.PreviousPlanJSON = previousPlan
 		st.IsAdjustment = true
+		st.AdjustmentScope = schedulePlanAdjustmentScopeMedium
 	}
 
 	// 3. 组装模型提示词。
@@ -135,6 +145,25 @@ func runPlanNode(
 	if strings.EqualFold(strings.TrimSpace(parsed.Strategy), "rapid") {
 		st.Strategy = "rapid"
 	}
+	st.RestartRequested = parsed.Restart
+	st.AdjustmentScope = normalizeAdjustmentScope(parsed.AdjustmentScope)
+	st.AdjustmentReason = strings.TrimSpace(parsed.Reason)
+	st.AdjustmentConfidence = clampAdjustmentConfidence(parsed.Confidence)
+
+	// 5.1 分级语义兜底：
+	// 5.1.1 非微调请求不走 small/medium，强制按 large 进入完整排程；
+	// 5.1.2 微调请求默认至少走 medium，避免 scope 缺失时误判；
+	// 5.1.3 restart=true 时强制重排并清空历史快照承接。
+	if !st.IsAdjustment {
+		st.AdjustmentScope = schedulePlanAdjustmentScopeLarge
+	} else if st.AdjustmentScope == "" {
+		st.AdjustmentScope = schedulePlanAdjustmentScopeMedium
+	}
+	if st.RestartRequested {
+		st.IsAdjustment = false
+		st.AdjustmentScope = schedulePlanAdjustmentScopeLarge
+		st.clearPreviousPreviewContext()
+	}
 
 	// 6. 合并任务类 ID（新字段 + 旧字段双兼容）。
 	// 6.1 先拼接已有值与模型输出；
@@ -172,7 +201,13 @@ func runPlanNode(
 
 	emitStage(
 		"schedule_plan.plan.done",
-		fmt.Sprintf("已识别排程意图，任务类数量=%d。", len(st.TaskClassIDs)),
+		fmt.Sprintf(
+			"已识别排程意图，任务类数量=%d，微调=%t，力度=%s，重排=%t。",
+			len(st.TaskClassIDs),
+			st.IsAdjustment,
+			st.AdjustmentScope,
+			st.RestartRequested,
+		),
 	)
 	return st, nil
 }
@@ -234,12 +269,16 @@ func runRoughBuildNode(
 	// 2.2 失败兜底：若快照不完整（例如 AllocatedItems 为空），会构造最小占位任务块，保持下游校验可运行；
 	// 2.3 回退策略：若没有可复用快照，再走全量粗排构建路径。
 	canReusePreviousPlan := st.IsAdjustment &&
+		!st.RestartRequested &&
 		len(st.PreviousHybridEntries) > 0 &&
 		sameTaskClassSet(taskClassIDs, st.PreviousTaskClassIDs)
 	if canReusePreviousPlan {
 		emitStage("schedule_plan.rough_build.reuse_previous", "检测到连续对话微调，复用上一版排程作为优化起点。")
 		st.HybridEntries = deepCopyEntries(st.PreviousHybridEntries)
-		st.CandidatePlans = hybridEntriesToWeekSchedules(st.HybridEntries)
+		st.CandidatePlans = deepCopyWeekSchedules(st.PreviousCandidatePlans)
+		if len(st.CandidatePlans) == 0 {
+			st.CandidatePlans = hybridEntriesToWeekSchedules(st.HybridEntries)
+		}
 		st.AllocatedItems = deepCopyTaskClassItems(st.PreviousAllocatedItems)
 		if len(st.AllocatedItems) == 0 {
 			st.AllocatedItems = buildAllocatedItemsFromHybridEntries(st.HybridEntries)
@@ -599,6 +638,51 @@ func normalizeTaskClassIDs(ids []int) []int {
 		out = append(out, id)
 	}
 	return out
+}
+
+// clearPreviousPreviewContext 清空会话承接快照字段。
+//
+// 触发场景：
+// 1. 用户明确要求 restart（重新排）；
+// 2. 需要强制断开“沿用历史方案”的路径，避免脏状态渗透到新方案。
+func (st *SchedulePlanState) clearPreviousPreviewContext() {
+	if st == nil {
+		return
+	}
+	st.HasPreviousPreview = false
+	st.PreviousTaskClassIDs = nil
+	st.PreviousHybridEntries = nil
+	st.PreviousAllocatedItems = nil
+	st.PreviousCandidatePlans = nil
+	st.PreviousPlanJSON = ""
+}
+
+// clampAdjustmentConfidence 约束置信度字段到 [0,1]。
+func clampAdjustmentConfidence(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
+// deepCopyWeekSchedules 深拷贝周视图方案切片，避免跨节点共享引用。
+func deepCopyWeekSchedules(src []model.UserWeekSchedule) []model.UserWeekSchedule {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make([]model.UserWeekSchedule, 0, len(src))
+	for _, week := range src {
+		eventsCopy := make([]model.WeeklyEventBrief, len(week.Events))
+		copy(eventsCopy, week.Events)
+		dst = append(dst, model.UserWeekSchedule{
+			Week:   week.Week,
+			Events: eventsCopy,
+		})
+	}
+	return dst
 }
 
 // sameTaskClassSet 判断两组 task_class_ids 是否表示同一集合（忽略顺序，忽略重复）。

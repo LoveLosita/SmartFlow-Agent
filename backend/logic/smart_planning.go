@@ -113,9 +113,6 @@ func (g *grid) FindNextAvailable(currW, currD, currS int) (int, int, int) {
 				if w == currW && d == currD && s < currS {
 					continue
 				}
-				if w == g.endWeek && d == g.endDay {
-					break
-				} // 🚀 守住结束节
 
 				if dayData[s].Status == Free || dayData[s].Status == Filler {
 					return w, d, s
@@ -439,13 +436,31 @@ type slotCoord struct {
 	w, d, s int
 }
 
-// getAllAvailable 获取窗口内所有可用的原子节次坐标（逻辑一维化）
+// planningSlotCandidate 表示一次“可落位任务块”的候选结果。
+//
+// 职责边界：
+// 1. 负责把“游标位置”映射成真正可落地的周/天/节次区间；
+// 2. 不负责写入 grid，占位仍由 computeAllocation 统一执行；
+// 3. 通过 coordIndex 告诉上层“本次是从哪个逻辑切片位置开始命中的”，便于继续推进游标。
+type planningSlotCandidate struct {
+	coordIndex  int
+	week        int
+	dayOfWeek   int
+	sectionFrom int
+	sectionTo   int
+}
+
+// getAllAvailable 获取窗口内所有可用的原子节次坐标（逻辑一维化）。
+//
+// 设计说明：
+// 1. 这里返回的是“快照坐标”，后续任务落位后，快照中的部分坐标可能失效；
+// 2. 因此 computeAllocation 在真正落位前会再次检查 grid 当前状态，避免覆盖占位。
 func (g *grid) getAllAvailable() []slotCoord {
 	var coords []slotCoord
 	for w := g.startWeek; w <= g.endWeek; w++ {
 		dayMap, hasData := g.data[w]
 		for d := 1; d <= 7; d++ {
-			// 边界裁剪逻辑
+			// 1. 头尾边界裁剪：只遍历任务类有效日期窗口。
 			if w == g.startWeek && d < g.startDay {
 				continue
 			}
@@ -458,10 +473,10 @@ func (g *grid) getAllAvailable() []slotCoord {
 				dayData = dayMap[d]
 			}
 
+			// 2. 仅记录可用格子（Free/Filler）。
 			for s := 1; s <= 12; s++ {
-				// 顺着你的逻辑，不限开始节次，但需注意状态判定
 				if dayData[s].Status == Free || dayData[s].Status == Filler {
-					coords = append(coords, slotCoord{w, d, s})
+					coords = append(coords, slotCoord{w: w, d: d, s: s})
 				}
 			}
 		}
@@ -469,28 +484,137 @@ func (g *grid) getAllAvailable() []slotCoord {
 	return coords
 }
 
+// findNextCandidateFromCursor 从当前 cursor 起向后寻找“可真正落位”的候选块。
+//
+// 职责边界：
+// 1. 负责“挑选起点”：从逻辑切片 coords 中向后扫描，直到命中可放置位置；
+// 2. 不负责“真正占位”：这里只做判断，不修改 grid 状态；
+// 3. 输入输出语义：
+//   - startCursor：当前逻辑游标（已包含 steady 策略的间隔效果）；
+//   - found=false：表示从该游标到窗口末尾都无法再放置任务块。
+//
+// 关键约束：
+// 1. 普通空位（Free）必须满足“连续 2 节都可用”才允许落位；
+// 2. 可嵌入课程（Filler）沿用“整块嵌入”语义：命中课程任意节次，都回溯到课程块起点并整块占用；
+// 3. 若某个坐标在前序迭代中已占用（coords 为快照可能过期），直接跳过继续扫描。
+func (g *grid) findNextCandidateFromCursor(coords []slotCoord, startCursor int) (candidate planningSlotCandidate, found bool) {
+	for idx := startCursor; idx < len(coords); idx++ {
+		loc := coords[idx]
+		node := g.getNode(loc.w, loc.d, loc.s)
+
+		// 1. 快照过期校验：
+		// 1.1 前序任务落位后，该坐标可能已变成 Occupied；
+		// 1.2 若不二次校验，会出现覆盖已占位节次的风险。
+		if node.Status != Free && node.Status != Filler {
+			continue
+		}
+
+		// 2. Filler 处理：
+		// 2.1 先识别课程块边界；
+		// 2.2 再在课程块内部寻找“奇数起点的双节对齐位”（1-2/3-4/...）；
+		// 2.3 找不到合法双节位则跳过该课程块，不允许退化成单节或偶数起点跨对齐块。
+		if node.Status == Filler {
+			blockFrom := loc.s
+			currID := node.EventID
+
+			// 2.1 向左回溯到同一 EventID 的起点。
+			for checkS := loc.s - 1; checkS >= 1; checkS-- {
+				prev := g.getNode(loc.w, loc.d, checkS)
+				if prev.Status == Filler && prev.EventID == currID {
+					blockFrom = checkS
+					continue
+				}
+				break
+			}
+
+			// 2.2 向右扩展到同一 EventID 的终点。
+			blockTo := blockFrom
+			for checkS := blockFrom + 1; checkS <= 12; checkS++ {
+				next := g.getNode(loc.w, loc.d, checkS)
+				if next.Status == Filler && next.EventID == currID {
+					blockTo = checkS
+					continue
+				}
+				break
+			}
+
+			// 2.3 在课程块中按“双节对齐位”查找合法起点（必须为奇数节）。
+			pairFrom := blockFrom
+			if pairFrom%2 == 0 {
+				pairFrom++
+			}
+			for ; pairFrom+1 <= blockTo; pairFrom += 2 {
+				// 虽然理论上 Filler 都可用，这里仍做显式校验，防止后续规则扩展导致误判。
+				if g.isAvailable(loc.w, loc.d, pairFrom) && g.isAvailable(loc.w, loc.d, pairFrom+1) {
+					return planningSlotCandidate{
+						coordIndex:  idx,
+						week:        loc.w,
+						dayOfWeek:   loc.d,
+						sectionFrom: pairFrom,
+						sectionTo:   pairFrom + 1,
+					}, true
+				}
+			}
+			continue
+		}
+
+		// 3. Free 处理：必须严格满足“奇数起点双节对齐位”。
+		// 3.1 起点必须是奇数节（1/3/5/7/9/11）；
+		// 3.2 且后一节可用；不允许偶数起点（如 8-9）跨对齐块。
+		if loc.s%2 == 0 {
+			continue
+		}
+		if loc.s >= 12 || !g.isAvailable(loc.w, loc.d, loc.s+1) {
+			continue
+		}
+
+		return planningSlotCandidate{
+			coordIndex:  idx,
+			week:        loc.w,
+			dayOfWeek:   loc.d,
+			sectionFrom: loc.s,
+			sectionTo:   loc.s + 1,
+		}, true
+	}
+
+	return planningSlotCandidate{}, false
+}
+
+// computeAllocation 根据当前时间格与策略，为每个任务块计算建议落位时间。
+//
+// 职责边界：
+// 1. 负责“粗排落位”与“内存占位状态更新”；
+// 2. 不负责持久化写库（由 service/dao 层负责）；
+// 3. 不负责最终展示结构转换（由 conv 层负责）。
+//
+// 失败语义：
+// 1. 返回 TimeNotEnoughForAutoScheduling 表示“时间片总量或连续性不足”；
+// 2. 返回 nil error 表示所有 items 都已成功回填 EmbeddedTime。
 func computeAllocation(g *grid, items []model.TaskClassItem, strategy string) ([]model.TaskClassItem, error) {
 	if len(items) == 0 {
 		return items, nil
 	}
 
-	// 1. 预处理：提取所有可用坑位
+	// 1. 预处理可用坐标快照，并做容量下限校验（每个任务默认至少 2 节）。
 	coords := g.getAllAvailable()
 	totalAvailable := len(coords)
-	totalRequired := len(items) * 2 // 基础需求：每个任务 2 节
-
+	totalRequired := len(items) * 2
 	if totalAvailable < totalRequired {
 		return nil, respond.TimeNotEnoughForAutoScheduling
 	}
 
-	// 2. 计算精准步长
+	// 2. 计算间隔策略：
+	// 2.1 rapid：gap=0，尽快塞满；
+	// 2.2 steady：按剩余可用位均匀留白。
 	gap := 0
 	if strategy == "steady" {
 		gap = (totalAvailable - totalRequired) / (len(items) + 1)
 	}
 
-	// 3. 线性映射分配
-	// cursor 是我们在逻辑切片中的“指针”
+	// 3. 线性分配主循环：
+	// 3.1 cursor 是逻辑切片游标（不是物理节次指针）；
+	// 3.2 每次成功落位后，按“命中索引 + 占用长度 + gap”推进；
+	// 3.3 若当前位置不满足约束（例如后继节被占），继续向后扫描，不降级为 1 节。
 	cursor := gap
 	lastPlacedIndex := -1
 
@@ -499,64 +623,38 @@ func computeAllocation(g *grid, items []model.TaskClassItem, strategy string) ([
 			break
 		}
 
-		// 获取当前逻辑位置对应的物理坐标
-		startLoc := coords[cursor]
-		w, d, s := startLoc.w, startLoc.d, startLoc.s
-
-		// 4. 计算本次任务块的落点区间。
-		// 4.1 默认按 2 节处理（普通空闲位优先遵循“每任务2节”的主策略）；
-		// 4.2 命中 Filler（可嵌入课程）时，必须先回溯到同课程块起点，再计算完整连续跨度；
-		// 4.3 失败兜底：若普通空闲位后继不可用，只能退化为 1 节，避免越界或覆盖占用位。
-		node := g.getNode(w, d, s)
-		sectionFrom := s
-		slotLen := 2
-		if node.Status == Filler {
-			// 4.2.1 先向左回溯到“同一课程块”的起点。
-			// 目的：修复“指针落在课程中间节次时被错误切成 1 节”的问题。
-			// 例如课程占 9-10 节，若 cursor 命中 10 节，必须回溯到 9 节再整体计算。
-			currID := node.EventID
-			for checkS := s - 1; checkS >= 1; checkS-- {
-				prev := g.getNode(w, d, checkS)
-				if prev.Status == Filler && prev.EventID == currID {
-					sectionFrom = checkS
-					continue
-				}
-				break
-			}
-
-			// 4.2.2 再从起点向右扩展，拿到同一课程块的完整连续节次长度。
-			sectionTo := sectionFrom
-			for checkS := sectionFrom + 1; checkS <= 12; checkS++ {
-				if next := g.getNode(w, d, checkS); next.Status == Filler && next.EventID == currID {
-					sectionTo = checkS
-				} else {
-					break
-				}
-			}
-			slotLen = sectionTo - sectionFrom + 1
-		} else if s == 12 || !g.isAvailable(w, d, s+1) {
-			// 如果是 Free 区域，但下一节不可用，则被迫设为 1 节
-			slotLen = 1
+		// 4. 先找候选，不立即写入：
+		// 4.1 找不到候选时提前结束；
+		// 4.2 最终统一通过 lastPlacedIndex 判断是否完整排完。
+		candidate, found := g.findNextCandidateFromCursor(coords, cursor)
+		if !found {
+			break
 		}
 
-		// 回填时间
-		endS := sectionFrom + slotLen - 1
+		// 5. 回填任务块建议时间。
 		items[i].EmbeddedTime = &model.TargetTime{
-			SectionFrom: sectionFrom, SectionTo: endS,
-			Week: w, DayOfWeek: d,
+			SectionFrom: candidate.sectionFrom,
+			SectionTo:   candidate.sectionTo,
+			Week:        candidate.week,
+			DayOfWeek:   candidate.dayOfWeek,
 		}
 
-		// 标记占用 (物理网格)
-		for sec := sectionFrom; sec <= endS; sec++ {
-			g.setNode(w, d, sec, slotNode{Status: Occupied})
+		// 6. 写入内存占位状态：
+		// 6.1 这是后续候选判断的真实依据；
+		// 6.2 失败兜底：纯内存操作无外部 IO，不存在部分提交问题。
+		for sec := candidate.sectionFrom; sec <= candidate.sectionTo; sec++ {
+			g.setNode(candidate.week, candidate.dayOfWeek, sec, slotNode{Status: Occupied})
 		}
 
-		// 🚀 核心进步：逻辑跳跃
-		// 既然任务占用了 slotLen 节，我们在逻辑切片中也向后推 slotLen 个位置，再加 gap
-		cursor += slotLen + gap
+		// 7. 推进游标并记录成功位置。
+		slotLen := candidate.sectionTo - candidate.sectionFrom + 1
+		cursor = candidate.coordIndex + slotLen + gap
 		lastPlacedIndex = i
 	}
 
+	// 8. 完整性校验：
+	// 8.1 只要有任一任务未落位，就返回统一的“时间不足”错误；
+	// 8.2 避免出现“部分任务有时间、部分任务为空”的半成品结果。
 	if lastPlacedIndex < len(items)-1 {
 		return nil, respond.TimeNotEnoughForAutoScheduling
 	}

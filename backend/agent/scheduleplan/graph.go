@@ -18,6 +18,8 @@ const (
 	schedulePlanGraphNodeExit = "schedule_plan_exit"
 	// 图节点：按天拆分并注入上下文标签
 	schedulePlanGraphNodeDailySplit = "schedule_plan_daily_split"
+	// 图节点：小改动快速微调（用于 small scope）
+	schedulePlanGraphNodeQuickRefine = "schedule_plan_quick_refine"
 	// 图节点：并发日内优化
 	schedulePlanGraphNodeDailyRefine = "schedule_plan_daily_refine"
 	// 图节点：合并日内优化结果
@@ -120,6 +122,9 @@ func RunSchedulePlanGraph(ctx context.Context, input SchedulePlanGraphRunInput) 
 	if err := graph.AddLambdaNode(schedulePlanGraphNodeDailySplit, compose.InvokableLambda(runner.dailySplitNode)); err != nil {
 		return nil, err
 	}
+	if err := graph.AddLambdaNode(schedulePlanGraphNodeQuickRefine, compose.InvokableLambda(runner.quickRefineNode)); err != nil {
+		return nil, err
+	}
 	if err := graph.AddLambdaNode(schedulePlanGraphNodeDailyRefine, compose.InvokableLambda(runner.dailyRefineNode)); err != nil {
 		return nil, err
 	}
@@ -157,6 +162,7 @@ func RunSchedulePlanGraph(ctx context.Context, input SchedulePlanGraphRunInput) 
 		runner.nextAfterRoughBuild,
 		map[string]bool{
 			schedulePlanGraphNodeDailySplit:   true,
+			schedulePlanGraphNodeQuickRefine:  true,
 			schedulePlanGraphNodeWeeklyRefine: true,
 			schedulePlanGraphNodeExit:         true,
 		},
@@ -164,7 +170,10 @@ func RunSchedulePlanGraph(ctx context.Context, input SchedulePlanGraphRunInput) 
 		return nil, err
 	}
 
-	// 7. 固定边：dailySplit -> dailyRefine -> merge -> weeklyRefine -> finalCheck -> returnPreview -> END
+	// 7. 固定边：quickRefine -> weeklyRefine；dailySplit -> dailyRefine -> merge -> weeklyRefine -> finalCheck -> returnPreview -> END
+	if err := graph.AddEdge(schedulePlanGraphNodeQuickRefine, schedulePlanGraphNodeWeeklyRefine); err != nil {
+		return nil, err
+	}
 	if err := graph.AddEdge(schedulePlanGraphNodeDailySplit, schedulePlanGraphNodeDailyRefine); err != nil {
 		return nil, err
 	}
