@@ -393,7 +393,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 		}
 
 		// 3.6 schedule_plan：执行智能排程 graph。
-		if routing.Action == route.ActionSchedulePlan {
+		if routing.Action == route.ActionSchedulePlanCreate {
 			reply, planErr := s.runSchedulePlanFlow(requestCtx, selectedModel, userMessage, userID, chatID, traceID, extra, progress.Emit, outChan, resolvedModelName)
 			if planErr != nil {
 				log.Printf("智能排程 graph 执行失败，回退普通聊天 trace_id=%s chat_id=%s err=%v", traceID, chatID, planErr)
@@ -412,7 +412,26 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 			return
 		}
 
-		// 3.7 未知 action 兜底：走普通聊天，保证可用性。
+		// 3.7 schedule_plan_refine：执行“连续微调排程”graph。
+		if routing.Action == route.ActionSchedulePlanRefine {
+			reply, refineErr := s.runScheduleRefineFlow(requestCtx, selectedModel, userMessage, userID, chatID, traceID, progress.Emit, outChan, resolvedModelName)
+			if refineErr != nil {
+				// 连续微调失败不再回落普通聊天，直接上报错误。
+				pushErrNonBlocking(errChan, refineErr)
+				return
+			}
+
+			if emitErr := emitSingleAssistantCompletion(outChan, resolvedModelName, reply); emitErr != nil {
+				pushErrNonBlocking(errChan, emitErr)
+				return
+			}
+			requestTotalTokens := snapshotRequestTokenMeter(requestCtx).TotalTokens
+			s.persistChatAfterReply(requestCtx, userID, chatID, userMessage, reply, 0, requestTotalTokens, errChan)
+			s.ensureConversationTitleAsync(userID, chatID)
+			return
+		}
+
+		// 3.8 未知 action 兜底：走普通聊天，保证可用性。
 		s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
 	}()
 

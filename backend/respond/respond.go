@@ -338,4 +338,9 @@ var ( //请求相关的响应
 		Status: "50001",
 		Info:   "route control failed",
 	}
+
+	ScheduleRefineOutputParseFailed = Response{ //智能微调输出二次解析失败
+		Status: "50002",
+		Info:   "schedule refine output parse failed",
+	}
 )
