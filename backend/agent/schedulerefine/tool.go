@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/LoveLosita/smartflow/backend/logic"
 	"github.com/LoveLosita/smartflow/backend/model"
 )
 
@@ -29,16 +30,13 @@ type reactToolResult struct {
 // 字段语义：
 // 1. goal_check：本轮要先验证的目标点；
 // 2. decision：本轮动作选择依据；
-// 3. missing_info：模型明确缺失的信息，前端可直接展示；
-// 4. reflect：本轮动作前的预期说明（不是执行后事实）；
-// 5. tool_calls：本轮工具动作列表（业务侧只取第一条）。
+// 3. tool_calls：本轮工具动作列表（业务侧只取第一条）。
 type reactLLMOutput struct {
 	Done        bool            `json:"done"`
 	Summary     string          `json:"summary"`
 	GoalCheck   string          `json:"goal_check"`
 	Decision    string          `json:"decision"`
-	MissingInfo []string        `json:"missing_info"`
-	Reflect     string          `json:"reflect"`
+	MissingInfo []string        `json:"missing_info,omitempty"`
 	ToolCalls   []reactToolCall `json:"tool_calls"`
 }
 
@@ -92,13 +90,17 @@ func dispatchRefineTool(entries []model.HybridScheduleEntry, call reactToolCall,
 		return refineToolSwap(entries, call.Params, window, policy)
 	case "BatchMove":
 		return refineToolBatchMove(entries, call.Params, window, policy)
+	case "SpreadEven":
+		return refineToolSpreadEven(entries, call.Params, window, policy)
+	case "MinContextSwitch":
+		return refineToolMinContextSwitch(entries, call.Params, window, policy)
 	case "Verify":
-		return refineToolVerify(entries, policy)
+		return refineToolVerify(entries, call.Params, policy)
 	default:
 		return entries, reactToolResult{
 			Tool:    strings.TrimSpace(call.Tool),
 			Success: false,
-			Result:  fmt.Sprintf("不支持的工具：%s（仅允许 QueryTargetTasks/QueryAvailableSlots/Move/Swap/BatchMove/Verify）", strings.TrimSpace(call.Tool)),
+			Result:  fmt.Sprintf("不支持的工具：%s（仅允许 QueryTargetTasks/QueryAvailableSlots/Move/Swap/BatchMove/SpreadEven/MinContextSwitch/Verify）", strings.TrimSpace(call.Tool)),
 		}
 	}
 }
@@ -138,9 +140,6 @@ func parseReactLLMOutput(raw string) (*reactLLMOutput, error) {
 
 	var out reactLLMOutput
 	if err := json.Unmarshal([]byte(clean), &out); err == nil {
-		if out.MissingInfo == nil {
-			out.MissingInfo = make([]string, 0)
-		}
 		return &out, nil
 	}
 	obj, objErr := extractFirstJSONObject(clean)
@@ -149,9 +148,6 @@ func parseReactLLMOutput(raw string) (*reactLLMOutput, error) {
 	}
 	if err := json.Unmarshal([]byte(obj), &out); err != nil {
 		return nil, err
-	}
-	if out.MissingInfo == nil {
-		out.MissingInfo = make([]string, 0)
 	}
 	return &out, nil
 }
@@ -204,10 +200,10 @@ func refineToolMove(entries []model.HybridScheduleEntry, params map[string]any, 
 	// 1.1 优先读取标准键（to_week/to_day/...）；
 	// 1.2 若模型输出了历史别名（target_xxx/day_of_week 等），也兼容解析；
 	// 1.3 目标是减少“仅参数名不一致导致的无效失败轮次”。
-	toWeek, okWeek := paramIntAny(params, "to_week", "target_week", "week")
-	toDay, okDay := paramIntAny(params, "to_day", "target_day", "target_day_of_week", "day_of_week", "day")
-	toSF, okSF := paramIntAny(params, "to_section_from", "target_section_from", "section_from")
-	toST, okST := paramIntAny(params, "to_section_to", "target_section_to", "section_to")
+	toWeek, okWeek := paramIntAny(params, "to_week", "target_week", "new_week", "week")
+	toDay, okDay := paramIntAny(params, "to_day", "target_day", "new_day", "target_day_of_week", "day_of_week", "day")
+	toSF, okSF := paramIntAny(params, "to_section_from", "target_section_from", "new_section_from", "section_from")
+	toST, okST := paramIntAny(params, "to_section_to", "target_section_to", "new_section_to", "section_to")
 	if !okWeek || !okDay || !okSF || !okST {
 		return entries, reactToolResult{
 			Tool:    "Move",
@@ -221,10 +217,11 @@ func refineToolMove(entries []model.HybridScheduleEntry, params map[string]any, 
 	if toSF < 1 || toST > 12 || toSF > toST {
 		return entries, reactToolResult{Tool: "Move", Success: false, Result: fmt.Sprintf("节次区间 %d-%d 非法", toSF, toST)}
 	}
+	allowEmbed := paramBoolAnyWithDefault(params, true, "allow_embed", "allow_embedding")
 
-	idx := findSuggestedByID(entries, taskID)
-	if idx < 0 {
-		return entries, reactToolResult{Tool: "Move", Success: false, Result: fmt.Sprintf("未找到 task_item_id=%d 的 suggested 任务", taskID)}
+	idx, locateErr := findUniqueSuggestedByID(entries, taskID)
+	if locateErr != nil {
+		return entries, reactToolResult{Tool: "Move", Success: false, Result: locateErr.Error()}
 	}
 	origSpan := entries[idx].SectionTo - entries[idx].SectionFrom
 	newSpan := toST - toSF
@@ -244,7 +241,7 @@ func refineToolMove(entries []model.HybridScheduleEntry, params map[string]any, 
 		}
 	}
 
-	if conflict, name := hasConflict(entries, toWeek, toDay, toSF, toST, map[int]bool{idx: true}); conflict {
+	if conflict, name := hasConflict(entries, toWeek, toDay, toSF, toST, map[int]bool{idx: true}, allowEmbed); conflict {
 		return entries, reactToolResult{
 			Tool:    "Move",
 			Success: false,
@@ -273,7 +270,7 @@ func refineToolMove(entries []model.HybridScheduleEntry, params map[string]any, 
 	return entries, reactToolResult{
 		Tool:    "Move",
 		Success: true,
-		Result:  fmt.Sprintf("已将任务[%s](id=%d) 从 %s 移动到 %s", entry.Name, taskID, before, after),
+		Result:  fmt.Sprintf("已将任务[%s](id=%d,type=%s,status=%s) 从 %s 移动到 %s", entry.Name, taskID, strings.TrimSpace(entry.Type), strings.TrimSpace(entry.Status), before, after),
 	}
 }
 
@@ -293,14 +290,18 @@ func refineToolSwap(entries []model.HybridScheduleEntry, params map[string]any, 
 	if !okA || !okB {
 		return entries, reactToolResult{Tool: "Swap", Success: false, Result: "参数缺失：task_a/task_b"}
 	}
+	allowEmbed := paramBoolAnyWithDefault(params, true, "allow_embed", "allow_embedding")
 	if idA == idB {
 		return entries, reactToolResult{Tool: "Swap", Success: false, Result: "task_a 与 task_b 不能相同"}
 	}
 
-	idxA := findSuggestedByID(entries, idA)
-	idxB := findSuggestedByID(entries, idB)
-	if idxA < 0 || idxB < 0 {
-		return entries, reactToolResult{Tool: "Swap", Success: false, Result: "至少有一个任务不是可交换的 suggested 条目"}
+	idxA, errA := findUniqueSuggestedByID(entries, idA)
+	if errA != nil {
+		return entries, reactToolResult{Tool: "Swap", Success: false, Result: errA.Error()}
+	}
+	idxB, errB := findUniqueSuggestedByID(entries, idB)
+	if errB != nil {
+		return entries, reactToolResult{Tool: "Swap", Success: false, Result: errB.Error()}
 	}
 
 	a := entries[idxA]
@@ -310,10 +311,10 @@ func refineToolSwap(entries []model.HybridScheduleEntry, params map[string]any, 
 	}
 
 	excludes := map[int]bool{idxA: true, idxB: true}
-	if conflict, name := hasConflict(entries, b.Week, b.DayOfWeek, b.SectionFrom, b.SectionTo, excludes); conflict {
+	if conflict, name := hasConflict(entries, b.Week, b.DayOfWeek, b.SectionFrom, b.SectionTo, excludes, allowEmbed); conflict {
 		return entries, reactToolResult{Tool: "Swap", Success: false, Result: fmt.Sprintf("任务A交换后将与 %s 冲突", name)}
 	}
-	if conflict, name := hasConflict(entries, a.Week, a.DayOfWeek, a.SectionFrom, a.SectionTo, excludes); conflict {
+	if conflict, name := hasConflict(entries, a.Week, a.DayOfWeek, a.SectionFrom, a.SectionTo, excludes, allowEmbed); conflict {
 		return entries, reactToolResult{Tool: "Swap", Success: false, Result: fmt.Sprintf("任务B交换后将与 %s 冲突", name)}
 	}
 
@@ -356,6 +357,19 @@ func refineToolBatchMove(entries []model.HybridScheduleEntry, params map[string]
 			Result:    parseErr.Error(),
 		}
 	}
+	// 2. 批级 allow_embed 默认值：
+	// 2.1 如果子动作未显式声明 allow_embed/allow_embedding，则继承批级开关；
+	// 2.2 默认 true，和 Move/Swap 一致：允许嵌入，但由 QueryAvailableSlots 先给纯空位。
+	batchAllowEmbed := paramBoolAnyWithDefault(params, true, "allow_embed", "allow_embedding")
+	for i := range moveParamsList {
+		if _, ok := moveParamsList[i]["allow_embed"]; ok {
+			continue
+		}
+		if _, ok := moveParamsList[i]["allow_embedding"]; ok {
+			continue
+		}
+		moveParamsList[i]["allow_embed"] = batchAllowEmbed
+	}
 
 	// 1. 在副本上执行，保证原子性：
 	// 1.1 每一步都复用 refineToolMove 的全部校验逻辑（冲突、窗口、顺序、跨度）；
@@ -389,6 +403,304 @@ func refineToolBatchMove(entries []model.HybridScheduleEntry, params map[string]
 	}
 }
 
+type compositePlannerFn func(
+	tasks []logic.RefineTaskCandidate,
+	slots []logic.RefineSlotCandidate,
+	options logic.RefineCompositePlanOptions,
+) ([]logic.RefineMovePlanItem, error)
+
+// refineToolSpreadEven 执行“均匀铺开”复合动作。
+//
+// 职责边界：
+// 1. 负责参数解析、候选收集、调用确定性规划器；
+// 2. 不直接改写 entries，统一通过 BatchMove 原子落地；
+// 3. 规划算法实现位于 logic 包，工具层只负责编排。
+func refineToolSpreadEven(entries []model.HybridScheduleEntry, params map[string]any, window planningWindow, policy refineToolPolicy) ([]model.HybridScheduleEntry, reactToolResult) {
+	return refineToolCompositeMove(entries, params, window, policy, "SpreadEven", logic.PlanEvenSpreadMoves)
+}
+
+// refineToolMinContextSwitch 执行“最少上下文切换”复合动作。
+//
+// 职责边界：
+// 1. 负责参数解析、候选收集、调用确定性规划器；
+// 2. 不直接改写 entries，统一通过 BatchMove 原子落地；
+// 3. 规划算法实现位于 logic 包，工具层只负责编排。
+func refineToolMinContextSwitch(entries []model.HybridScheduleEntry, params map[string]any, window planningWindow, policy refineToolPolicy) ([]model.HybridScheduleEntry, reactToolResult) {
+	return refineToolCompositeMove(entries, params, window, policy, "MinContextSwitch", logic.PlanMinContextSwitchMoves)
+}
+
+// refineToolCompositeMove 是复合动作工具的统一执行框架。
+//
+// 步骤化说明：
+// 1. 先解析“目标任务集合”，确保任务来源明确且可唯一落到 task_item_id；
+// 2. 再按任务跨度查询候选坑位，避免跨度不一致导致执行期失败；
+// 3. 调用 logic 包的确定性规划函数，得到 moves；
+// 4. 最后复用 BatchMove 原子提交，任一步失败整批回滚。
+func refineToolCompositeMove(
+	entries []model.HybridScheduleEntry,
+	params map[string]any,
+	window planningWindow,
+	policy refineToolPolicy,
+	toolName string,
+	planner compositePlannerFn,
+) ([]model.HybridScheduleEntry, reactToolResult) {
+	taskIDs := collectCompositeTaskIDs(params)
+	if len(taskIDs) == 0 {
+		return entries, reactToolResult{
+			Tool:      toolName,
+			Success:   false,
+			ErrorCode: "PARAM_MISSING",
+			Result:    "参数缺失：复合工具需要 task_item_ids 或 task_item_id",
+		}
+	}
+	idSet := intSliceToIDSet(taskIDs)
+
+	// 1. 先筛选任务候选，并校验 task_item_id 是否全部可定位。
+	// 2. 只允许可移动 suggested 任务参与，避免误改 existing/course 条目。
+	tasks := make([]logic.RefineTaskCandidate, 0, len(taskIDs))
+	found := make(map[int]struct{}, len(taskIDs))
+	spanNeed := make(map[int]int)
+	for _, entry := range entries {
+		if !isMovableSuggestedTask(entry) {
+			continue
+		}
+		if _, ok := idSet[entry.TaskItemID]; !ok {
+			continue
+		}
+		if _, duplicated := found[entry.TaskItemID]; duplicated {
+			return entries, reactToolResult{
+				Tool:      toolName,
+				Success:   false,
+				ErrorCode: "TASK_ID_AMBIGUOUS",
+				Result:    fmt.Sprintf("task_item_id=%d 命中多条可移动 suggested 任务，无法唯一定位", entry.TaskItemID),
+			}
+		}
+		found[entry.TaskItemID] = struct{}{}
+		task := logic.RefineTaskCandidate{
+			TaskItemID:  entry.TaskItemID,
+			Week:        entry.Week,
+			DayOfWeek:   entry.DayOfWeek,
+			SectionFrom: entry.SectionFrom,
+			SectionTo:   entry.SectionTo,
+			Name:        strings.TrimSpace(entry.Name),
+			ContextTag:  strings.TrimSpace(entry.ContextTag),
+			OriginRank:  policy.OriginOrderMap[entry.TaskItemID],
+		}
+		tasks = append(tasks, task)
+		spanNeed[entry.SectionTo-entry.SectionFrom+1]++
+	}
+	if len(tasks) != len(taskIDs) {
+		missing := make([]int, 0, len(taskIDs))
+		for _, id := range taskIDs {
+			if _, ok := found[id]; !ok {
+				missing = append(missing, id)
+			}
+		}
+		return entries, reactToolResult{
+			Tool:      toolName,
+			Success:   false,
+			ErrorCode: "TASK_NOT_FOUND",
+			Result:    fmt.Sprintf("未找到以下 task_item_id 的可移动 suggested 任务：%v", missing),
+		}
+	}
+
+	slots, slotErr := collectCompositeSlotsBySpan(entries, params, window, spanNeed)
+	if slotErr != nil {
+		return entries, reactToolResult{
+			Tool:      toolName,
+			Success:   false,
+			ErrorCode: "SLOT_QUERY_FAILED",
+			Result:    slotErr.Error(),
+		}
+	}
+	options := logic.RefineCompositePlanOptions{
+		ExistingDayLoad: buildCompositeDayLoadBaseline(entries, idSet, slots),
+	}
+	plannedMoves, planErr := planner(tasks, slots, options)
+	if planErr != nil {
+		return entries, reactToolResult{
+			Tool:      toolName,
+			Success:   false,
+			ErrorCode: "PLAN_FAILED",
+			Result:    planErr.Error(),
+		}
+	}
+	if len(plannedMoves) == 0 {
+		return entries, reactToolResult{
+			Tool:      toolName,
+			Success:   false,
+			ErrorCode: "PLAN_EMPTY",
+			Result:    "规划结果为空：未生成任何可执行移动",
+		}
+	}
+
+	moveParams := make([]any, 0, len(plannedMoves))
+	for _, move := range plannedMoves {
+		moveParams = append(moveParams, map[string]any{
+			"task_item_id":    move.TaskItemID,
+			"to_week":         move.ToWeek,
+			"to_day":          move.ToDay,
+			"to_section_from": move.ToSectionFrom,
+			"to_section_to":   move.ToSectionTo,
+		})
+	}
+	batchParams := map[string]any{
+		"moves":       moveParams,
+		"allow_embed": paramBoolAnyWithDefault(params, true, "allow_embed", "allow_embedding"),
+	}
+	nextEntries, batchResult := refineToolBatchMove(entries, batchParams, window, policy)
+	if !batchResult.Success {
+		return entries, reactToolResult{
+			Tool:      toolName,
+			Success:   false,
+			ErrorCode: batchResult.ErrorCode,
+			Result:    fmt.Sprintf("%s 执行失败：%s", toolName, batchResult.Result),
+		}
+	}
+	return nextEntries, reactToolResult{
+		Tool:    toolName,
+		Success: true,
+		Result:  fmt.Sprintf("%s 执行成功：已规划并提交 %d 条移动。", toolName, len(plannedMoves)),
+	}
+}
+
+func collectCompositeTaskIDs(params map[string]any) []int {
+	ids := readIntSlice(params, "task_item_ids", "task_ids")
+	if id, ok := paramIntAny(params, "task_item_id", "task_id"); ok {
+		ids = append(ids, id)
+	}
+	return uniquePositiveInts(ids)
+}
+
+func collectCompositeSlotsBySpan(
+	entries []model.HybridScheduleEntry,
+	params map[string]any,
+	window planningWindow,
+	spanNeed map[int]int,
+) ([]logic.RefineSlotCandidate, error) {
+	if len(spanNeed) == 0 {
+		return nil, fmt.Errorf("未识别到任务跨度需求")
+	}
+
+	spans := make([]int, 0, len(spanNeed))
+	for span := range spanNeed {
+		spans = append(spans, span)
+	}
+	sort.Ints(spans)
+
+	allSlots := make([]logic.RefineSlotCandidate, 0, 16)
+	for _, span := range spans {
+		required := spanNeed[span]
+		queryParams := buildCompositeSlotQueryParams(params, span, required)
+		_, queryResult := refineToolQueryAvailableSlots(entries, queryParams, window)
+		if !queryResult.Success {
+			return nil, fmt.Errorf("查询跨度=%d 的候选坑位失败：%s", span, queryResult.Result)
+		}
+
+		var payload struct {
+			Slots []struct {
+				Week        int `json:"week"`
+				DayOfWeek   int `json:"day_of_week"`
+				SectionFrom int `json:"section_from"`
+				SectionTo   int `json:"section_to"`
+			} `json:"slots"`
+		}
+		if err := json.Unmarshal([]byte(queryResult.Result), &payload); err != nil {
+			return nil, fmt.Errorf("解析跨度=%d 的空位结果失败：%v", span, err)
+		}
+		if len(payload.Slots) < required {
+			return nil, fmt.Errorf("跨度=%d 可用坑位不足：required=%d, got=%d", span, required, len(payload.Slots))
+		}
+		for _, slot := range payload.Slots {
+			allSlots = append(allSlots, logic.RefineSlotCandidate{
+				Week:        slot.Week,
+				DayOfWeek:   slot.DayOfWeek,
+				SectionFrom: slot.SectionFrom,
+				SectionTo:   slot.SectionTo,
+			})
+		}
+	}
+	return allSlots, nil
+}
+
+func buildCompositeSlotQueryParams(params map[string]any, span int, required int) map[string]any {
+	query := make(map[string]any, 12)
+	query["span"] = span
+
+	// 1. limit 以“任务数 * 兜底系数”估算，给规划器保留可选空间；
+	// 2. 若调用方显式给了 limit，则采用更大的那个，避免被过小 limit 限死。
+	limit := required * 6
+	if limit < required {
+		limit = required
+	}
+	if customLimit, ok := paramIntAny(params, "limit"); ok && customLimit > limit {
+		limit = customLimit
+	}
+	query["limit"] = limit
+	query["allow_embed"] = paramBoolAnyWithDefault(params, true, "allow_embed", "allow_embedding")
+
+	for _, key := range []string{"week", "week_from", "week_to", "day_scope", "after_section", "before_section"} {
+		if value, ok := params[key]; ok {
+			query[key] = value
+		}
+	}
+
+	copyIntSliceParam(params, query, "week_filter", "weeks")
+	copyIntSliceParam(params, query, "day_of_week", "days", "day_filter")
+	copyIntSliceParam(params, query, "exclude_sections", "exclude_section")
+
+	// 兼容 Move 风格别名，降低模型参数名漂移导致的失败。
+	if week, ok := paramIntAny(params, "to_week", "target_week", "new_week"); ok {
+		query["week"] = week
+	}
+	if day, ok := paramIntAny(params, "to_day", "target_day", "target_day_of_week", "new_day", "day"); ok {
+		query["day_of_week"] = []int{day}
+	}
+	return query
+}
+
+func copyIntSliceParam(src map[string]any, dst map[string]any, dstKey string, srcKeys ...string) {
+	values := readIntSlice(src, srcKeys...)
+	if len(values) == 0 {
+		return
+	}
+	normalized := uniquePositiveInts(values)
+	if len(normalized) == 0 {
+		return
+	}
+	dst[dstKey] = normalized
+}
+
+func buildCompositeDayLoadBaseline(
+	entries []model.HybridScheduleEntry,
+	excludeTaskIDs map[int]struct{},
+	slots []logic.RefineSlotCandidate,
+) map[string]int {
+	if len(slots) == 0 {
+		return nil
+	}
+	targetDays := make(map[string]struct{}, len(slots))
+	for _, slot := range slots {
+		targetDays[fmt.Sprintf("%d-%d", slot.Week, slot.DayOfWeek)] = struct{}{}
+	}
+
+	load := make(map[string]int, len(targetDays))
+	for _, entry := range entries {
+		if !isMovableSuggestedTask(entry) {
+			continue
+		}
+		if _, excluded := excludeTaskIDs[entry.TaskItemID]; excluded {
+			continue
+		}
+		key := fmt.Sprintf("%d-%d", entry.Week, entry.DayOfWeek)
+		if _, inTarget := targetDays[key]; !inTarget {
+			continue
+		}
+		load[key]++
+	}
+	return load
+}
+
 // refineToolQueryTargetTasks 查询“本轮潜在目标任务集合”。
 //
 // 步骤化说明：
@@ -398,6 +710,7 @@ func refineToolBatchMove(entries []model.HybridScheduleEntry, params map[string]
 func refineToolQueryTargetTasks(entries []model.HybridScheduleEntry, params map[string]any, policy refineToolPolicy) ([]model.HybridScheduleEntry, reactToolResult) {
 	scope := normalizeDayScope(readString(params, "day_scope", "all"))
 	statusFilter := normalizeStatusFilter(readString(params, "status", "suggested"))
+	weekFilter := intSliceToWeekSet(readIntSlice(params, "week_filter", "weeks"))
 	weekFrom, hasWeekFrom := paramIntAny(params, "week_from", "from_week")
 	weekTo, hasWeekTo := paramIntAny(params, "week_to", "to_week")
 	if week, hasWeek := paramIntAny(params, "week"); hasWeek {
@@ -420,7 +733,12 @@ func refineToolQueryTargetTasks(entries []model.HybridScheduleEntry, params map[
 	if !okLimit || limit <= 0 {
 		limit = 16
 	}
-	dayFilter := intSliceToSet(readIntSlice(params, "day_of_week", "days"))
+	dayFilter := intSliceToDaySet(readIntSlice(params, "day_of_week", "days", "day_filter"))
+	taskIDs := readIntSlice(params, "task_item_ids", "task_ids")
+	if taskID, ok := paramIntAny(params, "task_item_id", "task_id"); ok {
+		taskIDs = append(taskIDs, taskID)
+	}
+	taskIDSet := intSliceToIDSet(taskIDs)
 
 	type targetTask struct {
 		TaskItemID   int    `json:"task_item_id"`
@@ -439,8 +757,17 @@ func refineToolQueryTargetTasks(entries []model.HybridScheduleEntry, params map[
 		if !matchStatusFilter(entry.Status, statusFilter) {
 			continue
 		}
+		// suggested 视图只允许看到“可移动任务”，避免把课程类条目当成可调任务暴露给模型。
+		if statusFilter == "suggested" && !isMovableSuggestedTask(entry) {
+			continue
+		}
 		if entry.TaskItemID <= 0 {
 			continue
+		}
+		if len(taskIDSet) > 0 {
+			if _, ok := taskIDSet[entry.TaskItemID]; !ok {
+				continue
+			}
 		}
 		if len(dayFilter) > 0 {
 			if _, ok := dayFilter[entry.DayOfWeek]; !ok {
@@ -448,6 +775,11 @@ func refineToolQueryTargetTasks(entries []model.HybridScheduleEntry, params map[
 			}
 		} else if !matchDayScope(entry.DayOfWeek, scope) {
 			continue
+		}
+		if len(weekFilter) > 0 {
+			if _, ok := weekFilter[entry.Week]; !ok {
+				continue
+			}
 		}
 		if hasWeekFrom && entry.Week < weekFrom {
 			continue
@@ -488,6 +820,7 @@ func refineToolQueryTargetTasks(entries []model.HybridScheduleEntry, params map[
 		"count":       len(list),
 		"status":      statusFilter,
 		"day_scope":   scope,
+		"week_filter": keysOfIntSet(weekFilter),
 		"week_from":   weekFrom,
 		"week_to":     weekTo,
 		"day_of_week": keysOfIntSet(dayFilter),
@@ -513,12 +846,32 @@ func refineToolQueryTargetTasks(entries []model.HybridScheduleEntry, params map[
 //
 // 步骤化说明：
 // 1. 根据 day_scope/week 范围/span/exclude_sections 过滤候选时段；
-// 2. 使用现有冲突判定（entryBlocksSuggested + sectionsOverlap）确保结果可放置；
+// 2. 默认先收集“纯空位”，不足 limit 再补“可嵌入课程位”（第二优先级）；
 // 3. 返回结构化 JSON 字符串，不修改 entries。
 func refineToolQueryAvailableSlots(entries []model.HybridScheduleEntry, params map[string]any, window planningWindow) ([]model.HybridScheduleEntry, reactToolResult) {
 	scope := normalizeDayScope(readString(params, "day_scope", "all"))
-	dayFilter := intSliceToSet(readIntSlice(params, "day_of_week", "days"))
-	span, okSpan := paramIntAny(params, "span")
+	dayFilter := intSliceToDaySet(readIntSlice(params, "day_of_week", "days", "day_filter"))
+	weekFilter := intSliceToWeekSet(readIntSlice(params, "week_filter", "weeks"))
+	// 1. 空位优先策略：
+	// 1.1 默认 allow_embed=true，但查询分两阶段执行；
+	// 1.2 第一阶段只收集“纯空白位”（不与 existing 重叠）；
+	// 1.3 第二阶段仅在空白位不足 limit 时，补充“可嵌入课程位”。
+	allowEmbed := paramBoolAnyWithDefault(params, true, "allow_embed", "allow_embedding")
+	// 1.4 兼容 slot_type/slot_types：
+	// 1.4.1 当明确请求 pure/empty/strict 时，强制只查纯空位（关闭嵌入候选）。
+	// 1.4.2 当未声明时，维持“空位优先，空位不足再补嵌入候选”的默认策略。
+	slotTypeHints := readStringSlice(params, "slot_types")
+	if single := strings.TrimSpace(readString(params, "slot_type", "")); single != "" {
+		slotTypeHints = append(slotTypeHints, single)
+	}
+	for _, hint := range slotTypeHints {
+		normalized := strings.ToLower(strings.TrimSpace(hint))
+		if normalized == "pure" || normalized == "empty" || normalized == "strict" {
+			allowEmbed = false
+			break
+		}
+	}
+	span, okSpan := paramIntAny(params, "span", "section_duration", "task_duration")
 	if !okSpan || span <= 0 {
 		span = 2
 	}
@@ -553,6 +906,17 @@ func refineToolQueryAvailableSlots(entries []model.HybridScheduleEntry, params m
 			weekTo = endWeek
 		}
 	}
+	weeksToIterate := buildWeekIterList(weekFilter, weekFrom, weekTo)
+	if len(weeksToIterate) == 0 {
+		return entries, reactToolResult{
+			Tool:      "QueryAvailableSlots",
+			Success:   false,
+			ErrorCode: "PARAM_MISSING",
+			Result:    "周范围为空：请提供 week / week_filter 或确保排程窗口有效",
+		}
+	}
+	weekFrom = weeksToIterate[0]
+	weekTo = weeksToIterate[len(weeksToIterate)-1]
 
 	excludedSet := make(map[int]struct{})
 	for _, sec := range readIntSlice(params, "exclude_sections", "exclude_section") {
@@ -562,67 +926,110 @@ func refineToolQueryAvailableSlots(entries []model.HybridScheduleEntry, params m
 	}
 	afterSection, hasAfter := paramIntAny(params, "after_section")
 	beforeSection, hasBefore := paramIntAny(params, "before_section")
+	exactSectionFrom, hasExactFrom := paramIntAny(params, "section_from", "target_section_from")
+	exactSectionTo, hasExactTo := paramIntAny(params, "section_to", "target_section_to")
+	if hasExactFrom != hasExactTo {
+		return entries, reactToolResult{
+			Tool:      "QueryAvailableSlots",
+			Success:   false,
+			ErrorCode: "PARAM_MISSING",
+			Result:    "精确节次查询需同时提供 section_from 和 section_to",
+		}
+	}
+	if hasExactFrom {
+		if exactSectionFrom < 1 || exactSectionTo > 12 || exactSectionFrom > exactSectionTo {
+			return entries, reactToolResult{
+				Tool:      "QueryAvailableSlots",
+				Success:   false,
+				ErrorCode: "SPAN_INVALID",
+				Result:    fmt.Sprintf("精确节次区间非法：%d-%d", exactSectionFrom, exactSectionTo),
+			}
+		}
+		span = exactSectionTo - exactSectionFrom + 1
+	}
 
 	type slot struct {
-		Week        int `json:"week"`
-		DayOfWeek   int `json:"day_of_week"`
-		SectionFrom int `json:"section_from"`
-		SectionTo   int `json:"section_to"`
+		Week        int    `json:"week"`
+		DayOfWeek   int    `json:"day_of_week"`
+		SectionFrom int    `json:"section_from"`
+		SectionTo   int    `json:"section_to"`
+		SlotType    string `json:"slot_type,omitempty"`
 	}
 	slots := make([]slot, 0, limit)
-	for week := weekFrom; week <= weekTo; week++ {
-		for day := 1; day <= 7; day++ {
-			if len(dayFilter) > 0 {
-				if _, ok := dayFilter[day]; !ok {
-					continue
-				}
-			} else if !matchDayScope(day, scope) {
-				continue
-			}
-			if !isWithinWindow(window, week, day) {
-				continue
-			}
-			for sf := 1; sf+span-1 <= 12; sf++ {
-				st := sf + span - 1
-				if hasAfter && sf <= afterSection {
-					continue
-				}
-				if hasBefore && st >= beforeSection {
-					continue
-				}
-				if intersectsExcludedSections(sf, st, excludedSet) {
-					continue
-				}
-				if conflict, _ := hasConflict(entries, week, day, sf, st, nil); conflict {
-					continue
-				}
-				slots = append(slots, slot{
-					Week:        week,
-					DayOfWeek:   day,
-					SectionFrom: sf,
-					SectionTo:   st,
-				})
-				if len(slots) >= limit {
-					break
-				}
-			}
-			if len(slots) >= limit {
-				break
-			}
-		}
+	seen := make(map[string]struct{}, limit*2)
+	strictCount := 0
+	collect := func(embedAllowed bool, slotType string) {
 		if len(slots) >= limit {
-			break
+			return
+		}
+		for _, week := range weeksToIterate {
+			for day := 1; day <= 7; day++ {
+				if len(dayFilter) > 0 {
+					if _, ok := dayFilter[day]; !ok {
+						continue
+					}
+				} else if !matchDayScope(day, scope) {
+					continue
+				}
+				if !isWithinWindow(window, week, day) {
+					continue
+				}
+				for sf := 1; sf+span-1 <= 12; sf++ {
+					st := sf + span - 1
+					if hasExactFrom && (sf != exactSectionFrom || st != exactSectionTo) {
+						continue
+					}
+					if hasAfter && sf <= afterSection {
+						continue
+					}
+					if hasBefore && st >= beforeSection {
+						continue
+					}
+					if intersectsExcludedSections(sf, st, excludedSet) {
+						continue
+					}
+					if conflict, _ := hasConflict(entries, week, day, sf, st, nil, embedAllowed); conflict {
+						continue
+					}
+					key := fmt.Sprintf("%d-%d-%d-%d", week, day, sf, st)
+					if _, ok := seen[key]; ok {
+						continue
+					}
+					seen[key] = struct{}{}
+					slots = append(slots, slot{
+						Week:        week,
+						DayOfWeek:   day,
+						SectionFrom: sf,
+						SectionTo:   st,
+						SlotType:    slotType,
+					})
+					if len(slots) >= limit {
+						return
+					}
+				}
+			}
 		}
 	}
+	collect(false, "empty")
+	strictCount = len(slots)
+	if allowEmbed && len(slots) < limit {
+		collect(true, "embedded_candidate")
+	}
+	embeddedCount := len(slots) - strictCount
 
 	payload := map[string]any{
 		"tool":             "QueryAvailableSlots",
 		"count":            len(slots),
+		"strict_count":     strictCount,
+		"embedded_count":   embeddedCount,
+		"fallback_used":    embeddedCount > 0,
 		"day_scope":        scope,
 		"day_of_week":      keysOfIntSet(dayFilter),
+		"week_filter":      keysOfIntSet(weekFilter),
 		"week_from":        weekFrom,
 		"week_to":          weekTo,
 		"span":             span,
+		"allow_embed":      allowEmbed,
 		"exclude_sections": keysOfIntSet(excludedSet),
 		"slots":            slots,
 	}
@@ -631,6 +1038,10 @@ func refineToolQueryAvailableSlots(entries []model.HybridScheduleEntry, params m
 	}
 	if hasBefore {
 		payload["before_section"] = beforeSection
+	}
+	if hasExactFrom {
+		payload["section_from"] = exactSectionFrom
+		payload["section_to"] = exactSectionTo
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -654,36 +1065,84 @@ func refineToolQueryAvailableSlots(entries []model.HybridScheduleEntry, params m
 // 1. 当前只做 deterministic 校验（冲突/顺序），不做语义 LLM 终审；
 // 2. 语义层终审仍在 hard_check 节点统一处理；
 // 3. 该工具用于给执行阶段一个“可提前自查”的信号。
-func refineToolVerify(entries []model.HybridScheduleEntry, policy refineToolPolicy) ([]model.HybridScheduleEntry, reactToolResult) {
+func refineToolVerify(entries []model.HybridScheduleEntry, params map[string]any, policy refineToolPolicy) ([]model.HybridScheduleEntry, reactToolResult) {
 	physicsIssues := physicsCheck(entries, 0)
 	orderIssues := validateRelativeOrder(entries, policy)
-	if len(physicsIssues) == 0 && len(orderIssues) == 0 {
-		return entries, reactToolResult{
-			Tool:    "Verify",
-			Success: true,
-			Result:  `{"tool":"Verify","pass":true,"reason":"deterministic checks passed"}`,
+	if len(physicsIssues) > 0 || len(orderIssues) > 0 {
+		payload := map[string]any{
+			"tool":           "Verify",
+			"pass":           false,
+			"physics_issues": physicsIssues,
+			"order_issues":   orderIssues,
 		}
-	}
-	payload := map[string]any{
-		"tool":           "Verify",
-		"pass":           false,
-		"physics_issues": physicsIssues,
-		"order_issues":   orderIssues,
-	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return entries, reactToolResult{
+				Tool:      "Verify",
+				Success:   false,
+				ErrorCode: "VERIFY_FAILED",
+				Result:    "Verify 校验失败且结果无法序列化",
+			}
+		}
 		return entries, reactToolResult{
 			Tool:      "Verify",
 			Success:   false,
 			ErrorCode: "VERIFY_FAILED",
-			Result:    "Verify 校验失败且结果无法序列化",
+			Result:    string(raw),
 		}
 	}
+
+	// 1. 若携带 task_item_id / 目标坐标参数，则执行“针对性核验”，避免“全局 pass”掩盖当前任务不匹配。
+	// 2. 该核验是可选增强：没传 task_id 时仍维持全局 deterministic 行为。
+	taskID, hasTaskID := paramIntAny(params, "task_item_id", "task_id")
+	if hasTaskID {
+		idx, locateErr := findUniqueSuggestedByID(entries, taskID)
+		if locateErr != nil {
+			return entries, reactToolResult{
+				Tool:      "Verify",
+				Success:   false,
+				ErrorCode: "VERIFY_FAILED",
+				Result:    fmt.Sprintf(`{"tool":"Verify","pass":false,"reason":"%s"}`, locateErr.Error()),
+			}
+		}
+		target := entries[idx]
+		verifyWeek, hasWeek := paramIntAny(params, "week", "to_week", "target_week")
+		verifyDay, hasDay := paramIntAny(params, "day_of_week", "to_day", "target_day_of_week")
+		verifyFrom, hasFrom := paramIntAny(params, "section_from", "to_section_from", "target_section_from")
+		verifyTo, hasTo := paramIntAny(params, "section_to", "to_section_to", "target_section_to")
+
+		mismatch := make([]string, 0, 4)
+		if hasWeek && target.Week != verifyWeek {
+			mismatch = append(mismatch, fmt.Sprintf("week=%d(实际=%d)", verifyWeek, target.Week))
+		}
+		if hasDay && target.DayOfWeek != verifyDay {
+			mismatch = append(mismatch, fmt.Sprintf("day_of_week=%d(实际=%d)", verifyDay, target.DayOfWeek))
+		}
+		if hasFrom && target.SectionFrom != verifyFrom {
+			mismatch = append(mismatch, fmt.Sprintf("section_from=%d(实际=%d)", verifyFrom, target.SectionFrom))
+		}
+		if hasTo && target.SectionTo != verifyTo {
+			mismatch = append(mismatch, fmt.Sprintf("section_to=%d(实际=%d)", verifyTo, target.SectionTo))
+		}
+		if len(mismatch) > 0 {
+			return entries, reactToolResult{
+				Tool:      "Verify",
+				Success:   false,
+				ErrorCode: "VERIFY_FAILED",
+				Result:    fmt.Sprintf(`{"tool":"Verify","pass":false,"reason":"任务坐标不匹配：%s"}`, strings.Join(mismatch, "；")),
+			}
+		}
+		return entries, reactToolResult{
+			Tool:    "Verify",
+			Success: true,
+			Result:  `{"tool":"Verify","pass":true,"reason":"task-level deterministic checks passed"}`,
+		}
+	}
+
 	return entries, reactToolResult{
-		Tool:      "Verify",
-		Success:   false,
-		ErrorCode: "VERIFY_FAILED",
-		Result:    string(raw),
+		Tool:    "Verify",
+		Success: true,
+		Result:  `{"tool":"Verify","pass":true,"reason":"deterministic checks passed"}`,
 	}
 }
 
@@ -704,7 +1163,10 @@ func validateRelativeOrder(entries []model.HybridScheduleEntry, policy refineToo
 
 	suggested := make([]model.HybridScheduleEntry, 0, len(entries))
 	for _, entry := range entries {
-		if entry.Status == "suggested" && entry.TaskItemID > 0 {
+		// 1. 顺序校验与执行口径必须一致：
+		// 1.1 这里只校验“可移动 suggested 任务”，避免把 course 等不可移动条目误纳入顺序约束；
+		// 1.2 若把不可移动条目纳入，会出现“动作层不允许改、顺序层却报错”的左右脑互搏。
+		if isMovableSuggestedTask(entry) {
 			suggested = append(suggested, entry)
 		}
 	}
@@ -843,11 +1305,56 @@ func compareWeekDay(leftWeek, leftDay, rightWeek, rightDay int) int {
 // findSuggestedByID 在 entries 中查找指定 task_item_id 的 suggested 条目索引。
 func findSuggestedByID(entries []model.HybridScheduleEntry, taskItemID int) int {
 	for i, entry := range entries {
-		if entry.Status == "suggested" && entry.TaskItemID == taskItemID {
+		if isMovableSuggestedTask(entry) && entry.TaskItemID == taskItemID {
 			return i
 		}
 	}
 	return -1
+}
+
+// findUniqueSuggestedByID 查找可唯一定位的可移动 suggested 任务。
+//
+// 说明：
+// 1. “可移动”定义由 isMovableSuggestedTask 统一控制；
+// 2. 当 task_item_id 命中 0 条或 >1 条时都返回错误，避免把动作落到错误任务上。
+func findUniqueSuggestedByID(entries []model.HybridScheduleEntry, taskItemID int) (int, error) {
+	first := -1
+	count := 0
+	for idx, entry := range entries {
+		if !isMovableSuggestedTask(entry) {
+			continue
+		}
+		if entry.TaskItemID != taskItemID {
+			continue
+		}
+		if first < 0 {
+			first = idx
+		}
+		count++
+	}
+	if count == 0 {
+		return -1, fmt.Errorf("未找到 task_item_id=%d 的可移动 suggested 任务", taskItemID)
+	}
+	if count > 1 {
+		return -1, fmt.Errorf("task_item_id=%d 命中 %d 条可移动 suggested 任务，无法唯一定位", taskItemID, count)
+	}
+	return first, nil
+}
+
+// isMovableSuggestedTask 判断条目是否属于“可被微调工具改写”的任务。
+//
+// 规则：
+// 1. 必须是 suggested 且 task_item_id>0；
+// 2. type=course 明确禁止移动（即便被错误标记为 suggested）；
+// 3. 其余类型（含空值）按任务处理，兼容历史快照。
+func isMovableSuggestedTask(entry model.HybridScheduleEntry) bool {
+	if strings.TrimSpace(entry.Status) != "suggested" || entry.TaskItemID <= 0 {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(entry.Type), "course") {
+		return false
+	}
+	return true
 }
 
 // hasConflict 检查目标时段是否与其他条目冲突。
@@ -855,12 +1362,12 @@ func findSuggestedByID(entries []model.HybridScheduleEntry, taskItemID int) int 
 // 判断规则：
 // 1. 仅把“会阻塞 suggested 的条目”纳入冲突判断；
 // 2. excludes 中的索引会被跳过（常用于 Move 自身排除或 Swap 双排除）。
-func hasConflict(entries []model.HybridScheduleEntry, week, day, sf, st int, excludes map[int]bool) (bool, string) {
+func hasConflict(entries []model.HybridScheduleEntry, week, day, sf, st int, excludes map[int]bool, allowEmbed bool) (bool, string) {
 	for idx, entry := range entries {
 		if excludes != nil && excludes[idx] {
 			continue
 		}
-		if !entryBlocksSuggested(entry) {
+		if !entryBlocksSuggestedWithPolicy(entry, allowEmbed) {
 			continue
 		}
 		if entry.Week == week && entry.DayOfWeek == day && sectionsOverlap(entry.SectionFrom, entry.SectionTo, sf, st) {
@@ -872,10 +1379,23 @@ func hasConflict(entries []model.HybridScheduleEntry, week, day, sf, st int, exc
 
 // entryBlocksSuggested 判断条目是否会阻塞 suggested 任务落位。
 func entryBlocksSuggested(entry model.HybridScheduleEntry) bool {
+	return entryBlocksSuggestedWithPolicy(entry, true)
+}
+
+// entryBlocksSuggestedWithPolicy 判断条目是否阻塞 suggested 落位。
+//
+// 策略说明：
+// 1. allowEmbed=true：沿用 block_for_suggested 语义；
+// 2. allowEmbed=false：existing 一律阻塞，只允许纯空白课位；
+// 3. unknown status 保守阻塞，防止漏检。
+func entryBlocksSuggestedWithPolicy(entry model.HybridScheduleEntry, allowEmbed bool) bool {
 	if entry.Status == "suggested" {
 		return true
 	}
 	if entry.Status == "existing" {
+		if !allowEmbed {
+			return true
+		}
 		return entry.BlockForSuggested
 	}
 	// 未知状态保守处理为阻塞，避免写入潜在冲突。
@@ -922,6 +1442,56 @@ func paramIntAny(params map[string]any, keys ...string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// paramBool 从 map 中提取 bool 参数，兼容 JSON 常见布尔表示。
+func paramBool(params map[string]any, key string) (bool, bool) {
+	raw, ok := params[key]
+	if !ok {
+		return false, false
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v, true
+	case string:
+		text := strings.TrimSpace(strings.ToLower(v))
+		switch text {
+		case "true", "1", "yes", "y":
+			return true, true
+		case "false", "0", "no", "n":
+			return false, true
+		default:
+			return false, false
+		}
+	case int:
+		if v == 1 {
+			return true, true
+		}
+		if v == 0 {
+			return false, true
+		}
+		return false, false
+	case float64:
+		if v == 1 {
+			return true, true
+		}
+		if v == 0 {
+			return false, true
+		}
+		return false, false
+	default:
+		return false, false
+	}
+}
+
+// paramBoolAnyWithDefault 按候选键提取 bool，未命中时返回 fallback。
+func paramBoolAnyWithDefault(params map[string]any, fallback bool, keys ...string) bool {
+	for _, key := range keys {
+		if v, ok := paramBool(params, key); ok {
+			return v
+		}
+	}
+	return fallback
 }
 
 // readString 读取字符串参数，缺失时返回默认值。
@@ -985,14 +1555,68 @@ func matchDayScope(day int, scope string) bool {
 	}
 }
 
-// intSliceToSet 把 int 切片转换为 set，并自动去除非法 day 值。
-func intSliceToSet(items []int) map[int]struct{} {
+// intSliceToDaySet 把 day 切片转换为 set，并去除非法 day 值。
+func intSliceToDaySet(items []int) map[int]struct{} {
 	if len(items) == 0 {
 		return nil
 	}
 	set := make(map[int]struct{}, len(items))
 	for _, item := range items {
 		if item < 1 || item > 7 {
+			continue
+		}
+		set[item] = struct{}{}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+// intSliceToWeekSet 把周次切片转换为 set，并去除非正数。
+func intSliceToWeekSet(items []int) map[int]struct{} {
+	if len(items) == 0 {
+		return nil
+	}
+	set := make(map[int]struct{}, len(items))
+	for _, item := range items {
+		if item <= 0 {
+			continue
+		}
+		set[item] = struct{}{}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+// intSliceToSectionSet 把节次切片转换为 set，并去除非法节次。
+func intSliceToSectionSet(items []int) map[int]struct{} {
+	if len(items) == 0 {
+		return nil
+	}
+	set := make(map[int]struct{}, len(items))
+	for _, item := range items {
+		if item < 1 || item > 12 {
+			continue
+		}
+		set[item] = struct{}{}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+// intSliceToIDSet 把正整数 ID 切片转换为 set。
+func intSliceToIDSet(items []int) map[int]struct{} {
+	if len(items) == 0 {
+		return nil
+	}
+	set := make(map[int]struct{}, len(items))
+	for _, item := range items {
+		if item <= 0 {
 			continue
 		}
 		set[item] = struct{}{}
@@ -1021,6 +1645,26 @@ func inferWeekBounds(entries []model.HybridScheduleEntry, window planningWindow)
 		}
 	}
 	return minWeek, maxWeek
+}
+
+// buildWeekIterList 构建周次迭代列表。
+//
+// 规则：
+// 1. weekFilter 非空时，严格按过滤集合遍历；
+// 2. weekFilter 为空时，按 weekFrom~weekTo 连续区间遍历；
+// 3. 返回结果升序，便于日志与排查。
+func buildWeekIterList(weekFilter map[int]struct{}, weekFrom, weekTo int) []int {
+	if len(weekFilter) > 0 {
+		return keysOfIntSet(weekFilter)
+	}
+	if weekFrom <= 0 || weekTo <= 0 || weekFrom > weekTo {
+		return nil
+	}
+	out := make([]int, 0, weekTo-weekFrom+1)
+	for w := weekFrom; w <= weekTo; w++ {
+		out = append(out, w)
+	}
+	return out
 }
 
 // readIntSlice 读取 int 切片参数，兼容 []any / []int / 单个数值。
@@ -1053,6 +1697,47 @@ func readIntSlice(params map[string]any, keys ...string) []int {
 		default:
 			if n, okNum := paramInt(params, key); okNum {
 				return []int{n}
+			}
+		}
+	}
+	return nil
+}
+
+// readStringSlice 读取 string 切片参数，兼容 []any / []string / 单个字符串。
+func readStringSlice(params map[string]any, keys ...string) []string {
+	for _, key := range keys {
+		raw, ok := params[key]
+		if !ok || raw == nil {
+			continue
+		}
+		switch vv := raw.(type) {
+		case []string:
+			out := make([]string, 0, len(vv))
+			for _, item := range vv {
+				text := strings.TrimSpace(item)
+				if text != "" {
+					out = append(out, text)
+				}
+			}
+			return out
+		case []any:
+			out := make([]string, 0, len(vv))
+			for _, item := range vv {
+				text := strings.TrimSpace(fmt.Sprintf("%v", item))
+				if text != "" {
+					out = append(out, text)
+				}
+			}
+			return out
+		case string:
+			text := strings.TrimSpace(vv)
+			if text != "" {
+				return []string{text}
+			}
+		default:
+			text := strings.TrimSpace(fmt.Sprintf("%v", vv))
+			if text != "" {
+				return []string{text}
 			}
 		}
 	}

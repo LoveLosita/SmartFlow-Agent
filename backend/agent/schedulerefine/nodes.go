@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,80 +20,49 @@ import (
 )
 
 const (
-	// nodeTimeout 是单节点调用模型的超时预算。
-	// 说明：这里给到 120s，避免复杂轮次在网络抖动时过早超时。
-	nodeTimeout = 120 * time.Second
-	// plannerMaxTokens 是 Planner 节点输出预算。
-	// 说明：Planner 需要输出 steps/success_signals，预算过小会导致 JSON 被截断。
+	nodeTimeout      = 120 * time.Second
 	plannerMaxTokens = 420
-	// reactMaxTokens 是执行器单轮计划输出预算。
-	// 说明：当 tool_calls 含 BatchMove 时，参数体更长，需要更高预算避免半截 JSON。
-	reactMaxTokens = 480
+	reactMaxTokens   = 360
 )
 
 const (
-	// 说明：把 JSON 约束贴到 userPrompt 末尾，降低“系统提示词很长后模型偏离结构”的概率。
-	// 1. 每个节点都使用最小必要字段约束，避免提示过重导致上下文负担变大；
-	// 2. 要求“仅输出 JSON 对象”，减少 markdown/code fence 干扰；
-	// 3. 放在上下文最后，尽量靠近模型最终解码位置。
-	jsonContractForContract = `【输出协议（必须严格遵守）】
-只输出单个 JSON 对象，不要输出 Markdown、代码块、解释文字。
-必须包含键：intent, strategy, hard_requirements, keep_relative_order, order_scope, reason。`
-
-	jsonContractForPlanner = `【输出协议（必须严格遵守）】
-只输出单个 JSON 对象，不要输出 Markdown、代码块、解释文字。
-必须包含键：summary, steps, success_signals, fallback。`
-
-	jsonContractForReact = `【输出协议（必须严格遵守）】
-只输出单个 JSON 对象，不要输出 Markdown、代码块、解释文字。
-必须包含键：done, summary, goal_check, decision, missing_info, reflect, tool_calls。`
-
-	jsonContractForReview = `【输出协议（必须严格遵守）】
-只输出单个 JSON 对象，不要输出 Markdown、代码块、解释文字。
-必须包含键：pass, reason, unmet。`
-
-	jsonContractForPostReflect = `【输出协议（必须严格遵守）】
-只输出单个 JSON 对象，不要输出 Markdown、代码块、解释文字。
-必须包含键：reflection, next_strategy, should_stop, stop_reason。`
+	jsonContractForContract    = "只输出单个 JSON 对象，不要 Markdown/代码块/解释。必须包含: intent,strategy,hard_requirements,hard_assertions,keep_relative_order,order_scope。"
+	jsonContractForPlanner     = "只输出单个 JSON 对象，不要 Markdown/代码块/解释。必须包含: summary,steps。"
+	jsonContractForReact       = "只输出单个 JSON 对象，不要 Markdown/代码块/解释。必须包含: done,summary,goal_check,decision,missing_info,tool_calls。"
+	jsonContractForReview      = "只输出单个 JSON 对象，不要 Markdown/代码块/解释。必须包含: pass,reason,unmet。"
+	jsonContractForPostReflect = "只输出单个 JSON 对象，不要 Markdown/代码块/解释。必须包含: reflection,next_strategy,should_stop。"
 )
 
 type contractOutput struct {
-	Intent            string   `json:"intent"`
-	Strategy          string   `json:"strategy"`
-	HardRequirements  []string `json:"hard_requirements"`
-	KeepRelativeOrder bool     `json:"keep_relative_order"`
-	OrderScope        string   `json:"order_scope"`
-	Reason            string   `json:"reason"`
+	Intent            string                `json:"intent"`
+	Strategy          string                `json:"strategy"`
+	HardRequirements  []string              `json:"hard_requirements"`
+	HardAssertions    []hardAssertionOutput `json:"hard_assertions"`
+	KeepRelativeOrder bool                  `json:"keep_relative_order"`
+	OrderScope        string                `json:"order_scope"`
 }
 
-// postReflectOutput 表示“动作执行后真反思”节点的结构化输出。
-//
-// 字段语义：
-// 1. reflection：基于真实工具结果的复盘；
-// 2. next_strategy：下一轮建议策略；
-// 3. should_stop：是否建议结束动作循环；
-// 4. stop_reason：建议结束的原因。
+type hardAssertionOutput struct {
+	Metric     string `json:"metric"`
+	Operator   string `json:"operator"`
+	Value      int    `json:"value"`
+	Min        int    `json:"min"`
+	Max        int    `json:"max"`
+	Week       int    `json:"week"`
+	TargetWeek int    `json:"target_week"`
+}
+
 type postReflectOutput struct {
 	Reflection   string `json:"reflection"`
 	NextStrategy string `json:"next_strategy"`
 	ShouldStop   bool   `json:"should_stop"`
-	StopReason   string `json:"stop_reason"`
 }
 
-// plannerOutput 表示 Planner 阶段的结构化输出。
 type plannerOutput struct {
-	Summary        string   `json:"summary"`
-	Steps          []string `json:"steps"`
-	SuccessSignals []string `json:"success_signals"`
-	Fallback       string   `json:"fallback"`
+	Summary string   `json:"summary"`
+	Steps   []string `json:"steps"`
 }
 
-// runContractNode 执行“微调契约抽取”。
-//
-// 步骤化说明：
-// 1. 先把用户本轮请求与当前排程摘要打包给模型，抽取结构化目标。
-// 2. 再把模型输出映射到 state.Contract，作为后续动作与终审共同的判断基准。
-// 3. 若模型失败或解析失败，使用保守兜底契约继续流程，避免整链路中断。
 func runContractNode(
 	ctx context.Context,
 	chatModel *ark.ChatModel,
@@ -103,24 +75,20 @@ func runContractNode(
 	if chatModel == nil {
 		return nil, fmt.Errorf("schedule refine: model is nil in contract node")
 	}
-
 	emitStage("schedule_refine.contract.analyzing", "正在抽取本轮微调目标与硬性约束。")
 
-	entryCount := len(st.HybridEntries)
-	suggestedCount := countSuggested(st.HybridEntries)
 	userPrompt := withNearestJSONContract(
 		fmt.Sprintf(
-			"当前时间（北京时间）=%s\n用户请求=%s\n当前排程条目数=%d\n可调 suggested 数=%d\n已有约束=%s\n历史摘要=%s",
+			"当前时间=%s\n用户请求=%s\n当前排程条目数=%d\n可调 suggested 数=%d\n已有约束=%s\n历史摘要=%s",
 			st.RequestNowText,
 			strings.TrimSpace(st.UserMessage),
-			entryCount,
-			suggestedCount,
+			len(st.HybridEntries),
+			countSuggested(st.HybridEntries),
 			strings.Join(st.Constraints, "；"),
 			condenseSummary(st.CandidatePlans),
 		),
 		jsonContractForContract,
 	)
-
 	raw, err := callModelText(ctx, chatModel, contractPrompt, userPrompt, false, 260, 0)
 	if err != nil {
 		st.Contract = buildFallbackContract(st)
@@ -129,7 +97,6 @@ func runContractNode(
 		return st, nil
 	}
 	emitModelRawDebug(emitStage, "contract", raw)
-
 	parsed, parseErr := parseJSON[contractOutput](raw)
 	if parseErr != nil {
 		st.Contract = buildFallbackContract(st)
@@ -138,45 +105,283 @@ func runContractNode(
 		return st, nil
 	}
 
-	strategy := normalizeStrategy(parsed.Strategy)
 	intent := strings.TrimSpace(parsed.Intent)
 	if intent == "" {
 		intent = strings.TrimSpace(st.UserMessage)
 	}
-	reason := strings.TrimSpace(parsed.Reason)
-	if reason == "" {
-		reason = "已根据本轮请求抽取微调契约。"
+	// 1. 顺序策略以用户表达为准：默认保持顺序，明确授权乱序才放开。
+	// 2. 不再让模型自行放宽顺序，避免契约漂移导致“默认乱序”。
+	keepOrder := detectOrderIntent(st.UserMessage)
+	reqs := append([]string(nil), parsed.HardRequirements...)
+	if keepOrder {
+		reqs = append(reqs, "保持任务原始相对顺序不变")
 	}
-
-	// 1. keep_relative_order 既接受模型判断，也允许基于用户原话兜底增强。
-	// 2. 这样做的目的：避免模型偶发漏判“保持顺序”导致工具层约束缺失。
-	keepRelativeOrder := parsed.KeepRelativeOrder || detectOrderIntent(st.UserMessage)
-	orderScope := normalizeOrderScope(parsed.OrderScope)
-	hardRequirements := append([]string(nil), parsed.HardRequirements...)
-	if keepRelativeOrder {
-		hardRequirements = append(hardRequirements, "保持任务原始相对顺序不变")
+	assertions := normalizeHardAssertions(parsed.HardAssertions)
+	if len(assertions) == 0 {
+		// 1. 当模型未给出结构化断言时，后端基于请求做兜底推断。
+		// 2. 目标是保证终审一定可落到“可编程判断”的参数层，而不是停留在自然语言。
+		assertions = inferHardAssertionsFromRequest(st.UserMessage, reqs)
 	}
-
 	st.UserIntent = intent
 	st.Contract = RefineContract{
 		Intent:            intent,
-		Strategy:          strategy,
-		HardRequirements:  uniqueNonEmpty(hardRequirements),
-		KeepRelativeOrder: keepRelativeOrder,
-		OrderScope:        orderScope,
-		Reason:            reason,
+		Strategy:          normalizeStrategy(parsed.Strategy),
+		HardRequirements:  uniqueNonEmpty(reqs),
+		HardAssertions:    assertions,
+		KeepRelativeOrder: keepOrder,
+		OrderScope:        normalizeOrderScope(parsed.OrderScope),
 	}
-	emitStage("schedule_refine.contract.done", fmt.Sprintf("契约抽取完成：strategy=%s, keep_relative_order=%t。", strategy, keepRelativeOrder))
+	emitStage("schedule_refine.contract.done", fmt.Sprintf("契约抽取完成：strategy=%s, keep_relative_order=%t。", st.Contract.Strategy, st.Contract.KeepRelativeOrder))
 	return st, nil
 }
 
-// runReactLoopNode 执行“强 ReAct 微调循环”。
+func runPlanNode(
+	ctx context.Context,
+	chatModel *ark.ChatModel,
+	st *ScheduleRefineState,
+	emitStage func(stage, detail string),
+) (*ScheduleRefineState, error) {
+	if st == nil {
+		return nil, fmt.Errorf("schedule refine: nil state in plan node")
+	}
+	if chatModel == nil {
+		return nil, fmt.Errorf("schedule refine: model is nil in plan node")
+	}
+	if err := runPlannerNode(ctx, chatModel, st, emitStage, "initial"); err != nil {
+		return st, err
+	}
+	return st, nil
+}
+
+func runSliceNode(
+	ctx context.Context,
+	st *ScheduleRefineState,
+	emitStage func(stage, detail string),
+) (*ScheduleRefineState, error) {
+	_ = ctx
+	if st == nil {
+		return nil, fmt.Errorf("schedule refine: nil state in slice node")
+	}
+	emitStage("schedule_refine.slice.building", "正在构建本轮微调任务切片。")
+	slice := buildSlicePlan(st)
+	workset := collectWorksetTaskIDs(st.HybridEntries, slice, st.OriginOrderMap)
+	if len(workset) == 0 {
+		relaxed := slice
+		relaxed.SourceDays = nil
+		workset = collectWorksetTaskIDs(st.HybridEntries, relaxed, st.OriginOrderMap)
+		if len(workset) > 0 {
+			slice = relaxed
+			emitStage("schedule_refine.slice.relaxed", "切片首次为空，已放宽来源日过滤。")
+		}
+	}
+	if len(workset) == 0 {
+		workset = collectWorksetTaskIDs(st.HybridEntries, RefineSlicePlan{}, st.OriginOrderMap)
+		emitStage("schedule_refine.slice.fallback", "切片仍为空，已回退到全量 suggested 任务。")
+	}
+	st.SlicePlan = slice
+	st.Objective = compileRefineObjective(st, slice)
+	st.WorksetTaskIDs = workset
+	st.WorksetCursor = 0
+	st.CurrentTaskID = 0
+	st.CurrentTaskAttempt = 0
+	emitStage("schedule_refine.slice.done", fmt.Sprintf("切片完成：workset=%d，week_filter=%v，source_days=%v，target_days=%v，exclude_sections=%v。", len(workset), slice.WeekFilter, slice.SourceDays, slice.TargetDays, slice.ExcludeSections))
+	if raw, err := json.Marshal(st.Objective); err == nil {
+		emitStage("schedule_refine.objective.done", fmt.Sprintf("目标编译完成：%s", string(raw)))
+	} else {
+		emitStage("schedule_refine.objective.done", "目标编译完成。")
+	}
+	return st, nil
+}
+
+// runCompositeRouteNode 在 ReAct 之前做一次“全局复合动作直达”分流。
 //
-// 步骤化说明：
-// 1. 严格按 PlanMax/ExecuteMax/ReplanMax 控制规划与执行预算，并把 MaxRounds 对齐为 ExecuteMax+RepairReserve。
-// 2. 每轮先输出“计划/缺口/动作/结果”，再触发一次“动作后真反思（post-reflect）”。
-// 3. 每轮最多一个 tool_call（允许 BatchMove 在单调用内原子多步），失败也写入观察历史，驱动下一轮模型修正策略。
-// 4. 当模型给出 done=true、post-reflect 建议停止、或动作预算耗尽时退出循环。
+// 职责边界：
+// 1. 负责识别是否命中全局复合目标（SpreadEven/MinContextSwitch）；
+// 2. 负责直接调用一次复合工具并按配置重试，争取在进入 ReAct 前完成收口；
+// 3. 不负责语义推理与逐任务细调，失败后仅负责切换到“禁复合”的 ReAct 兜底链路。
+func runCompositeRouteNode(
+	ctx context.Context,
+	st *ScheduleRefineState,
+	emitStage func(stage, detail string),
+) (*ScheduleRefineState, error) {
+	_ = ctx
+	if st == nil {
+		return nil, fmt.Errorf("schedule refine: nil state in route node")
+	}
+	ensureCompositeStateMaps(st)
+	if st.CompositeRetryMax < 0 {
+		st.CompositeRetryMax = defaultCompositeRetry
+	}
+	// 1. 先由后端判定本轮是否需要复合路由，避免把分流复杂度继续交给主 ReAct。
+	// 2. 若已被上游标记为“禁复合兜底”，直接跳过该路由。
+	if st.DisableCompositeTools {
+		emitStage("schedule_refine.route.skip", "当前已处于禁复合兜底模式，跳过复合路由。")
+		return st, nil
+	}
+	if strings.TrimSpace(st.RequiredCompositeTool) == "" {
+		st.RequiredCompositeTool = detectRequiredCompositeTool(st)
+	}
+	required := normalizeCompositeToolName(st.RequiredCompositeTool)
+	if required == "" {
+		emitStage("schedule_refine.route.skip", "未命中全局复合目标，直接进入 ReAct 兜底链路。")
+		return st, nil
+	}
+
+	taskIDs := buildCompositeRouteTaskIDs(st)
+	if len(taskIDs) == 0 {
+		// 1. 没有任务可用于复合规划时，复合路由无法落地。
+		// 2. 直接降级到 ReAct，并明确禁用复合工具，避免循环重试同一失败路径。
+		st.CompositeRouteTried = true
+		st.DisableCompositeTools = true
+		st.RequiredCompositeTool = ""
+		st.CurrentPlan = buildFallbackPlan(st)
+		st.BatchMoveAllowed = false
+		emitStage("schedule_refine.route.fallback", "复合路由未获取到可执行任务，已切换到禁复合 ReAct 兜底。")
+		return st, nil
+	}
+
+	totalAttempts := 1 + st.CompositeRetryMax
+	emitStage("schedule_refine.route.start", fmt.Sprintf("命中复合路由：tool=%s，task_count=%d，首次1次+重试%d次。", required, len(taskIDs), st.CompositeRetryMax))
+	st.CompositeRouteTried = true
+
+	policy := refineToolPolicy{
+		// 1. 路由阶段只解决“坑位分布”。
+		// 2. 顺序归位统一放在终审阶段，避免复合路由被顺序约束提前卡死。
+		KeepRelativeOrder: false,
+		OrderScope:        st.Contract.OrderScope,
+		OriginOrderMap:    st.OriginOrderMap,
+	}
+	window := buildPlanningWindowFromEntries(st.HybridEntries)
+	lastReason := ""
+
+	for attempt := 1; attempt <= totalAttempts; attempt++ {
+		if st.RoundUsed >= st.ExecuteMax {
+			lastReason = "动作预算已耗尽，无法继续复合路由重试"
+			break
+		}
+		call := buildCompositeRouteCall(st, required, taskIDs)
+		callJSON, _ := json.Marshal(call.Params)
+		emitStage("schedule_refine.route.attempt", fmt.Sprintf("复合路由第 %d/%d 次尝试：调用=%s 参数=%s。", attempt, totalAttempts, required, string(callJSON)))
+
+		nextEntries, rawResult := dispatchRefineTool(cloneHybridEntries(st.HybridEntries), call, window, policy)
+		result := normalizeToolResult(rawResult)
+		st.RoundUsed++
+		markCompositeToolOutcome(st, result.Tool, result.Success)
+		emitStage("schedule_refine.route.result", fmt.Sprintf("复合路由第 %d 次结果：success=%t,error_code=%s,detail=%s", attempt, result.Success, fallbackText(result.ErrorCode, "NONE"), truncate(result.Result, 160)))
+
+		if !result.Success {
+			lastReason = fallbackText(result.Result, fallbackText(result.ErrorCode, "复合工具执行失败"))
+			st.LastFailedCallSignature = buildToolCallSignature(call)
+			st.ConsecutiveFailures++
+			continue
+		}
+
+		st.HybridEntries = nextEntries
+		st.EntriesVersion++
+		st.LastFailedCallSignature = ""
+		st.ConsecutiveFailures = 0
+		st.ThinkingBoostArmed = false
+		window = buildPlanningWindowFromEntries(st.HybridEntries)
+
+		// 1. 复合动作成功后必须立刻做后端确定性校验，避免“调用成功但目标未达成”被误收口。
+		// 2. 仅当业务目标与（若存在）复合门禁同时通过时，才允许跳过 ReAct。
+		if pass, reason, unmet, applied := evaluateObjectiveDeterministic(st); applied {
+			pass, reason, unmet = applyCompositeGateToIntentResult(st, pass, strings.TrimSpace(reason), unmet)
+			if pass {
+				st.CompositeRouteSucceeded = true
+				emitStage("schedule_refine.route.pass", fmt.Sprintf("复合路由收口成功：%s", truncate(reason, 160)))
+				st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("复合路由成功收口：tool=%s，reason=%s", required, reason))
+				return st, nil
+			}
+			lastReason = fallbackText(strings.TrimSpace(reason), "确定性目标未达成")
+			if len(unmet) > 0 {
+				emitStage("schedule_refine.route.unmet", fmt.Sprintf("复合路由第 %d 次后仍未达成：%s", attempt, truncate(strings.Join(unmet, "；"), 180)))
+			}
+			continue
+		}
+
+		lastReason = "未启用确定性目标，无法在复合路由直接收口"
+	}
+
+	// 1. 复合路由重试后仍失败，切入 ReAct 兜底并强制禁用复合工具。
+	// 2. 禁用后仅允许基础工具逐任务搬运，避免再次回到复合失败路径造成震荡。
+	st.DisableCompositeTools = true
+	st.RequiredCompositeTool = ""
+	st.CurrentPlan = buildFallbackPlan(st)
+	st.BatchMoveAllowed = false
+	emitStage("schedule_refine.route.fallback", fmt.Sprintf("复合路由未收口，切换禁复合 ReAct 兜底：%s", truncate(fallbackText(lastReason, "复合路由达到重试上限"), 180)))
+	st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("复合路由失败后降级：%s", fallbackText(lastReason, "无具体失败原因")))
+	return st, nil
+}
+
+func buildCompositeRouteTaskIDs(st *ScheduleRefineState) []int {
+	if st == nil {
+		return nil
+	}
+	ids := uniquePositiveInts(append([]int(nil), st.WorksetTaskIDs...))
+	if len(ids) > 0 {
+		return ids
+	}
+	ids = collectSourceTaskIDsForObjective(st.InitialHybridEntries, st.Objective, st.SlicePlan.WeekFilter)
+	if len(ids) > 0 {
+		return ids
+	}
+	// 兜底：从当前 suggested 中提取一份稳定任务集，避免因切片异常导致路由空跑。
+	seen := make(map[int]struct{}, len(st.HybridEntries))
+	out := make([]int, 0, len(st.HybridEntries))
+	for _, entry := range st.HybridEntries {
+		if !isMovableSuggestedTask(entry) {
+			continue
+		}
+		if _, ok := seen[entry.TaskItemID]; ok {
+			continue
+		}
+		seen[entry.TaskItemID] = struct{}{}
+		out = append(out, entry.TaskItemID)
+	}
+	sort.Ints(out)
+	return out
+}
+
+func buildCompositeRouteCall(st *ScheduleRefineState, tool string, taskIDs []int) reactToolCall {
+	limit := len(taskIDs) * 6
+	if limit < 12 {
+		limit = 12
+	}
+	params := map[string]any{
+		"task_item_ids": append([]int(nil), taskIDs...),
+		"allow_embed":   true,
+		"limit":         limit,
+	}
+	targetWeeks := append([]int(nil), st.Objective.TargetWeeks...)
+	if len(targetWeeks) == 0 {
+		targetWeeks = keysOfIntSet(inferTargetWeekSet(st.SlicePlan))
+	}
+	if len(targetWeeks) == 0 {
+		targetWeeks = append([]int(nil), st.Objective.SourceWeeks...)
+	}
+	if len(targetWeeks) == 1 {
+		params["week"] = targetWeeks[0]
+	} else if len(targetWeeks) > 1 {
+		params["week_filter"] = targetWeeks
+	}
+
+	targetDays := append([]int(nil), st.Objective.TargetDays...)
+	if len(targetDays) == 0 {
+		targetDays = append([]int(nil), st.SlicePlan.TargetDays...)
+	}
+	if len(targetDays) > 0 {
+		params["day_of_week"] = targetDays
+	}
+	if len(st.SlicePlan.ExcludeSections) > 0 {
+		params["exclude_sections"] = append([]int(nil), st.SlicePlan.ExcludeSections...)
+	}
+	return reactToolCall{
+		Tool:   tool,
+		Params: params,
+	}
+}
+
 func runReactLoopNode(
 	ctx context.Context,
 	chatModel *ark.ChatModel,
@@ -189,12 +394,20 @@ func runReactLoopNode(
 	if chatModel == nil {
 		return nil, fmt.Errorf("schedule refine: model is nil in react loop node")
 	}
+	if st.CompositeRouteSucceeded {
+		emitStage("schedule_refine.react.skip", "复合路由已收口成功，跳过 ReAct 兜底循环。")
+		return st, nil
+	}
 	if len(st.HybridEntries) == 0 {
 		st.ActionLogs = append(st.ActionLogs, "无可微调条目，跳过动作循环。")
 		return st, nil
 	}
-	if st.PlanMax <= 0 {
-		st.PlanMax = defaultPlanMax
+	if len(st.WorksetTaskIDs) == 0 {
+		st.ActionLogs = append(st.ActionLogs, "workset 为空，跳过动作循环。")
+		return st, nil
+	}
+	if st.PerTaskBudget <= 0 {
+		st.PerTaskBudget = defaultPerTaskBudget
 	}
 	if st.ExecuteMax <= 0 {
 		st.ExecuteMax = defaultExecuteMax
@@ -206,388 +419,299 @@ func runReactLoopNode(
 		st.RepairReserve = 0
 	}
 	st.MaxRounds = st.ExecuteMax + st.RepairReserve
-	if st.RepairReserve >= st.MaxRounds {
-		st.RepairReserve = 0
+	if st.TaskActionUsed == nil {
+		st.TaskActionUsed = make(map[int]int)
+	}
+	if st.SeenSlotQueries == nil {
+		st.SeenSlotQueries = make(map[string]struct{})
+	}
+	ensureCompositeStateMaps(st)
+	if st.DisableCompositeTools {
+		st.RequiredCompositeTool = ""
+		emitStage("schedule_refine.react.fallback_mode", "当前为禁复合兜底模式：仅允许基础工具逐任务调整。")
+	} else if strings.TrimSpace(st.RequiredCompositeTool) == "" {
+		st.RequiredCompositeTool = detectRequiredCompositeTool(st)
+	}
+	if strings.TrimSpace(st.CurrentPlan.Summary) == "" {
+		st.CurrentPlan = applyCompositeHardConditionToPlan(st, buildFallbackPlan(st))
+		st.BatchMoveAllowed = shouldAllowBatchMove(st.CurrentPlan)
 	}
 
 	window := buildPlanningWindowFromEntries(st.HybridEntries)
+	sourceWeekSet := inferSourceWeekSet(st.SlicePlan)
 	policy := refineToolPolicy{
-		KeepRelativeOrder: st.Contract.KeepRelativeOrder,
+		// 1. 执行期不再用顺序约束卡住 Move/Swap；
+		// 2. LLM 只负责把坑位排好，顺序由后端在收口阶段统一归位。
+		KeepRelativeOrder: false,
 		OrderScope:        st.Contract.OrderScope,
 		OriginOrderMap:    st.OriginOrderMap,
 	}
 	emitStage(
 		"schedule_refine.react.start",
-		fmt.Sprintf("开始执行 Plan-and-Execute 微调，plan_max=%d，execute_max=%d，replan_max=%d，修复预留=%d。", st.PlanMax, st.ExecuteMax, st.ReplanMax, st.RepairReserve),
+		fmt.Sprintf(
+			"开始执行单任务微步 ReAct，workset=%d，per_task_budget=%d，execute_max=%d，replan_max=%d，required_composite=%s，required_success=%t。",
+			len(st.WorksetTaskIDs),
+			st.PerTaskBudget,
+			st.ExecuteMax,
+			st.ReplanMax,
+			fallbackText(normalizeCompositeToolName(st.RequiredCompositeTool), "无"),
+			isRequiredCompositeSatisfied(st),
+		),
 	)
 
-	// 1. 先规划：Planner 决定“先取证还是先动作”，执行器按计划自由迭代。
-	// 2. 规划失败时走后端兜底计划，保证链路可继续。
-	if err := runPlannerNode(ctx, chatModel, st, emitStage, "initial"); err != nil {
-		return st, err
-	}
-
-	for st.RoundUsed < st.ExecuteMax {
-		round := st.RoundUsed + 1
-		remainingAction := st.ExecuteMax - st.RoundUsed
-		remainingTotal := st.MaxRounds - st.RoundUsed
-
-		useThinking, reason := shouldEnableRecoveryThinking(st)
-		emitStage("schedule_refine.react.round_start", fmt.Sprintf("第 %d 轮微调开始，动作剩余=%d，总剩余=%d。", round, remainingAction, remainingTotal))
-		if useThinking {
-			// 用户拍板要求：
-			// 1. 默认关闭 thinking；
-			// 2. 连续两次失败后，开启 1 轮 thinking，并把原因通过 SSE 透传给前端。
-			emitStage("schedule_refine.react.reasoning_switch", fmt.Sprintf("第 %d 轮|已启用恢复性 thinking：%s", round, reason))
-		}
-
-		entriesJSON, _ := json.Marshal(st.HybridEntries)
-		contractJSON, _ := json.Marshal(st.Contract)
-		planJSON, _ := json.Marshal(st.CurrentPlan)
-		observationText := buildObservationPrompt(st.ObservationHistory, 6)
-		lastObservationText := buildLastToolObservationPrompt(st.ObservationHistory)
-		lastFailedSignature := fallbackText(st.LastFailedCallSignature, "无")
-		userPrompt := withNearestJSONContract(
-			fmt.Sprintf(
-				"用户本轮请求=%s\n契约=%s\n当前计划=%s\n已有约束=%s\n动作预算剩余=%d\n总预算剩余=%d\nLAST_TOOL_RESULT=%s\nLAST_TOOL_OBSERVATION=%s\nLAST_FAILED_CALL_SIGNATURE=%s\nLAST_POST_STRATEGY=%s\n历史观察=%s\nday_of_week映射=1周一,2周二,3周三,4周四,5周五,6周六,7周日\nsuggested简表=%s\n当前混合日程JSON=%s",
-				strings.TrimSpace(st.UserMessage),
-				string(contractJSON),
-				string(planJSON),
-				strings.Join(st.Constraints, "；"),
-				remainingAction,
-				remainingTotal,
-				fallbackText(st.LastToolResult, "无"),
-				lastObservationText,
-				lastFailedSignature,
-				fallbackText(st.LastPostStrategy, "无"),
-				observationText,
-				buildSuggestedDigest(st.HybridEntries, 80),
-				string(entriesJSON),
-			),
-			jsonContractForReact,
-		)
-
-		// 1. ReAct 节点优先稳定性而非文风多样性：
-		// 1.1 温度固定 0，降低“同约束下每轮输出漂移”与非结构化长输出概率；
-		// 1.2 结合 parse_retry，可把“偶发半截 JSON”进一步压低。
-		raw, err := callModelText(ctx, chatModel, reactPrompt, userPrompt, useThinking, reactMaxTokens, 0)
-		if err != nil {
-			errDetail := formatRoundModelErrorDetail(round, err, ctx)
-			st.ActionLogs = append(st.ActionLogs, errDetail)
-			emitStage("schedule_refine.react.round_error", errDetail)
-			// 1. 若本轮前已产生过有效动作，则超时后不中断整链路。
-			// 2. 这样可以避免“前面已调好一部分，后面一轮超时导致全盘失败”。
-			if errors.Is(err, context.DeadlineExceeded) && st.RoundUsed > 0 {
-				emitStage("schedule_refine.react.round_timeout_continue", fmt.Sprintf("第 %d 轮超时，已保留前序结果并继续终审。", round))
+outer:
+	for st.WorksetCursor < len(st.WorksetTaskIDs) && st.RoundUsed < st.ExecuteMax {
+		// 1. 每次取下一个任务前先做一次全局目标短路判断。
+		// 2. 目标已满足时，直接结束整个 workset 循环，避免“任务6~10 空转”。
+		if pass, reason, _, applied := evaluateObjectiveDeterministic(st); applied && pass {
+			if isRequiredCompositeSatisfied(st) {
+				emitStage("schedule_refine.react.short_circuit", fmt.Sprintf("全局目标已满足，提前结束任务循环：%s", truncate(reason, 160)))
+				st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("全局目标提前达成，触发短路结束：%s", reason))
 				break
 			}
-			return st, err
+			st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("全局目标看似达成但未满足复合工具门禁：required=%s", normalizeCompositeToolName(st.RequiredCompositeTool)))
 		}
-		emitModelRawDebug(emitStage, fmt.Sprintf("react.round.%d.plan", round), raw)
-
-		// 1. 解析重试策略：
-		// 1.1 首次解析失败时，同轮再请求一次模型输出并再次解析；
-		// 1.2 重试成功则继续后续动作，不影响本轮链路；
-		// 1.3 二次解析仍失败时，返回统一业务错误码（respond 包），而不是裸 parseErr。
-		parsed, parseErr := parseReactOutputWithRetryOnce(ctx, chatModel, userPrompt, raw, round, emitStage, st)
-		if parseErr != nil {
-			return st, parseErr
+		taskID := st.WorksetTaskIDs[st.WorksetCursor]
+		current, ok := findSuggestedEntryByTaskID(st.HybridEntries, taskID)
+		if !ok {
+			st.WorksetCursor++
+			continue
 		}
-
-		observation := ReactRoundObservation{
-			Round:       round,
-			GoalCheck:   strings.TrimSpace(parsed.GoalCheck),
-			Decision:    strings.TrimSpace(parsed.Decision),
-			MissingInfo: append([]string(nil), parsed.MissingInfo...),
-			// 这里先记录“计划备注（动作前）”，执行工具后会用 post-reflect 的真反思覆盖。
-			Reflect: strings.TrimSpace(parsed.Reflect),
+		if len(sourceWeekSet) > 0 {
+			if _, inSourceWeek := sourceWeekSet[current.Week]; !inSourceWeek {
+				emitStage("schedule_refine.react.task_skip_scope", fmt.Sprintf("任务 id=%d 当前位于 W%d，不在来源周范围，已跳过。", taskID, current.Week))
+				st.WorksetCursor++
+				continue
+			}
 		}
+		st.CurrentTaskID = taskID
+		st.CurrentTaskAttempt = 0
+		emitStage("schedule_refine.react.task_start", fmt.Sprintf("开始处理任务 %d/%d：id=%d，%s。", st.WorksetCursor+1, len(st.WorksetTaskIDs), taskID, strings.TrimSpace(current.Name)))
 
-		emitStage("schedule_refine.react.plan", formatReactPlanStageDetail(round, parsed, remainingAction, useThinking))
-		if useThinking {
-			emitStage("schedule_refine.react.reasoning_content", fmt.Sprintf("第 %d 轮思考摘要：%s", round, truncate(strings.TrimSpace(parsed.Decision), 180)))
-		}
-		emitStage("schedule_refine.react.need_info", formatReactNeedInfoStageDetail(round, parsed.MissingInfo))
+		taskDone := false
+		for st.CurrentTaskAttempt < st.PerTaskBudget && st.RoundUsed < st.ExecuteMax {
+			// 1. 每轮开头先刷新“当前任务”的最新位置，避免模型基于旧坐标决策。
+			// 2. 若该任务已满足切片目标（例如“已从周末迁出到工作日”），则直接收口当前任务。
+			latest, exists := findSuggestedEntryByTaskID(st.HybridEntries, taskID)
+			if !exists {
+				taskDone = true
+				emitStage("schedule_refine.react.task_auto_done", fmt.Sprintf("任务 id=%d 已不在 suggested 列表，视为当前任务已完成。", taskID))
+				st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("任务 id=%d 自动完成：任务条目已不再可调 suggested。", taskID))
+				break
+			}
+			current = latest
+			if isCurrentTaskSatisfiedBySlice(current, st.SlicePlan) {
+				// 1. 自动收口前必须通过复合工具门禁。
+				// 2. 这样可避免“切片已满足但未执行必需复合工具”直接跳过执行阶段。
+				if isRequiredCompositeSatisfied(st) {
+					taskDone = true
+					emitStage("schedule_refine.react.task_auto_done", fmt.Sprintf("任务 id=%d 已满足切片目标，自动收口并切换下一任务。", taskID))
+					st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("任务 id=%d 自动完成：已满足切片目标。", taskID))
+					break
+				}
+				emitStage("schedule_refine.react.task_auto_done_blocked", fmt.Sprintf("任务 id=%d 虽满足切片目标，但复合工具门禁未通过，继续执行。", taskID))
+				st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("任务 id=%d 阻止自动收口：required_composite=%s 尚未成功。", taskID, fallbackText(normalizeCompositeToolName(st.RequiredCompositeTool), "无")))
+			}
 
-		if parsed.Done {
-			doneReason := fallbackText(strings.TrimSpace(parsed.Summary), "模型判定当前方案已满足目标。")
-			st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("第 %d 轮主动结束：%s", round, doneReason))
-			observation.Reflect = fallbackText(observation.Reflect, doneReason)
-			st.ObservationHistory = append(st.ObservationHistory, observation)
-			emitStage("schedule_refine.react.reflect", formatReactReflectStageDetail(round, observation.Reflect))
-			emitStage("schedule_refine.react.round_done", fmt.Sprintf("第 %d 轮结束：模型返回 done=true。", round))
-			break
-		}
+			round := st.RoundUsed + 1
+			remainingAction := st.ExecuteMax - st.RoundUsed
+			remainingTotal := st.MaxRounds - st.RoundUsed
+			useThinking, reason := shouldEnableRecoveryThinking(st)
+			st.CurrentTaskAttempt++
+			emitStage("schedule_refine.react.round_start", fmt.Sprintf("第 %d 轮微调开始（任务id=%d，第 %d/%d 次尝试），动作剩余=%d，总剩余=%d。", round, taskID, st.CurrentTaskAttempt, st.PerTaskBudget, remainingAction, remainingTotal))
+			if useThinking {
+				emitStage("schedule_refine.react.reasoning_switch", fmt.Sprintf("第 %d 轮已启用恢复态 thinking：%s", round, reason))
+			}
 
-		call, warn := pickSingleToolCall(parsed.ToolCalls)
-		if warn != "" {
-			st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("第 %d 轮告警：%s", round, warn))
-			emitStage("schedule_refine.react.round_warn", fmt.Sprintf("第 %d 轮告警：%s", round, warn))
-		}
-		if call == nil {
-			st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("第 %d 轮无可执行动作，结束微调。", round))
-			observation.Reflect = fallbackText(observation.Reflect, "本轮未生成可执行工具动作。")
-			st.ObservationHistory = append(st.ObservationHistory, observation)
-			emitStage("schedule_refine.react.reflect", formatReactReflectStageDetail(round, observation.Reflect))
-			emitStage("schedule_refine.react.round_done", fmt.Sprintf("第 %d 轮无动作，流程结束。", round))
-			break
-		}
+			userPrompt := buildMicroReactUserPrompt(st, current, remainingAction, remainingTotal)
+			raw, err := callModelText(ctx, chatModel, reactPrompt, userPrompt, useThinking, reactMaxTokens, 0)
+			if err != nil {
+				errDetail := formatRoundModelErrorDetail(round, err, ctx)
+				st.ActionLogs = append(st.ActionLogs, errDetail)
+				emitStage("schedule_refine.react.round_error", errDetail)
+				if errors.Is(err, context.DeadlineExceeded) && st.RoundUsed > 0 {
+					st.WorksetCursor = len(st.WorksetTaskIDs)
+					break
+				}
+				return st, err
+			}
+			emitModelRawDebug(emitStage, fmt.Sprintf("react.round.%d.plan", round), raw)
+			parsed, parseErr := parseReactOutputWithRetryOnce(ctx, chatModel, userPrompt, raw, round, emitStage, st)
+			if parseErr != nil {
+				return st, parseErr
+			}
 
-		emitStage("schedule_refine.react.tool_call", formatToolCallStageDetail(round, *call, remainingAction))
+			observation := ReactRoundObservation{
+				Round:     round,
+				GoalCheck: strings.TrimSpace(parsed.GoalCheck),
+				Decision:  strings.TrimSpace(parsed.Decision),
+			}
+			emitStage("schedule_refine.react.plan", formatReactPlanStageDetail(round, parsed, remainingAction, useThinking))
+			emitStage("schedule_refine.react.need_info", formatReactNeedInfoStageDetail(round, parsed.MissingInfo))
 
-		callSignature := buildToolCallSignature(*call)
-		if isRepeatedFailedCall(st, callSignature) {
-			// 1. 后端硬兜底：
-			// 1.1 若本轮动作与“上一轮失败动作签名”完全一致，直接拒绝执行，防止模型在同一坑位空转；
-			// 1.2 该失败会结构化写回上下文，驱动下一轮明确改道（换时段或改用 Swap）。
-			result := normalizeToolResult(reactToolResult{
-				Tool:      strings.TrimSpace(call.Tool),
-				Success:   false,
-				ErrorCode: "REPEAT_FAILED_ACTION",
-				Result:    "重复失败动作：与上一轮失败动作完全相同，请更换目标时段或改用 Swap。",
-			})
+			if parsed.Done {
+				allowDone := isCurrentTaskSatisfiedBySlice(current, st.SlicePlan)
+				if allowDone && !isRequiredCompositeSatisfied(st) {
+					allowDone = false
+				}
+				if !allowDone {
+					if pass, _, _, applied := evaluateObjectiveDeterministic(st); applied && pass && isRequiredCompositeSatisfied(st) {
+						allowDone = true
+					}
+				}
+				if !allowDone {
+					observation.Reflect = fmt.Sprintf("模型返回 done=true，但任务 id=%d 尚未满足切片目标或复合工具门禁未通过，继续执行。", taskID)
+					st.ObservationHistory = append(st.ObservationHistory, observation)
+					emitStage("schedule_refine.react.reflect", formatReactReflectStageDetail(round, observation.Reflect))
+					st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("任务 id=%d 拒绝提前 done：当前任务未满足目标。", taskID))
+					continue
+				}
+				reasonText := fallbackText(strings.TrimSpace(parsed.Summary), "模型判定当前任务已满足目标。")
+				observation.Reflect = reasonText
+				st.ObservationHistory = append(st.ObservationHistory, observation)
+				st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("任务 id=%d 完成：%s", taskID, reasonText))
+				emitStage("schedule_refine.react.reflect", formatReactReflectStageDetail(round, observation.Reflect))
+				taskDone = true
+				break
+			}
+
+			call, warn := pickSingleToolCall(parsed.ToolCalls)
+			if warn != "" {
+				emitStage("schedule_refine.react.round_warn", fmt.Sprintf("第 %d 轮告警：%s", round, warn))
+			}
+			if call == nil {
+				observation.Reflect = "本轮未生成可执行工具动作。"
+				st.ObservationHistory = append(st.ObservationHistory, observation)
+				emitStage("schedule_refine.react.reflect", formatReactReflectStageDetail(round, observation.Reflect))
+				break
+			}
+			normalizedCall := canonicalizeToolCall(*call)
+			call = &normalizedCall
+			emitStage("schedule_refine.react.tool_call", formatToolCallStageDetail(round, *call, remainingAction))
+
+			callSignature := buildToolCallSignature(*call)
+			taskIDs := listTaskIDsFromToolCall(*call)
+			if blockedResult, blocked := precheckCurrentTaskOwnership(*call, taskIDs, taskID); blocked {
+				if stop, err := handleBlockedToolResult(ctx, chatModel, st, emitStage, round, parsed, call, callSignature, blockedResult, &observation); err != nil {
+					return st, err
+				} else if stop {
+					taskDone = true
+					break
+				}
+				continue
+			}
+			if blockedResult, blocked := precheckToolCallPolicy(st, *call, taskIDs); blocked {
+				if stop, err := handleBlockedToolResult(ctx, chatModel, st, emitStage, round, parsed, call, callSignature, blockedResult, &observation); err != nil {
+					return st, err
+				} else if stop {
+					taskDone = true
+					break
+				}
+				continue
+			}
+			if isRepeatedFailedCall(st, callSignature) {
+				repeat := reactToolResult{Tool: strings.TrimSpace(call.Tool), Success: false, ErrorCode: "REPEAT_FAILED_ACTION", Result: "重复失败动作：与上一轮失败动作完全相同，请更换目标时段或改用 Swap。"}
+				if stop, err := handleBlockedToolResult(ctx, chatModel, st, emitStage, round, parsed, call, callSignature, repeat, &observation); err != nil {
+					return st, err
+				} else if stop {
+					taskDone = true
+					break
+				}
+				continue
+			}
+
+			for _, id := range taskIDs {
+				st.TaskActionUsed[id]++
+			}
+			nextEntries, rawResult := dispatchRefineTool(cloneHybridEntries(st.HybridEntries), *call, window, policy)
+			result := normalizeToolResult(rawResult)
 			st.RoundUsed++
-			st.LastToolResult = formatStructuredToolResult(result)
-			st.LastFailedCallSignature = callSignature
-			st.ConsecutiveFailures++
+			markCompositeToolOutcome(st, result.Tool, result.Success)
 
 			observation.ToolName = strings.TrimSpace(result.Tool)
 			observation.ToolParams = cloneToolParams(call.Params)
 			observation.ToolSuccess = result.Success
 			observation.ToolErrorCode = strings.TrimSpace(result.ErrorCode)
 			observation.ToolResult = strings.TrimSpace(result.Result)
-			postReflectText, nextStrategy, shouldStop := runPostReflectAfterTool(ctx, chatModel, st, round, parsed, call, result, emitStage)
+			postReflectText, _, shouldStop := runPostReflectAfterTool(ctx, chatModel, st, round, parsed, call, result, emitStage)
 			observation.Reflect = postReflectText
 			st.ObservationHistory = append(st.ObservationHistory, observation)
 
-			st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("第 %d 轮动作被拒绝：tool=%s error_code=%s detail=%s", round, result.Tool, result.ErrorCode, result.Result))
-			emitStage("schedule_refine.react.tool_blocked", fmt.Sprintf("第 %d 轮|检测到重复失败动作，已拒绝执行并要求模型改道。", round))
 			emitStage("schedule_refine.react.tool_result", formatToolResultStageDetail(round, result, st.RoundUsed, st.MaxRounds))
 			emitStage("schedule_refine.react.reflect", formatReactReflectStageDetail(round, observation.Reflect))
-			st.LastPostStrategy = fallbackText(nextStrategy, st.LastPostStrategy)
-			if shouldTriggerReplan(st, result) {
-				if replanned, err := tryReplan(ctx, chatModel, st, emitStage); err != nil {
-					return st, err
-				} else if replanned {
-					continue
+			if result.Success {
+				st.HybridEntries = nextEntries
+				window = buildPlanningWindowFromEntries(st.HybridEntries)
+				if isMutatingToolName(result.Tool) {
+					st.EntriesVersion++
+				}
+				st.LastFailedCallSignature = ""
+				st.ConsecutiveFailures = 0
+				st.ThinkingBoostArmed = false
+				// 1. 动作成功后立即尝试全局短路，避免继续拉着后续任务空转。
+				// 2. 只要 deterministic 目标达成，直接收口整个 ReAct 循环。
+				if pass, reason, _, applied := evaluateObjectiveDeterministic(st); applied && pass {
+					if isRequiredCompositeSatisfied(st) {
+						emitStage("schedule_refine.react.short_circuit", fmt.Sprintf("动作后全局目标达成，提前结束任务循环：%s", truncate(reason, 160)))
+						st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("动作后全局目标达成，触发短路结束：%s", reason))
+						taskDone = true
+						break outer
+					}
+					st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("动作后目标达成但复合工具门禁未通过：required=%s", normalizeCompositeToolName(st.RequiredCompositeTool)))
+				}
+				if latest, exists := findSuggestedEntryByTaskID(st.HybridEntries, taskID); exists {
+					current = latest
+					if isCurrentTaskSatisfiedBySlice(current, st.SlicePlan) {
+						if isRequiredCompositeSatisfied(st) {
+							taskDone = true
+							emitStage("schedule_refine.react.task_auto_done", fmt.Sprintf("任务 id=%d 动作后已满足切片目标，自动结束当前任务。", taskID))
+							st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("任务 id=%d 自动完成：动作后已满足切片目标。", taskID))
+							break
+						}
+						emitStage("schedule_refine.react.task_auto_done_blocked", fmt.Sprintf("任务 id=%d 动作后满足切片目标，但复合工具门禁未通过，继续执行。", taskID))
+						st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("任务 id=%d 阻止动作后自动收口：required_composite=%s 尚未成功。", taskID, fallbackText(normalizeCompositeToolName(st.RequiredCompositeTool), "无")))
+					}
+				} else {
+					taskDone = true
+					emitStage("schedule_refine.react.task_auto_done", fmt.Sprintf("任务 id=%d 动作后已不在 suggested 列表，自动结束当前任务。", taskID))
+					st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("任务 id=%d 自动完成：动作后不再可调。", taskID))
+					break
+				}
+			} else {
+				st.LastFailedCallSignature = callSignature
+				st.ConsecutiveFailures++
+				if shouldTriggerReplan(st, result) {
+					if replanned, err := tryReplan(ctx, chatModel, st, emitStage); err != nil {
+						return st, err
+					} else if replanned {
+						continue
+					}
 				}
 			}
 			if shouldStop {
-				emitStage("schedule_refine.react.round_done", fmt.Sprintf("第 %d 轮结束：post-reflect 建议停止。", round))
-				break
-			}
-			continue
-		}
-
-		nextEntries, rawResult := dispatchRefineTool(cloneHybridEntries(st.HybridEntries), *call, window, policy)
-		result := normalizeToolResult(rawResult)
-		st.RoundUsed++
-		st.LastToolResult = formatStructuredToolResult(result)
-
-		observation.ToolName = strings.TrimSpace(result.Tool)
-		observation.ToolParams = cloneToolParams(call.Params)
-		observation.ToolSuccess = result.Success
-		observation.ToolErrorCode = strings.TrimSpace(result.ErrorCode)
-		observation.ToolResult = strings.TrimSpace(result.Result)
-		postReflectText, nextStrategy, shouldStop := runPostReflectAfterTool(ctx, chatModel, st, round, parsed, call, result, emitStage)
-		observation.Reflect = postReflectText
-		st.ObservationHistory = append(st.ObservationHistory, observation)
-
-		st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("第 %d 轮动作：tool=%s success=%t detail=%s", round, result.Tool, result.Success, result.Result))
-		emitStage("schedule_refine.react.tool_result", formatToolResultStageDetail(round, result, st.RoundUsed, st.MaxRounds))
-		emitStage("schedule_refine.react.reflect", formatReactReflectStageDetail(round, observation.Reflect))
-		st.LastPostStrategy = fallbackText(nextStrategy, st.LastPostStrategy)
-
-		if result.Success {
-			st.HybridEntries = nextEntries
-			window = buildPlanningWindowFromEntries(st.HybridEntries)
-			st.LastFailedCallSignature = ""
-			st.ConsecutiveFailures = 0
-			st.ThinkingBoostArmed = false
-		} else {
-			st.LastFailedCallSignature = callSignature
-			st.ConsecutiveFailures++
-			if shouldTriggerReplan(st, result) {
-				if replanned, err := tryReplan(ctx, chatModel, st, emitStage); err != nil {
-					return st, err
-				} else if replanned {
-					continue
+				// 1. 模型建议 should_stop 只作为“候选中断信号”，必须经后端目标校验确认。
+				// 2. 若全局目标未达成，则继续本地循环，避免模型误停。
+				if pass, reason, _, applied := evaluateObjectiveDeterministic(st); applied && pass {
+					if isRequiredCompositeSatisfied(st) {
+						emitStage("schedule_refine.react.short_circuit", fmt.Sprintf("模型建议停止且全局目标达成，提前收口：%s", truncate(reason, 160)))
+						st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("模型建议停止且目标达成，触发短路结束：%s", reason))
+						taskDone = true
+						break outer
+					}
+					st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("模型建议停止但复合工具门禁未通过：required=%s", normalizeCompositeToolName(st.RequiredCompositeTool)))
 				}
 			}
 		}
-		if shouldStop {
-			emitStage("schedule_refine.react.round_done", fmt.Sprintf("第 %d 轮结束：post-reflect 建议停止。", round))
-			break
-		}
-	}
 
-	emitStage("schedule_refine.react.done", fmt.Sprintf("Plan-and-Execute 微调结束，已执行动作轮次=%d，重规划次数=%d。", st.RoundUsed, st.ReplanUsed))
+		emitStage("schedule_refine.react.task_done", fmt.Sprintf("任务 id=%d 处理完成：status=%s。", taskID, taskProgressLabel(taskDone, st.CurrentTaskAttempt, st.PerTaskBudget)))
+		st.WorksetCursor++
+		st.CurrentTaskID = 0
+		st.CurrentTaskAttempt = 0
+	}
+	emitStage("schedule_refine.react.done", fmt.Sprintf("单任务微步 ReAct 结束：已执行轮次=%d，重规划次数=%d，已处理任务=%d/%d。", st.RoundUsed, st.ReplanUsed, st.WorksetCursor, len(st.WorksetTaskIDs)))
 	return st, nil
 }
 
-// runPlannerNode 执行一次 Planner 规划。
-//
-// 步骤化说明：
-// 1. 读取当前约束、最近观察、失败上下文，生成结构化执行计划；
-// 2. 规划失败时使用后端兜底计划，保证执行器仍可继续；
-// 3. mode=initial/replan 仅用于阶段展示和日志区分。
-func runPlannerNode(
-	ctx context.Context,
-	chatModel *ark.ChatModel,
-	st *ScheduleRefineState,
-	emitStage func(stage, detail string),
-	mode string,
-) error {
-	if st == nil || chatModel == nil {
-		return fmt.Errorf("planner: invalid input")
-	}
-	if st.PlanUsed >= st.PlanMax {
-		return nil
-	}
-	stage := "schedule_refine.plan.generating"
-	if strings.TrimSpace(mode) == "replan" {
-		stage = "schedule_refine.plan.regenerating"
-	}
-	emitStage(stage, fmt.Sprintf("正在生成执行计划（mode=%s，已用%d/%d）。", mode, st.PlanUsed, st.PlanMax))
-
-	contractJSON, _ := json.Marshal(st.Contract)
-	observationText := buildObservationPrompt(st.ObservationHistory, 6)
-	userPrompt := withNearestJSONContract(
-		fmt.Sprintf(
-			"mode=%s\n用户请求=%s\n契约=%s\n已有约束=%s\n上一轮工具结果=%s\n上一轮策略=%s\n最近观察=%s\nsuggested简表=%s",
-			mode,
-			strings.TrimSpace(st.UserMessage),
-			string(contractJSON),
-			strings.Join(st.Constraints, "；"),
-			fallbackText(st.LastToolResult, "无"),
-			fallbackText(st.LastPostStrategy, "无"),
-			observationText,
-			buildSuggestedDigest(st.HybridEntries, 80),
-		),
-		jsonContractForPlanner,
-	)
-
-	raw, err := callModelText(ctx, chatModel, plannerPrompt, userPrompt, false, plannerMaxTokens, 0)
-	if err != nil {
-		st.CurrentPlan = buildFallbackPlan(st)
-		st.PlanUsed++
-		st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("Planner 调用失败，已使用兜底计划：%v", err))
-		emitStage("schedule_refine.plan.fallback", "Planner 调用失败，已切换后端兜底计划。")
-		return nil
-	}
-	emitModelRawDebug(emitStage, fmt.Sprintf("planner.%s", mode), raw)
-
-	parsed, parseErr := parsePlannerOutputWithRetryOnce(ctx, chatModel, userPrompt, raw, mode, emitStage)
-	if parseErr != nil {
-		st.CurrentPlan = buildFallbackPlan(st)
-		st.PlanUsed++
-		st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("Planner 解析失败，已使用兜底计划：%v", parseErr))
-		emitStage("schedule_refine.plan.fallback", fmt.Sprintf("Planner 输出解析失败，已切换后端兜底计划：%s", truncate(parseErr.Error(), 180)))
-		return nil
-	}
-
-	st.CurrentPlan = PlannerPlan{
-		Summary:        fallbackText(strings.TrimSpace(parsed.Summary), "已生成可执行计划。"),
-		Steps:          uniqueNonEmpty(parsed.Steps),
-		SuccessSignals: uniqueNonEmpty(parsed.SuccessSignals),
-		Fallback:       strings.TrimSpace(parsed.Fallback),
-	}
-	st.PlanUsed++
-	emitStage("schedule_refine.plan.done", fmt.Sprintf("规划完成：%s", truncate(st.CurrentPlan.Summary, 180)))
-	return nil
-}
-
-// buildFallbackPlan 构造“Planner 失败时兜底计划”。
-func buildFallbackPlan(st *ScheduleRefineState) PlannerPlan {
-	summary := "兜底计划：先取证再动作，优先原子批量移动，失败后改道。"
-	if st != nil && st.Contract.KeepRelativeOrder {
-		summary = "兜底计划：先取证再动作，严格保持相对顺序，优先原子批量移动。"
-	}
-	return PlannerPlan{
-		Summary: summary,
-		Steps: []string{
-			"1) 调用 QueryTargetTasks 定位目标任务",
-			"2) 调用 QueryAvailableSlots 获取可用时段",
-			"3) 优先尝试 BatchMove，失败后改用 Move/Swap",
-			"4) 收尾前调用 Verify 做确定性自检",
-		},
-		SuccessSignals: []string{
-			"工具动作成功且无冲突",
-			"Verify 通过",
-		},
-		Fallback: "若连续失败，重规划并更换工具路径。",
-	}
-}
-
-// shouldEnableRecoveryThinking 判断本轮是否触发“失败兜底 thinking”。
-//
-// 规则：
-// 1. 默认关闭 thinking；
-// 2. 连续失败达到 2 次时，仅开启 1 轮 thinking；
-// 3. 在同一失败串里只触发一次，直到出现成功再重置。
-func shouldEnableRecoveryThinking(st *ScheduleRefineState) (bool, string) {
-	if st == nil {
-		return false, ""
-	}
-	if st.ConsecutiveFailures < 2 {
-		return false, ""
-	}
-	if st.ThinkingBoostArmed {
-		return false, ""
-	}
-	st.ThinkingBoostArmed = true
-	return true, fmt.Sprintf("连续失败=%d，触发1轮恢复性 thinking", st.ConsecutiveFailures)
-}
-
-// shouldTriggerReplan 判断是否应该进入重规划。
-//
-// 触发条件：
-// 1. 连续失败 >=3；
-// 2. 且错误码属于“路径错误类”（冲突/顺序/重复失败/参数缺失/批量失败）。
-func shouldTriggerReplan(st *ScheduleRefineState, result reactToolResult) bool {
-	if st == nil {
-		return false
-	}
-	if st.ConsecutiveFailures < 3 {
-		return false
-	}
-	switch strings.TrimSpace(result.ErrorCode) {
-	case "SLOT_CONFLICT", "ORDER_VIOLATION", "REPEAT_FAILED_ACTION", "PARAM_MISSING", "BATCH_MOVE_FAILED", "VERIFY_FAILED":
-		return true
-	default:
-		return false
-	}
-}
-
-// tryReplan 在满足条件时触发一次重规划。
-func tryReplan(
-	ctx context.Context,
-	chatModel *ark.ChatModel,
-	st *ScheduleRefineState,
-	emitStage func(stage, detail string),
-) (bool, error) {
-	if st == nil {
-		return false, nil
-	}
-	if st.ReplanUsed >= st.ReplanMax {
-		return false, nil
-	}
-	if st.PlanUsed >= st.PlanMax {
-		return false, nil
-	}
-	st.ReplanUsed++
-	emitStage("schedule_refine.plan.replan_trigger", fmt.Sprintf("连续失败=%d，触发重规划（%d/%d）。", st.ConsecutiveFailures, st.ReplanUsed, st.ReplanMax))
-	if err := runPlannerNode(ctx, chatModel, st, emitStage, "replan"); err != nil {
-		return true, err
-	}
-	// 1. 重规划后重置失败串，避免刚重规划就再次被失败门槛立即打断；
-	// 2. 同时允许后续再次触发一次 thinking 兜底。
-	st.ConsecutiveFailures = 0
-	st.ThinkingBoostArmed = false
-	return true, nil
-}
-
-// runHardCheckNode 执行“物理校验 + 顺序校验 + 语义校验 + 单次修复”。
 func runHardCheckNode(
 	ctx context.Context,
 	chatModel *ark.ChatModel,
@@ -600,21 +724,27 @@ func runHardCheckNode(
 	if chatModel == nil {
 		return nil, fmt.Errorf("schedule refine: model is nil in hard check node")
 	}
-
 	emitStage("schedule_refine.hard_check.start", "正在执行终审硬校验。")
+	// 1. 先锁定“业务目标是否达成”的判定结果（未排序前）。
+	// 2. 后续顺序归位仅用于最终展示与顺序一致性，不得反向改变业务目标成败。
+	intentPassLocked, intentReasonLocked, intentUnmetLocked := evaluateIntentForJudgement(ctx, chatModel, st, emitStage)
+	emitStage("schedule_refine.hard_check.intent_locked", fmt.Sprintf("终审业务目标已锁定：pass=%t，reason=%s", intentPassLocked, truncate(intentReasonLocked, 120)))
+	if changed := normalizeMovableTaskOrderByOrigin(st); changed {
+		emitStage("schedule_refine.hard_check.order_normalized", "已在终审前按 origin_rank 对坑位做顺序归位。")
+	}
 	report := evaluateHardChecks(ctx, chatModel, st, emitStage)
+	report.IntentPassed = intentPassLocked
+	report.IntentReason = intentReasonLocked
+	report.IntentUnmet = append([]string(nil), intentUnmetLocked...)
 	st.HardCheck = report
-
 	if report.PhysicsPassed && report.OrderPassed && report.IntentPassed {
 		emitStage("schedule_refine.hard_check.pass", "终审通过。")
 		return st, nil
 	}
-
 	if st.RoundUsed >= st.MaxRounds {
 		emitStage("schedule_refine.hard_check.fail", "终审未通过，且动作预算已耗尽，无法继续修复。")
 		return st, nil
 	}
-
 	emitStage("schedule_refine.hard_check.repairing", "终审未通过，正在尝试一次修复动作。")
 	st.HardCheck.RepairTried = true
 	if err := runSingleRepairAction(ctx, chatModel, st, emitStage); err != nil {
@@ -622,20 +752,25 @@ func runHardCheckNode(
 		emitStage("schedule_refine.hard_check.fail", "修复动作失败，保留当前方案。")
 		return st, nil
 	}
-
+	intentPassLocked, intentReasonLocked, intentUnmetLocked = evaluateIntentForJudgement(ctx, chatModel, st, emitStage)
+	emitStage("schedule_refine.hard_check.intent_locked", fmt.Sprintf("修复后业务目标已锁定：pass=%t，reason=%s", intentPassLocked, truncate(intentReasonLocked, 120)))
+	if changed := normalizeMovableTaskOrderByOrigin(st); changed {
+		emitStage("schedule_refine.hard_check.order_normalized", "修复后已按 origin_rank 对坑位做顺序归位。")
+	}
 	report = evaluateHardChecks(ctx, chatModel, st, emitStage)
+	report.IntentPassed = intentPassLocked
+	report.IntentReason = intentReasonLocked
+	report.IntentUnmet = append([]string(nil), intentUnmetLocked...)
 	report.RepairTried = true
 	st.HardCheck = report
 	if report.PhysicsPassed && report.OrderPassed && report.IntentPassed {
 		emitStage("schedule_refine.hard_check.pass", "修复后终审通过。")
 		return st, nil
 	}
-
 	emitStage("schedule_refine.hard_check.fail", "修复后仍未完全满足要求，已返回当前最优结果。")
 	return st, nil
 }
 
-// runSummaryNode 生成最终用户可读总结，并回填结构化预览字段。
 func runSummaryNode(
 	ctx context.Context,
 	chatModel *ark.ChatModel,
@@ -648,23 +783,12 @@ func runSummaryNode(
 	if chatModel == nil {
 		return nil, fmt.Errorf("schedule refine: model is nil in summary node")
 	}
-
 	emitStage("schedule_refine.summary.generating", "正在生成微调结果总结。")
-
 	updateAllocatedItemsFromEntries(st)
 	st.CandidatePlans = hybridEntriesToWeekSchedules(st.HybridEntries)
-
 	reportJSON, _ := json.Marshal(st.HardCheck)
-	actionLogText := summarizeActionLogs(st.ActionLogs, 24)
 	contractJSON, _ := json.Marshal(st.Contract)
-	userPrompt := fmt.Sprintf(
-		"用户请求=%s\n契约=%s\n终审报告=%s\n动作日志=%s",
-		strings.TrimSpace(st.UserMessage),
-		string(contractJSON),
-		string(reportJSON),
-		actionLogText,
-	)
-
+	userPrompt := fmt.Sprintf("用户请求=%s\n契约=%s\n终审报告=%s\n动作日志=%s", strings.TrimSpace(st.UserMessage), string(contractJSON), string(reportJSON), summarizeActionLogs(st.ActionLogs, 24))
 	raw, err := callModelText(ctx, chatModel, summaryPrompt, userPrompt, false, 280, 0.35)
 	summary := strings.TrimSpace(raw)
 	if err == nil {
@@ -672,31 +796,41 @@ func runSummaryNode(
 	}
 	if err != nil || summary == "" {
 		if st.HardCheck.PhysicsPassed && st.HardCheck.OrderPassed && st.HardCheck.IntentPassed {
-			summary = fmt.Sprintf("微调已完成，共执行 %d 轮动作。当前方案已通过终审校验，可以继续使用。", st.RoundUsed)
+			summary = fmt.Sprintf("微调已完成，共执行 %d 轮动作，方案已通过终审。", st.RoundUsed)
 		} else {
-			summary = fmt.Sprintf("已完成微调并返回当前最优结果（执行 %d 轮动作）。终审仍有未满足项：%s。", st.RoundUsed, fallbackText(st.HardCheck.IntentReason, "请进一步明确你的微调要求"))
+			summary = fmt.Sprintf("已完成微调并返回当前最优结果（执行 %d 轮动作）。终审仍有未满足项：%s。", st.RoundUsed, fallbackText(st.HardCheck.IntentReason, "请进一步明确微调目标"))
 		}
 	}
-
+	summary = alignSummaryWithHardCheck(st, summary)
 	st.FinalSummary = summary
 	st.Completed = true
 	emitStage("schedule_refine.summary.done", "微调总结已生成。")
 	return st, nil
 }
 
-// evaluateHardChecks 执行一次完整硬校验（物理 + 顺序 + 语义）。
 func evaluateHardChecks(ctx context.Context, chatModel *ark.ChatModel, st *ScheduleRefineState, emitStage func(stage, detail string)) HardCheckReport {
 	report := HardCheckReport{}
-
 	report.PhysicsIssues = physicsCheck(st.HybridEntries, len(st.AllocatedItems))
 	report.PhysicsPassed = len(report.PhysicsIssues) == 0
-
+	// 1. 顺序校验默认开启：即便执行期放开顺序限制，终审也要验证“后端归位”后的顺序正确性。
+	// 2. 当 origin_order_map 为空时降级跳过，避免无基线时误报。
+	needOrderCheck := len(st.OriginOrderMap) > 0
 	report.OrderIssues = validateRelativeOrder(st.HybridEntries, refineToolPolicy{
-		KeepRelativeOrder: st.Contract.KeepRelativeOrder,
+		KeepRelativeOrder: needOrderCheck,
 		OrderScope:        st.Contract.OrderScope,
 		OriginOrderMap:    st.OriginOrderMap,
 	})
 	report.OrderPassed = len(report.OrderIssues) == 0
+
+	// 1. 优先使用“契约编译后”的确定性终审，执行与终审共用同一份目标约束。
+	// 2. 仅当目标约束不可判定时，才回退语义终审兜底。
+	if pass, reason, unmet, applied := evaluateObjectiveDeterministic(st); applied {
+		pass, reason, unmet = applyCompositeGateToIntentResult(st, pass, reason, unmet)
+		report.IntentPassed = pass
+		report.IntentReason = strings.TrimSpace(reason)
+		report.IntentUnmet = append([]string(nil), unmet...)
+		return report
+	}
 
 	review, err := runSemanticReview(ctx, chatModel, st, emitStage)
 	if err != nil {
@@ -705,13 +839,472 @@ func evaluateHardChecks(ctx context.Context, chatModel *ark.ChatModel, st *Sched
 		report.IntentUnmet = []string{"语义校验阶段异常"}
 		return report
 	}
-	report.IntentPassed = review.Pass
-	report.IntentReason = strings.TrimSpace(review.Reason)
-	report.IntentUnmet = append([]string(nil), review.Unmet...)
+	pass, reason, unmet := applyCompositeGateToIntentResult(st, review.Pass, strings.TrimSpace(review.Reason), review.Unmet)
+	report.IntentPassed = pass
+	report.IntentReason = strings.TrimSpace(reason)
+	report.IntentUnmet = append([]string(nil), unmet...)
 	return report
 }
 
-// runSingleRepairAction 在终审失败后执行一次修复动作。
+// evaluateIntentForJudgement 在“最终排序前”计算业务目标是否达成。
+//
+// 说明：
+// 1. 优先走 deterministic objective；
+// 2. objective 不可判定时退回语义 review；
+// 3. 返回值会在 hard_check 中被锁定，避免后置排序反向干扰业务目标判定。
+func evaluateIntentForJudgement(
+	ctx context.Context,
+	chatModel *ark.ChatModel,
+	st *ScheduleRefineState,
+	emitStage func(stage, detail string),
+) (pass bool, reason string, unmet []string) {
+	if pass, reason, unmet, applied := evaluateObjectiveDeterministic(st); applied {
+		pass, reason, unmet = applyCompositeGateToIntentResult(st, pass, strings.TrimSpace(reason), unmet)
+		return pass, strings.TrimSpace(reason), append([]string(nil), unmet...)
+	}
+	review, err := runSemanticReview(ctx, chatModel, st, emitStage)
+	if err != nil {
+		return false, fmt.Sprintf("语义校验失败：%v", err), []string{"语义校验阶段异常"}
+	}
+	pass, reason, unmet = applyCompositeGateToIntentResult(st, review.Pass, strings.TrimSpace(review.Reason), review.Unmet)
+	return pass, strings.TrimSpace(reason), append([]string(nil), unmet...)
+}
+
+// compileRefineObjective 把自然语言契约编译为“可执行且可校验”的目标参数。
+func compileRefineObjective(st *ScheduleRefineState, slice RefineSlicePlan) RefineObjective {
+	obj := RefineObjective{
+		Mode:            "none",
+		SourceWeeks:     keysOfIntSet(inferSourceWeekSet(slice)),
+		TargetWeeks:     keysOfIntSet(inferTargetWeekSet(slice)),
+		SourceDays:      uniquePositiveInts(append([]int(nil), slice.SourceDays...)),
+		TargetDays:      uniquePositiveInts(append([]int(nil), slice.TargetDays...)),
+		ExcludeSections: uniquePositiveInts(append([]int(nil), slice.ExcludeSections...)),
+	}
+	// 1. 若契约断言显式给出来源/目标周，优先回填到 objective；
+	// 2. 避免后续终审只能依赖自然语言猜测。
+	for _, assertion := range st.Contract.HardAssertions {
+		if assertion.Week > 0 && len(obj.SourceWeeks) == 0 {
+			obj.SourceWeeks = []int{assertion.Week}
+		}
+		if assertion.TargetWeek > 0 && len(obj.TargetWeeks) == 0 {
+			obj.TargetWeeks = []int{assertion.TargetWeek}
+		}
+	}
+
+	if len(obj.SourceWeeks) == 0 && len(slice.WeekFilter) == 1 && slice.WeekFilter[0] > 0 {
+		obj.SourceWeeks = []int{slice.WeekFilter[0]}
+	}
+	if len(obj.TargetWeeks) == 0 && len(slice.WeekFilter) == 1 && (len(obj.SourceDays) > 0 || len(obj.TargetDays) > 0) {
+		obj.TargetWeeks = []int{slice.WeekFilter[0]}
+	}
+
+	// 来源范围为空时无法构造目标，交给语义终审兜底。
+	if len(obj.SourceWeeks) == 0 && len(obj.SourceDays) == 0 {
+		obj.Reason = "来源范围为空，未启用确定性目标。"
+		return obj
+	}
+	// 目标范围为空时同样不启用确定性目标。
+	if len(obj.TargetWeeks) == 0 && len(obj.TargetDays) == 0 {
+		obj.Reason = "目标范围为空，未启用确定性目标。"
+		return obj
+	}
+
+	sourceTaskIDs := collectSourceTaskIDsForObjective(st.InitialHybridEntries, obj, slice.WeekFilter)
+	obj.BaselineSourceTaskCount = len(sourceTaskIDs)
+
+	halfIntent := hasHalfTransferIntent(st)
+	if halfIntent && len(obj.SourceWeeks) > 0 && len(obj.TargetWeeks) > 0 && !isSameWeeks(obj.SourceWeeks, obj.TargetWeeks) {
+		obj.Mode = "move_ratio"
+		obj.RequiredMoveMin = obj.BaselineSourceTaskCount / 2
+		obj.RequiredMoveMax = (obj.BaselineSourceTaskCount + 1) / 2
+		obj.Reason = "检测到“半数迁移”意图，按比例目标执行与终审。"
+		return obj
+	}
+
+	obj.Mode = "move_all"
+	obj.RequiredMoveMin = obj.BaselineSourceTaskCount
+	obj.RequiredMoveMax = obj.BaselineSourceTaskCount
+	obj.Reason = "默认按来源范围任务全部进入目标范围执行与终审。"
+	return obj
+}
+
+// evaluateObjectiveDeterministic 基于编译后的目标做确定性终审。
+func evaluateObjectiveDeterministic(st *ScheduleRefineState) (pass bool, reason string, unmet []string, applied bool) {
+	if st == nil {
+		return false, "", nil, false
+	}
+	obj := st.Objective
+	if strings.TrimSpace(obj.Mode) == "" || strings.TrimSpace(obj.Mode) == "none" {
+		return false, "", nil, false
+	}
+
+	sourceTaskIDs := collectSourceTaskIDsForObjective(st.InitialHybridEntries, obj, st.SlicePlan.WeekFilter)
+	if len(sourceTaskIDs) == 0 {
+		return true, "确定性校验通过：来源范围无可调任务。", nil, true
+	}
+
+	byTaskID := buildMovableTaskIndex(st.HybridEntries)
+	movedCount := 0
+	violations := make([]string, 0, 8)
+	for _, taskID := range sourceTaskIDs {
+		entries := byTaskID[taskID]
+		if len(entries) == 0 {
+			violations = append(violations, fmt.Sprintf("任务id=%d 未在结果中找到可移动条目", taskID))
+			continue
+		}
+		if len(entries) > 1 {
+			violations = append(violations, fmt.Sprintf("任务id=%d 命中 %d 条可移动条目，状态不唯一", taskID, len(entries)))
+			continue
+		}
+		entry := entries[0]
+		moved, why := isTaskMovedIntoObjectiveTarget(entry, obj)
+		if moved {
+			movedCount++
+			continue
+		}
+		if obj.Mode == "move_all" {
+			violations = append(violations, fmt.Sprintf("任务id=%d 未满足目标范围：%s", taskID, why))
+			continue
+		}
+		// 比例模式下，允许部分任务不迁移；但若任务落在来源/目标之外，视为异常。
+		if !isTaskInObjectiveSource(entry, obj) {
+			violations = append(violations, fmt.Sprintf("任务id=%d 既不在来源也不在目标范围（W%dD%d）", taskID, entry.Week, entry.DayOfWeek))
+		}
+	}
+
+	if movedCount < obj.RequiredMoveMin || movedCount > obj.RequiredMoveMax {
+		violations = append(violations, fmt.Sprintf("迁移数量未达标：要求在[%d,%d]，实际=%d", obj.RequiredMoveMin, obj.RequiredMoveMax, movedCount))
+	}
+
+	if len(violations) == 0 {
+		return true, fmt.Sprintf("确定性校验通过：迁移数量达标（%d/%d）。", movedCount, len(sourceTaskIDs)), nil, true
+	}
+	return false, fmt.Sprintf("确定性校验未通过：仍有 %d 项约束未满足。", len(violations)), violations, true
+}
+
+func collectSourceTaskIDsForObjective(entries []model.HybridScheduleEntry, obj RefineObjective, fallbackWeekFilter []int) []int {
+	if len(entries) == 0 {
+		return nil
+	}
+	sourceWeekSet := intSliceToWeekSet(obj.SourceWeeks)
+	sourceDaySet := intSliceToDaySet(obj.SourceDays)
+	fallbackWeekSet := intSliceToWeekSet(fallbackWeekFilter)
+
+	seen := make(map[int]struct{}, len(entries))
+	ids := make([]int, 0, len(entries))
+	for _, entry := range entries {
+		if !isMovableSuggestedTask(entry) {
+			continue
+		}
+		if len(sourceWeekSet) > 0 {
+			if _, ok := sourceWeekSet[entry.Week]; !ok {
+				continue
+			}
+		} else if len(fallbackWeekSet) > 0 {
+			if _, ok := fallbackWeekSet[entry.Week]; !ok {
+				continue
+			}
+		}
+		if len(sourceDaySet) > 0 {
+			if _, ok := sourceDaySet[entry.DayOfWeek]; !ok {
+				continue
+			}
+		}
+		if _, exists := seen[entry.TaskItemID]; exists {
+			continue
+		}
+		seen[entry.TaskItemID] = struct{}{}
+		ids = append(ids, entry.TaskItemID)
+	}
+	sort.Ints(ids)
+	return ids
+}
+
+func buildMovableTaskIndex(entries []model.HybridScheduleEntry) map[int][]model.HybridScheduleEntry {
+	index := make(map[int][]model.HybridScheduleEntry, len(entries))
+	for _, entry := range entries {
+		if !isMovableSuggestedTask(entry) {
+			continue
+		}
+		index[entry.TaskItemID] = append(index[entry.TaskItemID], entry)
+	}
+	return index
+}
+
+func hasHalfTransferIntent(st *ScheduleRefineState) bool {
+	if st == nil {
+		return false
+	}
+	if hasHalfTransferAssertion(st.Contract.HardAssertions) {
+		return true
+	}
+	joined := strings.ToLower(strings.Join(append([]string{st.UserMessage, st.Contract.Intent}, st.Contract.HardRequirements...), " "))
+	for _, key := range []string{"一半", "半数", "对半", "50%"} {
+		if strings.Contains(joined, key) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasHalfTransferAssertion(assertions []RefineAssertion) bool {
+	for _, item := range assertions {
+		metric := strings.ToLower(strings.TrimSpace(item.Metric))
+		if metric == "" {
+			continue
+		}
+		switch metric {
+		case "source_move_ratio_percent", "move_ratio_percent", "half_transfer_ratio":
+			switch strings.TrimSpace(item.Operator) {
+			case "==", ">=", "<=", "between":
+				if item.Value == 50 || item.Min == 50 || item.Max == 50 {
+					return true
+				}
+			}
+		case "source_remaining_count":
+			// 1. 该断言常用于“迁走一半后来源剩余=一半”。
+			// 2. 具体阈值是否满足由 objective + deterministic 校验统一判定。
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeHardAssertions(raw []hardAssertionOutput) []RefineAssertion {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]RefineAssertion, 0, len(raw))
+	for _, item := range raw {
+		metric := strings.TrimSpace(item.Metric)
+		if metric == "" {
+			continue
+		}
+		operator := strings.TrimSpace(item.Operator)
+		if operator == "" {
+			operator = "=="
+		}
+		assertion := RefineAssertion{
+			Metric:     metric,
+			Operator:   operator,
+			Value:      item.Value,
+			Min:        item.Min,
+			Max:        item.Max,
+			Week:       item.Week,
+			TargetWeek: item.TargetWeek,
+		}
+		out = append(out, assertion)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func inferHardAssertionsFromRequest(message string, requirements []string) []RefineAssertion {
+	joined := strings.TrimSpace(message + " " + strings.Join(requirements, " "))
+	if joined == "" {
+		return nil
+	}
+	weeks := extractWeekFilters(joined)
+	if !containsAny(strings.ToLower(joined), []string{"一半", "半数", "对半", "50%"}) {
+		return nil
+	}
+	// 1. 兜底断言：要求来源任务迁移比例为 50%。
+	// 2. week/target_week 使用文本中前两个周次，便于后续 objective 编译。
+	assertion := RefineAssertion{
+		Metric:   "source_move_ratio_percent",
+		Operator: "==",
+		Value:    50,
+	}
+	if len(weeks) > 0 {
+		assertion.Week = weeks[0]
+	}
+	if len(weeks) > 1 {
+		assertion.TargetWeek = weeks[1]
+	}
+	return []RefineAssertion{assertion}
+}
+
+func isTaskMovedIntoObjectiveTarget(entry model.HybridScheduleEntry, obj RefineObjective) (bool, string) {
+	targetWeekSet := intSliceToWeekSet(obj.TargetWeeks)
+	targetDaySet := intSliceToDaySet(obj.TargetDays)
+	excludedSections := intSliceToSectionSet(obj.ExcludeSections)
+	if len(targetWeekSet) > 0 {
+		if _, ok := targetWeekSet[entry.Week]; !ok {
+			return false, fmt.Sprintf("week=%d 不在目标周", entry.Week)
+		}
+	}
+	if len(targetDaySet) > 0 {
+		if _, ok := targetDaySet[entry.DayOfWeek]; !ok {
+			return false, fmt.Sprintf("day_of_week=%d 不在目标日", entry.DayOfWeek)
+		}
+	}
+	if len(excludedSections) > 0 && intersectsExcludedSections(entry.SectionFrom, entry.SectionTo, excludedSections) {
+		return false, fmt.Sprintf("section=%d-%d 命中排除节次", entry.SectionFrom, entry.SectionTo)
+	}
+	return true, ""
+}
+
+func isTaskInObjectiveSource(entry model.HybridScheduleEntry, obj RefineObjective) bool {
+	sourceWeekSet := intSliceToWeekSet(obj.SourceWeeks)
+	sourceDaySet := intSliceToDaySet(obj.SourceDays)
+	if len(sourceWeekSet) > 0 {
+		if _, ok := sourceWeekSet[entry.Week]; !ok {
+			return false
+		}
+	}
+	if len(sourceDaySet) > 0 {
+		if _, ok := sourceDaySet[entry.DayOfWeek]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func isSameWeeks(left []int, right []int) bool {
+	if len(left) == 0 || len(right) == 0 {
+		return false
+	}
+	lset := intSliceToWeekSet(left)
+	rset := intSliceToWeekSet(right)
+	if len(lset) != len(rset) {
+		return false
+	}
+	for w := range lset {
+		if _, ok := rset[w]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeMovableTaskOrderByOrigin 在“坑位不变”的前提下，按 origin_rank 归位任务顺序。
+//
+// 步骤化说明：
+// 1. 先提取所有可移动任务的当前坑位（week/day/section）；
+// 2. 再按任务跨度分组，避免把 2 节任务塞进 3 节坑位；
+// 3. 每个跨度组内按坑位时间升序与 origin_rank 升序做一一映射；
+// 4. 最终只改“任务身份落到哪个坑位”，不改坑位分布本身。
+func normalizeMovableTaskOrderByOrigin(st *ScheduleRefineState) bool {
+	if st == nil || len(st.HybridEntries) <= 1 || len(st.OriginOrderMap) == 0 {
+		return false
+	}
+	entries := cloneHybridEntries(st.HybridEntries)
+	indices := make([]int, 0, len(entries))
+	for idx, entry := range entries {
+		if isMovableSuggestedTask(entry) {
+			indices = append(indices, idx)
+		}
+	}
+	if len(indices) <= 1 {
+		return false
+	}
+
+	type slot struct {
+		Week        int
+		DayOfWeek   int
+		SectionFrom int
+		SectionTo   int
+	}
+	groupSlots := make(map[int][]slot)                      // key=span
+	groupTasks := make(map[int][]model.HybridScheduleEntry) // key=span
+	for _, idx := range indices {
+		entry := entries[idx]
+		span := entry.SectionTo - entry.SectionFrom + 1
+		groupSlots[span] = append(groupSlots[span], slot{
+			Week:        entry.Week,
+			DayOfWeek:   entry.DayOfWeek,
+			SectionFrom: entry.SectionFrom,
+			SectionTo:   entry.SectionTo,
+		})
+		groupTasks[span] = append(groupTasks[span], entry)
+	}
+
+	changed := false
+	spanKeys := make([]int, 0, len(groupSlots))
+	for span := range groupSlots {
+		spanKeys = append(spanKeys, span)
+	}
+	sort.Ints(spanKeys)
+
+	groupCursor := make(map[int]int, len(groupSlots))
+	for _, span := range spanKeys {
+		slots := groupSlots[span]
+		tasks := groupTasks[span]
+		if len(slots) != len(tasks) || len(slots) == 0 {
+			continue
+		}
+		sort.SliceStable(slots, func(i, j int) bool {
+			if slots[i].Week != slots[j].Week {
+				return slots[i].Week < slots[j].Week
+			}
+			if slots[i].DayOfWeek != slots[j].DayOfWeek {
+				return slots[i].DayOfWeek < slots[j].DayOfWeek
+			}
+			if slots[i].SectionFrom != slots[j].SectionFrom {
+				return slots[i].SectionFrom < slots[j].SectionFrom
+			}
+			return slots[i].SectionTo < slots[j].SectionTo
+		})
+		sort.SliceStable(tasks, func(i, j int) bool {
+			ri := st.OriginOrderMap[tasks[i].TaskItemID]
+			rj := st.OriginOrderMap[tasks[j].TaskItemID]
+			if ri <= 0 {
+				ri = 1 << 30
+			}
+			if rj <= 0 {
+				rj = 1 << 30
+			}
+			if ri != rj {
+				return ri < rj
+			}
+			if tasks[i].Week != tasks[j].Week {
+				return tasks[i].Week < tasks[j].Week
+			}
+			if tasks[i].DayOfWeek != tasks[j].DayOfWeek {
+				return tasks[i].DayOfWeek < tasks[j].DayOfWeek
+			}
+			if tasks[i].SectionFrom != tasks[j].SectionFrom {
+				return tasks[i].SectionFrom < tasks[j].SectionFrom
+			}
+			return tasks[i].TaskItemID < tasks[j].TaskItemID
+		})
+		for i := range tasks {
+			tasks[i].Week = slots[i].Week
+			tasks[i].DayOfWeek = slots[i].DayOfWeek
+			tasks[i].SectionFrom = slots[i].SectionFrom
+			tasks[i].SectionTo = slots[i].SectionTo
+		}
+		groupTasks[span] = tasks
+	}
+
+	for _, idx := range indices {
+		entry := entries[idx]
+		span := entry.SectionTo - entry.SectionFrom + 1
+		cursor := groupCursor[span]
+		if cursor >= len(groupTasks[span]) {
+			continue
+		}
+		nextEntry := groupTasks[span][cursor]
+		groupCursor[span] = cursor + 1
+		if entry.TaskItemID != nextEntry.TaskItemID ||
+			entry.Week != nextEntry.Week ||
+			entry.DayOfWeek != nextEntry.DayOfWeek ||
+			entry.SectionFrom != nextEntry.SectionFrom ||
+			entry.SectionTo != nextEntry.SectionTo {
+			changed = true
+		}
+		entries[idx] = nextEntry
+	}
+	if !changed {
+		return false
+	}
+	sortHybridEntries(entries)
+	st.HybridEntries = entries
+	return true
+}
+
 func runSingleRepairAction(ctx context.Context, chatModel *ark.ChatModel, st *ScheduleRefineState, emitStage func(stage, detail string)) error {
 	if st == nil {
 		return fmt.Errorf("nil state")
@@ -722,12 +1315,11 @@ func runSingleRepairAction(ctx context.Context, chatModel *ark.ChatModel, st *Sc
 	if st.RoundUsed >= st.MaxRounds {
 		return fmt.Errorf("动作预算已耗尽")
 	}
-
 	entriesJSON, _ := json.Marshal(st.HybridEntries)
 	contractJSON, _ := json.Marshal(st.Contract)
 	userPrompt := withNearestJSONContract(
 		fmt.Sprintf(
-			"用户请求=%s\n契约=%s\n未满足点=%s\n当前混合日程JSON=%s",
+			"用户请求=%s\n契约=%s\n未满足点=%s\n当前混合日程JSON=%s\nMove标准Schema={task_item_id,to_week,to_day,to_section_from,to_section_to}\nSwap标准Schema={task_a,task_b}",
 			strings.TrimSpace(st.UserMessage),
 			string(contractJSON),
 			strings.Join(st.HardCheck.IntentUnmet, "；"),
@@ -735,7 +1327,6 @@ func runSingleRepairAction(ctx context.Context, chatModel *ark.ChatModel, st *Sc
 		),
 		jsonContractForReact,
 	)
-
 	raw, err := callModelText(ctx, chatModel, repairPrompt, userPrompt, false, 240, 0.15)
 	if err != nil {
 		return err
@@ -745,7 +1336,6 @@ func runSingleRepairAction(ctx context.Context, chatModel *ark.ChatModel, st *Sc
 	if parseErr != nil {
 		return parseErr
 	}
-
 	call, warn := pickSingleToolCall(parsed.ToolCalls)
 	if warn != "" {
 		st.ActionLogs = append(st.ActionLogs, "修复阶段告警："+warn)
@@ -753,30 +1343,32 @@ func runSingleRepairAction(ctx context.Context, chatModel *ark.ChatModel, st *Sc
 	if call == nil {
 		return fmt.Errorf("修复阶段未给出可执行动作")
 	}
+	normalizedCall := canonicalizeToolCall(*call)
+	call = &normalizedCall
+	if !isMutatingToolName(strings.TrimSpace(call.Tool)) {
+		return fmt.Errorf("修复阶段工具不允许：%s（仅允许 Move/Swap/BatchMove）", strings.TrimSpace(call.Tool))
+	}
 	emitStage("schedule_refine.hard_check.repair_call", formatToolCallStageDetail(st.RoundUsed+1, *call, st.MaxRounds-st.RoundUsed))
-
-	policy := refineToolPolicy{
-		KeepRelativeOrder: st.Contract.KeepRelativeOrder,
+	nextEntries, result := dispatchRefineTool(cloneHybridEntries(st.HybridEntries), *call, buildPlanningWindowFromEntries(st.HybridEntries), refineToolPolicy{
+		KeepRelativeOrder: false,
 		OrderScope:        st.Contract.OrderScope,
 		OriginOrderMap:    st.OriginOrderMap,
-	}
-	nextEntries, result := dispatchRefineTool(cloneHybridEntries(st.HybridEntries), *call, buildPlanningWindowFromEntries(st.HybridEntries), policy)
+	})
 	result = normalizeToolResult(result)
 	st.RoundUsed++
-	st.LastToolResult = formatStructuredToolResult(result)
-	st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("修复动作：tool=%s success=%t detail=%s", result.Tool, result.Success, result.Result))
 	emitStage("schedule_refine.hard_check.repair_result", formatToolResultStageDetail(st.RoundUsed, result, st.RoundUsed, st.MaxRounds))
-
 	if !result.Success {
 		st.LastFailedCallSignature = buildToolCallSignature(*call)
 		return fmt.Errorf("修复动作执行失败：%s", result.Result)
 	}
 	st.LastFailedCallSignature = ""
 	st.HybridEntries = nextEntries
+	if isMutatingToolName(result.Tool) {
+		st.EntriesVersion++
+	}
 	return nil
 }
 
-// runSemanticReview 通过模型判断“当前方案是否满足用户本轮目标”。
 func runSemanticReview(ctx context.Context, chatModel *ark.ChatModel, st *ScheduleRefineState, emitStage func(stage, detail string)) (*reviewOutput, error) {
 	entriesJSON, _ := json.Marshal(st.HybridEntries)
 	contractJSON, _ := json.Marshal(st.Contract)
@@ -799,13 +1391,6 @@ func runSemanticReview(ctx context.Context, chatModel *ark.ChatModel, st *Schedu
 	return parseReviewOutput(raw)
 }
 
-// runPostReflectAfterTool 执行“工具动作后的真反思”。
-//
-// 步骤化说明：
-// 1. 输入本轮计划、工具调用参数、后端真实工具结果；
-// 2. 调用专用 postReflectPrompt，让模型基于真实结果给出复盘与下一步策略；
-// 3. 解析失败时使用后端兜底复盘文本，保证链路不被“反思失败”拖垮；
-// 4. 返回反思文本与 shouldStop 标记，供主循环决定是否提前结束。
 func runPostReflectAfterTool(
 	ctx context.Context,
 	chatModel *ark.ChatModel,
@@ -819,35 +1404,26 @@ func runPostReflectAfterTool(
 	if st == nil || chatModel == nil || call == nil {
 		return buildPostReflectFallback(plan, result), "", false
 	}
-
 	emitStage("schedule_refine.react.post_reflect.start", fmt.Sprintf("第 %d 轮|正在基于工具真实结果进行反思。", round))
-
 	contractJSON, _ := json.Marshal(st.Contract)
 	callJSON, _ := json.Marshal(call)
 	resultJSON, _ := json.Marshal(result)
-	planGoal := ""
 	planDecision := ""
-	planNote := ""
 	if plan != nil {
-		planGoal = strings.TrimSpace(plan.GoalCheck)
 		planDecision = strings.TrimSpace(plan.Decision)
-		planNote = strings.TrimSpace(plan.Reflect)
 	}
 	userPrompt := withNearestJSONContract(
 		fmt.Sprintf(
-			"用户请求=%s\n契约=%s\n本轮计划.goal_check=%s\n本轮计划.decision=%s\n本轮计划.note=%s\n本轮工具调用=%s\n本轮工具结果=%s\n最近观察=%s\n",
+			"用户请求=%s\n契约=%s\n本轮计划.decision=%s\n本轮工具调用=%s\n本轮工具结果=%s\n最近观察=%s",
 			strings.TrimSpace(st.UserMessage),
 			string(contractJSON),
-			planGoal,
 			planDecision,
-			planNote,
 			string(callJSON),
 			string(resultJSON),
-			buildObservationPrompt(st.ObservationHistory, 4),
+			buildObservationPrompt(st.ObservationHistory, 2),
 		),
 		jsonContractForPostReflect,
 	)
-
 	raw, err := callModelText(ctx, chatModel, postReflectPrompt, userPrompt, false, 220, 0)
 	if err != nil {
 		fallback := buildPostReflectFallback(plan, result)
@@ -855,14 +1431,12 @@ func runPostReflectAfterTool(
 		return fallback, "", false
 	}
 	emitModelRawDebug(emitStage, fmt.Sprintf("post_reflect.round.%d", round), raw)
-
 	parsed, parseErr := parseJSON[postReflectOutput](raw)
 	if parseErr != nil {
 		fallback := buildPostReflectFallback(plan, result)
 		emitStage("schedule_refine.react.post_reflect.fallback", fmt.Sprintf("第 %d 轮|模型反思解析失败，改用后端兜底复盘：%s", round, truncate(parseErr.Error(), 160)))
 		return fallback, "", false
 	}
-
 	reflection := strings.TrimSpace(parsed.Reflection)
 	if reflection == "" {
 		reflection = buildPostReflectFallback(plan, result)
@@ -872,35 +1446,359 @@ func runPostReflectAfterTool(
 		reflection = fmt.Sprintf("%s；下一步建议：%s", reflection, nextStrategy)
 	}
 	shouldStop := parsed.ShouldStop
-	stopReason := strings.TrimSpace(parsed.StopReason)
-	if shouldStop {
-		if stopReason == "" {
-			stopReason = "模型判定继续动作收益较低，建议转终审。"
-		}
-		reflection = fmt.Sprintf("%s；停止建议：%s", reflection, stopReason)
-	}
-	emitStage(
-		"schedule_refine.react.post_reflect.done",
-		fmt.Sprintf("第 %d 轮|模型反思=%s|下一步=%s|should_stop=%t", round, truncate(strings.TrimSpace(parsed.Reflection), 120), truncate(nextStrategy, 120), shouldStop),
-	)
+	emitStage("schedule_refine.react.post_reflect.done", fmt.Sprintf("第 %d 轮|模型反思=%s|下一步=%s|should_stop=%t", round, truncate(strings.TrimSpace(parsed.Reflection), 120), truncate(nextStrategy, 120), shouldStop))
 	return reflection, nextStrategy, shouldStop
 }
 
-// buildPostReflectFallback 生成“动作后真反思”的后端兜底文案。
-//
-// 说明：
-// 1. 当 post-reflect 模型调用/解析失败时，仍需给前端可解释文本；
-// 2. 兜底文本以真实工具结果为主，计划备注仅作补充；
-// 3. 该函数不决定 shouldStop，只负责生成可读复盘。
 func buildPostReflectFallback(plan *reactLLMOutput, result reactToolResult) string {
-	planNote := ""
+	modelReflect := ""
 	if plan != nil {
-		planNote = strings.TrimSpace(plan.Reflect)
+		modelReflect = strings.TrimSpace(plan.Decision)
 	}
-	return buildRuntimeReflect(planNote, result)
+	return buildRuntimeReflect(modelReflect, result)
 }
 
-// callModelText 统一封装模型调用，避免各节点重复拼装参数。
+func runPlannerNode(
+	ctx context.Context,
+	chatModel *ark.ChatModel,
+	st *ScheduleRefineState,
+	emitStage func(stage, detail string),
+	mode string,
+) error {
+	if st == nil || chatModel == nil {
+		return fmt.Errorf("planner: invalid input")
+	}
+	ensureCompositeStateMaps(st)
+	// 1. 正常模式下由后端判定“本轮必用复合工具”。
+	// 2. 若已进入禁复合兜底模式，必须清空该标记，避免规划阶段再次把复合门禁写回去。
+	if st.DisableCompositeTools {
+		st.RequiredCompositeTool = ""
+	} else {
+		st.RequiredCompositeTool = detectRequiredCompositeTool(st)
+	}
+	if st.PlanUsed >= st.PlanMax {
+		return nil
+	}
+	stage := "schedule_refine.plan.generating"
+	if strings.TrimSpace(mode) == "replan" {
+		stage = "schedule_refine.plan.regenerating"
+	}
+	emitStage(stage, fmt.Sprintf("正在生成执行计划（mode=%s，已用%d/%d）。", mode, st.PlanUsed, st.PlanMax))
+	contractJSON, _ := json.Marshal(st.Contract)
+	userPrompt := withNearestJSONContract(
+		fmt.Sprintf(
+			"mode=%s\n用户请求=%s\n契约=%s\n上一轮工具观察=%s\n最近观察=%s\nsuggested简表=%s",
+			mode,
+			strings.TrimSpace(st.UserMessage),
+			string(contractJSON),
+			buildLastToolObservationPrompt(st.ObservationHistory),
+			buildObservationPrompt(st.ObservationHistory, 2),
+			buildSuggestedDigest(st.HybridEntries, 40),
+		),
+		jsonContractForPlanner,
+	)
+	raw, err := callModelText(ctx, chatModel, plannerPrompt, userPrompt, false, plannerMaxTokens, 0)
+	if err != nil {
+		st.CurrentPlan = applyCompositeHardConditionToPlan(st, buildFallbackPlan(st))
+		st.BatchMoveAllowed = shouldAllowBatchMove(st.CurrentPlan)
+		st.PlanUsed++
+		emitStage("schedule_refine.plan.fallback", "Planner 调用失败，已切换后端兜底计划。")
+		return nil
+	}
+	emitModelRawDebug(emitStage, fmt.Sprintf("planner.%s", mode), raw)
+	parsed, parseErr := parsePlannerOutputWithRetryOnce(ctx, chatModel, userPrompt, raw, mode, emitStage)
+	if parseErr != nil {
+		st.CurrentPlan = applyCompositeHardConditionToPlan(st, buildFallbackPlan(st))
+		st.BatchMoveAllowed = shouldAllowBatchMove(st.CurrentPlan)
+		st.PlanUsed++
+		emitStage("schedule_refine.plan.fallback", fmt.Sprintf("Planner 输出解析失败，已切换后端兜底计划：%s", truncate(parseErr.Error(), 180)))
+		return nil
+	}
+	st.CurrentPlan = PlannerPlan{
+		Summary: fallbackText(strings.TrimSpace(parsed.Summary), "已生成可执行计划。"),
+		Steps:   uniqueNonEmpty(parsed.Steps),
+	}
+	st.CurrentPlan = applyCompositeHardConditionToPlan(st, st.CurrentPlan)
+	st.BatchMoveAllowed = shouldAllowBatchMove(st.CurrentPlan)
+	if st.DisableCompositeTools {
+		st.BatchMoveAllowed = false
+	}
+	st.PlanUsed++
+	emitStage("schedule_refine.plan.done", fmt.Sprintf("规划完成：%s", truncate(st.CurrentPlan.Summary, 180)))
+	return nil
+}
+
+func handleBlockedToolResult(
+	ctx context.Context,
+	chatModel *ark.ChatModel,
+	st *ScheduleRefineState,
+	emitStage func(stage, detail string),
+	round int,
+	parsed *reactLLMOutput,
+	call *reactToolCall,
+	callSignature string,
+	blockedResult reactToolResult,
+	observation *ReactRoundObservation,
+) (bool, error) {
+	result := normalizeToolResult(blockedResult)
+	st.RoundUsed++
+	st.LastFailedCallSignature = callSignature
+	st.ConsecutiveFailures++
+	observation.ToolName = strings.TrimSpace(result.Tool)
+	observation.ToolParams = cloneToolParams(call.Params)
+	observation.ToolSuccess = result.Success
+	observation.ToolErrorCode = strings.TrimSpace(result.ErrorCode)
+	observation.ToolResult = strings.TrimSpace(result.Result)
+	postReflectText, _, shouldStop := runPostReflectAfterTool(ctx, chatModel, st, round, parsed, call, result, emitStage)
+	observation.Reflect = postReflectText
+	st.ObservationHistory = append(st.ObservationHistory, *observation)
+	emitStage("schedule_refine.react.tool_blocked", fmt.Sprintf("第 %d 轮|动作被后端策略拦截：%s", round, truncate(result.Result, 120)))
+	emitStage("schedule_refine.react.tool_result", formatToolResultStageDetail(round, result, st.RoundUsed, st.MaxRounds))
+	emitStage("schedule_refine.react.reflect", formatReactReflectStageDetail(round, observation.Reflect))
+	if shouldTriggerReplan(st, result) {
+		if replanned, err := tryReplan(ctx, chatModel, st, emitStage); err != nil {
+			return false, err
+		} else if replanned {
+			return false, nil
+		}
+	}
+	return shouldStop, nil
+}
+
+func buildFallbackPlan(st *ScheduleRefineState) PlannerPlan {
+	summary := "兜底计划：先取证再动作，优先复合工具，其次 Move，冲突时尝试 Swap。"
+	if st != nil && st.Contract.KeepRelativeOrder {
+		summary = "兜底计划：先取证再动作，严格保持相对顺序，优先复合工具，其次 Move，冲突时尝试 Swap。"
+	}
+	return PlannerPlan{
+		Summary: summary,
+		Steps: []string{
+			"1) QueryTargetTasks 定位目标任务",
+			"2) QueryAvailableSlots 获取可用空位",
+			"3) 优先 SpreadEven/MinContextSwitch，其次 Move/Swap 执行动作并复盘",
+			"4) 收尾前执行 Verify 自检",
+		},
+	}
+}
+
+// ensureCompositeStateMaps 确保复合工具状态容器已初始化。
+func ensureCompositeStateMaps(st *ScheduleRefineState) {
+	if st == nil {
+		return
+	}
+	if st.CompositeToolCalled == nil {
+		st.CompositeToolCalled = map[string]bool{
+			"SpreadEven":       false,
+			"MinContextSwitch": false,
+		}
+	}
+	if st.CompositeToolSuccess == nil {
+		st.CompositeToolSuccess = map[string]bool{
+			"SpreadEven":       false,
+			"MinContextSwitch": false,
+		}
+	}
+}
+
+// detectRequiredCompositeTool 根据请求语义识别本轮必用复合工具。
+//
+// 规则：
+// 1. “上下文切换最少/同科目连续”优先映射 MinContextSwitch；
+// 2. “均匀分散/铺开”映射 SpreadEven；
+// 3. 未命中时返回空串，不强制复合工具。
+func detectRequiredCompositeTool(st *ScheduleRefineState) string {
+	if st == nil {
+		return ""
+	}
+	joined := strings.TrimSpace(strings.Join([]string{
+		st.UserMessage,
+		st.Contract.Intent,
+		strings.Join(st.Contract.HardRequirements, " "),
+	}, " "))
+	if joined == "" {
+		return ""
+	}
+	contextKeys := []string{"上下文切换", "切换最少", "同个科目", "同科目", "连续处理", "连续学习", "min context", "context switch"}
+	if containsAny(strings.ToLower(joined), contextKeys) || containsAny(joined, contextKeys) {
+		return "MinContextSwitch"
+	}
+	evenKeys := []string{"均匀", "分散", "铺开", "平摊", "均摊", "spread even", "even spread"}
+	if containsAny(strings.ToLower(joined), evenKeys) || containsAny(joined, evenKeys) {
+		return "SpreadEven"
+	}
+	return ""
+}
+
+// applyCompositeHardConditionToPlan 把“必用复合工具”硬条件注入计划文本。
+func applyCompositeHardConditionToPlan(st *ScheduleRefineState, plan PlannerPlan) PlannerPlan {
+	required := ""
+	if st != nil {
+		required = normalizeCompositeToolName(st.RequiredCompositeTool)
+	}
+	if required == "" {
+		return plan
+	}
+
+	hardStep := fmt.Sprintf("硬条件：必须成功调用 %s（COMPOSITE_SUCCESS[%s]=true）后才允许整体收口", required, required)
+	hasHardStep := false
+	for _, step := range plan.Steps {
+		if strings.Contains(step, required) && strings.Contains(step, "COMPOSITE_SUCCESS") {
+			hasHardStep = true
+			break
+		}
+	}
+	if !hasHardStep {
+		plan.Steps = append([]string{hardStep}, plan.Steps...)
+	}
+	if !strings.Contains(plan.Summary, required) {
+		plan.Summary = strings.TrimSpace(plan.Summary + "；硬条件：" + required + " 成功==true")
+	}
+	return plan
+}
+
+func normalizeCompositeToolName(name string) string {
+	switch strings.TrimSpace(name) {
+	case "SpreadEven":
+		return "SpreadEven"
+	case "MinContextSwitch":
+		return "MinContextSwitch"
+	default:
+		return ""
+	}
+}
+
+func isCompositeToolName(toolName string) bool {
+	switch normalizeCompositeToolName(toolName) {
+	case "SpreadEven", "MinContextSwitch":
+		return true
+	default:
+		return false
+	}
+}
+
+func isBaseMutatingToolName(toolName string) bool {
+	switch strings.TrimSpace(toolName) {
+	case "Move", "Swap", "BatchMove":
+		return true
+	default:
+		return false
+	}
+}
+
+func isRequiredCompositeSatisfied(st *ScheduleRefineState) bool {
+	if st == nil {
+		return true
+	}
+	required := normalizeCompositeToolName(st.RequiredCompositeTool)
+	if required == "" {
+		return true
+	}
+	ensureCompositeStateMaps(st)
+	return st.CompositeToolSuccess[required]
+}
+
+// applyCompositeGateToIntentResult 把“必用复合工具成功”并入业务目标判定。
+//
+// 步骤化说明：
+// 1. 先判断原始业务判定是否通过；未通过则原样返回；
+// 2. 再判断是否配置了必用复合工具；未配置则原样返回；
+// 3. 若配置但未成功，强制改判为失败并补充 unmet 原因。
+func applyCompositeGateToIntentResult(st *ScheduleRefineState, pass bool, reason string, unmet []string) (bool, string, []string) {
+	if !pass {
+		return pass, reason, append([]string(nil), unmet...)
+	}
+	required := normalizeCompositeToolName("")
+	if st != nil {
+		required = normalizeCompositeToolName(st.RequiredCompositeTool)
+	}
+	if required == "" {
+		return pass, reason, append([]string(nil), unmet...)
+	}
+	if isRequiredCompositeSatisfied(st) {
+		return pass, reason, append([]string(nil), unmet...)
+	}
+	newUnmet := append([]string(nil), unmet...)
+	newUnmet = append(newUnmet, fmt.Sprintf("复合工具门禁未通过：%s 尚未成功调用", required))
+	return false, fmt.Sprintf("复合工具门禁未通过：要求 %s 成功==true。", required), newUnmet
+}
+
+func markCompositeToolOutcome(st *ScheduleRefineState, toolName string, success bool) {
+	if st == nil {
+		return
+	}
+	tool := normalizeCompositeToolName(toolName)
+	if tool == "" {
+		return
+	}
+	ensureCompositeStateMaps(st)
+	st.CompositeToolCalled[tool] = true
+	if success {
+		st.CompositeToolSuccess[tool] = true
+	}
+}
+
+func shouldAllowBatchMove(plan PlannerPlan) bool {
+	text := strings.ToLower(strings.TrimSpace(plan.Summary))
+	if strings.Contains(text, "batchmove") || strings.Contains(text, "batch move") {
+		return true
+	}
+	for _, step := range plan.Steps {
+		s := strings.ToLower(strings.TrimSpace(step))
+		if strings.Contains(s, "batchmove") || strings.Contains(s, "batch move") {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldEnableRecoveryThinking(st *ScheduleRefineState) (bool, string) {
+	if st == nil {
+		return false, ""
+	}
+	if st.ConsecutiveFailures < 2 || st.ThinkingBoostArmed {
+		return false, ""
+	}
+	st.ThinkingBoostArmed = true
+	return true, fmt.Sprintf("连续失败=%d，触发 1 轮恢复态 thinking", st.ConsecutiveFailures)
+}
+
+func shouldTriggerReplan(st *ScheduleRefineState, result reactToolResult) bool {
+	if st == nil {
+		return false
+	}
+	if st.ConsecutiveFailures < 3 {
+		return false
+	}
+	switch strings.TrimSpace(result.ErrorCode) {
+	case "SLOT_CONFLICT", "ORDER_VIOLATION", "REPEAT_FAILED_ACTION", "PARAM_MISSING", "BATCH_MOVE_FAILED", "VERIFY_FAILED", "TASK_BUDGET_EXCEEDED", "BATCH_MOVE_DISABLED", "CURRENT_TASK_MISMATCH", "QUERY_REDUNDANT", "SLOT_QUERY_FAILED", "PLAN_FAILED", "PLAN_EMPTY", "COMPOSITE_REQUIRED", "COMPOSITE_DISABLED":
+		return true
+	default:
+		return false
+	}
+}
+
+func tryReplan(
+	ctx context.Context,
+	chatModel *ark.ChatModel,
+	st *ScheduleRefineState,
+	emitStage func(stage, detail string),
+) (bool, error) {
+	if st == nil {
+		return false, nil
+	}
+	if st.ReplanUsed >= st.ReplanMax || st.PlanUsed >= st.PlanMax {
+		return false, nil
+	}
+	st.ReplanUsed++
+	emitStage("schedule_refine.plan.replan_trigger", fmt.Sprintf("连续失败=%d，触发重规划（%d/%d）。", st.ConsecutiveFailures, st.ReplanUsed, st.ReplanMax))
+	if err := runPlannerNode(ctx, chatModel, st, emitStage, "replan"); err != nil {
+		return true, err
+	}
+	st.ConsecutiveFailures = 0
+	st.ThinkingBoostArmed = false
+	return true, nil
+}
+
 func callModelText(
 	ctx context.Context,
 	chatModel *ark.ChatModel,
@@ -915,7 +1813,6 @@ func callModelText(
 	}
 	nodeCtx, cancel := context.WithTimeout(ctx, nodeTimeout)
 	defer cancel()
-
 	thinkingType := arkModel.ThinkingTypeDisabled
 	if useThinking {
 		thinkingType = arkModel.ThinkingTypeEnabled
@@ -927,7 +1824,6 @@ func callModelText(
 	if maxTokens > 0 {
 		opts = append(opts, einoModel.WithMaxTokens(maxTokens))
 	}
-
 	resp, err := chatModel.Generate(nodeCtx, []*schema.Message{
 		schema.SystemMessage(systemPrompt),
 		schema.UserMessage(userPrompt),
@@ -954,7 +1850,6 @@ func callModelText(
 	return content, nil
 }
 
-// parseJSON 是通用 JSON 解析器，兼容 markdown code fence。
 func parseJSON[T any](raw string) (*T, error) {
 	clean := strings.TrimSpace(raw)
 	if clean == "" {
@@ -980,12 +1875,6 @@ func parseJSON[T any](raw string) (*T, error) {
 	return &out, nil
 }
 
-// extractFirstJSONObject 从文本中提取“第一个完整 JSON 对象”。
-//
-// 设计说明：
-// 1. 相比“first { + last }”的粗糙截取，这里使用括号配对，避免模型输出多段文本时误截；
-// 2. 兼容字符串内大括号（通过字符串状态机跳过）；
-// 3. 提取失败时返回明确错误，便于上层阶段日志提示。
 func extractFirstJSONObject(text string) (string, error) {
 	start := strings.Index(text, "{")
 	if start < 0 {
@@ -1028,12 +1917,6 @@ func extractFirstJSONObject(text string) (string, error) {
 	return "", fmt.Errorf("json object not closed")
 }
 
-// emitModelRawDebug 统一输出模型原始文本到 SSE 调试阶段。
-//
-// 规则：
-// 1. 所有模型节点都可调用该函数输出原始 raw，帮助定位解析失败；
-// 2. detail 统一带 `[debug][tag]` 前缀，满足前端快速筛选；
-// 3. 当 raw 过长时，按分片逐条输出，避免“单条截断导致看起来像 JSON 不闭合”的误判。
 func emitModelRawDebug(emitStage func(stage, detail string), tag string, raw string) {
 	if emitStage == nil {
 		return
@@ -1042,15 +1925,10 @@ func emitModelRawDebug(emitStage func(stage, detail string), tag string, raw str
 	if clean == "" {
 		clean = "<empty>"
 	}
-
-	// 1. 这里按 rune 分片而不是按 byte 分片，避免中文被截断后出现乱码。
-	// 2. 每片控制在较小体量，降低 SSE 单条过大造成前端展示异常或丢帧。
-	// 3. 分片时携带 part 序号，便于前端/日志侧拼接复盘完整 raw。
 	const chunkSize = 1600
-	tag = strings.TrimSpace(tag)
 	runes := []rune(clean)
 	if len(runes) <= chunkSize {
-		emitStage("schedule_refine.debug.raw", fmt.Sprintf("[debug][%s] %s", tag, clean))
+		emitStage("schedule_refine.debug.raw", fmt.Sprintf("[debug][%s] %s", strings.TrimSpace(tag), clean))
 		return
 	}
 	total := (len(runes) + chunkSize - 1) / chunkSize
@@ -1060,15 +1938,10 @@ func emitModelRawDebug(emitStage func(stage, detail string), tag string, raw str
 		if end > len(runes) {
 			end = len(runes)
 		}
-		part := string(runes[start:end])
-		emitStage(
-			"schedule_refine.debug.raw",
-			fmt.Sprintf("[debug][%s][part %d/%d] %s", tag, i+1, total, part),
-		)
+		emitStage("schedule_refine.debug.raw", fmt.Sprintf("[debug][%s][part %d/%d] %s", strings.TrimSpace(tag), i+1, total, string(runes[start:end])))
 	}
 }
 
-// physicsCheck 做确定性物理校验。
 func physicsCheck(entries []model.HybridScheduleEntry, allocatedCount int) []string {
 	issues := make([]string, 0, 8)
 	slotMap := make(map[string]string, len(entries)*2)
@@ -1079,10 +1952,10 @@ func physicsCheck(entries []model.HybridScheduleEntry, allocatedCount int) []str
 		if !entryBlocksSuggested(entry) {
 			continue
 		}
-		for section := entry.SectionFrom; section <= entry.SectionTo; section++ {
-			key := fmt.Sprintf("%d-%d-%d", entry.Week, entry.DayOfWeek, section)
+		for sec := entry.SectionFrom; sec <= entry.SectionTo; sec++ {
+			key := fmt.Sprintf("%d-%d-%d", entry.Week, entry.DayOfWeek, sec)
 			if existed, ok := slotMap[key]; ok {
-				issues = append(issues, fmt.Sprintf("冲突：%s 与 %s 同时占用 W%dD%d 第%d节", existed, entry.Name, entry.Week, entry.DayOfWeek, section))
+				issues = append(issues, fmt.Sprintf("冲突：%s 与 %s 同时占用 W%dD%d 第%d节", existed, entry.Name, entry.Week, entry.DayOfWeek, sec))
 			} else {
 				slotMap[key] = entry.Name
 			}
@@ -1103,7 +1976,7 @@ func updateAllocatedItemsFromEntries(st *ScheduleRefineState) {
 	}
 	byTaskID := make(map[int]model.HybridScheduleEntry, len(st.HybridEntries))
 	for _, entry := range st.HybridEntries {
-		if entry.Status == "suggested" && entry.TaskItemID > 0 {
+		if isMovableSuggestedTask(entry) {
 			byTaskID[entry.TaskItemID] = entry
 		}
 	}
@@ -1126,7 +1999,7 @@ func updateAllocatedItemsFromEntries(st *ScheduleRefineState) {
 func countSuggested(entries []model.HybridScheduleEntry) int {
 	count := 0
 	for _, entry := range entries {
-		if entry.Status == "suggested" {
+		if isMovableSuggestedTask(entry) {
 			count++
 		}
 	}
@@ -1151,12 +2024,6 @@ func fallbackText(text string, fallback string) string {
 	return clean
 }
 
-// withNearestJSONContract 把“严格 JSON 输出约束”追加到 userPrompt 末尾。
-//
-// 步骤化说明：
-// 1. 先做 trim，避免多余空白影响模型对结尾指令的关注；
-// 2. 再把结构化约束放在最后两行，确保它离模型输出位置最近；
-// 3. 若约束为空则原样返回，避免把空字符串误拼进 prompt。
 func withNearestJSONContract(userPrompt string, jsonContract string) string {
 	base := strings.TrimSpace(userPrompt)
 	rule := strings.TrimSpace(jsonContract)
@@ -1169,29 +2036,49 @@ func withNearestJSONContract(userPrompt string, jsonContract string) string {
 	return base + "\n\n" + rule
 }
 
+// alignSummaryWithHardCheck 对齐总结文案与硬校验事实，避免“通过/失败”口径冲突。
+//
+// 步骤化说明：
+// 1. 先以 hard_check 最终结果作为唯一真值；
+// 2. pass=true 且 round_used=0 时，强制输出“未执行动作但已满足”的口径；
+// 3. pass=true 但文案含失败词，或 pass=false 但文案含通过词，统一纠偏。
+func alignSummaryWithHardCheck(st *ScheduleRefineState, summary string) string {
+	clean := strings.TrimSpace(summary)
+	if st == nil {
+		return clean
+	}
+	passed := st.HardCheck.PhysicsPassed && st.HardCheck.OrderPassed && st.HardCheck.IntentPassed
+	if passed {
+		if st.RoundUsed == 0 {
+			return "本轮未执行调度动作（0轮），当前排程已满足终审条件。"
+		}
+		if clean == "" || containsAny(clean, []string{"未完全", "未达标", "未能", "差距", "失败", "未通过"}) {
+			return fmt.Sprintf("微调已完成，共执行 %d 轮动作，方案已通过终审。", st.RoundUsed)
+		}
+		return clean
+	}
+
+	if clean == "" || containsAny(clean, []string{"终审通过", "已通过终审", "完全达成", "全部满足"}) {
+		return fmt.Sprintf("已完成微调并返回当前最优结果（执行 %d 轮动作）。终审仍有未满足项：%s。", st.RoundUsed, fallbackText(st.HardCheck.IntentReason, "请进一步明确微调目标"))
+	}
+	return clean
+}
+
 func formatReactPlanStageDetail(round int, out *reactLLMOutput, remaining int, useThinking bool) string {
 	if out == nil {
 		return fmt.Sprintf("第 %d 轮：缺少计划输出。", round)
 	}
-	return fmt.Sprintf(
-		"第 %d 轮|thinking=%t|动作剩余=%d|goal_check=%s|decision=%s",
-		round, useThinking, remaining,
-		truncate(strings.TrimSpace(out.GoalCheck), 180),
-		truncate(strings.TrimSpace(out.Decision), 180),
-	)
+	return fmt.Sprintf("第 %d 轮|thinking=%t|动作剩余=%d|goal_check=%s|decision=%s", round, useThinking, remaining, truncate(strings.TrimSpace(out.GoalCheck), 180), truncate(strings.TrimSpace(out.Decision), 180))
 }
 
 func formatReactNeedInfoStageDetail(round int, missing []string) string {
 	if len(missing) == 0 {
 		return fmt.Sprintf("第 %d 轮|模型缺口信息=无。", round)
 	}
-	return fmt.Sprintf("第 %d 轮|模型缺口信息=%s", round, truncate(strings.Join(uniqueNonEmpty(missing), "；"), 260))
+	return fmt.Sprintf("第 %d 轮|模型缺口信息=%s", round, strings.Join(uniqueNonEmpty(missing), "；"))
 }
 
 func formatReactReflectStageDetail(round int, reflect string) string {
-	// 这里统一用“复盘”而不是“反思”：
-	// 1. 当前内容由“后端真实执行结果 + 模型预期说明”拼接而成，不是纯模型自述；
-	// 2. 用词改为复盘，能更准确表达“以执行结果为准”的定位，减少用户误解为“模型已经真的完成了这一步”。
 	return fmt.Sprintf("第 %d 轮|复盘=%s", round, truncate(strings.TrimSpace(reflect), 260))
 }
 
@@ -1213,10 +2100,7 @@ func formatToolResultStageDetail(round int, result reactToolResult, used int, to
 	if errorCode == "" {
 		errorCode = "NONE"
 	}
-	return fmt.Sprintf(
-		"第 %d 轮|工具=%s|success=%t|error_code=%s|结果=%s|轮次进度=%d/%d",
-		round, strings.TrimSpace(result.Tool), result.Success, errorCode, truncate(strings.TrimSpace(result.Result), 320), used, total,
-	)
+	return fmt.Sprintf("第 %d 轮|工具=%s|success=%t|error_code=%s|结果=%s|轮次进度=%d/%d", round, strings.TrimSpace(result.Tool), result.Success, errorCode, truncate(strings.TrimSpace(result.Result), 320), used, total)
 }
 
 func condenseSummary(plans []model.UserWeekSchedule) string {
@@ -1271,30 +2155,25 @@ func hybridEntriesToWeekSchedules(entries []model.HybridScheduleEntry) []model.U
 	for week, events := range weekMap {
 		result = append(result, model.UserWeekSchedule{Week: week, Events: events})
 	}
-	for i := 0; i < len(result); i++ {
-		for j := i + 1; j < len(result); j++ {
-			if result[j].Week < result[i].Week {
-				result[i], result[j] = result[j], result[i]
-			}
-		}
-	}
+	sort.SliceStable(result, func(i, j int) bool { return result[i].Week < result[j].Week })
 	return result
 }
 
 func buildFallbackContract(st *ScheduleRefineState) RefineContract {
 	intent := strings.TrimSpace(st.UserMessage)
 	keepOrder := detectOrderIntent(st.UserMessage)
-	hardRequirements := append([]string(nil), st.Constraints...)
+	reqs := append([]string(nil), st.Constraints...)
 	if keepOrder {
-		hardRequirements = append(hardRequirements, "保持任务原始相对顺序不变")
+		reqs = append(reqs, "保持任务原始相对顺序不变")
 	}
+	assertions := inferHardAssertionsFromRequest(st.UserMessage, reqs)
 	return RefineContract{
 		Intent:            intent,
 		Strategy:          "local_adjust",
-		HardRequirements:  uniqueNonEmpty(hardRequirements),
+		HardRequirements:  uniqueNonEmpty(reqs),
+		HardAssertions:    assertions,
 		KeepRelativeOrder: keepOrder,
 		OrderScope:        "global",
-		Reason:            "契约抽取失败，按兜底策略继续。",
 	}
 }
 
@@ -1310,15 +2189,16 @@ func normalizeStrategy(strategy string) string {
 func detectOrderIntent(userMessage string) bool {
 	msg := strings.TrimSpace(userMessage)
 	if msg == "" {
-		return false
+		return true
 	}
-	keywords := []string{"顺序不变", "保持顺序", "按原顺序", "不要打乱顺序", "不打乱顺序", "先后顺序", "原顺序"}
-	for _, k := range keywords {
+	// 1. 默认启用顺序约束，除非用户明确授权可打乱顺序。
+	// 2. 这样可避免“用户没提顺序但结果被打乱”的违和体验。
+	for _, k := range []string{"可以打乱顺序", "允许打乱顺序", "顺序无所谓", "不考虑顺序", "不用保持顺序", "无需保持顺序", "随便排顺序", "乱序也行"} {
 		if strings.Contains(msg, k) {
-			return true
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func uniqueNonEmpty(items []string) []string {
@@ -1351,17 +2231,11 @@ func buildObservationPrompt(history []ReactRoundObservation, tail int) string {
 	}
 	raw, err := json.Marshal(history[start:])
 	if err != nil {
-		return summarizeActionLogs([]string{err.Error()}, 1)
+		return err.Error()
 	}
 	return string(raw)
 }
 
-// buildLastToolObservationPrompt 返回“上一轮结构化工具观察”。
-//
-// 步骤化说明：
-// 1. 从观察历史末尾向前找最近一条带工具名的记录，避免把“done轮/无动作轮”误当工具观察；
-// 2. 输出 JSON 字符串，供模型按结构化字段读取 success/error_code/params；
-// 3. 若不存在工具观察则返回“无”。
 func buildLastToolObservationPrompt(history []ReactRoundObservation) string {
 	for i := len(history) - 1; i >= 0; i-- {
 		item := history[i]
@@ -1377,12 +2251,6 @@ func buildLastToolObservationPrompt(history []ReactRoundObservation) string {
 	return "无"
 }
 
-// buildToolCallSignature 构造工具调用签名（tool+params）。
-//
-// 说明：
-// 1. 用于识别“与上一轮失败动作完全相同”的重复调用；
-// 2. 采用 JSON 序列化参数，保证签名稳定、可记录、可回放；
-// 3. 签名只用于去重，不用于业务持久化。
 func buildToolCallSignature(call reactToolCall) string {
 	paramsText := "{}"
 	if len(call.Params) > 0 {
@@ -1393,25 +2261,287 @@ func buildToolCallSignature(call reactToolCall) string {
 	return fmt.Sprintf("%s|%s", strings.ToUpper(strings.TrimSpace(call.Tool)), paramsText)
 }
 
-// isRepeatedFailedCall 判断当前动作是否重复了“上一轮失败动作”。
+func buildSlotQuerySignature(st *ScheduleRefineState, params map[string]any) string {
+	normalized := canonicalizeToolCall(reactToolCall{Tool: "QueryAvailableSlots", Params: params})
+	raw, _ := json.Marshal(normalized.Params)
+	version := 0
+	if st != nil {
+		version = st.EntriesVersion
+	}
+	return fmt.Sprintf("v=%d|%s", version, string(raw))
+}
+
+func canonicalizeToolCall(call reactToolCall) reactToolCall {
+	canonical := reactToolCall{
+		Tool:   strings.TrimSpace(call.Tool),
+		Params: cloneToolParams(call.Params),
+	}
+	switch canonical.Tool {
+	case "Move":
+		canonical.Params = canonicalizeMoveParams(canonical.Params)
+	case "BatchMove":
+		canonical.Params = canonicalizeBatchMoveParams(canonical.Params)
+	case "SpreadEven", "MinContextSwitch":
+		canonical.Params = canonicalizeCompositeMoveParams(canonical.Params)
+	case "QueryAvailableSlots":
+		canonical.Params = canonicalizeSlotQueryParams(canonical.Params)
+	}
+	return canonical
+}
+
+func canonicalizeMoveParams(params map[string]any) map[string]any {
+	out := cloneToolParams(params)
+	setCanonicalInt(out, "task_item_id", out, "task_item_id", "task_id")
+	setCanonicalInt(out, "to_week", out, "to_week", "target_week", "new_week", "week")
+	setCanonicalInt(out, "to_day", out, "to_day", "target_day", "new_day", "target_day_of_week", "day_of_week", "day")
+	setCanonicalInt(out, "to_section_from", out, "to_section_from", "target_section_from", "new_section_from", "section_from")
+	setCanonicalInt(out, "to_section_to", out, "to_section_to", "target_section_to", "new_section_to", "section_to")
+	return out
+}
+
+func canonicalizeBatchMoveParams(params map[string]any) map[string]any {
+	out := cloneToolParams(params)
+	rawMoves, ok := out["moves"]
+	if !ok {
+		return out
+	}
+	moves, ok := rawMoves.([]any)
+	if !ok {
+		return out
+	}
+	normalized := make([]any, 0, len(moves))
+	for _, item := range moves {
+		moveMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		normalized = append(normalized, canonicalizeMoveParams(moveMap))
+	}
+	out["moves"] = normalized
+	return out
+}
+
+func canonicalizeCompositeMoveParams(params map[string]any) map[string]any {
+	out := cloneToolParams(params)
+	ids := readIntSlice(out, "task_item_ids", "task_ids")
+	if taskID, ok := paramIntAny(out, "task_item_id", "task_id"); ok {
+		ids = append(ids, taskID)
+	}
+	if len(ids) > 0 {
+		out["task_item_ids"] = uniquePositiveInts(ids)
+	}
+
+	setCanonicalInt(out, "week", out, "week", "to_week", "target_week", "new_week")
+	if day, ok := paramIntAny(out, "day_of_week", "to_day", "target_day_of_week", "target_day", "new_day", "day"); ok {
+		out["day_of_week"] = []int{day}
+	}
+	if weeks := readIntSlice(out, "week_filter", "weeks"); len(weeks) > 0 {
+		out["week_filter"] = uniquePositiveInts(weeks)
+	}
+	if days := readIntSlice(out, "day_of_week", "days", "day_filter"); len(days) > 0 {
+		out["day_of_week"] = uniquePositiveInts(days)
+	}
+	if sections := readIntSlice(out, "exclude_sections", "exclude_section"); len(sections) > 0 {
+		out["exclude_sections"] = uniquePositiveInts(sections)
+	}
+	return out
+}
+
+func canonicalizeSlotQueryParams(params map[string]any) map[string]any {
+	out := cloneToolParams(params)
+	setCanonicalInt(out, "week", out, "week")
+	if weeks := readIntSlice(out, "week_filter", "weeks"); len(weeks) > 0 {
+		out["week_filter"] = uniquePositiveInts(weeks)
+	}
+	if days := readIntSlice(out, "day_of_week", "days", "day_filter"); len(days) > 0 {
+		out["day_filter"] = uniquePositiveInts(days)
+	}
+	setCanonicalInt(out, "section_duration", out, "section_duration", "span", "task_duration")
+	setCanonicalInt(out, "section_from", out, "section_from", "target_section_from")
+	setCanonicalInt(out, "section_to", out, "section_to", "target_section_to")
+	setCanonicalInt(out, "limit", out, "limit")
+	return out
+}
+
+func setCanonicalInt(dst map[string]any, dstKey string, src map[string]any, keys ...string) {
+	if dst == nil || src == nil {
+		return
+	}
+	if value, ok := paramIntAny(src, keys...); ok {
+		dst[dstKey] = value
+	}
+}
+
+func listTaskIDsFromToolCall(call reactToolCall) []int {
+	switch strings.TrimSpace(call.Tool) {
+	case "Move":
+		taskID, ok := paramIntAny(call.Params, "task_item_id", "task_id")
+		if !ok {
+			return nil
+		}
+		return []int{taskID}
+	case "Swap":
+		taskA, okA := paramIntAny(call.Params, "task_a", "task_item_a", "task_item_id_a")
+		taskB, okB := paramIntAny(call.Params, "task_b", "task_item_b", "task_item_id_b")
+		return uniquePositiveInts([]int{taskA, taskB}, okA, okB)
+	case "BatchMove":
+		rawMoves, ok := call.Params["moves"]
+		if !ok {
+			return nil
+		}
+		moves, ok := rawMoves.([]any)
+		if !ok {
+			return nil
+		}
+		ids := make([]int, 0, len(moves))
+		for _, item := range moves {
+			moveMap, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if taskID, ok := paramIntAny(moveMap, "task_item_id", "task_id"); ok {
+				ids = append(ids, taskID)
+			}
+		}
+		return uniquePositiveInts(ids)
+	case "SpreadEven", "MinContextSwitch":
+		ids := readIntSlice(call.Params, "task_item_ids", "task_ids")
+		if taskID, ok := paramIntAny(call.Params, "task_item_id", "task_id"); ok {
+			ids = append(ids, taskID)
+		}
+		return uniquePositiveInts(ids)
+	default:
+		return nil
+	}
+}
+
+func precheckCurrentTaskOwnership(call reactToolCall, taskIDs []int, currentTaskID int) (reactToolResult, bool) {
+	if currentTaskID <= 0 {
+		return reactToolResult{}, false
+	}
+	if !isMutatingToolName(strings.TrimSpace(call.Tool)) {
+		return reactToolResult{}, false
+	}
+	for _, id := range taskIDs {
+		if id == currentTaskID {
+			return reactToolResult{}, false
+		}
+	}
+	return reactToolResult{
+		Tool:      strings.TrimSpace(call.Tool),
+		Success:   false,
+		ErrorCode: "CURRENT_TASK_MISMATCH",
+		Result:    fmt.Sprintf("当前微循环任务为 id=%d，本轮改写动作未包含该任务，请改为围绕当前任务执行。", currentTaskID),
+	}, true
+}
+
+func precheckToolCallPolicy(st *ScheduleRefineState, call reactToolCall, taskIDs []int) (reactToolResult, bool) {
+	if st == nil {
+		return reactToolResult{}, false
+	}
+	toolName := strings.TrimSpace(call.Tool)
+	if st.DisableCompositeTools && isCompositeToolName(toolName) {
+		return reactToolResult{
+			Tool:      toolName,
+			Success:   false,
+			ErrorCode: "COMPOSITE_DISABLED",
+			Result:    "当前已进入 ReAct 兜底模式，禁止调用复合工具，请使用 Move/Swap 逐步处理。",
+		}, true
+	}
+	if st.DisableCompositeTools && toolName == "BatchMove" {
+		return reactToolResult{
+			Tool:      toolName,
+			Success:   false,
+			ErrorCode: "BATCH_MOVE_DISABLED",
+			Result:    "当前兜底模式要求逐任务挪动，禁止使用 BatchMove。",
+		}, true
+	}
+	if toolName == "BatchMove" && !st.BatchMoveAllowed {
+		return reactToolResult{Tool: toolName, Success: false, ErrorCode: "BATCH_MOVE_DISABLED", Result: "当前计划未显式允许 BatchMove，请改用单步 Move/Swap。"}, true
+	}
+	if toolName == "QueryAvailableSlots" {
+		if st.SeenSlotQueries == nil {
+			st.SeenSlotQueries = make(map[string]struct{})
+		}
+		signature := buildSlotQuerySignature(st, call.Params)
+		if _, exists := st.SeenSlotQueries[signature]; exists {
+			return reactToolResult{
+				Tool:      toolName,
+				Success:   false,
+				ErrorCode: "QUERY_REDUNDANT",
+				Result:    "同版本排程下重复查询同一空位范围，已拒绝；请直接基于 ENV_SLOT_HINT 选择落点。",
+			}, true
+		}
+		st.SeenSlotQueries[signature] = struct{}{}
+		return reactToolResult{}, false
+	}
+	// 1. 当计划声明“必用复合工具”且尚未成功时，先锁住基础写工具。
+	// 2. 这样可避免模型绕开复合工具直接 Move，导致“命中率低 + 语义漂移”。
+	requiredComposite := normalizeCompositeToolName(st.RequiredCompositeTool)
+	if requiredComposite != "" && !isRequiredCompositeSatisfied(st) && isMutatingToolName(toolName) {
+		if toolName != requiredComposite {
+			return reactToolResult{
+				Tool:      toolName,
+				Success:   false,
+				ErrorCode: "COMPOSITE_REQUIRED",
+				Result:    fmt.Sprintf("当前计划要求先成功调用 %s；在其成功前禁止使用 %s。", requiredComposite, toolName),
+			}, true
+		}
+	}
+	if !isMutatingToolName(toolName) {
+		return reactToolResult{}, false
+	}
+	if st.PerTaskBudget <= 0 || len(taskIDs) == 0 {
+		return reactToolResult{}, false
+	}
+	for _, taskID := range taskIDs {
+		if st.TaskActionUsed[taskID] >= st.PerTaskBudget {
+			return reactToolResult{Tool: toolName, Success: false, ErrorCode: "TASK_BUDGET_EXCEEDED", Result: fmt.Sprintf("任务 id=%d 已达到单任务动作预算上限=%d，请重规划或更换目标任务。", taskID, st.PerTaskBudget)}, true
+		}
+	}
+	return reactToolResult{}, false
+}
+
+func isMutatingToolName(toolName string) bool {
+	switch strings.TrimSpace(toolName) {
+	case "Move", "Swap", "BatchMove", "SpreadEven", "MinContextSwitch":
+		return true
+	default:
+		return false
+	}
+}
+
+func uniquePositiveInts(ids []int, oks ...bool) []int {
+	allowAll := len(oks) == 0
+	seen := make(map[int]struct{}, len(ids))
+	out := make([]int, 0, len(ids))
+	for i, id := range ids {
+		if !allowAll {
+			if i >= len(oks) || !oks[i] {
+				continue
+			}
+		}
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
 func isRepeatedFailedCall(st *ScheduleRefineState, signature string) bool {
 	if st == nil {
 		return false
 	}
 	current := strings.TrimSpace(signature)
 	last := strings.TrimSpace(st.LastFailedCallSignature)
-	if current == "" || last == "" {
-		return false
-	}
-	return current == last
+	return current != "" && last != "" && current == last
 }
 
-// normalizeToolResult 对工具结果做统一规范化。
-//
-// 步骤化说明：
-// 1. 成功结果保留现状；
-// 2. 失败结果若未设置 error_code，则按结果文案推断统一错误码；
-// 3. 统一错误码后，可被模型下一轮稳定消费，减少“读不懂上一轮失败原因”。
 func normalizeToolResult(result reactToolResult) reactToolResult {
 	if result.Success {
 		return result
@@ -1423,10 +2553,13 @@ func normalizeToolResult(result reactToolResult) reactToolResult {
 	return result
 }
 
-// classifyToolFailureCode 把工具失败文案映射为稳定错误码。
 func classifyToolFailureCode(detail string) string {
 	text := strings.TrimSpace(detail)
 	switch {
+	case strings.Contains(text, "单任务动作预算上限"):
+		return "TASK_BUDGET_EXCEEDED"
+	case strings.Contains(text, "未显式允许 BatchMove"):
+		return "BATCH_MOVE_DISABLED"
 	case strings.Contains(text, "重复失败动作"):
 		return "REPEAT_FAILED_ACTION"
 	case strings.Contains(text, "顺序约束不满足"):
@@ -1435,6 +2568,8 @@ func classifyToolFailureCode(detail string) string {
 		return "PARAM_MISSING"
 	case strings.Contains(text, "目标时段已被"):
 		return "SLOT_CONFLICT"
+	case strings.Contains(text, "无法唯一定位"):
+		return "TASK_ID_AMBIGUOUS"
 	case strings.Contains(text, "任务跨度不一致"):
 		return "SPAN_MISMATCH"
 	case strings.Contains(text, "超出允许窗口"):
@@ -1458,27 +2593,6 @@ func classifyToolFailureCode(detail string) string {
 	}
 }
 
-// formatStructuredToolResult 把工具执行结果编码为结构化文本。
-//
-// 说明：
-// 1. 该字符串会写入 state，并在下一轮 prompt 以 LAST_TOOL_RESULT 透传给模型；
-// 2. 采用 JSON 结构，减少模型对自然语言描述的误读；
-// 3. 编码失败时降级为简短纯文本，避免链路中断。
-func formatStructuredToolResult(result reactToolResult) string {
-	obj := map[string]any{
-		"tool":       strings.TrimSpace(result.Tool),
-		"success":    result.Success,
-		"error_code": strings.TrimSpace(result.ErrorCode),
-		"result":     strings.TrimSpace(result.Result),
-	}
-	raw, err := json.Marshal(obj)
-	if err != nil {
-		return fmt.Sprintf("tool=%s success=%t error_code=%s result=%s", result.Tool, result.Success, result.ErrorCode, result.Result)
-	}
-	return string(raw)
-}
-
-// cloneToolParams 深拷贝工具参数，避免后续 map 复用造成历史观察污染。
 func cloneToolParams(params map[string]any) map[string]any {
 	if len(params) == 0 {
 		return nil
@@ -1525,15 +2639,11 @@ func buildRuntimeReflect(modelReflect string, result reactToolResult) string {
 		if modelText == "" {
 			return fmt.Sprintf("后端复盘：工具执行成功。%s", resultText)
 		}
-		// 1. 成功分支下，模型文本仅作为“动作前预期”的补充说明；
-		// 2. 业务上真正生效的是后端工具结果，因此前缀固定写“后端复盘”。
 		return fmt.Sprintf("后端复盘：工具执行成功。%s。模型预期（动作前）：%s", resultText, truncate(modelText, 180))
 	}
 	if modelText == "" {
 		return fmt.Sprintf("后端复盘：工具执行失败。%s。本轮调整未生效，已保留原方案。", resultText)
 	}
-	// 1. 失败分支必须把“未生效”写死，防止用户把模型话术当成已执行事实；
-	// 2. 模型文本仅保留为“动作前预期”，用于解释它为什么会选这一步。
 	return fmt.Sprintf("后端复盘：工具执行失败。%s。本轮调整未生效，已保留原方案。模型预期（动作前，仅供参考）：%s", resultText, truncate(modelText, 160))
 }
 
@@ -1543,7 +2653,7 @@ func buildSuggestedDigest(entries []model.HybridScheduleEntry, limit int) string
 	}
 	list := make([]model.HybridScheduleEntry, 0, len(entries))
 	for _, entry := range entries {
-		if entry.Status == "suggested" && entry.TaskItemID > 0 {
+		if isMovableSuggestedTask(entry) {
 			list = append(list, entry)
 		}
 	}
@@ -1559,18 +2669,25 @@ func buildSuggestedDigest(entries []model.HybridScheduleEntry, limit int) string
 	}
 	lines := make([]string, 0, len(list))
 	for _, item := range list {
-		lines = append(lines, fmt.Sprintf(
-			"id=%d|W%d|D%d(%s)|%d-%d|%s",
-			item.TaskItemID,
-			item.Week,
-			item.DayOfWeek,
-			weekdayLabel(item.DayOfWeek),
-			item.SectionFrom,
-			item.SectionTo,
-			strings.TrimSpace(item.Name),
-		))
+		lines = append(lines, fmt.Sprintf("id=%d|W%d|D%d(%s)|%d-%d|%s", item.TaskItemID, item.Week, item.DayOfWeek, weekdayLabel(item.DayOfWeek), item.SectionFrom, item.SectionTo, strings.TrimSpace(item.Name)))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func buildSuggestedDigestByWeek(entries []model.HybridScheduleEntry, week int, limit int) string {
+	if week <= 0 {
+		return buildSuggestedDigest(entries, limit)
+	}
+	filtered := make([]model.HybridScheduleEntry, 0, len(entries))
+	for _, entry := range entries {
+		if isMovableSuggestedTask(entry) && entry.Week == week {
+			filtered = append(filtered, entry)
+		}
+	}
+	if len(filtered) == 0 {
+		return "无同周 suggested 条目"
+	}
+	return buildSuggestedDigest(filtered, limit)
 }
 
 func weekdayLabel(day int) string {
@@ -1594,13 +2711,6 @@ func weekdayLabel(day int) string {
 	}
 }
 
-// parseReactOutputWithRetryOnce 对 ReAct 输出做“单次重试解析”。
-//
-// 步骤化说明：
-// 1. 先解析首次模型输出，成功即直接返回。
-// 2. 首次解析失败时，同轮重试一次模型调用（关闭 thinking + 温度置 0），提升结构化稳定性。
-// 3. 若重试后解析成功，则发出成功阶段信号并继续流程。
-// 4. 若重试调用或二次解析仍失败，则返回统一业务错误码，避免前端拿到不可控的原始解析错误。
 func parseReactOutputWithRetryOnce(
 	ctx context.Context,
 	chatModel *ark.ChatModel,
@@ -1613,43 +2723,26 @@ func parseReactOutputWithRetryOnce(
 	if st == nil {
 		return nil, respond.ScheduleRefineOutputParseFailed
 	}
-
 	parsed, parseErr := parseReactLLMOutput(firstRaw)
 	if parseErr == nil {
 		return parsed, nil
 	}
-
-	firstFail := fmt.Sprintf("第 %d 轮输出解析失败，准备重试1次：%s", round, truncate(parseErr.Error(), 260))
-	st.ActionLogs = append(st.ActionLogs, firstFail)
-	emitStage("schedule_refine.react.parse_retry", firstFail)
-
+	emitStage("schedule_refine.react.parse_retry", fmt.Sprintf("第 %d 轮输出解析失败，准备重试1次：%s", round, truncate(parseErr.Error(), 260)))
 	retryRaw, retryErr := callModelText(ctx, chatModel, reactPrompt, userPrompt, false, reactMaxTokens, 0)
 	if retryErr != nil {
-		retryErrDetail := formatRoundModelErrorDetail(round, fmt.Errorf("解析重试调用失败: %w", retryErr), ctx)
-		st.ActionLogs = append(st.ActionLogs, retryErrDetail)
-		emitStage("schedule_refine.react.round_error", retryErrDetail)
+		emitStage("schedule_refine.react.round_error", formatRoundModelErrorDetail(round, fmt.Errorf("解析重试调用失败: %w", retryErr), ctx))
 		return nil, respond.ScheduleRefineOutputParseFailed
 	}
 	emitModelRawDebug(emitStage, fmt.Sprintf("react.round.%d.retry", round), retryRaw)
-
 	retryParsed, retryParseErr := parseReactLLMOutput(retryRaw)
 	if retryParseErr != nil {
-		secondFail := fmt.Sprintf("第 %d 轮输出二次解析失败：%s", round, truncate(retryParseErr.Error(), 260))
-		st.ActionLogs = append(st.ActionLogs, secondFail)
-		emitStage("schedule_refine.react.round_error", secondFail)
+		emitStage("schedule_refine.react.round_error", fmt.Sprintf("第 %d 轮输出二次解析失败：%s", round, truncate(retryParseErr.Error(), 260)))
 		return nil, respond.ScheduleRefineOutputParseFailed
 	}
-
 	emitStage("schedule_refine.react.parse_retry_success", fmt.Sprintf("第 %d 轮输出重试解析成功，继续执行。", round))
 	return retryParsed, nil
 }
 
-// parsePlannerOutputWithRetryOnce 对 Planner 输出做“单次重试解析”。
-//
-// 步骤化说明：
-// 1. 先解析首次 Planner 输出，成功则直接返回；
-// 2. 若失败，触发一次“严格 JSON 重试请求”，并打出 retry raw debug；
-// 3. 若重试仍失败，返回错误给上层，由上层走兜底计划。
 func parsePlannerOutputWithRetryOnce(
 	ctx context.Context,
 	chatModel *ark.ChatModel,
@@ -1662,17 +2755,9 @@ func parsePlannerOutputWithRetryOnce(
 	if parseErr == nil {
 		return parsed, nil
 	}
-
-	emitStage(
-		"schedule_refine.plan.parse_retry",
-		fmt.Sprintf("Planner 解析失败，准备重试1次（mode=%s）：%s", strings.TrimSpace(mode), truncate(parseErr.Error(), 160)),
-	)
-
+	emitStage("schedule_refine.plan.parse_retry", fmt.Sprintf("Planner 解析失败，准备重试1次（mode=%s）：%s", strings.TrimSpace(mode), truncate(parseErr.Error(), 160)))
 	retryPrompt := withNearestJSONContract(
-		fmt.Sprintf(
-			"%s\n\n上一次输出解析失败（原因：JSON 不完整或不闭合）。请缩短内容并严格输出完整 JSON。",
-			originUserPrompt,
-		),
+		fmt.Sprintf("%s\n\n上一轮输出解析失败（原因：JSON 不完整或不闭合）。请缩短内容并严格输出完整 JSON。", originUserPrompt),
 		jsonContractForPlanner,
 	)
 	retryRaw, retryErr := callModelText(ctx, chatModel, plannerPrompt, retryPrompt, false, plannerMaxTokens, 0)
@@ -1680,11 +2765,546 @@ func parsePlannerOutputWithRetryOnce(
 		return nil, retryErr
 	}
 	emitModelRawDebug(emitStage, fmt.Sprintf("planner.%s.retry", strings.TrimSpace(mode)), retryRaw)
-
 	retryParsed, retryParseErr := parseJSON[plannerOutput](retryRaw)
 	if retryParseErr != nil {
 		return nil, retryParseErr
 	}
 	emitStage("schedule_refine.plan.parse_retry_success", fmt.Sprintf("Planner 重试解析成功（mode=%s）。", strings.TrimSpace(mode)))
 	return retryParsed, nil
+}
+
+func buildSlicePlan(st *ScheduleRefineState) RefineSlicePlan {
+	msg := strings.TrimSpace(st.UserMessage)
+	lower := strings.ToLower(msg)
+	plan := RefineSlicePlan{
+		WeekFilter:      extractWeekFilters(msg),
+		ExcludeSections: extractExcludeSections(msg),
+		Reason:          "根据用户请求抽取得到执行切片",
+	}
+	// 1. 优先解析“从A收敛到B”这类方向型表达，防止把 source/target 反向识别。
+	// 2. 例如“周四到周五收敛到周一到周三”应得到 source=[4,5], target=[1,2,3]。
+	if src, tgt, ok := extractDirectionalSourceTargetDays(msg); ok {
+		plan.SourceDays = src
+		plan.TargetDays = tgt
+		return plan
+	}
+	if strings.Contains(msg, "工作日") || strings.Contains(msg, "周一到周五") || strings.Contains(msg, "周1到周5") {
+		plan.TargetDays = []int{1, 2, 3, 4, 5}
+	} else if containsAny(lower, []string{"移到周末", "挪到周末", "安排在周末", "放到周末"}) {
+		plan.TargetDays = []int{6, 7}
+	} else if days := extractTargetDaysFromMessage(msg); len(days) > 0 {
+		plan.TargetDays = days
+	}
+	if len(plan.TargetDays) == 5 && isSameDays(plan.TargetDays, []int{1, 2, 3, 4, 5}) && strings.Contains(msg, "周末") {
+		plan.SourceDays = []int{6, 7}
+	}
+	if day := detectOverloadedDay(msg); day > 0 {
+		plan.SourceDays = uniquePositiveInts(append(plan.SourceDays, day))
+	}
+	if fromDays := extractSourceDaysFromMessage(msg); len(fromDays) > 0 {
+		plan.SourceDays = uniquePositiveInts(append(plan.SourceDays, fromDays...))
+	}
+	return plan
+}
+
+// extractDirectionalSourceTargetDays 解析“来源日 -> 目标日”表达。
+//
+// 规则：
+// 1. 以“收敛到/移到/挪到/调整到”等方向词为分割；
+// 2. 分割前提取 source days，分割后提取 target days；
+// 3. 两侧都提取成功才返回 true，避免误判。
+func extractDirectionalSourceTargetDays(text string) ([]int, []int, bool) {
+	verbIdx := -1
+	verbLen := 0
+	for _, key := range []string{"收敛到", "移到", "挪到", "调整到", "安排到", "放到", "改到", "迁移到", "分散到"} {
+		if idx := strings.Index(text, key); idx >= 0 {
+			verbIdx = idx
+			verbLen = len(key)
+			break
+		}
+	}
+	if verbIdx < 0 {
+		return nil, nil, false
+	}
+	left := strings.TrimSpace(text[:verbIdx])
+	right := strings.TrimSpace(text[verbIdx+verbLen:])
+	if left == "" || right == "" {
+		return nil, nil, false
+	}
+	source := extractDayExpr(left)
+	target := extractDayExpr(right)
+	if len(source) == 0 || len(target) == 0 {
+		return nil, nil, false
+	}
+	return source, target, true
+}
+
+// extractDayExpr 提取文本中的“星期表达式”。
+// 优先提取区间（周一到周三），提不到再提取离散天。
+func extractDayExpr(text string) []int {
+	if days := extractRangeDays(text); len(days) > 0 {
+		return days
+	}
+	return extractDays(text)
+}
+
+// inferSourceWeekSet 推断“来源周”集合。
+//
+// 规则：
+// 1. 当 week_filter 至少两个值时，默认第一个值视为来源周（保留用户原话顺序）；
+// 2. 当 week_filter 少于两个值时，不强制来源周过滤，返回空集合；
+// 3. 该规则用于收敛 workset，避免把目标周任务误纳入当前微循环。
+func inferSourceWeekSet(slice RefineSlicePlan) map[int]struct{} {
+	if len(slice.WeekFilter) < 2 {
+		return nil
+	}
+	sourceWeek := slice.WeekFilter[0]
+	if sourceWeek <= 0 {
+		return nil
+	}
+	return map[int]struct{}{sourceWeek: {}}
+}
+
+// inferTargetWeekSet 推断“目标周”集合。
+//
+// 规则：
+// 1. 当 week_filter 至少两个值时，除首个来源周外，其余周视为目标周；
+// 2. 当 week_filter 少于两个值时，不构造目标周集合，交由其他约束判定；
+// 3. 返回升维集合用于 O(1) 命中判断。
+func inferTargetWeekSet(slice RefineSlicePlan) map[int]struct{} {
+	if len(slice.WeekFilter) < 2 {
+		return nil
+	}
+	set := make(map[int]struct{}, len(slice.WeekFilter)-1)
+	for _, week := range slice.WeekFilter[1:] {
+		if week > 0 {
+			set[week] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+func collectWorksetTaskIDs(entries []model.HybridScheduleEntry, slice RefineSlicePlan, originOrder map[int]int) []int {
+	type candidate struct {
+		TaskID      int
+		Week        int
+		Day         int
+		SectionFrom int
+		Rank        int
+	}
+	list := make([]candidate, 0, len(entries))
+	seen := make(map[int]struct{}, len(entries))
+	weekSet := intSliceToWeekSet(slice.WeekFilter)
+	sourceWeekSet := inferSourceWeekSet(slice)
+	sourceSet := intSliceToDaySet(slice.SourceDays)
+	for _, entry := range entries {
+		if !isMovableSuggestedTask(entry) {
+			continue
+		}
+		// 1. 方向型周次请求（例如“14周挪到13周”）下，只把“来源周”任务放入 workset。
+		// 2. 这样做可以避免目标周/其他周任务被误当成当前微循环任务，触发串改。
+		if len(sourceWeekSet) > 0 {
+			if _, ok := sourceWeekSet[entry.Week]; !ok {
+				continue
+			}
+		}
+		if len(weekSet) > 0 {
+			if _, ok := weekSet[entry.Week]; !ok {
+				continue
+			}
+		}
+		if len(sourceSet) > 0 {
+			if _, ok := sourceSet[entry.DayOfWeek]; !ok {
+				continue
+			}
+		}
+		if _, ok := seen[entry.TaskItemID]; ok {
+			continue
+		}
+		seen[entry.TaskItemID] = struct{}{}
+		rank := originOrder[entry.TaskItemID]
+		if rank <= 0 {
+			rank = 1 << 30
+		}
+		list = append(list, candidate{
+			TaskID:      entry.TaskItemID,
+			Week:        entry.Week,
+			Day:         entry.DayOfWeek,
+			SectionFrom: entry.SectionFrom,
+			Rank:        rank,
+		})
+	}
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].Rank != list[j].Rank {
+			return list[i].Rank < list[j].Rank
+		}
+		if list[i].Week != list[j].Week {
+			return list[i].Week < list[j].Week
+		}
+		if list[i].Day != list[j].Day {
+			return list[i].Day < list[j].Day
+		}
+		if list[i].SectionFrom != list[j].SectionFrom {
+			return list[i].SectionFrom < list[j].SectionFrom
+		}
+		return list[i].TaskID < list[j].TaskID
+	})
+	ids := make([]int, 0, len(list))
+	for _, item := range list {
+		ids = append(ids, item.TaskID)
+	}
+	return ids
+}
+
+func findSuggestedEntryByTaskID(entries []model.HybridScheduleEntry, taskID int) (model.HybridScheduleEntry, bool) {
+	for _, entry := range entries {
+		if isMovableSuggestedTask(entry) && entry.TaskItemID == taskID {
+			return entry, true
+		}
+	}
+	return model.HybridScheduleEntry{}, false
+}
+
+// isCurrentTaskSatisfiedBySlice 判断“当前任务”是否已满足本轮切片目标。
+//
+// 步骤化说明：
+// 1. 该判断只用于“当前任务自动收口”，不替代全局 hard_check；
+// 2. 若切片包含 source_days，则任务离开 source_days 视为关键进展；
+// 3. 若切片包含 target_days / exclude_sections / week_filter，则需同时满足；
+// 4. 若切片没有任何约束，返回 false，避免误判导致提前结束。
+func isCurrentTaskSatisfiedBySlice(entry model.HybridScheduleEntry, slice RefineSlicePlan) bool {
+	if !isMovableSuggestedTask(entry) {
+		return false
+	}
+	weekSet := intSliceToWeekSet(slice.WeekFilter)
+	sourceWeekSet := inferSourceWeekSet(slice)
+	sourceSet := intSliceToDaySet(slice.SourceDays)
+	targetSet := intSliceToDaySet(slice.TargetDays)
+	excludedSet := intSliceToSectionSet(slice.ExcludeSections)
+
+	hasConstraint := len(sourceWeekSet) > 0 || len(weekSet) > 0 || len(sourceSet) > 0 || len(targetSet) > 0 || len(excludedSet) > 0
+	if !hasConstraint {
+		return false
+	}
+	if len(sourceWeekSet) > 0 {
+		if _, stillInSourceWeek := sourceWeekSet[entry.Week]; stillInSourceWeek {
+			return false
+		}
+	}
+	if len(weekSet) > 0 {
+		if _, ok := weekSet[entry.Week]; !ok {
+			return false
+		}
+	}
+	if len(sourceSet) > 0 {
+		if _, stillInSource := sourceSet[entry.DayOfWeek]; stillInSource {
+			return false
+		}
+	}
+	if len(targetSet) > 0 {
+		if _, ok := targetSet[entry.DayOfWeek]; !ok {
+			return false
+		}
+	}
+	if len(excludedSet) > 0 && intersectsExcludedSections(entry.SectionFrom, entry.SectionTo, excludedSet) {
+		return false
+	}
+	return true
+}
+
+func taskProgressLabel(done bool, attemptUsed int, perTaskBudget int) string {
+	if done {
+		return "done"
+	}
+	if perTaskBudget > 0 && attemptUsed >= perTaskBudget {
+		return "budget_exhausted"
+	}
+	return "paused"
+}
+
+func buildMicroReactUserPrompt(st *ScheduleRefineState, current model.HybridScheduleEntry, remainingAction int, remainingTotal int) string {
+	ensureCompositeStateMaps(st)
+	contractJSON, _ := json.Marshal(st.Contract)
+	planJSON, _ := json.Marshal(st.CurrentPlan)
+	sliceJSON, _ := json.Marshal(st.SlicePlan)
+	objectiveJSON, _ := json.Marshal(st.Objective)
+	currentJSON, _ := json.Marshal(current)
+	sourceWeeks := keysOfIntSet(inferSourceWeekSet(st.SlicePlan))
+	requiredComposite := normalizeCompositeToolName(st.RequiredCompositeTool)
+	requiredSuccess := isRequiredCompositeSatisfied(st)
+	compositeToolsAllowed := !st.DisableCompositeTools
+	compositeCalledJSON, _ := json.Marshal(st.CompositeToolCalled)
+	compositeSuccessJSON, _ := json.Marshal(st.CompositeToolSuccess)
+	envSlotHint := buildEnvSlotHint(st, current)
+	userPrompt := fmt.Sprintf(
+		"用户本轮请求=%s\n契约=%s\n执行计划=%s\n切片=%s\n目标约束=%s\nCURRENT_TASK=%s\nSOURCE_WEEK_FILTER=%v\nBACKEND_GUARD=本轮只允许改写 task_item_id=%d；若该任务已满足切片目标或目标约束已整体达成且复合工具门禁通过，请直接 done=true；下一任务由后端自动切换。\nREQUIRED_COMPOSITE_TOOL=%s\nCOMPOSITE_TOOLS_ALLOWED=%t\nCOMPOSITE_REQUIRED_SUCCESS=%t\nCOMPOSITE_CALLED=%s\nCOMPOSITE_SUCCESS=%s\nCURRENT_TASK_ACTION_USED=%d\nPER_TASK_BUDGET=%d\n动作预算剩余=%d\n总预算剩余=%d\nENV_SLOT_HINT=%s\nLAST_TOOL_OBSERVATION=%s\nLAST_FAILED_CALL_SIGNATURE=%s\n最近观察=%s\n同周suggested摘要=%s",
+		strings.TrimSpace(st.UserMessage),
+		string(contractJSON),
+		string(planJSON),
+		string(sliceJSON),
+		string(objectiveJSON),
+		string(currentJSON),
+		sourceWeeks,
+		current.TaskItemID,
+		fallbackText(requiredComposite, "无"),
+		compositeToolsAllowed,
+		requiredSuccess,
+		string(compositeCalledJSON),
+		string(compositeSuccessJSON),
+		st.TaskActionUsed[current.TaskItemID],
+		st.PerTaskBudget,
+		remainingAction,
+		remainingTotal,
+		envSlotHint,
+		buildLastToolObservationPrompt(st.ObservationHistory),
+		fallbackText(st.LastFailedCallSignature, "无"),
+		buildObservationPrompt(st.ObservationHistory, 2),
+		buildSuggestedDigestByWeek(st.HybridEntries, current.Week, 24),
+	)
+	return withNearestJSONContract(userPrompt, jsonContractForReact)
+}
+
+type slotHintPayload struct {
+	Count         int `json:"count"`
+	StrictCount   int `json:"strict_count"`
+	EmbeddedCount int `json:"embedded_count"`
+	Slots         []struct {
+		Week        int `json:"week"`
+		DayOfWeek   int `json:"day_of_week"`
+		SectionFrom int `json:"section_from"`
+		SectionTo   int `json:"section_to"`
+	} `json:"slots"`
+}
+
+func buildEnvSlotHint(st *ScheduleRefineState, current model.HybridScheduleEntry) string {
+	if st == nil || !isMovableSuggestedTask(current) {
+		return "无可用提示"
+	}
+	span := current.SectionTo - current.SectionFrom + 1
+	if span <= 0 {
+		span = 2
+	}
+	targetWeeks := append([]int(nil), st.Objective.TargetWeeks...)
+	if len(targetWeeks) == 0 {
+		targetWeeks = keysOfIntSet(inferTargetWeekSet(st.SlicePlan))
+	}
+	if len(targetWeeks) == 0 && current.Week > 0 {
+		targetWeeks = []int{current.Week}
+	}
+	targetDays := append([]int(nil), st.Objective.TargetDays...)
+	if len(targetDays) == 0 {
+		targetDays = append([]int(nil), st.SlicePlan.TargetDays...)
+	}
+	params := map[string]any{
+		"week_filter":      targetWeeks,
+		"day_filter":       targetDays,
+		"section_duration": span,
+		"limit":            8,
+		"slot_type":        "pure",
+		"exclude_sections": st.SlicePlan.ExcludeSections,
+	}
+	_, pureResult := refineToolQueryAvailableSlots(st.HybridEntries, params, buildPlanningWindowFromEntries(st.HybridEntries))
+	if !pureResult.Success {
+		return fmt.Sprintf("pure_slot_query_failed=%s", truncate(pureResult.Result, 100))
+	}
+	purePayload, ok := decodeSlotHintPayload(pureResult.Result)
+	if !ok {
+		return "pure_slot_parse_failed"
+	}
+
+	embedParams := map[string]any{
+		"week_filter":      targetWeeks,
+		"day_filter":       targetDays,
+		"section_duration": span,
+		"limit":            8,
+		"exclude_sections": st.SlicePlan.ExcludeSections,
+	}
+	_, fallbackResult := refineToolQueryAvailableSlots(st.HybridEntries, embedParams, buildPlanningWindowFromEntries(st.HybridEntries))
+	if !fallbackResult.Success {
+		return fmt.Sprintf("pure=%d fallback_query_failed=%s", purePayload.Count, truncate(fallbackResult.Result, 100))
+	}
+	fallbackPayload, ok := decodeSlotHintPayload(fallbackResult.Result)
+	if !ok {
+		return fmt.Sprintf("pure=%d fallback_parse_failed", purePayload.Count)
+	}
+
+	top := fallbackPayload.Slots
+	if len(top) > 3 {
+		top = top[:3]
+	}
+	slotText := make([]string, 0, len(top))
+	for _, item := range top {
+		slotText = append(slotText, fmt.Sprintf("W%dD%d %d-%d", item.Week, item.DayOfWeek, item.SectionFrom, item.SectionTo))
+	}
+	if len(slotText) == 0 {
+		slotText = append(slotText, "无")
+	}
+	return fmt.Sprintf("target_weeks=%v target_days=%v pure=%d embed_candidate=%d top=%s", targetWeeks, targetDays, purePayload.Count, fallbackPayload.EmbeddedCount, strings.Join(slotText, ","))
+}
+
+func decodeSlotHintPayload(raw string) (slotHintPayload, bool) {
+	var payload slotHintPayload
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return slotHintPayload{}, false
+	}
+	return payload, true
+}
+
+func extractWeekFilters(text string) []int {
+	patterns := []string{
+		`第\s*(\d{1,2})\s*周`,
+		`W\s*(\d{1,2})`,
+		`(\d{1,2})\s*周`,
+	}
+	out := make([]int, 0, 8)
+	for _, p := range patterns {
+		re := regexp.MustCompile(p)
+		for _, m := range re.FindAllStringSubmatch(text, -1) {
+			if len(m) < 2 {
+				continue
+			}
+			v, err := strconv.Atoi(strings.TrimSpace(m[1]))
+			if err != nil || v <= 0 {
+				continue
+			}
+			out = append(out, v)
+		}
+	}
+	return uniquePositiveInts(out)
+}
+
+func extractExcludeSections(text string) []int {
+	normalized := strings.ReplaceAll(strings.ToLower(text), " ", "")
+	if containsAny(normalized, []string{
+		"不要早八", "避开早八", "不想早八", "别在早八",
+		"不要1-2", "避开1-2", "不要第一节", "不要一二节",
+	}) {
+		return []int{1, 2}
+	}
+	return nil
+}
+
+func extractTargetDaysFromMessage(text string) []int {
+	verbIdx := -1
+	for _, key := range []string{"移到", "挪到", "改到", "安排到", "放到", "分散到", "调整到", "收敛到", "迁移到"} {
+		if idx := strings.Index(text, key); idx >= 0 {
+			verbIdx = idx + len(key)
+			break
+		}
+	}
+	if verbIdx < 0 || verbIdx >= len(text) {
+		return nil
+	}
+	targetPart := strings.TrimSpace(text[verbIdx:])
+	return extractDayExpr(targetPart)
+}
+
+func extractSourceDaysFromMessage(text string) []int {
+	source := make([]int, 0, 4)
+	re := regexp.MustCompile(`从\s*(周[一二三四五六日天]|星期[一二三四五六日天])`)
+	for _, m := range re.FindAllStringSubmatch(text, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		if day := dayTokenToInt(m[1]); day > 0 {
+			source = append(source, day)
+		}
+	}
+	re2 := regexp.MustCompile(`把\s*(周[一二三四五六日天]|星期[一二三四五六日天])`)
+	for _, m := range re2.FindAllStringSubmatch(text, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		if day := dayTokenToInt(m[1]); day > 0 {
+			source = append(source, day)
+		}
+	}
+	return uniquePositiveInts(source)
+}
+
+func detectOverloadedDay(text string) int {
+	re := regexp.MustCompile(`(周[一二三四五六日天]|星期[一二三四五六日天]).{0,8}(太多|过多|太满|过满|拥挤|太挤|塞满)`)
+	m := re.FindStringSubmatch(text)
+	if len(m) < 2 {
+		return 0
+	}
+	return dayTokenToInt(m[1])
+}
+
+func extractRangeDays(text string) []int {
+	re := regexp.MustCompile(`(周[一二三四五六日天]|星期[一二三四五六日天])\s*[到至\-]\s*(周[一二三四五六日天]|星期[一二三四五六日天])`)
+	m := re.FindStringSubmatch(text)
+	if len(m) < 3 {
+		return nil
+	}
+	start := dayTokenToInt(m[1])
+	end := dayTokenToInt(m[2])
+	if start <= 0 || end <= 0 {
+		return nil
+	}
+	if start > end {
+		start, end = end, start
+	}
+	out := make([]int, 0, end-start+1)
+	for day := start; day <= end; day++ {
+		out = append(out, day)
+	}
+	return out
+}
+
+func extractDays(text string) []int {
+	re := regexp.MustCompile(`周[一二三四五六日天]|星期[一二三四五六日天]`)
+	matches := re.FindAllString(text, -1)
+	days := make([]int, 0, len(matches))
+	for _, token := range matches {
+		if day := dayTokenToInt(token); day > 0 {
+			days = append(days, day)
+		}
+	}
+	return uniquePositiveInts(days)
+}
+
+func dayTokenToInt(token string) int {
+	switch strings.TrimSpace(token) {
+	case "周一", "星期一":
+		return 1
+	case "周二", "星期二":
+		return 2
+	case "周三", "星期三":
+		return 3
+	case "周四", "星期四":
+		return 4
+	case "周五", "星期五":
+		return 5
+	case "周六", "星期六":
+		return 6
+	case "周日", "周天", "星期日", "星期天":
+		return 7
+	default:
+		return 0
+	}
+}
+
+func containsAny(text string, keys []string) bool {
+	for _, k := range keys {
+		if strings.Contains(text, k) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSameDays(days []int, target []int) bool {
+	if len(days) != len(target) {
+		return false
+	}
+	for i := range days {
+		if days[i] != target[i] {
+			return false
+		}
+	}
+	return true
 }

@@ -10,6 +10,9 @@ import (
 
 const (
 	graphNodeContract  = "schedule_refine_contract"
+	graphNodePlan      = "schedule_refine_plan"
+	graphNodeSlice     = "schedule_refine_slice"
+	graphNodeRoute     = "schedule_refine_route"
 	graphNodeReact     = "schedule_refine_react"
 	graphNodeHardCheck = "schedule_refine_hard_check"
 	graphNodeSummary   = "schedule_refine_summary"
@@ -30,7 +33,7 @@ type ScheduleRefineGraphRunInput struct {
 // RunScheduleRefineGraph 执行“连续微调”独立图链路。
 //
 // 链路顺序：
-// START -> contract -> react -> hard_check -> summary -> END
+// START -> contract -> plan -> slice -> route -> react -> hard_check -> summary -> END
 //
 // 设计说明：
 // 1. 当前链路采用线性图，确保可读性优先；
@@ -55,6 +58,15 @@ func RunScheduleRefineGraph(ctx context.Context, input ScheduleRefineGraphRunInp
 	if err := graph.AddLambdaNode(graphNodeContract, compose.InvokableLambda(runner.contractNode)); err != nil {
 		return nil, err
 	}
+	if err := graph.AddLambdaNode(graphNodePlan, compose.InvokableLambda(runner.planNode)); err != nil {
+		return nil, err
+	}
+	if err := graph.AddLambdaNode(graphNodeSlice, compose.InvokableLambda(runner.sliceNode)); err != nil {
+		return nil, err
+	}
+	if err := graph.AddLambdaNode(graphNodeRoute, compose.InvokableLambda(runner.routeNode)); err != nil {
+		return nil, err
+	}
 	if err := graph.AddLambdaNode(graphNodeReact, compose.InvokableLambda(runner.reactNode)); err != nil {
 		return nil, err
 	}
@@ -68,7 +80,16 @@ func RunScheduleRefineGraph(ctx context.Context, input ScheduleRefineGraphRunInp
 	if err := graph.AddEdge(compose.START, graphNodeContract); err != nil {
 		return nil, err
 	}
-	if err := graph.AddEdge(graphNodeContract, graphNodeReact); err != nil {
+	if err := graph.AddEdge(graphNodeContract, graphNodePlan); err != nil {
+		return nil, err
+	}
+	if err := graph.AddEdge(graphNodePlan, graphNodeSlice); err != nil {
+		return nil, err
+	}
+	if err := graph.AddEdge(graphNodeSlice, graphNodeRoute); err != nil {
+		return nil, err
+	}
+	if err := graph.AddEdge(graphNodeRoute, graphNodeReact); err != nil {
 		return nil, err
 	}
 	if err := graph.AddEdge(graphNodeReact, graphNodeHardCheck); err != nil {
@@ -83,7 +104,7 @@ func RunScheduleRefineGraph(ctx context.Context, input ScheduleRefineGraphRunInp
 
 	runnable, err := graph.Compile(ctx,
 		compose.WithGraphName("ScheduleRefineGraph"),
-		compose.WithMaxRunSteps(12),
+		compose.WithMaxRunSteps(20),
 		compose.WithNodeTriggerMode(compose.AnyPredecessor),
 	)
 	if err != nil {

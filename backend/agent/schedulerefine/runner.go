@@ -28,6 +28,18 @@ func (r *scheduleRefineRunner) contractNode(ctx context.Context, st *ScheduleRef
 	return runContractNode(ctx, r.chatModel, st, r.emitStage)
 }
 
+func (r *scheduleRefineRunner) planNode(ctx context.Context, st *ScheduleRefineState) (*ScheduleRefineState, error) {
+	return runPlanNode(ctx, r.chatModel, st, r.emitStage)
+}
+
+func (r *scheduleRefineRunner) sliceNode(ctx context.Context, st *ScheduleRefineState) (*ScheduleRefineState, error) {
+	return runSliceNode(ctx, st, r.emitStage)
+}
+
+func (r *scheduleRefineRunner) routeNode(ctx context.Context, st *ScheduleRefineState) (*ScheduleRefineState, error) {
+	return runCompositeRouteNode(ctx, st, r.emitStage)
+}
+
 func (r *scheduleRefineRunner) reactNode(ctx context.Context, st *ScheduleRefineState) (*ScheduleRefineState, error) {
 	return runReactLoopNode(ctx, r.chatModel, st, r.emitStage)
 }
