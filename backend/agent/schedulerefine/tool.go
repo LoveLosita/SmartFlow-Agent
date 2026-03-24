@@ -422,11 +422,38 @@ func refineToolSpreadEven(entries []model.HybridScheduleEntry, params map[string
 // refineToolMinContextSwitch 执行“最少上下文切换”复合动作。
 //
 // 职责边界：
-// 1. 负责参数解析、候选收集、调用确定性规划器；
-// 2. 不直接改写 entries，统一通过 BatchMove 原子落地；
-// 3. 规划算法实现位于 logic 包，工具层只负责编排。
+// 1. 负责锁定“当前任务已占坑位集合”，避免为了聚类把任务远距离迁移；
+// 2. 负责在固定坑位集合内调用确定性规划器，只重排“任务 -> 坑位”的映射；
+// 3. 不直接改写 entries，统一通过 BatchMove 原子落地。
 func refineToolMinContextSwitch(entries []model.HybridScheduleEntry, params map[string]any, window planningWindow, policy refineToolPolicy) ([]model.HybridScheduleEntry, reactToolResult) {
-	return refineToolCompositeMove(entries, params, window, policy, "MinContextSwitch", logic.PlanMinContextSwitchMoves)
+	taskIDs := collectCompositeTaskIDs(params)
+	if len(taskIDs) == 0 {
+		return entries, reactToolResult{
+			Tool:      "MinContextSwitch",
+			Success:   false,
+			ErrorCode: "PARAM_MISSING",
+			Result:    "参数缺失：复合工具需要 task_item_ids 或 task_item_id",
+		}
+	}
+	tasks, taskResult, ok := collectCompositeTasks(entries, taskIDs, policy, "MinContextSwitch")
+	if !ok {
+		return entries, taskResult
+	}
+
+	// 1. MinContextSwitch 的产品语义是“尽量少切换，同时尽量少折腾坑位”；
+	// 2. 因此这里不再查询整周新坑位，而是直接复用当前任务已占据的坑位集合；
+	// 3. 这样最终只会发生“任务之间互换位置”，不会跳到用户意料之外的远处时段。
+	currentSlots := buildCompositeCurrentTaskSlots(tasks)
+	plannedMoves, planErr := logic.PlanMinContextSwitchMoves(tasks, currentSlots, logic.RefineCompositePlanOptions{})
+	if planErr != nil {
+		return entries, reactToolResult{
+			Tool:      "MinContextSwitch",
+			Success:   false,
+			ErrorCode: "PLAN_FAILED",
+			Result:    planErr.Error(),
+		}
+	}
+	return applyFixedSlotCompositeMoves(entries, policy, "MinContextSwitch", plannedMoves)
 }
 
 // refineToolCompositeMove 是复合动作工具的统一执行框架。
@@ -453,56 +480,12 @@ func refineToolCompositeMove(
 			Result:    "参数缺失：复合工具需要 task_item_ids 或 task_item_id",
 		}
 	}
+	tasks, taskResult, ok := collectCompositeTasks(entries, taskIDs, policy, toolName)
+	if !ok {
+		return entries, taskResult
+	}
 	idSet := intSliceToIDSet(taskIDs)
-
-	// 1. 先筛选任务候选，并校验 task_item_id 是否全部可定位。
-	// 2. 只允许可移动 suggested 任务参与，避免误改 existing/course 条目。
-	tasks := make([]logic.RefineTaskCandidate, 0, len(taskIDs))
-	found := make(map[int]struct{}, len(taskIDs))
-	spanNeed := make(map[int]int)
-	for _, entry := range entries {
-		if !isMovableSuggestedTask(entry) {
-			continue
-		}
-		if _, ok := idSet[entry.TaskItemID]; !ok {
-			continue
-		}
-		if _, duplicated := found[entry.TaskItemID]; duplicated {
-			return entries, reactToolResult{
-				Tool:      toolName,
-				Success:   false,
-				ErrorCode: "TASK_ID_AMBIGUOUS",
-				Result:    fmt.Sprintf("task_item_id=%d 命中多条可移动 suggested 任务，无法唯一定位", entry.TaskItemID),
-			}
-		}
-		found[entry.TaskItemID] = struct{}{}
-		task := logic.RefineTaskCandidate{
-			TaskItemID:  entry.TaskItemID,
-			Week:        entry.Week,
-			DayOfWeek:   entry.DayOfWeek,
-			SectionFrom: entry.SectionFrom,
-			SectionTo:   entry.SectionTo,
-			Name:        strings.TrimSpace(entry.Name),
-			ContextTag:  strings.TrimSpace(entry.ContextTag),
-			OriginRank:  policy.OriginOrderMap[entry.TaskItemID],
-		}
-		tasks = append(tasks, task)
-		spanNeed[entry.SectionTo-entry.SectionFrom+1]++
-	}
-	if len(tasks) != len(taskIDs) {
-		missing := make([]int, 0, len(taskIDs))
-		for _, id := range taskIDs {
-			if _, ok := found[id]; !ok {
-				missing = append(missing, id)
-			}
-		}
-		return entries, reactToolResult{
-			Tool:      toolName,
-			Success:   false,
-			ErrorCode: "TASK_NOT_FOUND",
-			Result:    fmt.Sprintf("未找到以下 task_item_id 的可移动 suggested 任务：%v", missing),
-		}
-	}
+	spanNeed := buildCompositeSpanNeed(tasks)
 
 	slots, slotErr := collectCompositeSlotsBySpan(entries, params, window, spanNeed)
 	if slotErr != nil {
@@ -525,6 +508,92 @@ func refineToolCompositeMove(
 			Result:    planErr.Error(),
 		}
 	}
+	return applyCompositePlannedMoves(entries, params, window, policy, toolName, plannedMoves)
+}
+
+// collectCompositeTasks 收集复合动作参与的可移动任务，并做唯一性校验。
+//
+// 步骤化说明：
+// 1. 只收 suggested 且可移动的 task，避免误改 existing/course；
+// 2. task_item_id 必须一一命中，命中多条或缺失都直接失败；
+// 3. 输出顺序保持 entries 原始遍历顺序，后续再由规划器做稳定排序。
+func collectCompositeTasks(entries []model.HybridScheduleEntry, taskIDs []int, policy refineToolPolicy, toolName string) ([]logic.RefineTaskCandidate, reactToolResult, bool) {
+	idSet := intSliceToIDSet(taskIDs)
+	tasks := make([]logic.RefineTaskCandidate, 0, len(taskIDs))
+	found := make(map[int]struct{}, len(taskIDs))
+	for _, entry := range entries {
+		if !isMovableSuggestedTask(entry) {
+			continue
+		}
+		if _, ok := idSet[entry.TaskItemID]; !ok {
+			continue
+		}
+		if _, duplicated := found[entry.TaskItemID]; duplicated {
+			return nil, reactToolResult{
+				Tool:      toolName,
+				Success:   false,
+				ErrorCode: "TASK_ID_AMBIGUOUS",
+				Result:    fmt.Sprintf("task_item_id=%d 命中多条可移动 suggested 任务，无法唯一定位", entry.TaskItemID),
+			}, false
+		}
+		found[entry.TaskItemID] = struct{}{}
+		tasks = append(tasks, logic.RefineTaskCandidate{
+			TaskItemID:  entry.TaskItemID,
+			Week:        entry.Week,
+			DayOfWeek:   entry.DayOfWeek,
+			SectionFrom: entry.SectionFrom,
+			SectionTo:   entry.SectionTo,
+			Name:        strings.TrimSpace(entry.Name),
+			ContextTag:  strings.TrimSpace(entry.ContextTag),
+			OriginRank:  policy.OriginOrderMap[entry.TaskItemID],
+		})
+	}
+	if len(tasks) != len(taskIDs) {
+		missing := make([]int, 0, len(taskIDs))
+		for _, id := range taskIDs {
+			if _, ok := found[id]; !ok {
+				missing = append(missing, id)
+			}
+		}
+		return nil, reactToolResult{
+			Tool:      toolName,
+			Success:   false,
+			ErrorCode: "TASK_NOT_FOUND",
+			Result:    fmt.Sprintf("未找到以下 task_item_id 的可移动 suggested 任务：%v", missing),
+		}, false
+	}
+	return tasks, reactToolResult{}, true
+}
+
+func buildCompositeSpanNeed(tasks []logic.RefineTaskCandidate) map[int]int {
+	spanNeed := make(map[int]int, len(tasks))
+	for _, task := range tasks {
+		spanNeed[task.SectionTo-task.SectionFrom+1]++
+	}
+	return spanNeed
+}
+
+func buildCompositeCurrentTaskSlots(tasks []logic.RefineTaskCandidate) []logic.RefineSlotCandidate {
+	slots := make([]logic.RefineSlotCandidate, 0, len(tasks))
+	for _, task := range tasks {
+		slots = append(slots, logic.RefineSlotCandidate{
+			Week:        task.Week,
+			DayOfWeek:   task.DayOfWeek,
+			SectionFrom: task.SectionFrom,
+			SectionTo:   task.SectionTo,
+		})
+	}
+	return slots
+}
+
+func applyCompositePlannedMoves(
+	entries []model.HybridScheduleEntry,
+	params map[string]any,
+	window planningWindow,
+	policy refineToolPolicy,
+	toolName string,
+	plannedMoves []logic.RefineMovePlanItem,
+) ([]model.HybridScheduleEntry, reactToolResult) {
 	if len(plannedMoves) == 0 {
 		return entries, reactToolResult{
 			Tool:      toolName,
@@ -561,6 +630,89 @@ func refineToolCompositeMove(
 		Tool:    toolName,
 		Success: true,
 		Result:  fmt.Sprintf("%s 执行成功：已规划并提交 %d 条移动。", toolName, len(plannedMoves)),
+	}
+}
+
+// applyFixedSlotCompositeMoves 以“同时改写坐标”的方式提交固定坑位重排结果。
+//
+// 步骤化说明：
+// 1. 该函数专门服务“坑位集合固定”的复合工具，避免 BatchMove 顺序执行时出现互相占位冲突；
+// 2. 先在副本上一次性改写所有目标任务的坐标，再统一排序与校验；
+// 3. 若发现目标坑位重复、任务缺失、或顺序约束不满足，则整批失败并回滚。
+func applyFixedSlotCompositeMoves(
+	entries []model.HybridScheduleEntry,
+	policy refineToolPolicy,
+	toolName string,
+	plannedMoves []logic.RefineMovePlanItem,
+) ([]model.HybridScheduleEntry, reactToolResult) {
+	if len(plannedMoves) == 0 {
+		return entries, reactToolResult{
+			Tool:      toolName,
+			Success:   false,
+			ErrorCode: "PLAN_EMPTY",
+			Result:    "规划结果为空：未生成任何可执行移动",
+		}
+	}
+
+	working := cloneHybridEntries(entries)
+	indexByTaskID := make(map[int]int, len(working))
+	for idx, entry := range working {
+		if !isMovableSuggestedTask(entry) {
+			continue
+		}
+		if _, exists := indexByTaskID[entry.TaskItemID]; exists {
+			return entries, reactToolResult{
+				Tool:      toolName,
+				Success:   false,
+				ErrorCode: "TASK_ID_AMBIGUOUS",
+				Result:    fmt.Sprintf("%s 执行失败：task_item_id=%d 命中多条可移动 suggested 任务", toolName, entry.TaskItemID),
+			}
+		}
+		indexByTaskID[entry.TaskItemID] = idx
+	}
+
+	targetSeen := make(map[string]int, len(plannedMoves))
+	for _, move := range plannedMoves {
+		if _, ok := indexByTaskID[move.TaskItemID]; !ok {
+			return entries, reactToolResult{
+				Tool:      toolName,
+				Success:   false,
+				ErrorCode: "TASK_NOT_FOUND",
+				Result:    fmt.Sprintf("%s 执行失败：task_item_id=%d 未找到可移动 suggested 任务", toolName, move.TaskItemID),
+			}
+		}
+		key := fmt.Sprintf("%d-%d-%d-%d", move.ToWeek, move.ToDay, move.ToSectionFrom, move.ToSectionTo)
+		if prevID, exists := targetSeen[key]; exists {
+			return entries, reactToolResult{
+				Tool:      toolName,
+				Success:   false,
+				ErrorCode: "PLAN_CONFLICT",
+				Result:    fmt.Sprintf("%s 执行失败：任务 id=%d 与 id=%d 目标坑位重复", toolName, prevID, move.TaskItemID),
+			}
+		}
+		targetSeen[key] = move.TaskItemID
+	}
+
+	for _, move := range plannedMoves {
+		idx := indexByTaskID[move.TaskItemID]
+		working[idx].Week = move.ToWeek
+		working[idx].DayOfWeek = move.ToDay
+		working[idx].SectionFrom = move.ToSectionFrom
+		working[idx].SectionTo = move.ToSectionTo
+	}
+	sortHybridEntries(working)
+	if issues := validateRelativeOrder(working, policy); len(issues) > 0 {
+		return entries, reactToolResult{
+			Tool:      toolName,
+			Success:   false,
+			ErrorCode: "ORDER_CONSTRAINT_VIOLATED",
+			Result:    "顺序约束不满足：" + strings.Join(issues, "；"),
+		}
+	}
+	return working, reactToolResult{
+		Tool:    toolName,
+		Success: true,
+		Result:  fmt.Sprintf("%s 执行成功：已在固定坑位集合内重排 %d 条任务。", toolName, len(plannedMoves)),
 	}
 }
 
@@ -645,9 +797,12 @@ func buildCompositeSlotQueryParams(params map[string]any, span int, required int
 		}
 	}
 
-	copyIntSliceParam(params, query, "week_filter", "weeks")
-	copyIntSliceParam(params, query, "day_of_week", "days", "day_filter")
-	copyIntSliceParam(params, query, "exclude_sections", "exclude_section")
+	// 1. 复合路由主链路自身使用的是 week_filter/day_of_week/exclude_sections；
+	// 2. 这里必须优先透传这些“规范键”，再兼容历史别名；
+	// 3. 否则会出现复合工具已被调用，但内部查坑位时丢失目标范围，导致规划结果漂移。
+	copyIntSliceParam(params, query, "week_filter", "week_filter", "weeks")
+	copyIntSliceParam(params, query, "day_of_week", "day_of_week", "days", "day_filter")
+	copyIntSliceParam(params, query, "exclude_sections", "exclude_sections", "exclude_section")
 
 	// 兼容 Move 风格别名，降低模型参数名漂移导致的失败。
 	if week, ok := paramIntAny(params, "to_week", "target_week", "new_week"); ok {

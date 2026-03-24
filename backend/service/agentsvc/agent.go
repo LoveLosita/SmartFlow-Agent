@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/agent/chat"
-	"github.com/LoveLosita/smartflow/backend/agent/route"
+	agentchat "github.com/LoveLosita/smartflow/backend/agent2/chat"
+	agentrouter "github.com/LoveLosita/smartflow/backend/agent2/router"
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
@@ -164,7 +164,7 @@ func (s *AgentService) runNormalChatFlow(
 
 	// 3. 计算本次请求可用的历史 token 预算，并执行历史裁剪。
 	//    这样可以在上下文增长时稳定控制模型窗口，避免超长上下文引发报错或高延迟。
-	historyBudget := pkg.HistoryTokenBudgetByModel(resolvedModelName, chat.SystemPrompt, userMessage)
+	historyBudget := pkg.HistoryTokenBudgetByModel(resolvedModelName, agentchat.SystemPrompt, userMessage)
 	trimmedHistory, totalHistoryTokens, keptHistoryTokens, droppedCount := pkg.TrimHistoryByTokenBudget(chatHistory, historyBudget)
 	chatHistory = trimmedHistory
 
@@ -192,7 +192,7 @@ func (s *AgentService) runNormalChatFlow(
 
 	// 6. 执行真正的流式聊天。
 	//    fullText 用于后续写 Redis/持久化，outChan 用于把流片段实时推给前端。
-	fullText, streamUsage, streamErr := chat.StreamChat(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, chatHistory, outChan, traceID, chatID, requestStart)
+	fullText, streamUsage, streamErr := agentchat.StreamChat(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, chatHistory, outChan, traceID, chatID, requestStart)
 	if streamErr != nil {
 		pushErrNonBlocking(errChan, streamErr)
 		return
@@ -321,7 +321,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 		}
 
 		// 3.2 chat：直接走普通聊天主链路。
-		if routing.Action == route.ActionChat {
+		if routing.Action == agentrouter.ActionChat {
 			s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
 			return
 		}
@@ -331,7 +331,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 		progress.Emit("request.accepted", routing.Detail)
 
 		// 3.4 quick_note_create：执行随口记 graph。
-		if routing.Action == route.ActionQuickNoteCreate {
+		if routing.Action == agentrouter.ActionQuickNoteCreate {
 			quickHandled, quickState, quickErr := s.tryHandleQuickNoteWithGraph(
 				requestCtx,
 				selectedModel,
@@ -371,7 +371,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 		}
 
 		// 3.5 task_query：执行任务查询 tool-calling。
-		if routing.Action == route.ActionTaskQuery {
+		if routing.Action == agentrouter.ActionTaskQuery {
 			reply, queryErr := s.runTaskQueryFlow(requestCtx, selectedModel, userMessage, userID, progress.Emit)
 			if queryErr != nil {
 				// 3.5.1 任务查询失败时回退普通聊天，避免请求直接中断。
@@ -393,7 +393,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 		}
 
 		// 3.6 schedule_plan：执行智能排程 graph。
-		if routing.Action == route.ActionSchedulePlanCreate {
+		if routing.Action == agentrouter.ActionSchedulePlanCreate {
 			reply, planErr := s.runSchedulePlanFlow(requestCtx, selectedModel, userMessage, userID, chatID, traceID, extra, progress.Emit, outChan, resolvedModelName)
 			if planErr != nil {
 				log.Printf("智能排程 graph 执行失败，回退普通聊天 trace_id=%s chat_id=%s err=%v", traceID, chatID, planErr)
@@ -413,7 +413,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 		}
 
 		// 3.7 schedule_plan_refine：执行“连续微调排程”graph。
-		if routing.Action == route.ActionSchedulePlanRefine {
+		if routing.Action == agentrouter.ActionSchedulePlanRefine {
 			reply, refineErr := s.runScheduleRefineFlow(requestCtx, selectedModel, userMessage, userID, chatID, traceID, progress.Emit, outChan, resolvedModelName)
 			if refineErr != nil {
 				// 连续微调失败不再回落普通聊天，直接上报错误。

@@ -507,6 +507,70 @@ func TestNormalizeMovableTaskOrderByOrigin(t *testing.T) {
 	}
 }
 
+func TestTryNormalizeMovableTaskOrderByOriginSkipsAfterMinContextSwitch(t *testing.T) {
+	st := &ScheduleRefineState{
+		OriginOrderMap: map[int]int{
+			101: 1,
+			202: 2,
+		},
+		CompositeToolSuccess: map[string]bool{
+			"SpreadEven":       false,
+			"MinContextSwitch": true,
+		},
+		HybridEntries: []model.HybridScheduleEntry{
+			{TaskItemID: 202, Name: "task-202", Type: "task", Status: "suggested", Week: 17, DayOfWeek: 1, SectionFrom: 1, SectionTo: 2},
+			{TaskItemID: 101, Name: "task-101", Type: "task", Status: "suggested", Week: 17, DayOfWeek: 3, SectionFrom: 1, SectionTo: 2},
+		},
+	}
+	changed, skipped := tryNormalizeMovableTaskOrderByOrigin(st)
+	if !skipped {
+		t.Fatalf("期望 MinContextSwitch 成功后跳过顺序归位")
+	}
+	if changed {
+		t.Fatalf("跳过顺序归位时不应报告 changed=true")
+	}
+	if st.HybridEntries[0].TaskItemID != 202 || st.HybridEntries[1].TaskItemID != 101 {
+		t.Fatalf("跳过顺序归位后不应改写任务顺序: %+v", st.HybridEntries)
+	}
+}
+
+func TestEvaluateHardChecksSkipsOrderConstraintAfterMinContextSwitch(t *testing.T) {
+	st := &ScheduleRefineState{
+		UserMessage: "减少第15周科目切换",
+		OriginOrderMap: map[int]int{
+			101: 1,
+			202: 2,
+		},
+		CompositeToolSuccess: map[string]bool{
+			"SpreadEven":       false,
+			"MinContextSwitch": true,
+		},
+		InitialHybridEntries: []model.HybridScheduleEntry{
+			{TaskItemID: 101, Name: "概率任务", Type: "task", Status: "suggested", Week: 15, DayOfWeek: 1, SectionFrom: 1, SectionTo: 2},
+			{TaskItemID: 202, Name: "数电任务", Type: "task", Status: "suggested", Week: 15, DayOfWeek: 1, SectionFrom: 3, SectionTo: 4},
+		},
+		HybridEntries: []model.HybridScheduleEntry{
+			{TaskItemID: 202, Name: "数电任务", Type: "task", Status: "suggested", Week: 15, DayOfWeek: 1, SectionFrom: 1, SectionTo: 2},
+			{TaskItemID: 101, Name: "概率任务", Type: "task", Status: "suggested", Week: 15, DayOfWeek: 1, SectionFrom: 3, SectionTo: 4},
+		},
+		Objective: RefineObjective{
+			Mode:                    "move_all",
+			SourceWeeks:             []int{15},
+			TargetWeeks:             []int{15},
+			BaselineSourceTaskCount: 2,
+			RequiredMoveMin:         2,
+			RequiredMoveMax:         2,
+		},
+		SlicePlan: RefineSlicePlan{
+			WeekFilter: []int{15},
+		},
+	}
+	report := evaluateHardChecks(nil, nil, st, nil)
+	if !report.OrderPassed {
+		t.Fatalf("期望 MinContextSwitch 成功后跳过顺序终审，实际 issues=%v", report.OrderIssues)
+	}
+}
+
 func TestPrecheckToolCallPolicyRejectsRedundantSlotQuery(t *testing.T) {
 	st := &ScheduleRefineState{
 		SeenSlotQueries: make(map[string]struct{}),

@@ -167,7 +167,12 @@ type ScheduleRefineState struct {
 	DisableCompositeTools bool
 	// CompositeRouteTried 标记是否尝试过“复合批处理路由”。
 	CompositeRouteTried bool
-	// CompositeRouteSucceeded 标记复合批处理路由是否成功收口。
+	// CompositeRouteSucceeded 标记复合批处理路由是否已完成“复合分支出站”。
+	//
+	// 说明：
+	// 1. true 表示当前链路可以跳过 ReAct 兜底，直接进入 hard_check；
+	// 2. 它不等价于“终审已通过”，终审是否通过仍以后续 HardCheck 结果为准；
+	// 3. 这样区分是为了避免“复合工具已成功执行，但业务目标要等终审裁决”时被误判为失败。
 	CompositeRouteSucceeded bool
 	TaskActionUsed          map[int]int
 	EntriesVersion          int
@@ -356,4 +361,17 @@ func buildOriginOrderMap(entries []model.HybridScheduleEntry) map[int]int {
 		orderMap[entry.TaskItemID] = i + 1
 	}
 	return orderMap
+}
+
+// FinalHardCheckPassed 判断“最终终审”是否整体通过。
+//
+// 职责边界：
+// 1. 负责聚合 physics/order/intent 三类硬校验结果，给服务层与总结阶段统一复用；
+// 2. 不负责触发终审，也不负责推导修复动作；
+// 3. nil state 视为未通过，避免上层把缺失结果误判为成功。
+func FinalHardCheckPassed(st *ScheduleRefineState) bool {
+	if st == nil {
+		return false
+	}
+	return st.HardCheck.PhysicsPassed && st.HardCheck.OrderPassed && st.HardCheck.IntentPassed
 }

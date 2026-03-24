@@ -158,11 +158,12 @@ func PlanMinContextSwitchMoves(tasks []RefineTaskCandidate, slots []RefineSlotCa
 		Tasks      []RefineTaskCandidate
 		MinRank    int
 	}
+	groupingKeys := buildMinContextGroupingKeys(normalizedTasks)
 	groupMap := make(map[string]*taskGroup)
 	groupOrder := make([]string, 0, len(normalizedTasks))
 
 	for _, task := range normalizedTasks {
-		key := normalizeContextKey(task.ContextTag)
+		key := groupingKeys[task.TaskItemID]
 		group, exists := groupMap[key]
 		if !exists {
 			group = &taskGroup{
@@ -339,6 +340,105 @@ func normalizeContextKey(tag string) string {
 		return "General"
 	}
 	return text
+}
+
+// buildMinContextGroupingKeys 为 MinContextSwitch 生成“实际用于聚类”的分组键。
+//
+// 步骤化说明：
+// 1. 先优先使用现有 ContextTag，避免影响已稳定的显式标签链路；
+// 2. 若整批任务只剩一个粗粒度标签（例如全是 General/High-Logic），说明标签对“同科目连续”帮助不足；
+// 3. 此时再基于任务名做学科关键词兜底，只在确实能拉开分组时启用；
+// 4. 若任务名也无法识别，则继续回落到原 ContextTag，保证行为可预测。
+func buildMinContextGroupingKeys(tasks []RefineTaskCandidate) map[int]string {
+	keys := make(map[int]string, len(tasks))
+	distinctExplicit := make(map[string]struct{}, len(tasks))
+	distinctNonCoarse := make(map[string]struct{}, len(tasks))
+
+	for _, task := range tasks {
+		key := normalizeContextKey(task.ContextTag)
+		keys[task.TaskItemID] = key
+		distinctExplicit[key] = struct{}{}
+		if !isCoarseContextKey(key) {
+			distinctNonCoarse[key] = struct{}{}
+		}
+	}
+
+	// 1. 当显式标签已经至少区分出两类“非粗标签”时，直接尊重上游语义；
+	// 2. 避免把已稳定的 context_tag 分组再改写成名称启发式结果。
+	if len(distinctNonCoarse) >= 2 {
+		return keys
+	}
+	// 1. 若显式标签本来就有 2 类及以上，且不全是粗标签，也继续沿用；
+	// 2. 只有“整批退化到同一个粗标签”时，才值得尝试名称兜底。
+	if len(distinctExplicit) > 1 && len(distinctNonCoarse) > 0 {
+		return keys
+	}
+
+	inferredKeys := make(map[int]string, len(tasks))
+	distinctInferred := make(map[string]struct{}, len(tasks))
+	for _, task := range tasks {
+		inferred := inferSubjectContextKeyFromTaskName(task.Name)
+		if inferred == "" {
+			inferred = keys[task.TaskItemID]
+		}
+		inferredKeys[task.TaskItemID] = inferred
+		distinctInferred[inferred] = struct{}{}
+	}
+	if len(distinctInferred) >= 2 {
+		return inferredKeys
+	}
+	return keys
+}
+
+func isCoarseContextKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "", "general", "high-logic", "high_logic", "memory", "review":
+		return true
+	default:
+		return false
+	}
+}
+
+func inferSubjectContextKeyFromTaskName(name string) string {
+	text := strings.ToLower(strings.TrimSpace(name))
+	if text == "" {
+		return ""
+	}
+
+	subjectKeywordGroups := []struct {
+		keywords []string
+		groupKey string
+	}{
+		{
+			keywords: []string{
+				"概率", "随机事件", "随机变量", "条件概率", "全概率", "贝叶斯",
+				"分布", "大数定律", "中心极限定理", "参数估计", "期望", "方差", "协方差", "相关系数",
+			},
+			groupKey: "subject:probability",
+		},
+		{
+			keywords: []string{
+				"数制", "码制", "逻辑代数", "逻辑函数", "卡诺图", "译码器", "编码器",
+				"数据选择器", "触发器", "时序电路", "状态图", "状态化简", "计数器", "寄存器", "数电",
+			},
+			groupKey: "subject:digital_logic",
+		},
+		{
+			keywords: []string{
+				"命题逻辑", "谓词逻辑", "量词", "等值演算", "集合", "关系", "函数",
+				"图论", "欧拉回路", "哈密顿", "生成树", "离散", "组合数学", "容斥", "递推",
+			},
+			groupKey: "subject:discrete_math",
+		},
+	}
+	for _, group := range subjectKeywordGroups {
+		for _, keyword := range group.keywords {
+			if strings.Contains(text, keyword) {
+				return group.groupKey
+			}
+		}
+	}
+	return ""
 }
 
 func composeDayKey(week, day int) string {

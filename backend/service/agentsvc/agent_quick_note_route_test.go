@@ -4,28 +4,29 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LoveLosita/smartflow/backend/agent/quicknote"
-	"github.com/LoveLosita/smartflow/backend/agent/route"
+	agentmodel "github.com/LoveLosita/smartflow/backend/agent2/model"
+	agentrouter "github.com/LoveLosita/smartflow/backend/agent2/router"
 )
 
 // TestParseQuickNoteRouteControlTag_QuickNote
-// 目的：验证模型控制码在 action=quick_note 时可被稳定解析，
-// 并且会校验 nonce，避免历史脏内容或伪造片段误命中。
+// 目的：
+// 1. 验证旧 quick note 兼容入口仍然可以解析控制码；
+// 2. 验证旧 action=quick_note 会被统一映射到新动作 quick_note_create；
+// 3. 验证 reason 仍然会被保留下来，方便上层做阶段提示与排障。
 func TestParseQuickNoteRouteControlTag_QuickNote(t *testing.T) {
 	nonce := "abc123nonce"
 	raw := `<SMARTFLOW_ROUTE nonce="abc123nonce" action="quick_note"></SMARTFLOW_ROUTE>
 <SMARTFLOW_REASON>用户明确在请求未来提醒</SMARTFLOW_REASON>`
 
-	decision, err := route.ParseQuickNoteRouteControlTag(raw, nonce)
+	decision, err := agentrouter.ParseQuickNoteRouteControlTag(raw, nonce)
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
 	if decision == nil {
 		t.Fatalf("decision 不应为空")
 	}
-	// 兼容逻辑：历史 quick_note 会被统一映射到 quick_note_create。
-	if decision.Action != route.ActionQuickNoteCreate {
-		t.Fatalf("action 解析错误，期望=%s 实际=%s", route.ActionQuickNoteCreate, decision.Action)
+	if decision.Action != agentrouter.ActionQuickNoteCreate {
+		t.Fatalf("action 解析错误，期望=%s 实际=%s", agentrouter.ActionQuickNoteCreate, decision.Action)
 	}
 	if strings.TrimSpace(decision.Reason) == "" {
 		t.Fatalf("reason 不应为空")
@@ -33,37 +34,40 @@ func TestParseQuickNoteRouteControlTag_QuickNote(t *testing.T) {
 }
 
 // TestParseRouteControlTag_TaskQuery
-// 目的：验证通用分流中 action=task_query 的控制码可稳定解析。
+// 目的：验证通用分流控制码在 action=task_query 时可以被稳定解析。
 func TestParseRouteControlTag_TaskQuery(t *testing.T) {
 	nonce := "taskquerynonce"
 	raw := `<SMARTFLOW_ROUTE nonce="taskquerynonce" action="task_query"></SMARTFLOW_ROUTE>
 <SMARTFLOW_REASON>用户在查最紧急任务</SMARTFLOW_REASON>`
 
-	decision, err := route.ParseRouteControlTag(raw, nonce)
+	decision, err := agentrouter.ParseRouteControlTag(raw, nonce)
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
 	if decision == nil {
 		t.Fatalf("decision 不应为空")
 	}
-	if decision.Action != route.ActionTaskQuery {
-		t.Fatalf("action 解析错误，期望=%s 实际=%s", route.ActionTaskQuery, decision.Action)
+	if decision.Action != agentrouter.ActionTaskQuery {
+		t.Fatalf("action 解析错误，期望=%s 实际=%s", agentrouter.ActionTaskQuery, decision.Action)
 	}
 }
 
 // TestParseQuickNoteRouteControlTag_NonceMismatch
-// 目的：确保 nonce 不匹配时直接报错，避免把非本次请求的控制码当作有效路由。
+// 目的：确保 nonce 不匹配时直接报错，避免把别的请求控制码误判成当前请求。
 func TestParseQuickNoteRouteControlTag_NonceMismatch(t *testing.T) {
 	raw := `<SMARTFLOW_ROUTE nonce="wrongnonce" action="chat"></SMARTFLOW_ROUTE>`
-	if _, err := route.ParseQuickNoteRouteControlTag(raw, "expectednonce"); err == nil {
+	if _, err := agentrouter.ParseQuickNoteRouteControlTag(raw, "expectednonce"); err == nil {
 		t.Fatalf("期望 nonce 不匹配时报错，但未报错")
 	}
 }
 
 // TestBuildQuickNoteFinalReply_NoFalseSuccessWithoutTaskID
-// 目的：即使 state.Persisted 被错误置为 true，只要 task_id 无效，也不能返回“安排成功”文案。
+// 目的：
+// 1. 即使状态被错误标记为 Persisted=true；
+// 2. 只要没有有效 task_id，就不能回成功文案；
+// 3. 避免出现“回复成功但库里没数据”的假成功体验。
 func TestBuildQuickNoteFinalReply_NoFalseSuccessWithoutTaskID(t *testing.T) {
-	state := &quicknote.QuickNoteState{
+	state := &agentmodel.QuickNoteState{
 		Persisted:       true,
 		PersistedTaskID: 0,
 		ExtractedTitle:  "去下馆子",
@@ -76,9 +80,11 @@ func TestBuildQuickNoteFinalReply_NoFalseSuccessWithoutTaskID(t *testing.T) {
 }
 
 // TestBuildQuickNoteFinalReply_UseExtractedBanter
-// 目的：当聚合规划阶段已经产出 banter 时，最终回复应直接复用，避免再次调用润色模型。
+// 目的：
+// 1. 当聚合规划阶段已经产出 banter 时，最终回复应直接复用；
+// 2. 避免为了润色再次调用模型，增加不必要时延。
 func TestBuildQuickNoteFinalReply_UseExtractedBanter(t *testing.T) {
-	state := &quicknote.QuickNoteState{
+	state := &agentmodel.QuickNoteState{
 		Persisted:         true,
 		PersistedTaskID:   12,
 		ExtractedTitle:    "明天去取快递",

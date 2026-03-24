@@ -7,20 +7,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/agent/chat"
-	"github.com/LoveLosita/smartflow/backend/agent/quicknote"
-	"github.com/LoveLosita/smartflow/backend/agent/route"
+	agentgraph "github.com/LoveLosita/smartflow/backend/agent2/graph"
+	agentllm "github.com/LoveLosita/smartflow/backend/agent2/llm"
+	agentmodel "github.com/LoveLosita/smartflow/backend/agent2/model"
+	agentnode "github.com/LoveLosita/smartflow/backend/agent2/node"
+	agentrouter "github.com/LoveLosita/smartflow/backend/agent2/router"
+	agentstream "github.com/LoveLosita/smartflow/backend/agent2/stream"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/cloudwego/eino-ext/components/model/ark"
-	einoModel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
-	arkModel "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
 )
 
 // quickNoteRoutingDecision 只是路由层结果的本地别名。
 // 保留这个别名是为了尽量少改调用侧（agent.go 中的字段访问保持不变）。
-type quickNoteRoutingDecision = route.RoutingDecision
+type quickNoteRoutingDecision = agentrouter.RoutingDecision
 
 // quickNoteProgressEmitter 负责把“链路阶段状态”伪装成 OpenAI 兼容的 reasoning_content chunk。
 // 设计目标：
@@ -69,23 +70,16 @@ func (e *quickNoteProgressEmitter) Emit(stage, detail string) {
 		return
 	}
 
-	reasoning := fmt.Sprintf("阶段：%s", stage)
-	if detail != "" {
-		reasoning += "\n" + detail
-	}
-	// 2.1 每条阶段消息末尾补双换行，避免客户端把多条 chunk 紧贴在同一行显示。
-	//     这里统一在 emitter 层处理，所有接入 emitStage 的链路都会受益。
-	reasoning += "\n\n"
-
-	// 3. 复用 OpenAI 兼容封装：把阶段文本伪装成 reasoning_content。
-	chunk, err := chat.ToOpenAIStream(&schema.Message{ReasoningContent: reasoning}, e.requestID, e.modelName, e.created, false)
+	// 3. 调用目的：阶段提示统一走 agent2/stream 的 reasoning chunk 包装，
+	//    避免 service 层继续自己拼 OpenAI 兼容 JSON。
+	err := agentstream.EmitStageAsReasoning(func(payload string) error {
+		e.outChan <- payload
+		return nil
+	}, e.requestID, e.modelName, e.created, stage, detail, false)
 	if err != nil {
 		// 3.1 阶段推送失败不应影响主链路，只打日志即可。
 		log.Printf("输出随口记阶段状态失败 stage=%s err=%v", stage, err)
 		return
-	}
-	if chunk != "" {
-		e.outChan <- chunk
 	}
 }
 
@@ -103,28 +97,28 @@ func (s *AgentService) tryHandleQuickNoteWithGraph(
 	traceID string,
 	trustRoute bool,
 	emitStage func(stage, detail string),
-) (handled bool, state *quicknote.QuickNoteState, err error) {
+) (handled bool, state *agentmodel.QuickNoteState, err error) {
 	// 1. 依赖预检：taskRepo 或模型未注入时，不做随口记处理，交给上层回落聊天。
 	if s.taskRepo == nil || selectedModel == nil {
 		return false, nil, nil
 	}
 
 	// 2. 初始化随口记状态对象（贯穿 graph 全流程的共享上下文）。
-	state = quicknote.NewQuickNoteState(traceID, userID, chatID, userMessage)
+	state = agentmodel.NewQuickNoteState(traceID, userID, chatID, userMessage)
 
 	// 3. 执行 quick note graph。
 	//    本次依赖注入了两个“工具能力”：
 	//    3.1 ResolveUserID：从当前请求上下文确定 user_id；
 	//    3.2 CreateTask：真正执行任务写库。
-	finalState, runErr := quicknote.RunQuickNoteGraph(ctx, quicknote.QuickNoteGraphRunInput{
+	finalState, runErr := agentgraph.RunQuickNoteGraph(ctx, agentnode.QuickNoteGraphRunInput{
 		Model: selectedModel,
 		State: state,
-		Deps: quicknote.QuickNoteToolDeps{
+		Deps: agentnode.QuickNoteToolDeps{
 			ResolveUserID: func(ctx context.Context) (int, error) {
 				// 当前链路 userID 已由上层鉴权拿到，这里直接复用。
 				return userID, nil
 			},
-			CreateTask: func(ctx context.Context, req quicknote.QuickNoteCreateTaskRequest) (*quicknote.QuickNoteCreateTaskResult, error) {
+			CreateTask: func(ctx context.Context, req agentnode.QuickNoteCreateTaskRequest) (*agentnode.QuickNoteCreateTaskResult, error) {
 				// 3.2.1 把 quick note 的工具入参映射成项目 Task 模型。
 				taskModel := &model.Task{
 					UserID:             req.UserID,
@@ -142,7 +136,7 @@ func (s *AgentService) tryHandleQuickNoteWithGraph(
 				}
 
 				// 3.2.3 把写库结果回填给 graph 状态，用于后续回复拼装。
-				return &quicknote.QuickNoteCreateTaskResult{
+				return &agentnode.QuickNoteCreateTaskResult{
 					TaskID:             created.ID,
 					Title:              created.Title,
 					PriorityGroup:      created.Priority,
@@ -179,23 +173,17 @@ func emitSingleAssistantCompletion(outChan chan<- string, modelName, reply strin
 	requestID := "chatcmpl-" + uuid.NewString()
 	created := time.Now().Unix()
 
-	// 2. 正文 chunk（完整一次性输出，不做人为拆片）。
-	chunk, err := chat.ToOpenAIStream(&schema.Message{Role: schema.Assistant, Content: reply}, requestID, modelName, created, true)
-	if err != nil {
+	emit := func(payload string) error {
+		outChan <- payload
+		return nil
+	}
+	if err := agentstream.EmitAssistantReply(emit, requestID, modelName, created, reply, true); err != nil {
 		return err
 	}
-	if chunk != "" {
-		outChan <- chunk
-	}
-
-	// 3. 按 OpenAI 风格补 finish chunk + [DONE]，确保客户端可正确收尾。
-	finishChunk, err := chat.ToOpenAIFinishStream(requestID, modelName, created)
-	if err != nil {
+	if err := agentstream.EmitFinish(emit, requestID, modelName, created); err != nil {
 		return err
 	}
-	outChan <- finishChunk
-	outChan <- "[DONE]"
-	return nil
+	return agentstream.EmitDone(emit)
 }
 
 // buildQuickNoteFinalReply 生成最终的一次性正文回复。
@@ -203,7 +191,7 @@ func emitSingleAssistantCompletion(outChan chan<- string, modelName, reply strin
 // 1) 任务事实（标题/优先级/截止时间）由后端拼接，确保准确；
 // 2) 轻松跟进句交给 AI 生成，贴合用户话题；
 // 3) AI 生成失败时自动降级为固定友好文案，保证稳定可用。
-func buildQuickNoteFinalReply(ctx context.Context, selectedModel *ark.ChatModel, userMessage string, state *quicknote.QuickNoteState) string {
+func buildQuickNoteFinalReply(ctx context.Context, selectedModel *ark.ChatModel, userMessage string, state *agentmodel.QuickNoteState) string {
 	// 1. 极端兜底：状态为空时给出稳定失败文案，避免返回空字符串。
 	if state == nil {
 		return "我这次没成功记上，别急，再发我一次我马上补上。"
@@ -218,8 +206,8 @@ func buildQuickNoteFinalReply(ctx context.Context, selectedModel *ark.ChatModel,
 		}
 
 		priorityText := "已安排优先级"
-		if quicknote.IsValidTaskPriority(state.ExtractedPriority) {
-			priorityText = fmt.Sprintf("优先级：%s", quicknote.PriorityLabelCN(state.ExtractedPriority))
+		if agentmodel.IsValidTaskPriority(state.ExtractedPriority) {
+			priorityText = fmt.Sprintf("优先级：%s", agentmodel.PriorityLabelCN(state.ExtractedPriority))
 		}
 
 		deadlineText := ""
@@ -239,7 +227,7 @@ func buildQuickNoteFinalReply(ctx context.Context, selectedModel *ark.ChatModel,
 		}
 
 		// 2.3 兜底生成轻松跟进句；失败则降级固定文案，确保体验连续。
-		banter, err := generateQuickNoteBanter(ctx, selectedModel, userMessage, title, priorityText, deadlineText)
+		banter, err := agentllm.GenerateQuickNoteBanter(ctx, selectedModel, userMessage, title, priorityText, deadlineText)
 		if err != nil {
 			return factLine + " 这下可以先安心推进，不用等 ddl 来敲门了。"
 		}
@@ -262,81 +250,13 @@ func buildQuickNoteFinalReply(ctx context.Context, selectedModel *ark.ChatModel,
 	return "这次没成功写入任务，我没跑路，再给我一次我就把它稳稳记上。"
 }
 
-// generateQuickNoteBanter 让模型根据用户原话生成一条“贴题轻松句”。
-// 约束：
-// 1) 只生成跟进语气，不承担事实表达；
-// 2) 不得改动任务事实；
-// 3) 输出控制在一句，方便直接拼接在事实句后。
-func generateQuickNoteBanter(
-	ctx context.Context,
-	selectedModel *ark.ChatModel,
-	userMessage string,
-	title string,
-	priorityText string,
-	deadlineText string,
-) (string, error) {
-	// 1. 模型防御校验。
-	if selectedModel == nil {
-		return "", fmt.Errorf("model is nil")
-	}
-
-	// 2. 把事实信息显式塞入 prompt，约束模型只能“润色语气”。
-	prompt := fmt.Sprintf(`用户原话：%s
-已确认事实：
-- 任务标题：%s
-- %s
-- %s
-
-请输出一句轻松自然的跟进话术（仅一句）。`,
-		strings.TrimSpace(userMessage),
-		strings.TrimSpace(title),
-		strings.TrimSpace(priorityText),
-		strings.TrimSpace(deadlineText),
-	)
-
-	// 3. 构造消息：
-	//    - system：定义输出边界（一句话、不改事实）；
-	//    - user：提供本次上下文素材。
-	messages := []*schema.Message{
-		schema.SystemMessage(quicknote.QuickNoteReplyBanterPrompt),
-		schema.UserMessage(prompt),
-	}
-
-	// 4. 调用模型生成 banter，并显式关闭 thinking，减少额外延迟。
-	resp, err := selectedModel.Generate(ctx, messages,
-		ark.WithThinking(&arkModel.Thinking{Type: arkModel.ThinkingTypeDisabled}),
-		einoModel.WithTemperature(0.7),
-		einoModel.WithMaxTokens(72),
-	)
-	if err != nil {
-		return "", err
-	}
-	if resp == nil {
-		return "", fmt.Errorf("empty response")
-	}
-
-	// 5. 输出清洗：
-	//    5.1 去首尾空白与引号；
-	//    5.2 若模型多行输出，只取第一行；
-	//    5.3 最终为空则视为失败，让上层走降级文案。
-	text := strings.TrimSpace(resp.Content)
-	text = strings.Trim(text, "\"'“”‘’")
-	if text == "" {
-		return "", fmt.Errorf("empty content")
-	}
-	if idx := strings.Index(text, "\n"); idx >= 0 {
-		text = strings.TrimSpace(text[:idx])
-	}
-	return text, nil
-}
-
 // decideQuickNoteRouting 决定当前输入是否进入“随口记 graph”。
 // 该函数只是服务层薄封装，具体控制码解析逻辑已下沉到 agent/route 包。
 func (s *AgentService) decideQuickNoteRouting(ctx context.Context, selectedModel *ark.ChatModel, userMessage string) quickNoteRoutingDecision {
 	// 这里保留方法是为了让 AgentService 对外语义完整，
 	// 同时避免上层调用方直接依赖 route 包，降低耦合。
 	_ = s
-	return route.DecideQuickNoteRouting(ctx, selectedModel, userMessage)
+	return agentrouter.DecideQuickNoteRouting(ctx, selectedModel, userMessage)
 }
 
 // persistChatAfterReply 在“随口记 graph”返回后，复用当前项目的后置持久化策略：

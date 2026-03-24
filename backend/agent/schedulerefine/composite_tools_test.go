@@ -1,6 +1,7 @@
 package schedulerefine
 
 import (
+	"fmt"
 	"sort"
 	"testing"
 
@@ -95,6 +96,67 @@ func TestRefineToolMinContextSwitchGroupsContext(t *testing.T) {
 	}
 	if switches > 1 {
 		t.Fatalf("期望最少上下文切换（<=1），实际 switches=%d, tasks=%+v", switches, selected)
+	}
+	if selected[0].TaskItemID != 11 || selected[1].TaskItemID != 13 || selected[2].TaskItemID != 12 {
+		t.Fatalf("期望在原坑位集合内重排为 11,13,12，实际=%+v", selected)
+	}
+	for _, task := range selected {
+		if task.Week != 16 || task.DayOfWeek != 1 {
+			t.Fatalf("MinContextSwitch 不应跳出原坑位集合，实际 task=%+v", task)
+		}
+	}
+}
+
+func TestRefineToolMinContextSwitchKeepsCurrentSlotSet(t *testing.T) {
+	entries := []model.HybridScheduleEntry{
+		{TaskItemID: 21, Name: "随机事件与概率基础概念复习", Type: "task", Status: "suggested", Week: 14, DayOfWeek: 1, SectionFrom: 1, SectionTo: 2, ContextTag: "General"},
+		{TaskItemID: 22, Name: "数制、码制与逻辑代数基础", Type: "task", Status: "suggested", Week: 14, DayOfWeek: 1, SectionFrom: 11, SectionTo: 12, ContextTag: "General"},
+		{TaskItemID: 23, Name: "第二章 条件概率与全概率公式", Type: "task", Status: "suggested", Week: 14, DayOfWeek: 3, SectionFrom: 3, SectionTo: 4, ContextTag: "General"},
+	}
+	params := map[string]any{
+		"task_item_ids": []any{21.0, 22.0, 23.0},
+		"week":          14,
+		"limit":         48,
+		"allow_embed":   true,
+	}
+	policy := refineToolPolicy{OriginOrderMap: map[int]int{21: 1, 22: 2, 23: 3}}
+
+	nextEntries, result := refineToolMinContextSwitch(entries, params, planningWindow{Enabled: false}, policy)
+	if !result.Success {
+		t.Fatalf("MinContextSwitch 执行失败: %s", result.Result)
+	}
+
+	selected := make([]model.HybridScheduleEntry, 0, 3)
+	for _, id := range []int{21, 22, 23} {
+		idx := findSuggestedByID(nextEntries, id)
+		if idx < 0 {
+			t.Fatalf("未找到任务 id=%d", id)
+		}
+		selected = append(selected, nextEntries[idx])
+	}
+	sort.SliceStable(selected, func(i, j int) bool {
+		if selected[i].Week != selected[j].Week {
+			return selected[i].Week < selected[j].Week
+		}
+		if selected[i].DayOfWeek != selected[j].DayOfWeek {
+			return selected[i].DayOfWeek < selected[j].DayOfWeek
+		}
+		return selected[i].SectionFrom < selected[j].SectionFrom
+	})
+
+	if selected[0].TaskItemID != 21 || selected[1].TaskItemID != 23 || selected[2].TaskItemID != 22 {
+		t.Fatalf("期望按原坑位集合重排为概率, 概率, 数电，实际=%+v", selected)
+	}
+	expectedSlots := map[int]string{
+		21: "14-1-1-2",
+		23: "14-1-11-12",
+		22: "14-3-3-4",
+	}
+	for _, task := range selected {
+		got := fmt.Sprintf("%d-%d-%d-%d", task.Week, task.DayOfWeek, task.SectionFrom, task.SectionTo)
+		if got != expectedSlots[task.TaskItemID] {
+			t.Fatalf("任务 id=%d 应仅在原坑位集合内换位，期望=%s 实际=%s", task.TaskItemID, expectedSlots[task.TaskItemID], got)
+		}
 	}
 }
 

@@ -66,8 +66,12 @@ func (s *AgentService) runScheduleRefineFlow(
 	// 4. 调用目的：
 	// 4.1 saveSchedulePlanPreview 目前是“预览缓存 + MySQL 快照”的统一写入口；
 	// 4.2 这里把 refine state 映射为 scheduleplan state，复用已有落盘链路；
-	// 4.3 这样可以保证 create/refine 两条链路写入口径一致，便于后续统一维护。
-	s.saveSchedulePlanPreview(ctx, userID, chatID, convertRefineStateToPlanState(finalState))
+	// 4.3 但若是“独立复合分支已出站、终审仍失败”，则不覆盖上一版预览，避免外部误以为新方案已验证通过。
+	if shouldPersistScheduleRefinePreview(finalState) {
+		s.saveSchedulePlanPreview(ctx, userID, chatID, convertRefineStateToPlanState(finalState))
+	} else {
+		emitStage("schedule_refine.preview.skipped", "复合分支终审未通过，本轮结果不覆盖上一版预览。")
+	}
 
 	reply := strings.TrimSpace(finalState.FinalSummary)
 	if reply == "" {
@@ -151,4 +155,20 @@ func convertRefineStateToPlanState(st *schedulerefine.ScheduleRefineState) *sche
 		FinalSummary: strings.TrimSpace(st.FinalSummary),
 		Completed:    st.Completed,
 	}
+}
+
+// shouldPersistScheduleRefinePreview 判断“本轮微调结果是否应覆盖上一版预览”。
+//
+// 职责边界：
+// 1. 默认沿用原有 refine 持久化策略，保证普通 ReAct 微调链路不受影响；
+// 2. 仅当“独立复合分支已直接出站，但终审未通过”时，拒绝覆盖上一版预览；
+// 3. 这样可以避免外层把未经验证的复合结果当成新的基线继续滚动微调。
+func shouldPersistScheduleRefinePreview(st *schedulerefine.ScheduleRefineState) bool {
+	if st == nil {
+		return false
+	}
+	if st.CompositeRouteSucceeded && !schedulerefine.FinalHardCheckPassed(st) {
+		return false
+	}
+	return true
 }

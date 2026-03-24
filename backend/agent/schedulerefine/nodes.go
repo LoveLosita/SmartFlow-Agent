@@ -300,7 +300,17 @@ func runCompositeRouteNode(
 			continue
 		}
 
-		lastReason = "未启用确定性目标，无法在复合路由直接收口"
+		// 1. “均匀分散/最少上下文切换”这类复合目标，未必能编译成 deterministic objective；
+		// 2. 只要本轮要求的复合工具已经成功执行，就允许独立复合分支直接出站并跳过 ReAct；
+		// 3. 最终是否真正达标，继续交给 hard_check 统一裁决，避免“工具成功却被路由误判失败”。
+		if reason, ok := allowCompositeRouteExitByToolSuccess(st, result); ok {
+			st.CompositeRouteSucceeded = true
+			emitStage("schedule_refine.route.handoff", truncate(reason, 180))
+			st.ActionLogs = append(st.ActionLogs, fmt.Sprintf("复合路由直接出站：tool=%s，reason=%s", required, reason))
+			return st, nil
+		}
+
+		lastReason = "未启用确定性目标，且复合工具门禁未满足，无法在复合路由直接出站"
 	}
 
 	// 1. 复合路由重试后仍失败，切入 ReAct 兜底并强制禁用复合工具。
@@ -341,6 +351,30 @@ func buildCompositeRouteTaskIDs(st *ScheduleRefineState) []int {
 	}
 	sort.Ints(out)
 	return out
+}
+
+// allowCompositeRouteExitByToolSuccess 判断“复合工具成功后，是否允许跳过 ReAct 直接进入终审”。
+//
+// 步骤化说明：
+// 1. 仅在当前没有 deterministic objective 时启用，避免覆盖原有“确定性验收优先”策略；
+// 2. 只有本轮要求的复合工具已成功、且成功工具名与门禁一致时才放行；
+// 3. 放行后并不代表最终成功，后续仍由 hard_check 做统一裁决。
+func allowCompositeRouteExitByToolSuccess(st *ScheduleRefineState, result reactToolResult) (string, bool) {
+	if st == nil || !result.Success {
+		return "", false
+	}
+	if strings.TrimSpace(st.Objective.Mode) != "" && strings.TrimSpace(st.Objective.Mode) != "none" {
+		return "", false
+	}
+	required := normalizeCompositeToolName(st.RequiredCompositeTool)
+	toolName := normalizeCompositeToolName(result.Tool)
+	if required == "" || toolName == "" || required != toolName {
+		return "", false
+	}
+	if !isRequiredCompositeSatisfied(st) {
+		return "", false
+	}
+	return fmt.Sprintf("复合工具 %s 已成功执行；当前目标暂不支持确定性收口，跳过 ReAct，交由终审裁决。", required), true
 }
 
 func buildCompositeRouteCall(st *ScheduleRefineState, tool string, taskIDs []int) reactToolCall {
@@ -729,7 +763,9 @@ func runHardCheckNode(
 	// 2. 后续顺序归位仅用于最终展示与顺序一致性，不得反向改变业务目标成败。
 	intentPassLocked, intentReasonLocked, intentUnmetLocked := evaluateIntentForJudgement(ctx, chatModel, st, emitStage)
 	emitStage("schedule_refine.hard_check.intent_locked", fmt.Sprintf("终审业务目标已锁定：pass=%t，reason=%s", intentPassLocked, truncate(intentReasonLocked, 120)))
-	if changed := normalizeMovableTaskOrderByOrigin(st); changed {
+	if changed, skipped := tryNormalizeMovableTaskOrderByOrigin(st); skipped {
+		emitStage("schedule_refine.hard_check.order_normalized", "已跳过顺序归位：MinContextSwitch 结果需要保留重排后的任务顺序。")
+	} else if changed {
 		emitStage("schedule_refine.hard_check.order_normalized", "已在终审前按 origin_rank 对坑位做顺序归位。")
 	}
 	report := evaluateHardChecks(ctx, chatModel, st, emitStage)
@@ -754,7 +790,9 @@ func runHardCheckNode(
 	}
 	intentPassLocked, intentReasonLocked, intentUnmetLocked = evaluateIntentForJudgement(ctx, chatModel, st, emitStage)
 	emitStage("schedule_refine.hard_check.intent_locked", fmt.Sprintf("修复后业务目标已锁定：pass=%t，reason=%s", intentPassLocked, truncate(intentReasonLocked, 120)))
-	if changed := normalizeMovableTaskOrderByOrigin(st); changed {
+	if changed, skipped := tryNormalizeMovableTaskOrderByOrigin(st); skipped {
+		emitStage("schedule_refine.hard_check.order_normalized", "修复后跳过顺序归位：MinContextSwitch 结果需要保留重排后的任务顺序。")
+	} else if changed {
 		emitStage("schedule_refine.hard_check.order_normalized", "修复后已按 origin_rank 对坑位做顺序归位。")
 	}
 	report = evaluateHardChecks(ctx, chatModel, st, emitStage)
@@ -795,7 +833,7 @@ func runSummaryNode(
 		emitModelRawDebug(emitStage, "summary", raw)
 	}
 	if err != nil || summary == "" {
-		if st.HardCheck.PhysicsPassed && st.HardCheck.OrderPassed && st.HardCheck.IntentPassed {
+		if FinalHardCheckPassed(st) {
 			summary = fmt.Sprintf("微调已完成，共执行 %d 轮动作，方案已通过终审。", st.RoundUsed)
 		} else {
 			summary = fmt.Sprintf("已完成微调并返回当前最优结果（执行 %d 轮动作）。终审仍有未满足项：%s。", st.RoundUsed, fallbackText(st.HardCheck.IntentReason, "请进一步明确微调目标"))
@@ -803,7 +841,10 @@ func runSummaryNode(
 	}
 	summary = alignSummaryWithHardCheck(st, summary)
 	st.FinalSummary = summary
-	st.Completed = true
+	// 1. Completed 只代表“最终终审已通过”，不再把“链路执行完毕”误写成成功；
+	// 2. 这样外层持久化与展示层可以准确区分“已通过方案”与“当前最优但未达标方案”；
+	// 3. 若只是返回 best-effort 结果，FinalSummary 仍会保留，但 Completed=false。
+	st.Completed = FinalHardCheckPassed(st)
 	emitStage("schedule_refine.summary.done", "微调总结已生成。")
 	return st, nil
 }
@@ -813,8 +854,9 @@ func evaluateHardChecks(ctx context.Context, chatModel *ark.ChatModel, st *Sched
 	report.PhysicsIssues = physicsCheck(st.HybridEntries, len(st.AllocatedItems))
 	report.PhysicsPassed = len(report.PhysicsIssues) == 0
 	// 1. 顺序校验默认开启：即便执行期放开顺序限制，终审也要验证“后端归位”后的顺序正确性。
-	// 2. 当 origin_order_map 为空时降级跳过，避免无基线时误报。
-	needOrderCheck := len(st.OriginOrderMap) > 0
+	// 2. 但 MinContextSwitch 成功后，重排后的顺序本身就是业务目标，不能再拿 origin_rank 反向判错。
+	// 3. 当 origin_order_map 为空时同样降级跳过，避免无基线时误报。
+	needOrderCheck := len(st.OriginOrderMap) > 0 && !shouldSkipOrderConstraintCheck(st)
 	report.OrderIssues = validateRelativeOrder(st.HybridEntries, refineToolPolicy{
 		KeepRelativeOrder: needOrderCheck,
 		OrderScope:        st.Contract.OrderScope,
@@ -1303,6 +1345,34 @@ func normalizeMovableTaskOrderByOrigin(st *ScheduleRefineState) bool {
 	sortHybridEntries(entries)
 	st.HybridEntries = entries
 	return true
+}
+
+// tryNormalizeMovableTaskOrderByOrigin 决定是否执行“按 origin_rank 顺序归位”。
+//
+// 步骤化说明：
+// 1. 默认仍保持旧行为，继续在终审前做展示侧顺序归位；
+// 2. 但当 MinContextSwitch 已成功执行时，重排后的顺序本身就是业务目标的一部分；
+// 3. 此时若再按 origin_rank 归位，会把复合工具效果直接抹掉，因此必须跳过。
+func tryNormalizeMovableTaskOrderByOrigin(st *ScheduleRefineState) (changed bool, skipped bool) {
+	if shouldSkipOriginOrderNormalization(st) {
+		return false, true
+	}
+	return normalizeMovableTaskOrderByOrigin(st), false
+}
+
+func shouldSkipOriginOrderNormalization(st *ScheduleRefineState) bool {
+	if st == nil {
+		return false
+	}
+	ensureCompositeStateMaps(st)
+	if st.CompositeToolSuccess["MinContextSwitch"] {
+		return true
+	}
+	return false
+}
+
+func shouldSkipOrderConstraintCheck(st *ScheduleRefineState) bool {
+	return shouldSkipOriginOrderNormalization(st)
 }
 
 func runSingleRepairAction(ctx context.Context, chatModel *ark.ChatModel, st *ScheduleRefineState, emitStage func(stage, detail string)) error {
@@ -2047,7 +2117,7 @@ func alignSummaryWithHardCheck(st *ScheduleRefineState, summary string) string {
 	if st == nil {
 		return clean
 	}
-	passed := st.HardCheck.PhysicsPassed && st.HardCheck.OrderPassed && st.HardCheck.IntentPassed
+	passed := FinalHardCheckPassed(st)
 	if passed {
 		if st.RoundUsed == 0 {
 			return "本轮未执行调度动作（0轮），当前排程已满足终审条件。"

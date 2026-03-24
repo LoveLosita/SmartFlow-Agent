@@ -81,6 +81,42 @@ func TestPlanMinContextSwitchMovesGroupsSameContext(t *testing.T) {
 	}
 }
 
+func TestPlanMinContextSwitchMovesFallsBackToTaskNameWhenAllGeneral(t *testing.T) {
+	tasks := []RefineTaskCandidate{
+		{TaskItemID: 301, Week: 16, DayOfWeek: 1, SectionFrom: 1, SectionTo: 2, Name: "随机事件与概率基础概念复习", ContextTag: "General", OriginRank: 1},
+		{TaskItemID: 302, Week: 16, DayOfWeek: 1, SectionFrom: 3, SectionTo: 4, Name: "数制、码制与逻辑代数基础", ContextTag: "General", OriginRank: 2},
+		{TaskItemID: 303, Week: 16, DayOfWeek: 1, SectionFrom: 5, SectionTo: 6, Name: "第二章 条件概率与全概率公式", ContextTag: "General", OriginRank: 3},
+	}
+	slots := []RefineSlotCandidate{
+		{Week: 12, DayOfWeek: 1, SectionFrom: 1, SectionTo: 2},
+		{Week: 12, DayOfWeek: 1, SectionFrom: 3, SectionTo: 4},
+		{Week: 12, DayOfWeek: 1, SectionFrom: 5, SectionTo: 6},
+	}
+	moves, err := PlanMinContextSwitchMoves(tasks, slots, RefineCompositePlanOptions{})
+	if err != nil {
+		t.Fatalf("PlanMinContextSwitchMoves 返回错误: %v", err)
+	}
+	if len(moves) != 3 {
+		t.Fatalf("期望移动 3 条，实际=%d", len(moves))
+	}
+
+	sort.SliceStable(moves, func(i, j int) bool {
+		if moves[i].ToWeek != moves[j].ToWeek {
+			return moves[i].ToWeek < moves[j].ToWeek
+		}
+		if moves[i].ToDay != moves[j].ToDay {
+			return moves[i].ToDay < moves[j].ToDay
+		}
+		return moves[i].ToSectionFrom < moves[j].ToSectionFrom
+	})
+	if moves[0].TaskItemID != 301 || moves[1].TaskItemID != 303 {
+		t.Fatalf("期望概率任务通过名称兜底连续聚类，实际=%+v", moves)
+	}
+	if moves[2].TaskItemID != 302 {
+		t.Fatalf("期望数电任务落在最后一个坑位，实际=%+v", moves[2])
+	}
+}
+
 func TestPlanEvenSpreadMovesReturnsErrorWhenSpanNotMatched(t *testing.T) {
 	tasks := []RefineTaskCandidate{
 		{TaskItemID: 301, Week: 16, DayOfWeek: 1, SectionFrom: 1, SectionTo: 3, OriginRank: 1}, // span=3
