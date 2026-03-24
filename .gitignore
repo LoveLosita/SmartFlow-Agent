@@ -8,6 +8,7 @@
 # 2. 依赖管理 (Dependencies)
 # Go 项目通常不提交 vendor，除非你有特殊需求
 /vendor/
+/frontend/node_modules/
 
 # 3. 配置文件与敏感信息 (Security & Configs)
 # 绝对不要提交包含数据库密码和 Kafka 地址的配置文件
@@ -17,6 +18,7 @@ backend/config.yaml
 # 4. 临时文件与日志 (Logs & Temp)
 *.log
 /tmp/
+/frontend/dist/
 
 # 5. IDE 与系统文件
 .idea/

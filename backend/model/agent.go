@@ -78,8 +78,23 @@ type GetConversationListResponse struct {
 	List     []GetConversationListItem `json:"list"`
 	Page     int                       `json:"page"`
 	PageSize int                       `json:"page_size"`
+	Limit    int                       `json:"limit"`
 	Total    int64                     `json:"total"`
 	HasMore  bool                      `json:"has_more"`
+}
+
+// GetConversationHistoryItem 是“按会话读取聊天历史”接口的单条消息响应。
+//
+// 职责边界：
+// 1. role/content：承载前端渲染消息气泡所需的核心字段；
+// 2. id/created_at：仅在回源 DB 时可稳定提供，命中 Redis 时允许为空；
+// 3. reasoning_content：兼容模型推理内容，缓存命中时可直接透传。
+type GetConversationHistoryItem struct {
+	ID               int        `json:"id,omitempty"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content"`
+	CreatedAt        *time.Time `json:"created_at,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
 }
 
 // SchedulePlanPreviewCache 是“排程预览”在 Redis 中的缓存结构。

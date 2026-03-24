@@ -122,6 +122,7 @@ func (s *AgentService) GetConversationList(ctx context.Context, userID, page, pa
 		List:     items,
 		Page:     normalizedPage,
 		PageSize: normalizedPageSize,
+		Limit:    normalizedPageSize,
 		Total:    total,
 		HasMore:  hasMore,
 	}, nil

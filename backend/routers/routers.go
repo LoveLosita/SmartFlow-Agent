@@ -93,6 +93,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, userRepo *d
 			agentGroup.POST("/chat", middleware.TokenQuotaGuard(cache, userRepo), handlers.AgentHandler.ChatAgent)
 			agentGroup.GET("/conversation-meta", handlers.AgentHandler.GetConversationMeta)
 			agentGroup.GET("/conversation-list", handlers.AgentHandler.GetConversationList)
+			agentGroup.GET("/conversation-history", handlers.AgentHandler.GetConversationHistory)
 			agentGroup.GET("/schedule-preview", handlers.AgentHandler.GetSchedulePlanPreview)
 		}
 	}

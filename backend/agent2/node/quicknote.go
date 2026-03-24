@@ -11,33 +11,21 @@ import (
 )
 
 const (
-	// QuickNoteGraphNodeIntent 是随口记图里的“意图识别”节点名。
-	// 这里把节点名下沉到 node 层，是为了让：
-	// 1. 节点自己的分支方法可以直接返回目标节点名；
-	// 2. graph 层只负责连线，不需要反向暴露常量给 node 层；
-	// 3. 后续若节点改名，只需要在这里统一收口。
+	// QuickNoteGraphNodeIntent 是随口记图中的“意图识别”节点名。
 	QuickNoteGraphNodeIntent = "quick_note_intent"
-	// QuickNoteGraphNodeRank 是随口记图里的“优先级评估”节点名。
+	// QuickNoteGraphNodeRank 是随口记图中的“优先级评估”节点名。
 	QuickNoteGraphNodeRank = "quick_note_priority"
-	// QuickNoteGraphNodePersist 是随口记图里的“持久化写库”节点名。
+	// QuickNoteGraphNodePersist 是随口记图中的“持久化写库”节点名。
 	QuickNoteGraphNodePersist = "quick_note_persist"
-	// QuickNoteGraphNodeExit 是随口记图里的“提前退出”节点名。
+	// QuickNoteGraphNodeExit 是随口记图中的“提前退出”节点名。
 	QuickNoteGraphNodeExit = "quick_note_exit"
 )
 
-// QuickNoteGraphRunInput 描述一次“随口记图运行”所需的请求级依赖。
+// QuickNoteGraphRunInput 描述一次随口记图运行所需的请求级依赖。
 //
 // 职责边界：
-// 1. Model：当前请求实际使用的聊天模型；
-// 2. State：本次图运行共享的状态对象；
-// 3. Deps：工具层依赖，例如解析 user_id、执行写库；
-// 4. SkipIntentVerification：若上游路由已高置信命中，可跳过二次意图判断；
-// 5. EmitStage：向外层推送阶段消息的可选回调。
-//
-// 不负责什么：
-// 1. 不负责真正的 graph 连线；
-// 2. 不负责工具注册与提取；
-// 3. 不负责节点内部业务流转。
+// 1. 负责把模型、初始状态、工具依赖和阶段回调打包给 graph 层。
+// 2. 不负责做依赖校验，校验逻辑由 graph/node 构造阶段处理。
 type QuickNoteGraphRunInput struct {
 	Model                  *ark.ChatModel
 	State                  *agentmodel.QuickNoteState
@@ -46,29 +34,22 @@ type QuickNoteGraphRunInput struct {
 	EmitStage              func(stage, detail string)
 }
 
-// QuickNoteNodes 是“随口记”节点容器。
-//
-// 设计目的：
-// 1. 把“请求级依赖”收口到 node 层，而不是继续堆在 graph 层；
-// 2. 让 graph 层直接挂 `nodes.Intent / nodes.Priority / nodes.Persist` 这些方法；
-// 3. 这样 graph 文件就只负责画图，不再负责依赖转接。
+// QuickNoteNodes 是随口记图的节点容器。
 //
 // 职责边界：
-// 1. 负责提供可直接挂载到 graph 的节点方法；
-// 2. 负责在节点执行时读取本次请求的 input / tool / stage emitter；
-// 3. 不负责 graph 编译与运行，也不负责 service 层收尾持久化。
+// 1. 负责承接节点运行时依赖，并向 graph 暴露可直接挂载的方法。
+// 2. 不负责 graph 编译，也不负责 service 层接口接线。
 type QuickNoteNodes struct {
 	input          QuickNoteGraphRunInput
 	createTaskTool tool.InvokableTool
 	emitStage      func(stage, detail string)
 }
 
-// NewQuickNoteNodes 创建随口记节点容器。
+// NewQuickNoteNodes 负责构造随口记节点容器。
 //
-// 说明：
-// 1. 这里做的是“节点依赖注入”，不是 graph 连线；
-// 2. emitStage 允许为空，内部会补成 no-op，避免节点里反复判空；
-// 3. createTaskTool 为 persist 节点的硬依赖，缺失时直接报错，避免跑到写库节点再失败。
+// 输入输出语义：
+// 1. createTaskTool 不能为空，否则 persist 节点无法落库。
+// 2. EmitStage 为空时会回退到空实现，避免节点内部到处判空。
 func NewQuickNoteNodes(input QuickNoteGraphRunInput, createTaskTool tool.InvokableTool) (*QuickNoteNodes, error) {
 	if createTaskTool == nil {
 		return nil, errors.New("quick note nodes: createTaskTool is nil")
@@ -86,18 +67,22 @@ func NewQuickNoteNodes(input QuickNoteGraphRunInput, createTaskTool tool.Invokab
 	}, nil
 }
 
-// Exit 是图里的显式退出节点。
+// Exit 是图中的显式退出节点。
 //
 // 职责边界：
-// 1. 只负责把当前 state 原样透传到 END；
-// 2. 不负责追加业务逻辑；
-// 3. 保留这个节点，是为了后续若要补统一埋点、日志、收尾逻辑时有稳定挂载点。
+// 1. 仅作为图收口占位，保持状态原样透传。
+// 2. 不做额外业务处理，避免退出节点再引入副作用。
 func (n *QuickNoteNodes) Exit(ctx context.Context, st *agentmodel.QuickNoteState) (*agentmodel.QuickNoteState, error) {
 	_ = ctx
 	return st, nil
 }
 
-// NextAfterIntent 负责根据意图识别结果决定 intent 后的分支走向。
+// NextAfterIntent 根据意图识别结果决定 intent 节点后的分支走向。
+//
+// 步骤说明：
+// 1. 非随口记意图时直接退出，避免误把普通聊天写成任务。
+// 2. 截止时间校验失败时同样直接退出，让上层优先把错误提示给用户。
+// 3. 只有意图成立且时间合法，才进入优先级评估节点。
 func (n *QuickNoteNodes) NextAfterIntent(ctx context.Context, st *agentmodel.QuickNoteState) (string, error) {
 	_ = ctx
 	if st == nil || !st.IsQuickNoteIntent {
@@ -107,10 +92,14 @@ func (n *QuickNoteNodes) NextAfterIntent(ctx context.Context, st *agentmodel.Qui
 		return QuickNoteGraphNodeExit, nil
 	}
 	return QuickNoteGraphNodeRank, nil
-
 }
 
-// NextAfterPersist 负责根据持久化结果决定 persist 后的分支走向。
+// NextAfterPersist 根据持久化结果决定 persist 节点后的分支走向。
+//
+// 输入输出语义：
+// 1. Persisted=true 表示已经成功写库，可以直接结束。
+// 2. Persisted=false 且 CanRetryTool()=true 表示继续重试写库。
+// 3. 重试用尽后会补齐兜底回复，再结束链路，避免用户拿到空响应。
 func (n *QuickNoteNodes) NextAfterPersist(ctx context.Context, st *agentmodel.QuickNoteState) (string, error) {
 	_ = ctx
 	if st == nil {
@@ -123,9 +112,6 @@ func (n *QuickNoteNodes) NextAfterPersist(ctx context.Context, st *agentmodel.Qu
 		return QuickNoteGraphNodePersist, nil
 	}
 	if st.AssistantReply == "" {
-		// 1. 重试次数耗尽且上游没有明确失败文案时，在这里补一条兜底回复；
-		// 2. 这样可以保证图结束后 service 层一定能拿到稳定可展示的失败信息；
-		// 3. 不在 graph 层处理，是因为这属于节点业务状态修正。
 		st.AssistantReply = "抱歉，我已经重试了多次，还是没能成功记录这条任务，请稍后再试。"
 	}
 	return compose.END, nil

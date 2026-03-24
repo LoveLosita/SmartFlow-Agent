@@ -165,6 +165,19 @@ func (api *AgentHandler) GetConversationList(c *gin.Context) {
 		pageSize = parsedPageSize
 	}
 
+	// 2.3 limit 是 page_size 的懒加载别名：
+	// 2.3.1 前端若显式传 limit，则以 limit 为准，避免前端再做字段转换；
+	// 2.3.2 若 limit 非法同样直接返回 400，避免把脏参数下沉到 service；
+	// 2.3.3 若未传 limit，则继续沿用历史 page_size 行为，保持老前端兼容。
+	if rawLimit := strings.TrimSpace(c.Query("limit")); rawLimit != "" {
+		parsedLimit, err := strconv.Atoi(rawLimit)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, respond.WrongParamType)
+			return
+		}
+		pageSize = parsedLimit
+	}
+
 	// 3. status 过滤器可选，最终合法性由 service 层统一校验。
 	status := strings.TrimSpace(c.Query("status"))
 
@@ -179,6 +192,42 @@ func (api *AgentHandler) GetConversationList(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
+}
+
+// GetConversationHistory 返回指定会话的聊天历史记录。
+//
+// 设计说明：
+// 1) 该接口只读历史，不负责改写 Redis/DB 中的会话状态；
+// 2) 读取顺序复用现有服务层能力：先校验归属，再查 Redis，未命中再回源 DB；
+// 3) 会话不存在时统一返回 400，避免前端把无效会话误判成系统故障。
+func (api *AgentHandler) GetConversationHistory(c *gin.Context) {
+	// 1. 参数校验：conversation_id 必填。
+	conversationID := strings.TrimSpace(c.Query("conversation_id"))
+	if conversationID == "" {
+		c.JSON(http.StatusBadRequest, respond.MissingParam)
+		return
+	}
+
+	// 2. 从鉴权上下文取当前用户 ID，确保查询范围只落在“本人会话”内。
+	userID := c.GetInt("user_id")
+
+	// 3. 设置短超时，避免缓存抖动或慢查询长期占用连接。
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+
+	// 4. 调 service 查询聊天历史。
+	history, err := api.svc.GetConversationHistory(ctx, userID, conversationID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusBadRequest, respond.WrongParamType)
+			return
+		}
+		respond.DealWithError(c, err)
+		return
+	}
+
+	// 5. 返回统一响应结构。
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, history))
 }
 
 // GetSchedulePlanPreview 返回“指定会话”的排程结构化预览。

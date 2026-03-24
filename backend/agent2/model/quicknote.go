@@ -7,89 +7,56 @@ import (
 )
 
 const (
-	// QuickNoteDatetimeMinuteLayout 是“随口记”链路内部统一的分钟级时间格式。
-	// 说明：
-	// 1) 用于把“当前时间基准”传给模型，避免模型在相对时间推断时出现秒级抖动。
-	// 2) 用于日志和调试，读起来比 RFC3339 更直观。
+	// QuickNoteDatetimeMinuteLayout 是随口记链路统一使用的分钟级时间格式。
 	QuickNoteDatetimeMinuteLayout = "2006-01-02 15:04"
-
-	// QuickNoteTimezoneName 是随口记链路默认业务时区。
-	// 这里固定为东八区，避免容器运行在 UTC 时把“明天/今晚”解释偏移到错误日期。
+	// QuickNoteTimezoneName 是随口记时间解析与展示优先使用的时区。
 	QuickNoteTimezoneName = "Asia/Shanghai"
 
-	// QuickNotePriorityImportantUrgent 对应四象限里的“重要且紧急”。
-	QuickNotePriorityImportantUrgent = 1
-	// QuickNotePriorityImportantNotUrgent 对应“重要不紧急”。
-	QuickNotePriorityImportantNotUrgent = 2
-	// QuickNotePrioritySimpleNotImportant 对应“简单不重要”。
-	QuickNotePrioritySimpleNotImportant = 3
-	// QuickNotePriorityComplexNotImportant 对应“不简单不重要”。
-	QuickNotePriorityComplexNotImportant = 4
+	QuickNotePriorityImportantUrgent     = TaskPriorityImportantUrgent
+	QuickNotePriorityImportantNotUrgent  = TaskPriorityImportantNotUrgent
+	QuickNotePrioritySimpleNotImportant  = TaskPrioritySimpleNotImportant
+	QuickNotePriorityComplexNotImportant = TaskPriorityComplexNotImportant
 )
 
-// IsValidTaskPriority 判断优先级是否合法。
-func IsValidTaskPriority(priority int) bool {
-	return priority >= QuickNotePriorityImportantUrgent && priority <= QuickNotePriorityComplexNotImportant
-}
-
-// PriorityLabelCN 把优先级数值转换为中文标签，便于拼接给用户的自然语言回复。
-func PriorityLabelCN(priority int) string {
-	switch priority {
-	case QuickNotePriorityImportantUrgent:
-		return "重要且紧急"
-	case QuickNotePriorityImportantNotUrgent:
-		return "重要不紧急"
-	case QuickNotePrioritySimpleNotImportant:
-		return "简单不重要"
-	case QuickNotePriorityComplexNotImportant:
-		return "不简单不重要"
-	default:
-		return "未知优先级"
-	}
-}
-
-// QuickNoteState 是“AI随口记”链路在 graph 节点间传递的统一状态容器。
+// QuickNoteState 是随口记图在节点间流转的完整状态。
+//
+// 职责边界：
+// 1. 负责保存意图识别、任务提取、工具重试和最终回复所需状态。
+// 2. 不负责图编排，也不直接映射数据库任务实体。
 type QuickNoteState struct {
 	TraceID        string
 	UserID         int
 	ConversationID string
-
-	// RequestNow 记录“请求进入随口记链路时”的时间基准（分钟级）。
-	RequestNow time.Time
-	// RequestNowText 是 RequestNow 的字符串形式，主要用于 prompt 注入。
+	RequestNow     time.Time
 	RequestNowText string
-
-	UserInput string
+	UserInput      string
 
 	IsQuickNoteIntent bool
 	IntentJudgeReason string
 
-	ExtractedTitle        string
-	ExtractedDeadline     *time.Time
-	ExtractedDeadlineText string
-	// ExtractedUrgencyThreshold 表示“进入紧急象限的分界时间”。
+	ExtractedTitle            string
+	ExtractedDeadline         *time.Time
+	ExtractedDeadlineText     string
 	ExtractedUrgencyThreshold *time.Time
 	ExtractedPriority         int
-	// ExtractedBanter 是聚合规划阶段生成的“轻松跟进句”。
-	ExtractedBanter string
-	// PlannedBySingleCall 标记本次是否走了“单请求聚合规划”快路径。
-	PlannedBySingleCall bool
-
-	ExtractedPriorityReason string
-	// DeadlineValidationError 记录时间校验失败原因。
-	DeadlineValidationError string
+	ExtractedBanter           string
+	PlannedBySingleCall       bool
+	ExtractedPriorityReason   string
+	DeadlineValidationError   string
 
 	ToolAttemptCount int
 	MaxToolRetry     int
 	LastToolError    string
-
-	PersistedTaskID int
-	Persisted       bool
-
-	AssistantReply string
+	PersistedTaskID  int
+	Persisted        bool
+	AssistantReply   string
 }
 
-// NewQuickNoteState 创建随口记状态对象并初始化默认重试次数。
+// NewQuickNoteState 负责创建随口记图的初始状态。
+//
+// 输入输出语义：
+// 1. RequestNow 与 RequestNowText 会在创建时同步写入，保证整条链路共用同一时间基准。
+// 2. MaxToolRetry 默认给 3，避免上层未配置时完全失去重试能力。
 func NewQuickNoteState(traceID string, userID int, conversationID, userInput string) *QuickNoteState {
 	requestNow := agentshared.NowToMinute()
 	return &QuickNoteState{
@@ -103,18 +70,30 @@ func NewQuickNoteState(traceID string, userID int, conversationID, userInput str
 	}
 }
 
-// CanRetryTool 判断当前是否还能继续重试工具调用。
+// CanRetryTool 返回当前是否还允许再次调用持久化工具。
+//
+// 输入输出语义：
+// 1. true 表示“尚未达到最大重试次数”，调用方仍可继续重试。
+// 2. false 表示必须收口，避免无限重试。
 func (s *QuickNoteState) CanRetryTool() bool {
 	return s.ToolAttemptCount < s.MaxToolRetry
 }
 
-// RecordToolError 记录一次工具调用失败。
+// RecordToolError 记录一次工具失败，并推进重试计数。
+//
+// 职责边界：
+// 1. 只更新与工具失败相关的状态。
+// 2. 不决定是否继续重试，是否重试由节点分支逻辑判断。
 func (s *QuickNoteState) RecordToolError(errMsg string) {
 	s.ToolAttemptCount++
 	s.LastToolError = errMsg
 }
 
-// RecordToolSuccess 记录一次工具调用成功。
+// RecordToolSuccess 记录一次工具成功结果。
+//
+// 输入输出语义：
+// 1. taskID 必须是持久化后的真实任务 ID。
+// 2. 成功后会清空 LastToolError，表示当前链路已进入稳定态。
 func (s *QuickNoteState) RecordToolSuccess(taskID int) {
 	s.ToolAttemptCount++
 	s.PersistedTaskID = taskID
