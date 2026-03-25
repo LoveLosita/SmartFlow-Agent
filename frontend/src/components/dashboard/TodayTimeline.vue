@@ -5,10 +5,11 @@ import type { TodayEvent } from '@/types/dashboard'
 import { formatTimeRange } from '@/utils/date'
 
 interface TimelineSlot {
-  order: number
+  key: string
   kind: 'event' | 'pause'
   label: string
   timeText?: string
+  eventOrder?: number
 }
 
 const props = defineProps<{
@@ -17,13 +18,17 @@ const props = defineProps<{
 }>()
 
 const slotBlueprint: TimelineSlot[] = [
-  { order: 1, kind: 'event', label: '上午' },
-  { order: 2, kind: 'event', label: '上午' },
-  { order: 3, kind: 'pause', label: '午休', timeText: '11:55 - 14:00' },
-  { order: 4, kind: 'event', label: '下午' },
-  { order: 5, kind: 'event', label: '下午' },
-  { order: 6, kind: 'pause', label: '晚餐', timeText: '17:55 - 19:00' },
-  { order: 7, kind: 'event', label: '晚间' },
+  { key: 'slot-1', kind: 'event', label: '上午', timeText: '08:00 - 09:40', eventOrder: 1 },
+  { key: 'slot-2', kind: 'event', label: '上午', timeText: '10:15 - 11:55', eventOrder: 2 },
+  { key: 'slot-noon', kind: 'pause', label: '午休' },
+  { key: 'slot-4', kind: 'event', label: '下午', timeText: '14:00 - 15:40', eventOrder: 4 },
+  // 1. 晚餐块固定放在 7-8 节与 9-10 节之间，作为晚间课程前的过渡占位。
+  // 2. 根据用户最新要求，它要出现在“17:55 结束的课块之后、19:00 黄色块之前”。
+  // 3. 用户要求该块只保留单独卡片，不展示时间文本。
+  { key: 'slot-dinner', kind: 'pause', label: '晚餐' },
+  { key: 'slot-5', kind: 'event', label: '下午', timeText: '16:15 - 17:55', eventOrder: 5 },
+  { key: 'slot-6', kind: 'event', label: '晚间', timeText: '19:00 - 20:40', eventOrder: 6 },
+  { key: 'slot-7', kind: 'event', label: '晚间', timeText: '20:50 - 22:30', eventOrder: 7 },
 ]
 
 const eventMap = computed(() => {
@@ -49,6 +54,13 @@ function resolveCardTone(event: TodayEvent) {
 
   return orderToneMap[event.order] ?? 'neutral'
 }
+
+function resolveSlotEvent(slot: TimelineSlot) {
+  if (typeof slot.eventOrder !== 'number') {
+    return null
+  }
+  return eventMap.value.get(slot.eventOrder) ?? null
+}
 </script>
 
 <template>
@@ -62,34 +74,40 @@ function resolveCardTone(event: TodayEvent) {
     </header>
 
     <div v-if="loading" class="timeline-skeleton">
-      <div v-for="index in 7" :key="index" class="timeline-skeleton__item" />
+      <div v-for="slot in slotBlueprint" :key="slot.key" class="timeline-skeleton__item" />
     </div>
 
     <div v-else class="timeline-grid">
-      <template v-for="slot in slotBlueprint" :key="slot.order">
+      <template v-for="slot in slotBlueprint" :key="slot.key">
+        <article v-if="slot.kind === 'pause'" class="timeline-placeholder timeline-placeholder--pause">
+          <span v-if="slot.timeText" class="timeline-placeholder__time">{{ slot.timeText }}</span>
+          <strong class="timeline-placeholder__title">{{ slot.label }}</strong>
+          <span class="timeline-placeholder__hint">为中段留出缓冲与恢复时间</span>
+        </article>
+
         <article
-          v-if="eventMap.has(slot.order)"
+          v-else-if="resolveSlotEvent(slot)"
           class="timeline-event"
-          :class="`timeline-event--${resolveCardTone(eventMap.get(slot.order)!)}`"
+          :class="`timeline-event--${resolveCardTone(resolveSlotEvent(slot)!)}`"
         >
           <span class="timeline-event__time">
             {{
               formatTimeRange(
-                eventMap.get(slot.order)?.start_time,
-                eventMap.get(slot.order)?.end_time,
+                resolveSlotEvent(slot)?.start_time,
+                resolveSlotEvent(slot)?.end_time,
               )
             }}
           </span>
-          <strong class="timeline-event__title">{{ eventMap.get(slot.order)?.name }}</strong>
+          <strong class="timeline-event__title">{{ resolveSlotEvent(slot)?.name }}</strong>
           <span class="timeline-event__location">
-            {{ eventMap.get(slot.order)?.location || '休息时间' }}
+            {{ resolveSlotEvent(slot)?.location || '休息时间' }}
           </span>
         </article>
 
-        <article v-else class="timeline-placeholder timeline-placeholder--pause">
-          <span class="timeline-placeholder__time">{{ slot.timeText }}</span>
-          <strong class="timeline-placeholder__title">{{ slot.label }}</strong>
-          <span class="timeline-placeholder__hint">为中段留出缓冲与恢复时间</span>
+        <article v-else class="timeline-event timeline-event--neutral">
+          <span class="timeline-event__time">{{ slot.timeText }}</span>
+          <strong class="timeline-event__title">无课</strong>
+          <span class="timeline-event__location">休息时间</span>
         </article>
       </template>
     </div>
@@ -98,6 +116,7 @@ function resolveCardTone(event: TodayEvent) {
 
 <style scoped>
 .timeline-card {
+  min-width: 0;
   border-radius: 28px;
   padding: 22px 22px 20px;
   border: 1px solid rgba(17, 24, 39, 0.08);
@@ -133,16 +152,20 @@ function resolveCardTone(event: TodayEvent) {
 }
 
 .timeline-grid {
+  min-width: 0;
   display: grid;
-  grid-template-columns: repeat(7, minmax(132px, 1fr));
+  /* 1. 改为 auto-fit 自适应列数，避免固定列数把左侧主区整体撑宽。 */
+  /* 2. 每张卡片保留可读最小宽度，空间不足时自动换行，而不是出现横向滚动条。 */
+  /* 3. 这样在左右近似二分的布局下，左侧信息板也能保持完整可见。 */
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   gap: 12px;
-  overflow-x: auto;
-  padding-bottom: 4px;
+  overflow: visible;
 }
 
 .timeline-event,
 .timeline-placeholder,
 .timeline-skeleton__item {
+  min-width: 0;
   min-height: 124px;
   border-radius: 20px;
 }
@@ -226,6 +249,14 @@ function resolveCardTone(event: TodayEvent) {
   background: #57b8ea;
 }
 
+.timeline-event--neutral {
+  background: linear-gradient(180deg, #f8fbff 0%, #f3f7fc 100%);
+}
+
+.timeline-event--neutral::before {
+  background: #c8d6e8;
+}
+
 .timeline-placeholder {
   border: 1px dashed rgba(120, 144, 171, 0.28);
   background: rgba(255, 255, 255, 0.55);
@@ -260,8 +291,9 @@ function resolveCardTone(event: TodayEvent) {
 }
 
 .timeline-skeleton {
+  min-width: 0;
   display: grid;
-  grid-template-columns: repeat(7, minmax(132px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   gap: 12px;
 }
 
@@ -278,6 +310,27 @@ function resolveCardTone(event: TodayEvent) {
 
   100% {
     background-position: -200% 0;
+  }
+}
+
+@media (max-width: 1320px) {
+  .timeline-grid,
+  .timeline-skeleton {
+    grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  }
+}
+
+@media (max-width: 1040px) {
+  .timeline-card__header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+@media (max-width: 780px) {
+  .timeline-grid,
+  .timeline-skeleton {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   }
 }
 </style>

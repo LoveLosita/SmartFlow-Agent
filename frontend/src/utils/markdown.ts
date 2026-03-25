@@ -9,11 +9,17 @@ function escapeHtml(input: string) {
 
 function parseInlineMarkdown(input: string) {
   const inlineCodeBlocks: string[] = []
-  let content = escapeHtml(input)
+  const htmlBreakToken = '@@HTML_BREAK@@'
+  let content = input.replace(/<br\s*\/?>/gi, htmlBreakToken)
+
+  // 1. 先抽离行内代码，避免代码片段里的 Markdown / HTML 被后续规则误处理。
+  // 2. <br> 只做白名单放行，其它原始 HTML 仍统一转义，避免把模型输出直接注入页面。
+  // 3. 若用户就是想输入普通换行，外层段落逻辑仍会继续按 <br /> 渲染，不受这里影响。
+  content = escapeHtml(content)
 
   content = content.replace(/`([^`]+)`/g, (_, code: string) => {
     const token = `@@INLINE_CODE_${inlineCodeBlocks.length}@@`
-    inlineCodeBlocks.push(`<code>${escapeHtml(code)}</code>`)
+    inlineCodeBlocks.push(`<code>${escapeHtml(code.replaceAll(htmlBreakToken, '<br>'))}</code>`)
     return token
   })
 
@@ -26,6 +32,7 @@ function parseInlineMarkdown(input: string) {
   content = content.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
   content = content.replace(/\*([^*]+)\*/g, '<em>$1</em>')
   content = content.replace(/~~([^~]+)~~/g, '<del>$1</del>')
+  content = content.replaceAll(htmlBreakToken, '<br />')
 
   return content.replace(/@@INLINE_CODE_(\d+)@@/g, (_, index: string) => inlineCodeBlocks[Number(index)] ?? '')
 }

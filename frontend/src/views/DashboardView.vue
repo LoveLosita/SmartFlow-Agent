@@ -27,7 +27,7 @@ const tasks = ref<TaskItem[]>([])
 const todayEvents = ref<TodayEvent[]>([])
 
 const sidebarWidth = ref(78)
-const assistantWidth = ref(460)
+const assistantWidth = ref(560)
 
 const taskForm = reactive<{
   title: string
@@ -221,8 +221,38 @@ function clampSidebarWidth(nextWidth: number) {
   return Math.min(110, Math.max(68, nextWidth))
 }
 
-function clampAssistantWidth(nextWidth: number) {
-  return Math.min(680, Math.max(380, nextWidth))
+function getAssistantWidthBounds(containerWidth: number, nextSidebarWidth = sidebarWidth.value) {
+  // 1. 右侧助手区默认按“主区 / 助手区”近似二分来算，贴近用户给出的 DeepSeek 参考布局。
+  // 2. 只允许在平衡宽度附近做小范围拖拽，避免主区被挤压后卡片内容大面积隐藏。
+  // 3. 若窗口过窄，则仍保留主区最小可读宽度，优先保证左侧任务与日程信息可见。
+  const reservedWidth = nextSidebarWidth + 20 + 32
+  const availableWidth = Math.max(960, containerWidth - reservedWidth)
+  const balancedWidth = availableWidth / 2
+  const dragAllowance = Math.min(72, availableWidth * 0.08)
+  const minWidth = Math.max(440, balancedWidth - dragAllowance)
+  const maxWidth = Math.max(minWidth, Math.min(760, balancedWidth + dragAllowance))
+
+  return {
+    balancedWidth,
+    minWidth,
+    maxWidth,
+  }
+}
+
+function clampAssistantWidth(nextWidth: number, containerWidth = dashboardLayoutRef.value?.getBoundingClientRect().width ?? 1600) {
+  const { minWidth, maxWidth } = getAssistantWidthBounds(containerWidth)
+  return Math.min(maxWidth, Math.max(minWidth, nextWidth))
+}
+
+function syncAssistantWidthToBalancedSplit() {
+  const layout = dashboardLayoutRef.value
+  if (!layout || window.innerWidth <= 1380) {
+    return
+  }
+
+  const containerWidth = layout.getBoundingClientRect().width
+  const { balancedWidth } = getAssistantWidthBounds(containerWidth)
+  assistantWidth.value = clampAssistantWidth(balancedWidth, containerWidth)
 }
 
 function startResize(type: 'sidebar' | 'assistant', event: PointerEvent) {
@@ -242,7 +272,7 @@ function startResize(type: 'sidebar' | 'assistant', event: PointerEvent) {
   const handlePointerMove = (moveEvent: PointerEvent) => {
     const deltaX = moveEvent.clientX - startX
     const splitterTotalWidth = 20
-    const minMainWidth = 760
+    const minMainWidth = 560
 
     if (type === 'sidebar') {
       const nextSidebarWidth = clampSidebarWidth(startSidebarWidth + deltaX)
@@ -251,9 +281,9 @@ function startResize(type: 'sidebar' | 'assistant', event: PointerEvent) {
       return
     }
 
-    const nextAssistantWidth = clampAssistantWidth(startAssistantWidth - deltaX)
     const maxAssistantWidth = rect.width - sidebarWidth.value - splitterTotalWidth - minMainWidth
-    assistantWidth.value = Math.min(nextAssistantWidth, Math.max(380, maxAssistantWidth))
+    const nextAssistantWidth = clampAssistantWidth(startAssistantWidth - deltaX, rect.width)
+    assistantWidth.value = Math.min(nextAssistantWidth, Math.max(440, maxAssistantWidth))
   }
 
   const stopResize = () => {
@@ -269,10 +299,13 @@ function startResize(type: 'sidebar' | 'assistant', event: PointerEvent) {
 
 onMounted(async () => {
   await loadDashboardData()
+  syncAssistantWidthToBalancedSplit()
+  window.addEventListener('resize', syncAssistantWidthToBalancedSplit)
 })
 
 onBeforeUnmount(() => {
   document.body.classList.remove('dashboard-resizing')
+  window.removeEventListener('resize', syncAssistantWidthToBalancedSplit)
 })
 </script>
 
@@ -538,6 +571,7 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
+  overflow: hidden;
 }
 
 .dashboard-topbar {
@@ -607,10 +641,13 @@ onBeforeUnmount(() => {
   width: 100%;
   max-width: none;
   min-height: 0;
+  min-width: 0;
   display: grid;
   gap: 14px;
-  overflow: auto;
-  padding-right: 4px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 0;
+  align-content: start;
 }
 
 .dashboard-actions {
@@ -630,8 +667,9 @@ onBeforeUnmount(() => {
 }
 
 .dashboard-quadrants {
+  min-width: 0;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 14px;
 }
 
@@ -718,6 +756,7 @@ onBeforeUnmount(() => {
 }
 
 .dashboard-assistant {
+  min-width: 0;
   min-height: 0;
   height: 100%;
   align-self: stretch;
@@ -733,7 +772,7 @@ onBeforeUnmount(() => {
 
 @media (max-width: 1640px) {
   .dashboard-layout {
-    --dashboard-assistant-width: 430px;
+    --dashboard-assistant-width: 520px;
   }
 }
 

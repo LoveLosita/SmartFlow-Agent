@@ -35,10 +35,15 @@ interface StreamErrorPayload {
 
 interface StreamEventPayload {
   choices?: StreamChoicePayload[]
+  delta?: StreamDeltaPayload
+  content?: string
+  reasoning_content?: string
+  finish_reason?: string | null
   error?: StreamErrorPayload
 }
 
 const authStore = useAuthStore()
+
 const assistantBodyRef = ref<HTMLElement | null>(null)
 const messageViewportRef = ref<HTMLElement | null>(null)
 
@@ -50,7 +55,7 @@ const selectedConversationId = ref('')
 const selectedModel = ref<'worker' | 'strategist'>('worker')
 const thinkingEnabled = ref(false)
 const messageInput = ref('')
-const historyPanelWidth = ref(220)
+const historyPanelWidth = ref(228)
 const activeStreamingMessageId = ref('')
 
 const conversationPage = ref(1)
@@ -63,14 +68,19 @@ const conversationMetaMap = reactive<Record<string, ConversationMeta>>({})
 const conversationMessagesMap = reactive<Record<string, AssistantMessage[]>>({})
 const unavailableHistoryMap = reactive<Record<string, boolean>>({})
 const thinkingMessageMap = reactive<Record<string, boolean>>({})
+const reasoningCollapsedMap = reactive<Record<string, boolean>>({})
 
-const quickActions = ['帮我梳理今天最重要的三件事', '把当前任务拆成可执行步骤', '总结这段对话的关键结论', '给我一个更稳妥的推进方案']
-const capabilityPoints = ['流式输出', 'Markdown 渲染', '会话懒加载', '深度思考展示']
+const quickActions = [
+  '帮我梳理今天最重要的三件事',
+  '把当前任务拆成可执行步骤',
+  '总结这段对话的关键结论',
+  '给我一个更稳妥的推进方案',
+]
 
 let messageScrollRaf = 0
 
 const assistantBodyStyle = computed(() => ({
-  '--assistant-history-width': `${historyExpanded.value ? historyPanelWidth.value : 64}px`,
+  '--assistant-history-width': `${historyExpanded.value ? historyPanelWidth.value : 68}px`,
 }))
 
 const selectedConversation = computed(() =>
@@ -81,13 +91,12 @@ const selectedMessages = computed(() => {
   if (!selectedConversationId.value) {
     return []
   }
-
   return conversationMessagesMap[selectedConversationId.value] ?? []
 })
 
 const selectedConversationTitle = computed(() => {
   if (!selectedConversationId.value) {
-    return '新的会话'
+    return '新对话'
   }
 
   const meta = conversationMetaMap[selectedConversationId.value]
@@ -105,7 +114,7 @@ const selectedConversationTitle = computed(() => {
 
 const selectedConversationSubtitle = computed(() => {
   if (!selectedConversationId.value) {
-    return '支持流式输出、Markdown 渲染与深度思考展示'
+    return '发送后立即上屏，思考流和正文流会连续更新'
   }
 
   const meta = conversationMetaMap[selectedConversationId.value]
@@ -135,19 +144,89 @@ function ensureConversationBucket(conversationId: string) {
 
 function appendConversationMessage(conversationId: string, message: AssistantMessage) {
   ensureConversationBucket(conversationId)
-  conversationMessagesMap[conversationId].push(message)
-  thinkingMessageMap[message.id] = Boolean(message.reasoning?.trim())
+  const bucket = conversationMessagesMap[conversationId]
+  bucket.push(message)
+  const appended = bucket[bucket.length - 1]!
+  thinkingMessageMap[appended.id] = Boolean(appended.reasoning?.trim())
+  return appended
+}
+
+function createDraftConversationId() {
+  return `draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function createMessageId(role: AssistantMessage['role']) {
+  return `${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function isDraftConversationId(conversationId: string) {
+  return conversationId.startsWith('draft-')
 }
 
 function upsertConversationMeta(meta: ConversationMeta) {
   conversationMetaMap[meta.conversation_id] = meta
 }
 
+// migrateConversationState 负责把“本地 draft 会话”迁移成后端返回的真实会话 ID。
+// 职责边界：
+// 1. 先迁移消息、元信息、异常状态，再切换当前选中会话，避免流式过程中界面抖动。
+// 2. 若列表里同时存在 draft 和真实会话，则按真实会话 ID 去重，保留较新的字段。
+// 3. 这里只处理前端状态搬迁，不额外发网络请求；标题和条数的最终修正仍交给后续 meta/list 刷新。
+function migrateConversationState(fromConversationId: string, toConversationId: string) {
+  if (!fromConversationId || !toConversationId || fromConversationId === toConversationId) {
+    return
+  }
+
+  if (conversationMessagesMap[fromConversationId]) {
+    conversationMessagesMap[toConversationId] =
+      conversationMessagesMap[toConversationId] ?? conversationMessagesMap[fromConversationId]
+    delete conversationMessagesMap[fromConversationId]
+  }
+
+  if (typeof unavailableHistoryMap[fromConversationId] !== 'undefined') {
+    unavailableHistoryMap[toConversationId] = unavailableHistoryMap[fromConversationId]
+    delete unavailableHistoryMap[fromConversationId]
+  }
+
+  if (conversationMetaMap[fromConversationId]) {
+    conversationMetaMap[toConversationId] = {
+      ...conversationMetaMap[fromConversationId],
+      conversation_id: toConversationId,
+    }
+    delete conversationMetaMap[fromConversationId]
+  }
+
+  const latestMap = new Map<string, ConversationListItem>()
+  const deduplicated: ConversationListItem[] = []
+  const seen = new Set<string>()
+
+  for (const item of conversationList.value) {
+    const nextItem =
+      item.conversation_id === fromConversationId ? { ...item, conversation_id: toConversationId } : item
+    latestMap.set(nextItem.conversation_id, nextItem)
+  }
+
+  for (const item of conversationList.value) {
+    const nextId = item.conversation_id === fromConversationId ? toConversationId : item.conversation_id
+    if (seen.has(nextId)) {
+      continue
+    }
+    seen.add(nextId)
+    deduplicated.push(latestMap.get(nextId)!)
+  }
+
+  conversationList.value = deduplicated
+
+  if (selectedConversationId.value === fromConversationId) {
+    selectedConversationId.value = toConversationId
+  }
+}
+
 // mergeConversationList 负责把分页拿到的会话列表按会话 ID 合并进本地状态。
 // 职责边界：
 // 1. 负责“保留现有顺序 + 更新最新字段 + 去重”，避免懒加载时列表闪烁。
 // 2. 不负责决定选中哪个会话，选中逻辑交给 ensureSelectedConversationAfterListLoad。
-// 3. 若后端返回重复项，以后出现的记录覆盖前面的字段，保证时间和标题尽量新。
+// 3. 本地尚未完成 round-trip 的 draft 会话会原样保留，避免用户发出首条消息后列表瞬间丢失。
 function mergeConversationList(items: ConversationListItem[]) {
   const merged = [...conversationList.value, ...items]
   const latestMap = new Map<string, ConversationListItem>()
@@ -181,7 +260,10 @@ function prependConversationPreview(conversationId: string, previewText: string,
     created_at: current?.created_at || createdAt,
   }
 
-  conversationList.value = [nextItem, ...conversationList.value.filter((item) => item.conversation_id !== conversationId)]
+  conversationList.value = [
+    nextItem,
+    ...conversationList.value.filter((item) => item.conversation_id !== conversationId),
+  ]
 }
 
 function normalizeHistoryMessage(message: ConversationHistoryMessage, index: number): AssistantMessage {
@@ -195,6 +277,7 @@ function normalizeHistoryMessage(message: ConversationHistoryMessage, index: num
   }
 
   thinkingMessageMap[id] = Boolean(message.reasoning_content?.trim())
+  reasoningCollapsedMap[id] = Boolean(message.reasoning_content?.trim())
   return normalized
 }
 
@@ -210,9 +293,21 @@ function isThinkingMessage(message: AssistantMessage) {
   return thinkingMessageMap[message.id] === true
 }
 
-function shouldShowReasoningBox(message: AssistantMessage) {
-  return message.role === 'assistant' && (Boolean(message.reasoning?.trim()) || (isStreamingMessage(message) && isThinkingMessage(message)))
+function isReasoningCollapsed(messageId: string) {
+  return reasoningCollapsedMap[messageId] === true
 }
+
+function toggleReasoningCollapse(messageId: string) {
+  reasoningCollapsedMap[messageId] = !reasoningCollapsedMap[messageId]
+}
+
+function shouldShowReasoningBox(message: AssistantMessage) {
+  return message.role === 'assistant' && (
+    Boolean(message.reasoning?.trim()) ||
+    (isStreamingMessage(message) && isThinkingMessage(message))
+  )
+}
+
 function scheduleScrollMessagesToBottom(smooth = false) {
   if (messageScrollRaf) {
     cancelAnimationFrame(messageScrollRaf)
@@ -241,9 +336,9 @@ async function ensureSelectedConversationAfterListLoad() {
 
 // loadConversationListData 负责按页读取会话列表，并驱动首屏选中与懒加载状态。
 // 职责边界：
-// 1. reset=true 时重置分页并重新获取第一页，适合新消息发送后刷新列表顺序。
+// 1. reset=true 时重置分页并重新获取第一页，适合新消息发送完成后刷新标题和时间。
 // 2. reset=false 时只在还有更多数据且当前不在加载时继续拉下一页，避免重复请求。
-// 3. 接口失败时只提示并保留现有列表，防止用户当前聊天内容被清空。
+// 3. 接口失败时保留现有列表，不清空本地草稿会话，防止用户当前上下文丢失。
 async function loadConversationListData(reset = false) {
   if (reset) {
     conversationPage.value = 1
@@ -264,12 +359,10 @@ async function loadConversationListData(reset = false) {
       status: 'active',
     })
 
-    const currentItems = result?.list ?? []
     if (reset) {
-      conversationList.value = currentItems
-    } else {
-      mergeConversationList(currentItems)
+      conversationList.value = conversationList.value.filter((item) => isDraftConversationId(item.conversation_id))
     }
+    mergeConversationList(result?.list ?? [])
 
     conversationHasMore.value = Boolean(result?.has_more)
     conversationPage.value += 1
@@ -297,9 +390,9 @@ function handleHistoryScroll(event: Event) {
 
 // startResizeHistoryPanel 负责处理会话列表与聊天主区之间的横向拖拽。
 // 职责边界：
-// 1. 只负责更新内部历史面板宽度，不修改整个 Dashboard 的左右布局。
-// 2. 为聊天区保留最小宽度，避免拖拽后消息正文被压到无法阅读。
-// 3. 拖拽结束后必须解绑事件并清理全局样式，避免页面残留 col-resize 状态。
+// 1. 只负责更新助手面板内部的历史区宽度，不修改外层 Dashboard 的左右二分布局。
+// 2. 会为正文区保留最小阅读宽度，避免把长回答挤压到难以阅读。
+// 3. 拖拽结束后统一解绑事件并清理全局样式，防止页面残留 col-resize 状态。
 function startResizeHistoryPanel(event: PointerEvent) {
   const body = assistantBodyRef.value
   if (!body || window.innerWidth <= 960 || !historyExpanded.value) {
@@ -312,7 +405,7 @@ function startResizeHistoryPanel(event: PointerEvent) {
 
   const handlePointerMove = (moveEvent: PointerEvent) => {
     const deltaX = moveEvent.clientX - startX
-    const minHistoryWidth = 180
+    const minHistoryWidth = 188
     const minChatWidth = 420
     const splitterWidth = 8
     const maxHistoryWidth = rect.width - splitterWidth - minChatWidth
@@ -335,7 +428,11 @@ function toggleHistoryPanel() {
 }
 
 async function loadConversationMessages(conversationId: string) {
-  if (!conversationId || conversationMessagesMap[conversationId]) {
+  if (!conversationId) {
+    return
+  }
+
+  if (conversationMessagesMap[conversationId] && unavailableHistoryMap[conversationId] !== true) {
     return
   }
 
@@ -350,7 +447,7 @@ async function loadConversationMessages(conversationId: string) {
 }
 
 async function ensureConversationMeta(conversationId: string) {
-  if (!conversationId || conversationMetaMap[conversationId]) {
+  if (!conversationId || isDraftConversationId(conversationId) || conversationMetaMap[conversationId]) {
     return
   }
 
@@ -358,9 +455,8 @@ async function ensureConversationMeta(conversationId: string) {
     const meta = await getConversationMeta(conversationId)
     upsertConversationMeta(meta)
   } catch {
-    // 这里故意静默失败：
     // 1. 标题和条数属于增强信息，不应阻塞聊天主链路。
-    // 2. 即使元信息失败，列表里已有的回退标题仍可保证界面可用。
+    // 2. 即使元信息失败，列表里的回退标题仍可保证界面可用。
     // 3. 后续再次刷新列表或重新进入会话时，还会有机会补齐这些字段。
   }
 }
@@ -377,7 +473,7 @@ function startNewConversation() {
   activeStreamingMessageId.value = ''
 }
 
-// fetchChatStream 负责以 fetch 方式发起聊天请求并处理一次 refresh token 自动重试。
+// fetchChatStream 负责以 fetch 方式发起聊天请求，并处理一次 refresh token 自动重试。
 // 职责边界：
 // 1. 只负责把请求发出去并返回原始 Response，不在这里解析 SSE 数据。
 // 2. 401 时优先尝试用 refresh token 换新 access token，并只重试一次，避免死循环。
@@ -407,8 +503,8 @@ async function fetchChatStream(body: ChatStreamRequest, attempt = 0): Promise<Re
 
   if (!response.ok) {
     try {
-      const errorBody = (await response.json()) as { info?: string }
-      throw new Error(errorBody.info || '发送消息失败，请稍后重试')
+      const errorBody = (await response.json()) as { info?: string; message?: string }
+      throw new Error(errorBody.info || errorBody.message || '发送消息失败，请稍后重试')
     } catch (error) {
       if (error instanceof Error) {
         throw error
@@ -423,54 +519,71 @@ async function fetchChatStream(body: ChatStreamRequest, attempt = 0): Promise<Re
 
   return response
 }
+
 // processSseBlock 负责解析单个 SSE block，并把增量内容落到当前 assistant message 上。
 // 职责边界：
-// 1. 只处理 data: 开头的事件行，忽略 [DONE] 和无法解析的脏数据，保证前端更健壮。
-// 2. reasoning_content 与 content 分开追加，确保“思考过程”和“最终回答”能同时流式可见。
-// 3. 如果后端显式下发 error.message 或 finish_reason，这里立即同步到当前状态，便于上层收尾。
+// 1. 会把同一个 block 里的多行 data: 合并后再解析，兼容标准 SSE 多行数据格式。
+// 2. 同时兼容 choices[0].delta 和平铺 content/reasoning_content 两种载荷，避免后端切换实现时前端失配。
+// 3. 收到 finish_reason 或 [DONE] 时立即收尾，并自动折叠思考框，让最终阅读视图更接近 DeepSeek 风格。
 function processSseBlock(block: string, assistantMessage: AssistantMessage) {
   const dataLines = block
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.startsWith('data:'))
+    .map((line) => line.replace(/^data:\s*/, ''))
 
-  for (const line of dataLines) {
-    const payload = line.replace(/^data:\s*/, '')
-    if (!payload || payload === '[DONE]') {
-      continue
-    }
-
-    let parsed: StreamEventPayload
-    try {
-      parsed = JSON.parse(payload) as StreamEventPayload
-    } catch {
-      continue
-    }
-
-    if (parsed.error?.message) {
-      throw new Error(parsed.error.message)
-    }
-
-    const choice = parsed.choices?.[0]
-    const delta = choice?.delta
-
-    if (typeof delta?.reasoning_content === 'string' && delta.reasoning_content) {
-      assistantMessage.reasoning = `${assistantMessage.reasoning || ''}${delta.reasoning_content}`
-      thinkingMessageMap[assistantMessage.id] = true
-    }
-
-    if (typeof delta?.content === 'string' && delta.content) {
-      assistantMessage.content += delta.content
-    }
-
-    if (choice?.finish_reason) {
-      activeStreamingMessageId.value = ''
-    }
-
-    scheduleScrollMessagesToBottom(false)
+  if (dataLines.length === 0) {
+    return
   }
+
+  const payload = dataLines.join('\n').trim()
+  if (!payload) {
+    return
+  }
+
+  if (payload === '[DONE]') {
+    activeStreamingMessageId.value = ''
+    reasoningCollapsedMap[assistantMessage.id] = true
+    return
+  }
+
+  let parsed: StreamEventPayload
+  try {
+    parsed = JSON.parse(payload) as StreamEventPayload
+  } catch {
+    return
+  }
+
+  if (parsed.error?.message) {
+    throw new Error(parsed.error.message)
+  }
+
+  const choice = parsed.choices?.[0]
+  const delta = choice?.delta ?? parsed.delta ?? parsed
+  const finishReason = choice?.finish_reason ?? parsed.finish_reason ?? null
+
+  if (typeof delta?.reasoning_content === 'string' && delta.reasoning_content) {
+    assistantMessage.reasoning = `${assistantMessage.reasoning || ''}${delta.reasoning_content}`
+    thinkingMessageMap[assistantMessage.id] = true
+  }
+
+  if (typeof delta?.content === 'string' && delta.content) {
+    assistantMessage.content += delta.content
+  }
+
+  if (finishReason) {
+    activeStreamingMessageId.value = ''
+    reasoningCollapsedMap[assistantMessage.id] = true
+  }
+
+  scheduleScrollMessagesToBottom(false)
 }
 
+// sendMessage 负责执行“本地先上屏，再异步接流”的发送链路。
+// 职责边界：
+// 1. 先创建用户消息和 assistant 占位消息，让发送动作立即反馈到界面，等待建连过程无感化。
+// 2. 若当前是新会话，则先使用 draft 会话承接本地状态，等响应头返回真实 conversation_id 后再整体迁移。
+// 3. 网络错误只中断当前这轮 assistant 占位，不回滚用户已发送的内容，避免“点了发送却像没发出去”。
 async function sendMessage(preset?: string) {
   const text = (preset ?? messageInput.value).trim()
   if (!text || chatLoading.value) {
@@ -478,55 +591,56 @@ async function sendMessage(preset?: string) {
   }
 
   chatLoading.value = true
-  let assistantMessage: AssistantMessage | null = null
+
+  const draftConversationId = selectedConversationId.value || createDraftConversationId()
+  if (!selectedConversationId.value) {
+    selectedConversationId.value = draftConversationId
+  }
+
+  ensureConversationBucket(draftConversationId)
+  unavailableHistoryMap[draftConversationId] = false
+
+  const now = new Date().toISOString()
+  appendConversationMessage(draftConversationId, {
+    id: createMessageId('user'),
+    role: 'user',
+    content: text,
+    createdAt: now,
+  })
+
+  const assistantMessage = appendConversationMessage(draftConversationId, {
+    id: createMessageId('assistant'),
+    role: 'assistant',
+    content: '',
+    createdAt: now,
+    reasoning: '',
+  })
+
+  thinkingMessageMap[assistantMessage.id] = thinkingEnabled.value
+  reasoningCollapsedMap[assistantMessage.id] = false
+  activeStreamingMessageId.value = assistantMessage.id
+
+  messageInput.value = ''
+  prependConversationPreview(draftConversationId, text, now)
+  scheduleScrollMessagesToBottom(false)
 
   try {
     const response = await fetchChatStream({
-      conversation_id: selectedConversationId.value || undefined,
+      conversation_id: isDraftConversationId(draftConversationId) ? undefined : draftConversationId,
       message: text,
       model: selectedModel.value,
       thinking: thinkingEnabled.value,
     })
 
-    const conversationId =
-      response.headers.get('X-Conversation-ID')?.trim() || selectedConversationId.value || `draft-${Date.now()}`
+    const responseConversationId = response.headers.get('X-Conversation-ID')?.trim()
+    const actualConversationId = responseConversationId || draftConversationId
 
-    if (!selectedConversationId.value) {
-      selectedConversationId.value = conversationId
-      unavailableHistoryMap[conversationId] = false
+    if (actualConversationId !== draftConversationId) {
+      migrateConversationState(draftConversationId, actualConversationId)
+      prependConversationPreview(actualConversationId, text, now)
     }
 
-    ensureConversationBucket(conversationId)
-
-    const now = new Date().toISOString()
-    appendConversationMessage(conversationId, {
-      id: `user-${Date.now()}`,
-      role: 'user',
-      content: text,
-      createdAt: now,
-    })
-
-    assistantMessage = {
-      id: `assistant-${Date.now()}`,
-      role: 'assistant',
-      content: '',
-      createdAt: now,
-      reasoning: '',
-    }
-    appendConversationMessage(conversationId, assistantMessage)
-    thinkingMessageMap[assistantMessage.id] = thinkingEnabled.value
-    activeStreamingMessageId.value = assistantMessage.id
-
-    messageInput.value = ''
-    prependConversationPreview(conversationId, text, now)
-    scheduleScrollMessagesToBottom(false)
-
-    const responseBody = response.body
-    if (!responseBody) {
-      throw new Error('流式响应体为空，无法继续接收消息')
-    }
-
-    const reader = responseBody.getReader()
+    const reader = response.body!.getReader()
     const decoder = new TextDecoder('utf-8')
     let buffer = ''
 
@@ -537,7 +651,7 @@ async function sendMessage(preset?: string) {
       }
 
       buffer += decoder.decode(value, { stream: true })
-      const blocks = buffer.split('\n\n')
+      const blocks = buffer.split(/\r?\n\r?\n/)
       buffer = blocks.pop() ?? ''
 
       for (const block of blocks) {
@@ -550,25 +664,19 @@ async function sendMessage(preset?: string) {
       processSseBlock(buffer, assistantMessage)
     }
 
-    if (!assistantMessage.content.trim() && assistantMessage.reasoning?.trim()) {
-      assistantMessage.content = '已完成深度思考，但当前响应未返回正文内容。'
+    if (!assistantMessage.content.trim()) {
+      assistantMessage.content = assistantMessage.reasoning?.trim()
+        ? '已完成深度思考，但当前响应未返回正文内容。'
+        : '暂未收到回复正文，请稍后重试。'
     }
 
     await loadConversationListData(true)
-
-    try {
-      const meta = await getConversationMeta(conversationId)
-      upsertConversationMeta(meta)
-    } catch {
-      // 这里保持静默兜底：
-      // 1. 会话元信息失败不影响当前已经拿到的正文与历史消息。
-      // 2. 列表刷新后仍可继续点击、继续追问，不阻断主流程。
-      // 3. 等后端元信息接口稳定后，重新进入页面即可自然补齐。
-    }
+    await ensureConversationMeta(actualConversationId)
   } catch (error) {
-    if (assistantMessage && !assistantMessage.content.trim()) {
+    if (!assistantMessage.content.trim()) {
       assistantMessage.content = '本次回复已中断，请稍后重试。'
     }
+    reasoningCollapsedMap[assistantMessage.id] = false
     ElMessage.error(error instanceof Error ? error.message : '发送消息失败，请稍后重试')
   } finally {
     activeStreamingMessageId.value = ''
@@ -597,19 +705,14 @@ onBeforeUnmount(() => {
 
 <template>
   <aside class="assistant-shell glass-panel">
-    <div class="assistant-header">
-      <div class="assistant-title">
-        <span class="assistant-title__badge">AI</span>
-        <div>
-          <strong>AI 助手</strong>
-          <small>接近 ChatGPT Web 风格的扁平化对话区，支持会话历史和流式回答。</small>
-        </div>
+    <header class="assistant-header">
+      <div class="assistant-header__text">
+        <span class="assistant-header__eyebrow">AI 对话</span>
+        <strong>{{ selectedConversationTitle }}</strong>
+        <p>{{ selectedConversationSubtitle }}</p>
       </div>
-
-      <button type="button" class="assistant-header__action" @click="startNewConversation">
-        新建会话
-      </button>
-    </div>
+      <button type="button" class="assistant-header__action" @click="startNewConversation">新对话</button>
+    </header>
 
     <div
       ref="assistantBodyRef"
@@ -617,9 +720,9 @@ onBeforeUnmount(() => {
       :class="{ 'assistant-body--collapsed': !historyExpanded }"
       :style="assistantBodyStyle"
     >
-      <section class="assistant-history" :class="{ 'assistant-history--collapsed': !historyExpanded }">
+      <aside class="assistant-history" :class="{ 'assistant-history--collapsed': !historyExpanded }">
         <div class="assistant-history__toolbar">
-          <strong v-if="historyExpanded">聊天记录</strong>
+          <strong v-if="historyExpanded">会话</strong>
           <button type="button" class="assistant-history__toggle" @click="toggleHistoryPanel">
             {{ historyExpanded ? '收起' : '展开' }}
           </button>
@@ -628,13 +731,11 @@ onBeforeUnmount(() => {
         <div class="assistant-history__content" @scroll="handleHistoryScroll">
           <button type="button" class="assistant-history__new" @click="startNewConversation">
             <span>+</span>
-            <template v-if="historyExpanded">
-              <strong>发起新对话</strong>
-              <small>清空当前上下文，开始新会话</small>
-            </template>
+            <strong>{{ historyExpanded ? '新建会话' : '新' }}</strong>
+            <small v-if="historyExpanded">从空白上下文开始</small>
           </button>
 
-          <div v-if="conversationLoading && !conversationList.length" class="assistant-history__loading">
+          <div v-if="conversationLoading && !conversationListReady" class="assistant-history__loading">
             <div v-for="index in 4" :key="index" class="assistant-history__loading-item" />
           </div>
 
@@ -647,69 +748,40 @@ onBeforeUnmount(() => {
               :class="{ 'assistant-history__item--active': item.conversation_id === selectedConversationId }"
               @click="selectConversation(item.conversation_id)"
             >
-              <strong>{{ historyExpanded ? item.title || '未命名会话' : '对' }}</strong>
-              <small v-if="historyExpanded">
-                {{ formatConversationTime(item.last_message_at || item.created_at) }} · {{ item.message_count }} 条消息
-              </small>
+              <strong>{{ item.has_title && item.title ? item.title : '未命名会话' }}</strong>
+              <small v-if="historyExpanded">{{ formatConversationTime(item.last_message_at || item.created_at) }}</small>
             </button>
+
+            <p v-if="!conversationList.length" class="assistant-history__empty">暂无历史会话</p>
+            <p v-else-if="!conversationHasMore && !conversationLoadingMore" class="assistant-history__end">已经到底了</p>
 
             <div v-if="conversationLoadingMore" class="assistant-history__loading assistant-history__loading--more">
               <div v-for="index in 2" :key="index" class="assistant-history__loading-item" />
             </div>
-
-            <p v-if="conversationListReady && !conversationList.length" class="assistant-history__empty">
-              还没有历史会话，先发起一段新对话吧。
-            </p>
-            <p v-else-if="conversationListReady && !conversationHasMore && conversationList.length" class="assistant-history__end">
-              已经到底了
-            </p>
           </template>
         </div>
-      </section>
+      </aside>
 
       <div
         class="assistant-splitter"
         :class="{ 'assistant-splitter--hidden': !historyExpanded }"
         role="separator"
-        aria-label="调整历史记录宽度"
+        aria-label="调整会话列表宽度"
         @pointerdown.prevent="startResizeHistoryPanel"
       >
         <span class="assistant-splitter__line" />
       </div>
 
       <section class="assistant-chat">
-        <header class="assistant-chat__header">
-          <div>
-            <h3>{{ selectedConversationTitle }}</h3>
-            <p>{{ selectedConversationSubtitle }}</p>
-          </div>
-
-          <div class="assistant-chat__header-side">
-            <span class="assistant-chat__status" :class="{ 'assistant-chat__status--active': chatLoading }">
-              {{ chatLoading ? '流式输出中' : '待命中' }}
-            </span>
-          </div>
-        </header>
-
-        <div class="assistant-capabilities">
-          <span
-            v-for="point in capabilityPoints"
-            :key="point"
-            class="assistant-capabilities__item"
-            :class="{ 'assistant-capabilities__item--active': chatLoading }"
-          >
-            {{ point }}
-          </span>
-        </div>
         <div ref="messageViewportRef" class="assistant-messages">
           <div v-if="shouldShowHistoryFallback" class="assistant-chat__fallback">
-            当前会话的历史消息接口暂时不可用，但你仍然可以继续在这个会话里追问；等接口补齐后，历史内容会自动恢复。
+            当前会话的历史消息暂时不可读，但你仍然可以继续追问；后续刷新后会自动恢复。
           </div>
 
           <div v-if="!selectedMessages.length && !chatLoading" class="assistant-empty">
             <div class="assistant-empty__halo" />
             <strong>从这里开始和 AI 协作</strong>
-            <p>你可以直接输入问题，也可以点下方快捷操作。回答支持流式输出，长内容会按 Markdown 渲染。</p>
+            <p>右侧采用更接近 DeepSeek 的阅读式布局，只保留用户气泡，AI 回复直接按正文流展示。</p>
           </div>
 
           <article
@@ -718,38 +790,51 @@ onBeforeUnmount(() => {
             class="chat-message"
             :class="`chat-message--${message.role}`"
           >
-            <div class="chat-message__avatar">
-              {{ message.role === 'assistant' ? 'AI' : message.role === 'user' ? '我' : '系统' }}
+            <div v-if="message.role === 'user'" class="chat-message__user-row">
+              <div class="chat-message__user-bubble">
+                <div class="chat-message__markdown" v-html="renderMessageMarkdown(message.content)" />
+              </div>
+              <span class="chat-message__time chat-message__time--user">{{ formatMessageTime(message.createdAt) }}</span>
             </div>
-            <div class="chat-message__bubble">
+
+            <div v-else class="chat-message__assistant-flow">
               <div v-if="shouldShowReasoningBox(message)" class="chat-message__reasoning">
                 <div class="chat-message__reasoning-head">
-                  <span class="chat-message__reasoning-dot" />
-                  <strong>{{ isStreamingMessage(message) ? '深度思考中' : '思考过程' }}</strong>
+                  <div class="chat-message__reasoning-title">
+                    <span class="chat-message__reasoning-dot" />
+                    <strong>{{ isStreamingMessage(message) ? '深度思考中' : '深度思考' }}</strong>
+                  </div>
+                  <button
+                    type="button"
+                    class="chat-message__reasoning-toggle"
+                    @click="toggleReasoningCollapse(message.id)"
+                  >
+                    {{ isReasoningCollapsed(message.id) ? '展开' : '折叠' }}
+                  </button>
                 </div>
 
-                <div
-                  v-if="message.reasoning"
-                  class="chat-message__markdown chat-message__markdown--reasoning"
-                  v-html="renderMessageMarkdown(message.reasoning)"
-                />
-                <div v-else class="chat-message__reasoning-streaming">
-                  <span>正在接收 reasoning 增量...</span>
-                  <div class="typing-indicator">
-                    <span />
-                    <span />
-                    <span />
+                <div v-if="!isReasoningCollapsed(message.id)">
+                  <div
+                    v-if="message.reasoning"
+                    class="chat-message__markdown chat-message__markdown--reasoning"
+                    v-html="renderMessageMarkdown(message.reasoning)"
+                  />
+                  <div v-else class="chat-message__streaming">
+                    <span>正在接收 reasoning 增量...</span>
+                    <div class="typing-indicator">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
                   </div>
                 </div>
               </div>
 
-              <div
-                v-if="message.content"
-                class="chat-message__markdown"
-                v-html="renderMessageMarkdown(message.content)"
-              />
-              <div v-else-if="message.role === 'assistant' && isStreamingMessage(message)" class="chat-message__streaming">
-                <span>{{ message.reasoning ? '正在生成正文内容...' : '正在建立流式输出...' }}</span>
+              <div v-if="message.content" class="chat-message__assistant-content">
+                <div class="chat-message__markdown chat-message__markdown--assistant" v-html="renderMessageMarkdown(message.content)" />
+              </div>
+              <div v-else-if="isStreamingMessage(message)" class="chat-message__streaming chat-message__streaming--plain">
+                <span>{{ message.reasoning ? '正在生成正文内容...' : '正在建立连接...' }}</span>
                 <div class="typing-indicator">
                   <span />
                   <span />
@@ -778,7 +863,7 @@ onBeforeUnmount(() => {
           <textarea
             v-model="messageInput"
             class="assistant-composer__input"
-            placeholder="输入你的问题，Enter 发送，Shift + Enter 换行"
+            placeholder="给 AI 发消息，Enter 发送，Shift + Enter 换行"
             rows="3"
             @keydown.enter.exact.prevent="sendMessage()"
           />
@@ -792,18 +877,22 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <div class="assistant-options">
-          <label class="assistant-options__group">
-            <span>模型</span>
-            <el-select v-model="selectedModel" size="small" class="assistant-options__select">
-              <el-option label="Worker" value="worker" />
-              <el-option label="Strategist" value="strategist" />
-            </el-select>
-          </label>
+        <div class="assistant-toolbar">
+          <button
+            type="button"
+            class="assistant-toolbar__pill"
+            :class="{ 'assistant-toolbar__pill--active': thinkingEnabled }"
+            @click="thinkingEnabled = !thinkingEnabled"
+          >
+            深度思考
+          </button>
 
-          <label class="assistant-options__group assistant-options__group--switch">
-            <span>深度思考</span>
-            <el-switch v-model="thinkingEnabled" inline-prompt active-text="开" inactive-text="关" />
+          <label class="assistant-toolbar__pill assistant-toolbar__pill--select">
+            <span>模型</span>
+            <select v-model="selectedModel" class="assistant-toolbar__select">
+              <option value="worker">标准</option>
+              <option value="strategist">策略</option>
+            </select>
           </label>
         </div>
       </section>
@@ -815,87 +904,84 @@ onBeforeUnmount(() => {
 .assistant-shell {
   height: 100%;
   min-height: 0;
-  max-height: 100%;
-  border-radius: 28px;
-  border: 1px solid rgba(17, 24, 39, 0.08);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
+  border-radius: 30px;
+  border: 1px solid rgba(16, 24, 40, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(247, 249, 252, 0.98)),
+    radial-gradient(circle at top right, rgba(127, 169, 255, 0.16), transparent 34%);
+  font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Segoe UI Variable Text', sans-serif;
+}
+
+.assistant-header,
+.assistant-history__toolbar,
+.assistant-actions,
+.assistant-composer,
+.assistant-toolbar {
+  background: rgba(255, 255, 255, 0.92);
 }
 
 .assistant-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  gap: 14px;
-  padding: 16px 16px 14px;
-  border-bottom: 1px solid rgba(17, 24, 39, 0.06);
-  background: rgba(255, 255, 255, 0.78);
+  gap: 16px;
+  padding: 18px 20px 16px;
+  border-bottom: 1px solid rgba(16, 24, 40, 0.06);
 }
 
-.assistant-title {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.assistant-title__badge {
-  width: 38px;
-  height: 38px;
-  border-radius: 12px;
-  background: linear-gradient(180deg, #0f73ea 0%, #1d5ec7 100%);
-  color: #fff;
+.assistant-header__eyebrow {
   display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 800;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(39, 110, 241, 0.08);
+  color: #2263cb;
+  font-size: 11px;
+  font-weight: 700;
 }
 
-.assistant-title strong,
-.assistant-title small {
+.assistant-header strong {
   display: block;
+  margin-top: 10px;
+  color: #142133;
+  font-size: 20px;
 }
 
-.assistant-title strong {
-  font-size: 17px;
-  color: #111c30;
-}
-
-.assistant-title small {
-  margin-top: 4px;
-  color: #738198;
+.assistant-header p {
+  margin: 6px 0 0;
+  color: #738197;
   font-size: 12px;
 }
 
-.assistant-header__action {
-  border: 1px solid rgba(37, 99, 235, 0.16);
-  background: #f5f9ff;
-  color: #1f63d1;
-  border-radius: 12px;
-  padding: 9px 12px;
-  font-weight: 700;
+.assistant-header__action,
+.assistant-history__toggle,
+.assistant-actions__chip,
+.assistant-composer__send,
+.assistant-toolbar__pill,
+.chat-message__reasoning-toggle {
   cursor: pointer;
-  transition:
-    transform 0.18s ease,
-    box-shadow 0.18s ease,
-    background-color 0.18s ease;
 }
 
-.assistant-header__action:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 10px 20px rgba(15, 23, 42, 0.06);
+.assistant-header__action {
+  height: 40px;
+  padding: 0 15px;
+  border: 1px solid rgba(36, 102, 220, 0.14);
+  border-radius: 14px;
+  background: #f8fbff;
+  color: #2363cb;
+  font-weight: 700;
 }
 
 .assistant-body {
-  --assistant-history-width: 220px;
-  height: 100%;
+  --assistant-history-width: 228px;
   min-height: 0;
   display: grid;
   grid-template-columns: var(--assistant-history-width) 8px minmax(0, 1fr);
 }
 
 .assistant-body--collapsed {
-  grid-template-columns: 64px 0 minmax(0, 1fr);
+  grid-template-columns: 68px 0 minmax(0, 1fr);
 }
 
 .assistant-history {
@@ -903,105 +989,82 @@ onBeforeUnmount(() => {
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  border-right: 1px solid rgba(17, 24, 39, 0.06);
-  background: rgba(249, 251, 254, 0.82);
-}
-
-.assistant-history--collapsed {
-  border-right: none;
+  border-right: 1px solid rgba(16, 24, 40, 0.05);
+  background: linear-gradient(180deg, rgba(248, 250, 253, 0.96), rgba(244, 247, 252, 0.92));
 }
 
 .assistant-history__toolbar {
   display: flex;
-  align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 12px 10px;
-}
-
-.assistant-history__toolbar strong {
-  font-size: 13px;
-  color: #3d4b62;
+  padding: 14px 12px 10px;
 }
 
 .assistant-history__toggle {
   border: none;
   background: transparent;
-  color: #6f7d92;
-  cursor: pointer;
+  color: #718097;
   font-size: 12px;
-  padding: 0;
 }
 
 .assistant-history__content {
-  display: grid;
-  gap: 9px;
-  padding: 0 8px 12px;
   min-height: 0;
   overflow-y: auto;
+  display: grid;
   align-content: start;
+  gap: 10px;
+  padding: 0 10px 14px;
 }
+
 .assistant-history__new,
 .assistant-history__item {
   width: 100%;
-  border: 1px solid rgba(17, 24, 39, 0.06);
-  background: rgba(255, 255, 255, 0.92);
-  border-radius: 16px;
-  padding: 11px 10px;
+  padding: 12px;
+  border: 1px solid rgba(16, 24, 40, 0.05);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.88);
   text-align: left;
-  cursor: pointer;
-  transition:
-    transform 0.18s ease,
-    box-shadow 0.18s ease,
-    border-color 0.18s ease,
-    background-color 0.18s ease;
-}
-
-.assistant-history__new:hover,
-.assistant-history__item:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 10px 20px rgba(15, 23, 42, 0.06);
 }
 
 .assistant-history__new span {
   display: inline-flex;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   align-items: center;
   justify-content: center;
-  border-radius: 9px;
+  border-radius: 10px;
   background: #eef4ff;
-  color: #2c69d4;
+  color: #2b69d4;
   font-size: 17px;
   font-weight: 700;
 }
 
 .assistant-history__new strong,
 .assistant-history__item strong,
-.assistant-history__item small,
-.assistant-history__new small {
+.assistant-history__new small,
+.assistant-history__item small {
   display: block;
 }
 
 .assistant-history__new strong,
 .assistant-history__item strong {
   margin-top: 8px;
-  color: #152036;
+  color: #182335;
   font-size: 12px;
   line-height: 1.45;
 }
 
 .assistant-history__new small,
-.assistant-history__item small {
-  margin-top: 6px;
-  color: #7b8799;
+.assistant-history__item small,
+.assistant-history__empty,
+.assistant-history__end {
+  color: #7b889b;
   font-size: 11px;
-  line-height: 1.4;
 }
 
 .assistant-history__item--active {
-  border-color: rgba(37, 99, 235, 0.18);
-  background: linear-gradient(180deg, #f4f8ff 0%, #edf4ff 100%);
+  border-color: rgba(36, 102, 220, 0.16);
+  background: linear-gradient(180deg, #f5f9ff, #eef5ff);
 }
 
 .assistant-history--collapsed .assistant-history__new,
@@ -1017,49 +1080,35 @@ onBeforeUnmount(() => {
   display: none;
 }
 
-.assistant-history--collapsed .assistant-history__item strong {
-  margin-top: 0;
-}
-
 .assistant-history__loading {
   display: grid;
-  gap: 9px;
-}
-
-.assistant-history__loading--more .assistant-history__loading-item {
-  height: 56px;
+  gap: 10px;
 }
 
 .assistant-history__loading-item {
-  height: 76px;
-  border-radius: 16px;
-  background: linear-gradient(
-    90deg,
-    rgba(230, 236, 244, 0.8),
-    rgba(245, 248, 252, 1),
-    rgba(230, 236, 244, 0.8)
-  );
+  height: 72px;
+  border-radius: 18px;
+  background: linear-gradient(90deg, rgba(231, 236, 244, 0.85), rgba(246, 249, 252, 1), rgba(231, 236, 244, 0.85));
   background-size: 200% 100%;
   animation: history-shimmer 1.3s linear infinite;
+}
+
+.assistant-history__loading--more .assistant-history__loading-item {
+  height: 54px;
 }
 
 .assistant-history__empty,
 .assistant-history__end {
   margin: 0;
-  padding: 6px 2px 0;
+  padding-top: 4px;
   text-align: center;
-  color: #90a0b4;
-  font-size: 12px;
 }
 
 .assistant-splitter {
-  position: relative;
-  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: col-resize;
-  touch-action: none;
 }
 
 .assistant-splitter--hidden {
@@ -1071,200 +1120,119 @@ onBeforeUnmount(() => {
   width: 3px;
   height: 56px;
   border-radius: 999px;
-  background: linear-gradient(180deg, rgba(145, 163, 188, 0.24), rgba(88, 124, 177, 0.4), rgba(145, 163, 188, 0.24));
-  transition:
-    background-color 0.18s ease,
-    transform 0.18s ease;
-}
-
-.assistant-splitter:hover .assistant-splitter__line {
-  transform: scaleX(1.18);
-  background: linear-gradient(180deg, rgba(104, 140, 194, 0.34), rgba(42, 108, 214, 0.62), rgba(104, 140, 194, 0.34));
+  background: linear-gradient(180deg, rgba(145, 163, 188, 0.22), rgba(88, 124, 177, 0.42), rgba(145, 163, 188, 0.22));
 }
 
 .assistant-chat {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto auto auto;
-}
-
-.assistant-chat__header {
-  display: flex;
-  justify-content: space-between;
-  gap: 14px;
-  align-items: flex-start;
-  padding: 16px 18px 10px;
-}
-
-.assistant-chat__header h3 {
-  margin: 0;
-  font-size: 19px;
-  line-height: 1.2;
-  letter-spacing: -0.02em;
-  color: #111c30;
-}
-
-.assistant-chat__header p {
-  margin: 6px 0 0;
-  color: #768396;
-  font-size: 12px;
-}
-
-.assistant-chat__header-side {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-}
-
-.assistant-chat__status {
-  border-radius: 999px;
-  padding: 7px 10px;
-  font-size: 11px;
-  color: #607086;
-  background: #f5f8fc;
-  border: 1px solid rgba(17, 24, 39, 0.04);
-}
-
-.assistant-chat__status--active {
-  color: #1f63d1;
-  background: #edf4ff;
-}
-
-.assistant-capabilities {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-  padding: 0 18px 10px;
-}
-
-.assistant-capabilities__item {
-  padding: 7px 11px;
-  border-radius: 999px;
-  background: #f5f8fc;
-  color: #607086;
-  font-size: 11px;
-  border: 1px solid rgba(17, 24, 39, 0.04);
-  transition: background-color 0.24s ease;
-}
-
-.assistant-capabilities__item--active {
-  background: #ecf4ff;
-  color: #1f63d1;
+  grid-template-rows: minmax(0, 1fr) auto auto auto;
 }
 
 .assistant-messages {
   min-height: 0;
   overflow-y: auto;
-  padding: 8px 18px 16px;
+  padding: 24px 28px 18px;
   display: grid;
-  gap: 12px;
+  gap: 20px;
   align-content: start;
   background:
-    linear-gradient(180deg, rgba(248, 250, 252, 0.74) 0%, rgba(255, 255, 255, 0.96) 60%),
-    radial-gradient(circle at top center, rgba(122, 169, 255, 0.08), transparent 34%);
+    linear-gradient(180deg, rgba(249, 251, 253, 0.42), rgba(255, 255, 255, 0.9) 28%, rgba(255, 255, 255, 1)),
+    radial-gradient(circle at top center, rgba(129, 171, 255, 0.1), transparent 34%);
+}
+
+.assistant-chat__fallback,
+.chat-message__reasoning {
+  border-radius: 16px;
+  border: 1px solid rgba(36, 102, 220, 0.1);
+  background: #f8fbff;
 }
 
 .assistant-chat__fallback {
-  padding: 13px 14px;
-  border-radius: 14px;
-  background: #f8fbff;
-  border: 1px solid rgba(37, 99, 235, 0.1);
+  padding: 14px 16px;
   color: #617189;
   font-size: 12px;
 }
+
 .assistant-empty {
-  min-height: 200px;
+  min-height: 260px;
   display: grid;
   place-items: center;
   align-content: center;
   justify-items: center;
   text-align: center;
   gap: 10px;
-  color: #677588;
+  color: #68778e;
 }
 
 .assistant-empty strong {
-  color: #12243e;
+  color: #162334;
 }
 
 .assistant-empty p {
   margin: 0;
   max-width: 420px;
-  line-height: 1.7;
+  line-height: 1.75;
 }
 
 .assistant-empty__halo {
-  width: 68px;
-  height: 68px;
-  border-radius: 24px;
-  background: radial-gradient(circle at center, rgba(37, 99, 235, 0.2), rgba(37, 99, 235, 0.02));
+  width: 74px;
+  height: 74px;
+  border-radius: 26px;
+  background: radial-gradient(circle at center, rgba(37, 99, 235, 0.18), rgba(37, 99, 235, 0.02));
   animation: halo-breathe 2.4s ease-in-out infinite;
 }
 
-.chat-message {
+.chat-message__user-row {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr);
-  gap: 10px;
-  align-items: start;
-  animation: message-rise 0.26s ease;
+  justify-items: end;
+  gap: 8px;
 }
 
-.chat-message--user {
-  grid-template-columns: minmax(0, 1fr) 38px;
+.chat-message__user-bubble {
+  max-width: min(90%, 760px);
+  padding: 14px 16px;
+  border-radius: 20px;
+  background: linear-gradient(180deg, #dff0ff, #d7ebff);
+  color: #173252;
+  border: 1px solid rgba(64, 138, 240, 0.18);
 }
 
-.chat-message--user .chat-message__avatar {
-  order: 2;
-  background: #eff4fb;
-  color: #2d415e;
+.chat-message__assistant-flow {
+  max-width: min(92%, 860px);
+  display: grid;
+  gap: 12px;
 }
 
-.chat-message--user .chat-message__bubble {
-  order: 1;
-  margin-left: auto;
-  background: linear-gradient(180deg, #1368dd 0%, #165bc0 100%);
-  color: #fff;
-}
-
-.chat-message__avatar {
-  width: 38px;
-  height: 38px;
-  border-radius: 12px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: #11284b;
-  color: #fff;
-  font-weight: 800;
-  font-size: 12px;
-}
-
-.chat-message__bubble {
-  max-width: min(96%, 880px);
-  padding: 13px 14px 11px;
-  border-radius: 18px;
-  background: #ffffff;
-  border: 1px solid rgba(17, 24, 39, 0.06);
-  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+.chat-message__assistant-content {
+  padding-right: 10px;
 }
 
 .chat-message__reasoning {
-  margin-bottom: 10px;
-  padding: 10px 11px;
-  border-radius: 12px;
-  background: #f5f8fe;
-  border: 1px solid rgba(90, 152, 255, 0.12);
-  color: #5d6d84;
+  padding: 14px 16px;
+  border-color: rgba(92, 122, 170, 0.14);
+  background: linear-gradient(180deg, rgba(245, 247, 251, 0.96), rgba(239, 243, 248, 0.98));
+}
+
+.chat-message__reasoning-head,
+.chat-message__streaming,
+.assistant-toolbar,
+.assistant-actions {
+  display: flex;
+  align-items: center;
 }
 
 .chat-message__reasoning-head {
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.chat-message__reasoning-title {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
-  color: #446388;
-  font-size: 12px;
 }
 
 .chat-message__reasoning-dot {
@@ -1276,26 +1244,36 @@ onBeforeUnmount(() => {
   animation: pulse-dot 1.6s ease-in-out infinite;
 }
 
-.chat-message__reasoning-streaming,
-.chat-message__streaming {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 24px;
-  color: #62738a;
-  font-size: 13px;
+.chat-message__reasoning-toggle {
+  border: none;
+  background: rgba(255, 255, 255, 0.72);
+  color: #5f728b;
+  font-size: 12px;
+  border-radius: 999px;
+  padding: 6px 10px;
 }
 
 .chat-message__markdown {
-  color: inherit;
-  font-size: 13px;
-  line-height: 1.7;
+  font-size: 15px;
+  line-height: 1.9;
   word-break: break-word;
+  color: inherit;
+}
+
+.chat-message__markdown--assistant {
+  color: #1c2b3f;
+}
+
+.chat-message__markdown--reasoning,
+.chat-message__streaming,
+.chat-message__time,
+.chat-message__time--user {
+  color: #64758c;
 }
 
 .chat-message__markdown--reasoning {
-  color: #5b6d84;
+  font-size: 13px;
+  line-height: 1.8;
 }
 
 .chat-message__markdown :deep(p) {
@@ -1306,11 +1284,11 @@ onBeforeUnmount(() => {
 .chat-message__markdown :deep(p + ul),
 .chat-message__markdown :deep(p + ol),
 .chat-message__markdown :deep(p + blockquote),
-.chat-message__markdown :deep(ul + p),
-.chat-message__markdown :deep(ol + p),
+.chat-message__markdown :deep(p + pre),
 .chat-message__markdown :deep(pre + p),
-.chat-message__markdown :deep(p + pre) {
-  margin-top: 10px;
+.chat-message__markdown :deep(ul + p),
+.chat-message__markdown :deep(ol + p) {
+  margin-top: 12px;
 }
 
 .chat-message__markdown :deep(h1),
@@ -1319,36 +1297,25 @@ onBeforeUnmount(() => {
 .chat-message__markdown :deep(h4),
 .chat-message__markdown :deep(h5),
 .chat-message__markdown :deep(h6) {
-  margin: 0 0 10px;
-  line-height: 1.35;
-  color: inherit;
+  margin: 0 0 12px;
+  line-height: 1.4;
 }
 
 .chat-message__markdown :deep(ul),
 .chat-message__markdown :deep(ol) {
   margin: 0;
-  padding-left: 20px;
-}
-
-.chat-message__markdown :deep(li + li) {
-  margin-top: 6px;
+  padding-left: 22px;
 }
 
 .chat-message__markdown :deep(blockquote) {
   margin: 0;
-  padding-left: 12px;
-  border-left: 3px solid rgba(71, 115, 179, 0.18);
-  color: inherit;
+  padding-left: 14px;
+  border-left: 3px solid rgba(73, 110, 167, 0.18);
 }
 
 .chat-message__markdown :deep(a) {
-  color: #1f63d1;
+  color: #2667d2;
   text-decoration: none;
-}
-
-.chat-message--user .chat-message__markdown :deep(a) {
-  color: #fff;
-  text-decoration: underline;
 }
 
 .chat-message__markdown :deep(code) {
@@ -1356,23 +1323,15 @@ onBeforeUnmount(() => {
   border-radius: 6px;
   background: rgba(15, 23, 42, 0.06);
   font-family: Consolas, 'Courier New', monospace;
-  font-size: 12px;
-}
-
-.chat-message--user .chat-message__markdown :deep(code) {
-  background: rgba(255, 255, 255, 0.16);
+  font-size: 13px;
 }
 
 .chat-message__markdown :deep(.md-pre) {
   margin: 0;
-  padding: 12px 13px;
-  border-radius: 12px;
-  background: #f4f7fb;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: #f5f7fb;
   overflow-x: auto;
-}
-
-.chat-message--user .chat-message__markdown :deep(.md-pre) {
-  background: rgba(255, 255, 255, 0.14);
 }
 
 .chat-message__markdown :deep(.md-pre code) {
@@ -1380,129 +1339,116 @@ onBeforeUnmount(() => {
   background: transparent;
 }
 
-.chat-message__time {
-  display: block;
-  margin-top: 10px;
-  font-size: 11px;
-  color: rgba(110, 124, 146, 0.9);
+.chat-message__streaming {
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 26px;
+  font-size: 13px;
 }
 
-.chat-message--user .chat-message__time {
-  color: rgba(255, 255, 255, 0.72);
+.chat-message__streaming--plain {
+  padding-right: 10px;
 }
+
+.chat-message__time,
+.chat-message__time--user {
+  font-size: 11px;
+}
+
 .assistant-actions {
-  display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 0 18px 12px;
+  padding: 0 22px 12px;
 }
 
 .assistant-actions__chip {
-  border: 1px solid rgba(17, 24, 39, 0.05);
+  border: 1px solid rgba(16, 24, 40, 0.05);
   background: #f8fafc;
-  color: #506076;
+  color: #536378;
   border-radius: 999px;
-  padding: 8px 11px;
-  cursor: pointer;
+  padding: 8px 12px;
   font-size: 12px;
-  transition:
-    transform 0.18s ease,
-    background-color 0.18s ease;
-}
-
-.assistant-actions__chip:hover {
-  transform: translateY(-1px);
-  background: #eef4ff;
 }
 
 .assistant-composer {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-  padding: 12px 18px 10px;
-  border-top: 1px solid rgba(17, 24, 39, 0.06);
-  background: rgba(255, 255, 255, 0.92);
+  gap: 12px;
+  padding: 12px 22px 10px;
+  border-top: 1px solid rgba(16, 24, 40, 0.05);
 }
 
 .assistant-composer__input {
   width: 100%;
   resize: none;
-  border: 1px solid rgba(17, 24, 39, 0.08);
-  border-radius: 16px;
-  padding: 13px 14px;
+  border: 1px solid rgba(16, 24, 40, 0.08);
+  border-radius: 18px;
+  padding: 14px 16px;
   outline: none;
   background: #fbfcfe;
-  transition: border-color 0.18s ease;
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 1.65;
   font-family: inherit;
-}
-
-.assistant-composer__input:focus {
-  border-color: rgba(37, 99, 235, 0.28);
 }
 
 .assistant-composer__send {
   align-self: end;
-  height: 48px;
-  min-width: 84px;
+  min-width: 88px;
+  height: 50px;
   border: none;
-  border-radius: 14px;
-  background: linear-gradient(180deg, #126ce4 0%, #1358bb 100%);
+  border-radius: 16px;
+  background: linear-gradient(180deg, #1656b8, #15469a);
   color: #fff;
   font-weight: 700;
-  cursor: pointer;
-  transition:
-    transform 0.18s ease,
-    box-shadow 0.18s ease,
-    opacity 0.18s ease;
 }
 
-.assistant-composer__send:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 14px 24px rgba(18, 108, 228, 0.26);
+.assistant-toolbar {
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 0 22px 18px;
 }
 
-.assistant-composer__send:disabled {
-  opacity: 0.52;
-  cursor: not-allowed;
-}
-
-.assistant-options {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 18px 14px;
-  background: rgba(255, 255, 255, 0.92);
-}
-
-.assistant-options__group {
-  display: flex;
+.assistant-toolbar__pill {
+  height: 38px;
+  padding: 0 14px;
+  border: 1px solid rgba(16, 24, 40, 0.06);
+  border-radius: 999px;
+  background: #f7f9fc;
+  color: #55657b;
+  font-size: 13px;
+  font-weight: 600;
+  display: inline-flex;
   align-items: center;
   gap: 8px;
-  color: #55657c;
-  font-size: 12px;
-  font-weight: 600;
 }
 
-.assistant-options__group--switch {
-  margin-left: auto;
+.assistant-toolbar__pill--active {
+  border-color: rgba(36, 102, 220, 0.16);
+  background: #edf4ff;
+  color: #225fc5;
 }
 
-.assistant-options__select {
-  width: 136px;
+.assistant-toolbar__pill--select {
+  padding-right: 10px;
+}
+
+.assistant-toolbar__select {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  outline: none;
 }
 
 .typing-indicator {
   display: flex;
-  gap: 6px;
   align-items: center;
-  min-height: 20px;
+  gap: 6px;
 }
 
 .typing-indicator span {
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
   border-radius: 999px;
   background: #86a9dd;
   animation: typing-bounce 1.2s ease-in-out infinite;
@@ -1517,66 +1463,24 @@ onBeforeUnmount(() => {
 }
 
 @keyframes typing-bounce {
-  0%,
-  80%,
-  100% {
-    transform: translateY(0);
-    opacity: 0.5;
-  }
-
-  40% {
-    transform: translateY(-4px);
-    opacity: 1;
-  }
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.5; }
+  40% { transform: translateY(-4px); opacity: 1; }
 }
 
 @keyframes pulse-dot {
-  0% {
-    box-shadow: 0 0 0 0 rgba(90, 152, 255, 0.34);
-  }
-
-  70% {
-    box-shadow: 0 0 0 8px rgba(90, 152, 255, 0);
-  }
-
-  100% {
-    box-shadow: 0 0 0 0 rgba(90, 152, 255, 0);
-  }
+  0% { box-shadow: 0 0 0 0 rgba(90, 152, 255, 0.34); }
+  70% { box-shadow: 0 0 0 8px rgba(90, 152, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(90, 152, 255, 0); }
 }
 
 @keyframes halo-breathe {
-  0%,
-  100% {
-    transform: scale(0.96);
-    opacity: 0.82;
-  }
-
-  50% {
-    transform: scale(1.06);
-    opacity: 1;
-  }
-}
-
-@keyframes message-rise {
-  from {
-    transform: translateY(8px);
-    opacity: 0;
-  }
-
-  to {
-    transform: translateY(0);
-    opacity: 1;
-  }
+  0%, 100% { transform: scale(0.96); opacity: 0.82; }
+  50% { transform: scale(1.06); opacity: 1; }
 }
 
 @keyframes history-shimmer {
-  0% {
-    background-position: 200% 0;
-  }
-
-  100% {
-    background-position: -200% 0;
-  }
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 
 @media (max-width: 960px) {
@@ -1587,7 +1491,7 @@ onBeforeUnmount(() => {
 
   .assistant-history {
     border-right: none;
-    border-bottom: 1px solid rgba(17, 24, 39, 0.06);
+    border-bottom: 1px solid rgba(16, 24, 40, 0.05);
   }
 
   .assistant-history__content {
@@ -1598,13 +1502,15 @@ onBeforeUnmount(() => {
     display: none;
   }
 
-  .assistant-chat__header,
-  .assistant-options {
-    flex-wrap: wrap;
+  .assistant-messages {
+    padding: 20px 18px 16px;
   }
 
-  .assistant-options__group--switch {
-    margin-left: 0;
+  .assistant-actions,
+  .assistant-composer,
+  .assistant-toolbar {
+    padding-left: 18px;
+    padding-right: 18px;
   }
 }
 </style>
