@@ -198,13 +198,3 @@ func schedulePlanNowToMinute() time.Time {
 func normalizeAdjustmentScope(raw string) string {
 	return NormalizeSchedulePlanAdjustmentScope(raw)
 }
-
-// ScheduleRefineState 先保留现有骨架，避免本轮“只迁 schedule_plan”时误动 refine。
-type ScheduleRefineState struct {
-	TraceID        string
-	UserID         int
-	ConversationID string
-	UserInput      string
-	Completed      bool
-	FinalSummary   string
-}

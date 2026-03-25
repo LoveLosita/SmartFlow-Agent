@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 
-import AssistantPanel from '@/components/dashboard/AssistantPanel.vue'
 import TaskQuadrantCard from '@/components/dashboard/TaskQuadrantCard.vue'
 import TodayTimeline from '@/components/dashboard/TodayTimeline.vue'
 import { completeTask, createTask, getTasks, undoCompleteTask } from '@/api/task'
@@ -23,12 +22,16 @@ const createTaskLoading = ref(false)
 const logoutLoading = ref(false)
 const createTaskDialogVisible = ref(false)
 const dashboardLayoutRef = ref<HTMLElement | null>(null)
+const dashboardMainRef = ref<HTMLElement | null>(null)
+const dashboardMainInnerRef = ref<HTMLElement | null>(null)
+const dashboardTopbarRef = ref<HTMLElement | null>(null)
+const dashboardContentRef = ref<HTMLElement | null>(null)
+const dashboardMainScale = ref(1)
 
 const tasks = ref<TaskItem[]>([])
 const todayEvents = ref<TodayEvent[]>([])
 
 const sidebarWidth = ref(78)
-const assistantWidth = ref(560)
 
 const taskForm = reactive<{
   title: string
@@ -44,19 +47,22 @@ interface SidebarItem {
   key: 'home' | 'task' | 'calendar' | 'ai'
   label: string
   short: string
-  to?: '/dashboard' | '/assistant'
+  to?: '/dashboard' | '/assistant' | '/schedule'
 }
 
 const sidebarItems: SidebarItem[] = [
   { key: 'home', label: '总览', short: '总', to: '/dashboard' },
   { key: 'task', label: '任务', short: '任' },
-  { key: 'calendar', label: '日程', short: '程' },
+  { key: 'calendar', label: '日程', short: '程', to: '/schedule' },
   { key: 'ai', label: '助手', short: 'AI', to: '/assistant' },
 ]
 
 const activeSidebarKey = computed<SidebarItem['key']>(() => {
   if (route.path.startsWith('/assistant')) {
     return 'ai'
+  }
+  if (route.path.startsWith('/schedule')) {
+    return 'calendar'
   }
   return 'home'
 })
@@ -97,7 +103,9 @@ const pageTitleDate = computed(() => formatHeaderDate(new Date()))
 const greetingName = computed(() => authStore.lastUsername || 'SmartFlow 用户')
 const layoutStyle = computed(() => ({
   '--dashboard-sidebar-width': `${sidebarWidth.value}px`,
-  '--dashboard-assistant-width': `${assistantWidth.value}px`,
+}))
+const dashboardMainScaleStyle = computed(() => ({
+  '--dashboard-main-scale': `${dashboardMainScale.value}`,
 }))
 
 const groupedTasks = computed(() => {
@@ -250,41 +258,7 @@ function clampSidebarWidth(nextWidth: number) {
   return Math.min(110, Math.max(68, nextWidth))
 }
 
-function getAssistantWidthBounds(containerWidth: number, nextSidebarWidth = sidebarWidth.value) {
-  // 1. 右侧助手区默认按“主区 / 助手区”近似二分来算，贴近用户给出的 DeepSeek 参考布局。
-  // 2. 只允许在平衡宽度附近做小范围拖拽，避免主区被挤压后卡片内容大面积隐藏。
-  // 3. 若窗口过窄，则仍保留主区最小可读宽度，优先保证左侧任务与日程信息可见。
-  const reservedWidth = nextSidebarWidth + 20 + 32
-  const availableWidth = Math.max(960, containerWidth - reservedWidth)
-  const balancedWidth = availableWidth / 2
-  const dragAllowance = Math.min(72, availableWidth * 0.08)
-  const minWidth = Math.max(440, balancedWidth - dragAllowance)
-  const maxWidth = Math.max(minWidth, Math.min(760, balancedWidth + dragAllowance))
-
-  return {
-    balancedWidth,
-    minWidth,
-    maxWidth,
-  }
-}
-
-function clampAssistantWidth(nextWidth: number, containerWidth = dashboardLayoutRef.value?.getBoundingClientRect().width ?? 1600) {
-  const { minWidth, maxWidth } = getAssistantWidthBounds(containerWidth)
-  return Math.min(maxWidth, Math.max(minWidth, nextWidth))
-}
-
-function syncAssistantWidthToBalancedSplit() {
-  const layout = dashboardLayoutRef.value
-  if (!layout || window.innerWidth <= 1380) {
-    return
-  }
-
-  const containerWidth = layout.getBoundingClientRect().width
-  const { balancedWidth } = getAssistantWidthBounds(containerWidth)
-  assistantWidth.value = clampAssistantWidth(balancedWidth, containerWidth)
-}
-
-function startResize(type: 'sidebar' | 'assistant', event: PointerEvent) {
+function startResize(type: 'sidebar', event: PointerEvent) {
   const layout = dashboardLayoutRef.value
   if (!layout || window.innerWidth <= 1380) {
     return
@@ -293,26 +267,18 @@ function startResize(type: 'sidebar' | 'assistant', event: PointerEvent) {
   const rect = layout.getBoundingClientRect()
   const startX = event.clientX
   const startSidebarWidth = sidebarWidth.value
-  const startAssistantWidth = assistantWidth.value
 
   // 1. 拖拽时先记录容器宽度和起始位置，避免每次 move 都重复读布局造成抖动。
-  // 2. 中间主区域需要保留最小宽度，防止用户把左右面板拖到挤爆内容区。
+  // 2. 主区域需要保留最小宽度，防止侧栏被拖得过宽后正文不可读。
   // 3. 结束时统一解绑事件，避免指针松开后仍残留拖拽状态。
   const handlePointerMove = (moveEvent: PointerEvent) => {
     const deltaX = moveEvent.clientX - startX
-    const splitterTotalWidth = 20
+    const splitterTotalWidth = 10
     const minMainWidth = 560
 
-    if (type === 'sidebar') {
-      const nextSidebarWidth = clampSidebarWidth(startSidebarWidth + deltaX)
-      const maxSidebarWidth = rect.width - assistantWidth.value - splitterTotalWidth - minMainWidth
-      sidebarWidth.value = Math.min(nextSidebarWidth, Math.max(68, maxSidebarWidth))
-      return
-    }
-
-    const maxAssistantWidth = rect.width - sidebarWidth.value - splitterTotalWidth - minMainWidth
-    const nextAssistantWidth = clampAssistantWidth(startAssistantWidth - deltaX, rect.width)
-    assistantWidth.value = Math.min(nextAssistantWidth, Math.max(440, maxAssistantWidth))
+    const nextSidebarWidth = clampSidebarWidth(startSidebarWidth + deltaX)
+    const maxSidebarWidth = rect.width - splitterTotalWidth - minMainWidth
+    sidebarWidth.value = Math.min(nextSidebarWidth, Math.max(68, maxSidebarWidth))
   }
 
   const stopResize = () => {
@@ -326,16 +292,64 @@ function startResize(type: 'sidebar' | 'assistant', event: PointerEvent) {
   window.addEventListener('pointerup', stopResize)
 }
 
+function syncDashboardMainScale() {
+  const main = dashboardMainRef.value
+  const inner = dashboardMainInnerRef.value
+  const topbar = dashboardTopbarRef.value
+  const content = dashboardContentRef.value
+  if (!main || !inner || !topbar || !content || window.innerWidth <= 980) {
+    dashboardMainScale.value = 1
+    return
+  }
+
+  // 1. 先回到 1:1，确保拿到未缩放状态下的真实高度。
+  // 2. 自然高度按“顶部栏高度 + 内容 scrollHeight + 栅格间距”计算，避免被 1fr 约束低估。
+  // 3. 仅在桌面端启用缩放，小屏仍走原生滚动布局。
+  dashboardMainScale.value = 1
+  window.requestAnimationFrame(() => {
+    const availableHeight = main.clientHeight
+    const gridGap = 10
+    const naturalHeight = topbar.getBoundingClientRect().height + content.scrollHeight + gridGap
+    if (!availableHeight || !naturalHeight) {
+      dashboardMainScale.value = 1
+      return
+    }
+
+    // 预留适中安全边距，优先保证底部卡片完整可见，避免再次出现裁切。
+    const nextScale = Math.min(1, (availableHeight / naturalHeight) * 0.98)
+    dashboardMainScale.value = Number(nextScale.toFixed(4))
+  })
+}
+
 onMounted(async () => {
   await loadDashboardData()
-  syncAssistantWidthToBalancedSplit()
-  window.addEventListener('resize', syncAssistantWidthToBalancedSplit)
+  await nextTick()
+  syncDashboardMainScale()
+  window.addEventListener('resize', syncDashboardMainScale)
 })
 
 onBeforeUnmount(() => {
   document.body.classList.remove('dashboard-resizing')
-  window.removeEventListener('resize', syncAssistantWidthToBalancedSplit)
+  window.removeEventListener('resize', syncDashboardMainScale)
 })
+
+watch(
+  [() => tasks.value.length, () => todayEvents.value.length, pageLoading],
+  async () => {
+    await nextTick()
+    syncDashboardMainScale()
+  },
+  { flush: 'post' },
+)
+
+watch(
+  sidebarWidth,
+  async () => {
+    await nextTick()
+    syncDashboardMainScale()
+  },
+  { flush: 'post' },
+)
 </script>
 
 <template>
@@ -368,82 +382,74 @@ onBeforeUnmount(() => {
         <span class="dashboard-splitter__line" />
       </div>
 
-      <section class="dashboard-main">
-        <header class="dashboard-topbar glass-panel">
-          <div>
-            <div class="dashboard-topbar__brandline">
-              <strong>AI 智慧日程系统</strong>
-              <span>{{ pageTitleDate }}</span>
+      <section ref="dashboardMainRef" class="dashboard-main">
+        <div ref="dashboardMainInnerRef" class="dashboard-main__scaled" :style="dashboardMainScaleStyle">
+          <header ref="dashboardTopbarRef" class="dashboard-topbar glass-panel">
+            <div>
+              <div class="dashboard-topbar__brandline">
+                <strong>AI 智慧日程系统</strong>
+                <span>{{ pageTitleDate }}</span>
+              </div>
             </div>
-          </div>
 
-          <div class="dashboard-topbar__actions">
-            <button
-              type="button"
-              class="dashboard-topbar__logout"
-              :disabled="logoutLoading"
-              @click="handleLogout"
-            >
-              {{ logoutLoading ? '退出中…' : '登出' }}
-            </button>
-            <div class="dashboard-topbar__profile">
-              <strong>{{ greetingName }}</strong>
-              <span>{{ greetingName.slice(0, 1).toUpperCase() }}</span>
+            <div class="dashboard-topbar__actions">
+              <button
+                type="button"
+                class="dashboard-topbar__logout"
+                :disabled="logoutLoading"
+                @click="handleLogout"
+              >
+                {{ logoutLoading ? '退出中…' : '登出' }}
+              </button>
+              <div class="dashboard-topbar__profile">
+                <strong>{{ greetingName }}</strong>
+                <span>{{ greetingName.slice(0, 1).toUpperCase() }}</span>
+              </div>
             </div>
-          </div>
-        </header>
+          </header>
 
-        <div class="dashboard-content page-shell">
-          <TodayTimeline :events="todayEvents" :loading="scheduleLoading || pageLoading" />
+          <div ref="dashboardContentRef" class="dashboard-content page-shell">
+            <TodayTimeline :events="todayEvents" :loading="scheduleLoading || pageLoading" />
 
-          <div class="dashboard-actions">
-            <button type="button" class="dashboard-actions__primary" @click="openCreateTaskDialog">
-              添加任务
-            </button>
-          </div>
-
-          <section class="dashboard-quadrants">
-            <TaskQuadrantCard
-              v-for="group in quadrantOrder"
-              :key="group"
-              :title="quadrantMeta[group].title"
-              :caption="quadrantMeta[group].caption"
-              :tone="quadrantMeta[group].tone"
-              :empty-text="quadrantMeta[group].emptyText"
-              :count="groupedTasks[group].length"
-              :tasks="groupedTasks[group]"
-              :loading="taskLoading || pageLoading"
-              @toggle="handleTaskToggle"
-            />
-          </section>
-
-          <section class="dashboard-import glass-panel">
-            <div class="dashboard-import__content">
-              <p class="dashboard-import__eyebrow">课程导入</p>
-              <h2>导入课表</h2>
-              <p>导入课表后，可以在安排日程时避开上课时间，后续我会继续把导入流程页接完整。</p>
-              <button type="button" class="dashboard-import__button" @click="handleCourseImportEntry">
-                开始导入
+            <div class="dashboard-actions">
+              <button type="button" class="dashboard-actions__primary" @click="openCreateTaskDialog">
+                添加任务
               </button>
             </div>
-            <div class="dashboard-import__shape">
-              <span class="dashboard-import__shape-ring" />
-              <span class="dashboard-import__shape-core" />
-            </div>
-          </section>
+
+            <section class="dashboard-quadrants">
+              <TaskQuadrantCard
+                v-for="group in quadrantOrder"
+                :key="group"
+                :title="quadrantMeta[group].title"
+                :caption="quadrantMeta[group].caption"
+                :tone="quadrantMeta[group].tone"
+                :empty-text="quadrantMeta[group].emptyText"
+                :count="groupedTasks[group].length"
+                :tasks="groupedTasks[group]"
+                :loading="taskLoading || pageLoading"
+                @toggle="handleTaskToggle"
+              />
+            </section>
+
+            <section class="dashboard-import glass-panel">
+              <div class="dashboard-import__content">
+                <p class="dashboard-import__eyebrow">课程导入</p>
+                <h2>导入课表</h2>
+                <p>导入课表后，可以在安排日程时避开上课时间，后续我会继续把导入流程页接完整。</p>
+                <button type="button" class="dashboard-import__button" @click="handleCourseImportEntry">
+                  开始导入
+                </button>
+              </div>
+              <div class="dashboard-import__shape">
+                <span class="dashboard-import__shape-ring" />
+                <span class="dashboard-import__shape-core" />
+              </div>
+            </section>
+          </div>
         </div>
       </section>
 
-      <div
-        class="dashboard-splitter"
-        role="separator"
-        aria-label="调整 AI 助手宽度"
-        @pointerdown.prevent="startResize('assistant', $event)"
-      >
-        <span class="dashboard-splitter__line" />
-      </div>
-
-      <AssistantPanel class="dashboard-assistant" />
     </div>
 
     <el-dialog
@@ -494,15 +500,12 @@ onBeforeUnmount(() => {
 
 .dashboard-layout {
   --dashboard-sidebar-width: 78px;
-  --dashboard-assistant-width: 460px;
   height: calc(100vh - 20px);
   display: grid;
   grid-template-columns:
     var(--dashboard-sidebar-width)
     10px
-    minmax(0, 1fr)
-    10px
-    var(--dashboard-assistant-width);
+    minmax(0, 1fr);
   gap: 8px;
   align-items: stretch;
 }
@@ -598,10 +601,20 @@ onBeforeUnmount(() => {
 .dashboard-main {
   min-width: 0;
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 10px;
   overflow: hidden;
+}
+
+.dashboard-main__scaled {
+  --dashboard-main-scale: 1;
+  min-width: 0;
+  min-height: 0;
+  width: calc(100% / var(--dashboard-main-scale));
+  height: calc(100% / var(--dashboard-main-scale));
+  display: grid;
+  grid-template-rows: auto auto;
+  gap: 10px;
+  transform: scale(var(--dashboard-main-scale));
+  transform-origin: top left;
 }
 
 .dashboard-topbar {
@@ -674,7 +687,7 @@ onBeforeUnmount(() => {
   min-width: 0;
   display: grid;
   gap: 14px;
-  overflow-y: auto;
+  overflow-y: hidden;
   overflow-x: hidden;
   padding-right: 0;
   align-content: start;
@@ -720,6 +733,7 @@ onBeforeUnmount(() => {
   position: relative;
   z-index: 1;
   max-width: 460px;
+  padding-bottom: 22px;
 }
 
 .dashboard-import__eyebrow {
@@ -785,25 +799,12 @@ onBeforeUnmount(() => {
   bottom: 2px;
 }
 
-.dashboard-assistant {
-  min-width: 0;
-  min-height: 0;
-  height: 100%;
-  align-self: stretch;
-}
-
 .dashboard-dialog :deep(.el-dialog) {
   border-radius: 24px;
 }
 
 .dashboard-dialog__select {
   width: 100%;
-}
-
-@media (max-width: 1640px) {
-  .dashboard-layout {
-    --dashboard-assistant-width: 520px;
-  }
 }
 
 @media (max-width: 1380px) {
@@ -814,11 +815,6 @@ onBeforeUnmount(() => {
 
   .dashboard-splitter {
     display: none;
-  }
-
-  .dashboard-assistant {
-    grid-column: 2;
-    height: auto;
   }
 }
 
@@ -840,9 +836,18 @@ onBeforeUnmount(() => {
     justify-content: center;
   }
 
-  .dashboard-main,
-  .dashboard-assistant {
+  .dashboard-main {
     grid-column: auto;
+  }
+
+  .dashboard-main__scaled {
+    width: 100%;
+    height: 100%;
+    transform: none;
+  }
+
+  .dashboard-content {
+    overflow-y: auto;
   }
 
   .dashboard-quadrants {

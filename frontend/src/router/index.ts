@@ -4,6 +4,7 @@ import { useAuthStore } from '@/stores/auth'
 import AuthView from '@/views/AuthView.vue'
 import AssistantView from '@/views/AssistantView.vue'
 import DashboardView from '@/views/DashboardView.vue'
+import ScheduleView from '@/views/ScheduleView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -32,6 +33,14 @@ const router = createRouter({
       path: '/assistant',
       name: 'assistant',
       component: AssistantView,
+      meta: {
+        requiresAuth: true,
+      },
+    },
+    {
+      path: '/schedule',
+      name: 'schedule',
+      component: ScheduleView,
       meta: {
         requiresAuth: true,
       },

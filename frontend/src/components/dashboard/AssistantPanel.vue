@@ -44,6 +44,12 @@ interface StreamEventPayload {
 
 type ModelType = 'worker' | 'strategist'
 
+interface ConversationGroup {
+  key: string
+  label: string
+  items: ConversationListItem[]
+}
+
 const props = withDefaults(
   defineProps<{
     initialHistoryWidth?: number
@@ -97,6 +103,8 @@ const MODEL_PREFERENCE_STORAGE_KEY = 'smartflow.assistant.model.byConversation.v
 let messageScrollRaf = 0
 let reasoningTicker = 0
 const reasoningDisplayNow = ref(Date.now())
+const shouldAutoFollowMessages = ref(true)
+const messageBottomTolerancePx = 6
 
 const isStandaloneMode = computed(() => props.viewMode === 'standalone')
 
@@ -119,6 +127,59 @@ const selectedMessages = computed(() => {
     return []
   }
   return conversationMessagesMap[selectedConversationId.value] ?? []
+})
+
+function resolveConversationGroupLabel(timeText?: string | null) {
+  if (!timeText) {
+    return '更早'
+  }
+
+  const messageDate = new Date(timeText)
+  if (Number.isNaN(messageDate.getTime())) {
+    return '更早'
+  }
+
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const targetDay = new Date(messageDate.getFullYear(), messageDate.getMonth(), messageDate.getDate())
+  const diffDays = Math.floor((today.getTime() - targetDay.getTime()) / (24 * 60 * 60 * 1000))
+
+  if (diffDays <= 0) {
+    return '今天'
+  }
+  if (diffDays < 7) {
+    return '7 天内'
+  }
+  if (diffDays < 30) {
+    return '30 天内'
+  }
+
+  return `${messageDate.getFullYear()}-${String(messageDate.getMonth() + 1).padStart(2, '0')}`
+}
+
+const groupedConversationList = computed<ConversationGroup[]>(() => {
+  const orderedGroups: ConversationGroup[] = []
+  const groupMap = new Map<string, ConversationGroup>()
+
+  for (const item of conversationList.value) {
+    const label = resolveConversationGroupLabel(item.last_message_at || item.created_at)
+    const key = label
+    const existed = groupMap.get(key)
+    if (existed) {
+      existed.items.push(item)
+      continue
+    }
+
+    const nextGroup: ConversationGroup = {
+      key,
+      label,
+      items: [item],
+    }
+    groupMap.set(key, nextGroup)
+    orderedGroups.push(nextGroup)
+  }
+
+  return orderedGroups
 })
 
 const selectedConversationTitle = computed(() => {
@@ -415,8 +476,10 @@ function markReasoningStart(message: AssistantMessage) {
     return
   }
 
-  const parsedCreatedAt = Date.parse(message.createdAt)
-  reasoningStartedAtMap[message.id] = Number.isFinite(parsedCreatedAt) ? parsedCreatedAt : Date.now()
+  // 1. 计时起点绑定到“首个思考 token 到达前端”的瞬间，而不是消息发送时间。
+  // 2. 这样可避免网络排队/后端排队时间被错误计入“已思考用时”。
+  // 3. 只在首次命中时写入，后续增量不会重复覆盖起点。
+  reasoningStartedAtMap[message.id] = Date.now()
 }
 
 function markReasoningFinished(message: AssistantMessage) {
@@ -470,12 +533,58 @@ function shouldShowAnsweringIndicator(message: AssistantMessage) {
   return isStreamingMessage(message) && !isThinkingMessage(message) && !message.content.trim()
 }
 
-function scheduleScrollMessagesToBottom(smooth = false) {
+function isMessageViewportAtBottom(viewport: HTMLElement) {
+  return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= messageBottomTolerancePx
+}
+
+function stopMessageAutoFollow() {
+  shouldAutoFollowMessages.value = false
+  if (messageScrollRaf) {
+    cancelAnimationFrame(messageScrollRaf)
+    messageScrollRaf = 0
+  }
+}
+
+function handleMessageViewportWheel(event: WheelEvent) {
+  if (event.deltaY < 0) {
+    // 1. 用户一旦尝试向上滚动，立即关闭自动跟随，优先保证人工浏览体验。
+    // 2. 这里不依赖是否真的滚动成功，避免 SSE 高频刷新把用户拉回底部。
+    // 3. 恢复自动跟随交给 handleMessageViewportScroll 在“回到底部”时统一处理。
+    stopMessageAutoFollow()
+  }
+}
+
+function handleMessageViewportScroll(event: Event) {
+  const viewport = event.target as HTMLElement | null
+  if (!viewport) {
+    return
+  }
+
+  // 1. 若滚动到底部（最后一行完整露出），恢复自动跟随。
+  // 2. 只要离底部有距离，就维持“手动阅读模式”，防止流式输出打断阅读。
+  // 3. 该状态会影响后续 scheduleScrollMessagesToBottom，形成可控的跟随策略。
+  shouldAutoFollowMessages.value = isMessageViewportAtBottom(viewport)
+}
+
+function scheduleScrollMessagesToBottom(smooth = false, force = false) {
+  if (!force && !shouldAutoFollowMessages.value) {
+    return
+  }
+
+  if (force) {
+    shouldAutoFollowMessages.value = true
+  }
+
   if (messageScrollRaf) {
     cancelAnimationFrame(messageScrollRaf)
   }
 
   messageScrollRaf = window.requestAnimationFrame(() => {
+    if (!force && !shouldAutoFollowMessages.value) {
+      messageScrollRaf = 0
+      return
+    }
+
     const viewport = messageViewportRef.value
     if (!viewport) {
       messageScrollRaf = 0
@@ -627,13 +736,14 @@ async function selectConversation(conversationId: string) {
   selectedConversationId.value = conversationId
   applyPreferredModelForConversation(conversationId)
   await Promise.allSettled([loadConversationMessages(conversationId), ensureConversationMeta(conversationId)])
-  scheduleScrollMessagesToBottom(false)
+  scheduleScrollMessagesToBottom(false, true)
 }
 
 function startNewConversation() {
   selectedConversationId.value = ''
   messageInput.value = ''
   activeStreamingMessageId.value = ''
+  shouldAutoFollowMessages.value = true
 }
 
 // fetchChatStream 负责以 fetch 方式发起聊天请求，并处理一次 refresh token 自动重试。
@@ -803,7 +913,7 @@ async function sendMessage(preset?: string) {
 
   messageInput.value = ''
   prependConversationPreview(draftConversationId, text, now)
-  scheduleScrollMessagesToBottom(false)
+  scheduleScrollMessagesToBottom(false, true)
 
   try {
     const response = await fetchChatStream({
@@ -910,7 +1020,6 @@ onBeforeUnmount(() => {
         <strong>{{ selectedConversationTitle }}</strong>
         <p>{{ selectedConversationSubtitle }}</p>
       </div>
-      <button type="button" class="assistant-header__action" @click="startNewConversation">新对话</button>
     </header>
 
     <div
@@ -921,41 +1030,75 @@ onBeforeUnmount(() => {
         'assistant-body--standalone': isStandaloneMode,
       }"
       :style="assistantBodyStyle"
-    >
-      <aside class="assistant-history" :class="{ 'assistant-history--collapsed': !historyExpanded }">
-        <div class="assistant-history__toolbar">
-          <strong v-if="historyExpanded">会话</strong>
-          <button type="button" class="assistant-history__toggle" @click="toggleHistoryPanel">
-            {{ historyExpanded ? '收起' : '展开' }}
-          </button>
-        </div>
-
-        <div class="assistant-history__content" @scroll="handleHistoryScroll">
-          <button type="button" class="assistant-history__new" @click="startNewConversation">
-            <span>+</span>
-            <strong>{{ historyExpanded ? '新建会话' : '新' }}</strong>
-            <small v-if="historyExpanded">从空白上下文开始</small>
-          </button>
-
-          <div v-if="conversationLoading && !conversationListReady" class="assistant-history__loading">
-            <div v-for="index in 4" :key="index" class="assistant-history__loading-item" />
+      >
+        <aside class="assistant-history" :class="{ 'assistant-history--collapsed': !historyExpanded }">
+          <div class="assistant-history__toolbar">
+            <div v-if="historyExpanded" class="assistant-history__brand">
+              <span class="assistant-history__brand-icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M3.09961 2.34961H12.9004C13.3146 2.34961 13.6504 2.6854 13.6504 3.09961V12.9004C13.6504 13.3146 13.3146 13.6504 12.9004 13.6504H3.09961C2.6854 13.6504 2.34961 13.3146 2.34961 12.9004V3.09961C2.34961 2.6854 2.6854 2.34961 3.09961 2.34961Z" fill="currentColor" />
+                  <path d="M4.7998 5.34961H11.2002V6.65039H4.7998V5.34961ZM4.7998 7.34961H9.2998V8.65039H4.7998V7.34961ZM4.7998 9.34961H11.2002V10.6504H4.7998V9.34961Z" fill="white" />
+                </svg>
+              </span>
+              <strong>对话历史</strong>
+            </div>
+            <button
+              type="button"
+              class="assistant-history__toggle"
+              :aria-label="historyExpanded ? '收起历史会话' : '展开历史会话'"
+              @click="toggleHistoryPanel"
+            >
+              <svg
+                class="assistant-history__toggle-icon"
+                :class="{ 'assistant-history__toggle-icon--collapsed': !historyExpanded }"
+                width="14"
+                height="14"
+                viewBox="0 0 14 14"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+                aria-hidden="true"
+              >
+                <path d="M8.5 2.15137L8.07617 2.57617L5.34863 5.30273C5.09294 5.55843 4.86618 5.78438 4.70215 5.98828C4.53117 6.20088 4.38244 6.44405 4.33398 6.75C4.30778 6.91565 4.30778 7.08435 4.33398 7.25C4.38244 7.55595 4.53117 7.79912 4.70215 8.01172C4.86618 8.21561 5.09294 8.44157 5.34863 8.69727L8.07617 11.4238L8.5 11.8486L9.34863 11L8.92383 10.5762L6.19727 7.84863C5.92268 7.57405 5.75151 7.40124 5.6377 7.25977C5.53096 7.12709 5.52187 7.07728 5.51953 7.0625C5.51297 7.02105 5.51297 6.97895 5.51953 6.9375C5.52187 6.92272 5.53096 6.87291 5.6377 6.74023C5.75152 6.59876 5.92268 6.42595 6.19727 6.15137L8.92383 3.42383L9.34863 3L8.5 2.15137Z" fill="currentColor" />
+              </svg>
+            </button>
           </div>
 
-          <template v-else>
-            <button
-              v-for="item in conversationList"
-              :key="item.conversation_id"
-              type="button"
-              class="assistant-history__item"
-              :class="{ 'assistant-history__item--active': item.conversation_id === selectedConversationId }"
-              @click="selectConversation(item.conversation_id)"
-            >
-              <strong>{{ item.has_title && item.title ? item.title : '未命名会话' }}</strong>
-              <small v-if="historyExpanded">{{ formatConversationTime(item.last_message_at || item.created_at) }}</small>
+          <div class="assistant-history__content" @scroll="handleHistoryScroll">
+            <button type="button" class="assistant-history__new" @click="startNewConversation">
+              <span class="assistant-history__new-icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M8 0.599609C3.91309 0.599609 0.599609 3.91309 0.599609 8C0.599609 9.13376 0.855461 10.2098 1.3125 11.1719L1.5918 11.7588L2.76562 11.2012L2.48633 10.6143C2.11034 9.82278 1.90039 8.93675 1.90039 8C1.90039 4.63106 4.63106 1.90039 8 1.90039C11.3689 1.90039 14.0996 4.63106 14.0996 8C14.0996 11.3689 11.3689 14.0996 8 14.0996C7.31041 14.0996 6.80528 14.0514 6.35742 13.9277C5.91623 13.8059 5.49768 13.6021 4.99707 13.2529C4.26492 12.7422 3.21611 12.5616 2.35156 13.1074L2.33789 13.1162L2.32422 13.126L1.58789 13.6436L2.01953 14.9297L3.0459 14.207C3.36351 14.0065 3.83838 14.0294 4.25293 14.3184C4.84547 14.7317 5.39743 15.011 6.01172 15.1807C6.61947 15.3485 7.25549 15.4004 8 15.4004C12.0869 15.4004 15.4004 12.0869 15.4004 8C15.4004 3.91309 12.0869 0.599609 8 0.599609ZM7.34473 4.93945V7.34961H4.93945V8.65039H7.34473V11.0605H8.64551V8.65039H11.0605V7.34961H8.64551V4.93945H7.34473Z" fill="currentColor" />
+                </svg>
+              </span>
+              <span v-if="historyExpanded" class="assistant-history__new-text">开启新对话</span>
             </button>
 
-            <p v-if="!conversationList.length" class="assistant-history__empty">暂无历史会话</p>
-            <p v-else-if="!conversationHasMore && !conversationLoadingMore" class="assistant-history__end">已经到底了</p>
+            <div v-if="conversationLoading && !conversationListReady" class="assistant-history__loading">
+              <div v-for="index in 4" :key="index" class="assistant-history__loading-item" />
+            </div>
+
+            <template v-else>
+              <div v-for="group in groupedConversationList" :key="group.key" class="assistant-history__group">
+                <p v-if="historyExpanded" class="assistant-history__group-title">{{ group.label }}</p>
+                <button
+                  v-for="item in group.items"
+                  :key="item.conversation_id"
+                  type="button"
+                  class="assistant-history__item"
+                  :class="{ 'assistant-history__item--active': item.conversation_id === selectedConversationId }"
+                  @click="selectConversation(item.conversation_id)"
+                >
+                  <span class="assistant-history__item-title">
+                    {{ item.has_title && item.title ? item.title : '未命名会话' }}
+                  </span>
+                  <small v-if="historyExpanded" class="assistant-history__item-time">
+                    {{ formatConversationTime(item.last_message_at || item.created_at) }}
+                  </small>
+                </button>
+              </div>
+
+              <p v-if="!conversationList.length" class="assistant-history__empty">暂无历史会话</p>
+              <p v-else-if="!conversationHasMore && !conversationLoadingMore" class="assistant-history__end">已经到底了</p>
 
             <div v-if="conversationLoadingMore" class="assistant-history__loading assistant-history__loading--more">
               <div v-for="index in 2" :key="index" class="assistant-history__loading-item" />
@@ -975,7 +1118,12 @@ onBeforeUnmount(() => {
       </div>
 
       <section class="assistant-chat">
-        <div ref="messageViewportRef" class="assistant-messages">
+        <div
+          ref="messageViewportRef"
+          class="assistant-messages"
+          @scroll.passive="handleMessageViewportScroll"
+          @wheel.passive="handleMessageViewportWheel"
+        >
           <div v-if="shouldShowHistoryFallback" class="assistant-chat__fallback">
             当前会话的历史消息暂时不可读，但你仍然可以继续追问；后续刷新后会自动恢复。
           </div>
@@ -1023,7 +1171,7 @@ onBeforeUnmount(() => {
                         />
                       </svg>
                     </span>
-                    <strong>{{ getReasoningStatusLabel(message) }}</strong>
+                    <span class="chat-message__reasoning-status">{{ getReasoningStatusLabel(message) }}</span>
                   </div>
                   <button
                     type="button"
@@ -1031,11 +1179,22 @@ onBeforeUnmount(() => {
                     :aria-label="isReasoningCollapsed(message.id) ? '展开深度思考' : '折叠深度思考'"
                     @click="toggleReasoningCollapse(message.id)"
                   >
-                    <span
-                      class="chat-message__reasoning-chevron"
-                      :class="{ 'chat-message__reasoning-chevron--collapsed': isReasoningCollapsed(message.id) }"
-                    >
-                      ⌄
+                    <span class="chat-message__reasoning-chevron">
+                      <svg
+                        class="chat-message__reasoning-chevron-icon"
+                        :class="{ 'chat-message__reasoning-chevron-icon--expanded': !isReasoningCollapsed(message.id) }"
+                        width="14"
+                        height="14"
+                        viewBox="0 0 14 14"
+                        fill="none"
+                        xmlns="http://www.w3.org/2000/svg"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M5.5 2.15137L5.92383 2.57617L8.65137 5.30273C8.90706 5.55843 9.13382 5.78438 9.29785 5.98828C9.46883 6.20088 9.61756 6.44405 9.66602 6.75C9.69222 6.91565 9.69222 7.08435 9.66602 7.25C9.61756 7.55595 9.46883 7.79912 9.29785 8.01172C9.13382 8.21561 8.90706 8.44157 8.65137 8.69727L5.92383 11.4238L5.5 11.8486L4.65137 11L5.07617 10.5762L7.80273 7.84863C8.07732 7.57405 8.24849 7.40124 8.3623 7.25977C8.46904 7.12709 8.47813 7.07728 8.48047 7.0625C8.48703 7.02105 8.48703 6.97895 8.48047 6.9375C8.47813 6.92272 8.46904 6.87291 8.3623 6.74023C8.24848 6.59876 8.07732 6.42595 7.80273 6.15137L5.07617 3.42383L4.65137 3L5.5 2.15137Z"
+                          fill="currentColor"
+                        />
+                      </svg>
                     </span>
                   </button>
                 </div>
@@ -1084,47 +1243,86 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <div class="assistant-composer">
-          <textarea
-            v-model="messageInput"
-            class="assistant-composer__input"
-            placeholder="给 AI 发消息，Enter 发送，Shift + Enter 换行"
-            rows="3"
-            @keydown.enter.exact.prevent="sendMessage()"
-          />
-          <button
-            type="button"
-            class="assistant-composer__send"
-            :disabled="chatLoading || !messageInput.trim()"
-            @click="sendMessage()"
-          >
-            发送
-          </button>
-        </div>
+        <div class="_9a2f8e4 assistant-composer-ds">
+          <div class="aaff8b8f">
+            <div class="_77cefa5 _9996a53">
+              <div class="_020ab5b">
+                <div class="_24fad49">
+                  <textarea
+                    v-model="messageInput"
+                    class="_27c9245 ds-scroll-area ds-scroll-area--show-on-focus-within d96f2d2a"
+                    placeholder="给 DeepSeek 发送消息 "
+                    rows="2"
+                    @keydown.enter.exact.prevent="sendMessage()"
+                  />
+                  <div class="b13855df" />
+                </div>
 
-        <div class="assistant-toolbar">
-          <button
-            type="button"
-            class="assistant-toolbar__pill"
-            :class="{ 'assistant-toolbar__pill--active': thinkingEnabled }"
-            @click="thinkingEnabled = !thinkingEnabled"
-          >
-            深度思考
-          </button>
+                <div class="ec4f5d61">
+                  <button
+                    type="button"
+                    class="ds-atom-button f79352dc ds-toggle-button ds-toggle-button--md"
+                    :class="{ 'ds-toggle-button--selected': thinkingEnabled }"
+                    @click="thinkingEnabled = !thinkingEnabled"
+                  >
+                    <div class="ds-icon ds-atom-button__icon">
+                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M7.06428 5.93342C7.6876 5.93342 8.19304 6.43904 8.19319 7.06233C8.19319 7.68573 7.68769 8.19123 7.06428 8.19123C6.44096 8.19113 5.93537 7.68567 5.93537 7.06233C5.93552 6.43911 6.44105 5.93353 7.06428 5.93342Z" fill="currentColor" />
+                        <path fill-rule="evenodd" clip-rule="evenodd" d="M8.68147 0.963693C10.1168 0.447019 11.6266 0.374829 12.5633 1.31135C13.5 2.24805 13.4276 3.75776 12.911 5.19319C12.7126 5.74431 12.4385 6.31796 12.0965 6.89729C12.4969 7.54638 12.8141 8.19018 13.036 8.80647C13.5527 10.2419 13.625 11.7516 12.6883 12.6883C11.7516 13.625 10.2419 13.5527 8.80647 13.036C8.19019 12.8141 7.54638 12.4969 6.89729 12.0965C6.31794 12.4386 5.74432 12.7125 5.19319 12.911C3.75774 13.4276 2.24807 13.5 1.31135 12.5633C0.374829 11.6266 0.447019 10.1168 0.963693 8.68147C1.17182 8.10338 1.46318 7.50063 1.82893 6.8924C1.52179 6.35711 1.27232 5.82825 1.08869 5.31819C0.572038 3.88278 0.499683 2.37306 1.43635 1.43635C2.37304 0.499655 3.88277 0.572044 5.31819 1.08869C5.82825 1.27232 6.35712 1.5218 6.8924 1.82893C7.50063 1.46318 8.10338 1.17181 8.68147 0.963693ZM11.3572 8.01154C10.9083 8.62253 10.3901 9.22873 9.8094 9.8094C9.22874 10.3901 8.62252 10.9083 8.01154 11.3572C8.42567 11.5841 8.82867 11.7688 9.21272 11.9071C10.5455 12.3868 11.4246 12.2547 11.8397 11.8397C12.2547 11.4246 12.3869 10.5456 11.9071 9.21272C11.7688 8.82866 11.5841 8.42568 11.3572 8.01154ZM2.56526 8.02912C2.3734 8.39322 2.21492 8.74796 2.0926 9.08772C1.61288 10.4204 1.74509 11.2995 2.15998 11.7147C2.57502 12.1297 3.45412 12.2618 4.78694 11.7821C5.11053 11.6656 5.44783 11.5164 5.79377 11.3367C5.24897 10.9223 4.70919 10.4533 4.19026 9.9344C3.57575 9.31987 3.03166 8.67633 2.56526 8.02912ZM6.90705 3.2469C6.24062 3.70479 5.56457 4.26321 4.91389 4.91389C4.26322 5.56456 3.70479 6.24063 3.2469 6.90705C3.72671 7.63325 4.32774 8.37459 5.03889 9.08576C5.6494 9.69627 6.2818 10.2265 6.90803 10.6678C7.59365 10.2025 8.29077 9.63076 8.96076 8.96076C9.63077 8.29075 10.2025 7.59366 10.6678 6.90803C10.2265 6.2818 9.69628 5.6494 9.08576 5.03889C8.37459 4.32773 7.63325 3.72672 6.90705 3.2469ZM11.7147 2.15998C11.2995 1.74509 10.4204 1.61288 9.08772 2.0926C8.74832 2.21479 8.39379 2.37271 8.0301 2.56428C8.67725 3.03065 9.31992 3.5758 9.9344 4.19026C10.4533 4.7092 10.9223 5.24896 11.3367 5.79377C11.5164 5.44785 11.6656 5.11052 11.7821 4.78694C12.2618 3.45416 12.1297 2.57502 11.7147 2.15998ZM4.91194 2.2176C3.57918 1.73788 2.70001 1.86995 2.28498 2.28498C1.86998 2.70003 1.73788 3.5792 2.2176 4.91194C2.31706 5.18822 2.44109 5.47427 2.58674 5.7674C3.01928 5.1887 3.51471 4.6158 4.06526 4.06526C4.61581 3.5147 5.18869 3.01928 5.7674 2.58674C5.47428 2.4411 5.18821 2.31706 4.91194 2.2176Z" fill="currentColor" />
+                      </svg>
+                    </div>
+                    <span><span class="_6dbc175">深度思考</span></span>
+                  </button>
 
-          <div class="assistant-toolbar__pill assistant-toolbar__pill--select">
-            <span class="assistant-toolbar__select-label">模型</span>
-            <el-select
-              v-model="selectedModel"
-              class="assistant-toolbar__select-box"
-              size="small"
-              popper-class="assistant-model-select-panel"
-              placement="top-start"
-              :teleported="true"
-            >
-              <el-option value="worker" label="标准" />
-              <el-option value="strategist" label="策略" />
-            </el-select>
+                  <div class="assistant-toolbar__pill assistant-toolbar__pill--select assistant-toolbar__pill--ds-model">
+                    <span class="assistant-toolbar__select-label">模型</span>
+                    <el-select
+                      v-model="selectedModel"
+                      class="assistant-toolbar__select-box"
+                      size="small"
+                      popper-class="assistant-model-select-panel"
+                      placement="top-start"
+                      :teleported="true"
+                    >
+                      <el-option value="worker" label="标准" />
+                      <el-option value="strategist" label="策略" />
+                    </el-select>
+                  </div>
+
+                  <label class="f02f0e25 ds-icon-button ds-icon-button--l ds-icon-button--sizing-container" role="button" aria-disabled="false">
+                    <div class="ds-icon-button__hover-bg" />
+                    <div class="ds-icon">
+                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M5.5498 9.75V5H6.9502V9.75C6.9502 10.3299 7.4201 10.7998 8 10.7998C8.5799 10.7998 9.0498 10.3299 9.0498 9.75V4.5C9.0498 2.9536 7.7964 1.7002 6.25 1.7002C4.7036 1.7002 3.4502 2.9536 3.4502 4.5V9.75C3.4502 12.2629 5.4871 14.2998 8 14.2998C10.5129 14.2998 12.5498 12.2629 12.5498 9.75V4H13.9502V9.75C13.9502 13.0361 11.2861 15.7002 8 15.7002C4.71391 15.7002 2.0498 13.0361 2.0498 9.75V4.5C2.04981 2.1804 3.9304 0.299806 6.25 0.299805C8.5696 0.299805 10.4502 2.1804 10.4502 4.5V9.75C10.4502 11.1031 9.3531 12.2002 8 12.2002C6.6469 12.2002 5.5498 11.1031 5.5498 9.75Z" fill="currentColor" />
+                      </svg>
+                    </div>
+                    <input
+                      type="file"
+                      multiple
+                      accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.md,.csv,.json,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.js,.ts,.tsx,.go,.py,.java,.c,.cpp,.h,.html,.css,.yaml,.yml,.log"
+                      style="display: none"
+                    >
+                  </label>
+
+                  <button
+                    type="button"
+                    class="_7436101 bcc55ca1 ds-icon-button ds-icon-button--l ds-icon-button--sizing-container"
+                    :class="{ 'ds-icon-button--disabled': chatLoading || !messageInput.trim() }"
+                    :disabled="chatLoading || !messageInput.trim()"
+                    :aria-disabled="chatLoading || !messageInput.trim()"
+                    @click="sendMessage()"
+                  >
+                    <div class="ds-icon-button__hover-bg" />
+                    <div class="ds-icon">
+                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M8.3125 0.981587C8.66767 1.0545 8.97902 1.20558 9.2627 1.43374C9.48724 1.61438 9.73029 1.85933 9.97949 2.10854L14.707 6.83608L13.293 8.25014L9 3.95717V15.0431H7V3.95717L2.70703 8.25014L1.29297 6.83608L6.02051 2.10854C6.26971 1.85933 6.51277 1.61438 6.7373 1.43374C6.97662 1.24126 7.28445 1.04542 7.6875 0.981587C7.8973 0.94841 8.1031 0.956564 8.3125 0.981587Z" fill="currentColor" />
+                      </svg>
+                    </div>
+                    <div class="ds-focus-ring" style="--ds-focus-ring-offset: -2px;" />
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -1157,8 +1355,7 @@ onBeforeUnmount(() => {
 .assistant-shell--standalone .assistant-header,
 .assistant-shell--standalone .assistant-history__toolbar,
 .assistant-shell--standalone .assistant-actions,
-.assistant-shell--standalone .assistant-composer,
-.assistant-shell--standalone .assistant-toolbar {
+.assistant-shell--standalone .assistant-composer-ds {
   background: #ffffff;
 }
 
@@ -1185,15 +1382,11 @@ onBeforeUnmount(() => {
 .assistant-header,
 .assistant-history__toolbar,
 .assistant-actions,
-.assistant-composer,
-.assistant-toolbar {
+.assistant-composer-ds {
   background: rgba(255, 255, 255, 0.92);
 }
 
 .assistant-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
   padding: 18px 20px 16px;
   border-bottom: 1px solid rgba(16, 24, 40, 0.06);
 }
@@ -1221,23 +1414,11 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
-.assistant-header__action,
 .assistant-history__toggle,
 .assistant-actions__chip,
-.assistant-composer__send,
 .assistant-toolbar__pill,
 .chat-message__reasoning-toggle {
   cursor: pointer;
-}
-
-.assistant-header__action {
-  height: 40px;
-  padding: 0 15px;
-  border: 1px solid rgba(36, 102, 220, 0.14);
-  border-radius: 14px;
-  background: #f8fbff;
-  color: #2363cb;
-  font-weight: 700;
 }
 
 .assistant-body {
@@ -1265,21 +1446,67 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   border-right: 1px solid rgba(16, 24, 40, 0.05);
-  background: linear-gradient(180deg, rgba(248, 250, 253, 0.96), rgba(244, 247, 252, 0.92));
+  background: linear-gradient(180deg, #f8f9fc 0%, #f5f7fb 100%);
 }
 
 .assistant-history__toolbar {
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  padding: 14px 12px 10px;
+  padding: 12px;
+  align-items: center;
+}
+
+.assistant-history__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.assistant-history__brand-icon {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #355fd5;
+}
+
+.assistant-history__brand strong {
+  color: #1f2a3d;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .assistant-history__toggle {
-  border: none;
-  background: transparent;
-  color: #718097;
-  font-size: 12px;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 10px;
+  background: #ffffff;
+  color: #667085;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.assistant-history__toggle:hover {
+  border-color: rgba(54, 96, 210, 0.35);
+  background: #edf2ff;
+  color: #355fd5;
+}
+
+.assistant-history__toggle-icon {
+  width: 14px;
+  height: 14px;
+  display: block;
+  transition: transform 0.16s ease;
+}
+
+.assistant-history__toggle-icon--collapsed {
+  transform: rotate(180deg);
 }
 
 .assistant-history__content {
@@ -1287,93 +1514,168 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   display: grid;
   align-content: start;
-  gap: 10px;
-  padding: 0 10px 14px;
+  gap: 12px;
+  padding: 0 10px 14px 12px;
 }
 
-.assistant-history__new,
-.assistant-history__item {
+.assistant-history__new {
   width: 100%;
-  padding: 12px;
-  border: 1px solid rgba(16, 24, 40, 0.05);
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.88);
-  text-align: left;
-}
-
-.assistant-history__new span {
+  height: 42px;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 12px;
+  background: #ffffff;
   display: inline-flex;
-  width: 28px;
-  height: 28px;
   align-items: center;
   justify-content: center;
+  gap: 8px;
+  color: #344054;
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.assistant-history__new:hover {
+  border-color: rgba(54, 96, 210, 0.35);
+  background: #edf2ff;
+  color: #355fd5;
+}
+
+.assistant-history__new-icon {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+}
+
+.assistant-history__new-text {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.assistant-history__group {
+  display: grid;
+  gap: 6px;
+}
+
+.assistant-history__group-title {
+  margin: 0;
+  padding: 2px 2px 0;
+  color: #7a879d;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.assistant-history__item {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
   border-radius: 10px;
-  background: #eef4ff;
-  color: #2b69d4;
-  font-size: 17px;
-  font-weight: 700;
+  background: transparent;
+  color: #1f2937;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
 }
 
-.assistant-history__new strong,
-.assistant-history__item strong,
-.assistant-history__new small,
-.assistant-history__item small {
-  display: block;
+.assistant-history__item:hover {
+  border-color: rgba(54, 96, 210, 0.18);
+  background: rgba(237, 242, 255, 0.72);
 }
 
-.assistant-history__new strong,
-.assistant-history__item strong {
-  margin-top: 8px;
-  color: #182335;
-  font-size: 12px;
-  line-height: 1.45;
+.assistant-history__item-title {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.3;
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.assistant-history__new small,
-.assistant-history__item small,
+.assistant-history__item-time,
 .assistant-history__empty,
 .assistant-history__end {
-  color: #7b889b;
+  color: #8792a7;
   font-size: 11px;
+  line-height: 1;
+  flex: 0 0 auto;
 }
 
 .assistant-history__item--active {
-  border-color: rgba(36, 102, 220, 0.16);
-  background: linear-gradient(180deg, #f5f9ff, #eef5ff);
+  border-color: rgba(54, 96, 210, 0.3);
+  background: #eaf0ff;
+  color: #234ab3;
 }
 
 .assistant-shell--standalone .assistant-history {
-  background: linear-gradient(180deg, #f8f9fc 0%, #f4f6fa 100%);
+  background: linear-gradient(180deg, #f8f9fc 0%, #f4f7fb 100%);
   border-right: 1px solid rgba(15, 23, 42, 0.08);
 }
 
 .assistant-shell--standalone .assistant-history__item--active {
-  border-color: rgba(49, 96, 202, 0.2);
-  background: #ffffff;
-  box-shadow: 0 6px 16px rgba(36, 67, 127, 0.08);
+  border-color: rgba(49, 96, 202, 0.3);
+  background: #edf2ff;
+  box-shadow: 0 4px 10px rgba(36, 67, 127, 0.08);
 }
 
-.assistant-history--collapsed .assistant-history__new,
-.assistant-history--collapsed .assistant-history__item {
-  padding: 10px;
-  display: grid;
-  place-items: center;
+.assistant-history--collapsed .assistant-history__toolbar {
+  padding-inline: 8px;
+  justify-content: center;
 }
 
-.assistant-history--collapsed .assistant-history__new strong,
-.assistant-history--collapsed .assistant-history__new small,
-.assistant-history--collapsed .assistant-history__item small {
+.assistant-history--collapsed .assistant-history__brand,
+.assistant-history--collapsed .assistant-history__new-text,
+.assistant-history--collapsed .assistant-history__group-title,
+.assistant-history--collapsed .assistant-history__item-time {
   display: none;
+}
+
+.assistant-history--collapsed .assistant-history__content {
+  padding-inline: 8px;
+}
+
+.assistant-history--collapsed .assistant-history__new {
+  width: 42px;
+  justify-self: center;
+  padding: 0;
+}
+
+.assistant-history--collapsed .assistant-history__item {
+  width: 42px;
+  min-height: 42px;
+  justify-self: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.assistant-history--collapsed .assistant-history__item-title {
+  display: none;
+}
+
+.assistant-history--collapsed .assistant-history__item::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.42;
+}
+
+.assistant-history--collapsed .assistant-history__item--active::before {
+  opacity: 0.72;
 }
 
 .assistant-history__loading {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .assistant-history__loading-item {
-  height: 72px;
-  border-radius: 18px;
+  height: 38px;
+  border-radius: 10px;
   background: linear-gradient(90deg, rgba(231, 236, 244, 0.85), rgba(246, 249, 252, 1), rgba(231, 236, 244, 0.85));
   background-size: 200% 100%;
   animation: history-shimmer 1.3s linear infinite;
@@ -1386,7 +1688,7 @@ onBeforeUnmount(() => {
 .assistant-history__empty,
 .assistant-history__end {
   margin: 0;
-  padding-top: 4px;
+  padding-top: 2px;
   text-align: center;
 }
 
@@ -1529,12 +1831,13 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #4b596d;
+  color: #5a6577;
 }
 
-.chat-message__reasoning-title strong {
+.chat-message__reasoning-status {
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 600;
+  line-height: 1.35;
 }
 
 .chat-message__reasoning-icon {
@@ -1551,22 +1854,36 @@ onBeforeUnmount(() => {
 }
 
 .chat-message__reasoning-toggle {
+  width: 24px;
+  height: 24px;
   border: none;
   background: transparent;
-  color: #7b8798;
-  font-size: 18px;
-  border-radius: 999px;
-  padding: 0 4px;
-  line-height: 1;
+  color: #6f7b8e;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.chat-message__reasoning-toggle:hover {
+  background: rgba(79, 118, 234, 0.1);
+  color: #4f76ea;
 }
 
 .chat-message__reasoning-chevron {
-  display: inline-block;
+  display: inline-flex;
+}
+
+.chat-message__reasoning-chevron-icon {
+  width: 14px;
+  height: 14px;
+  display: block;
   transition: transform 0.15s ease;
 }
 
-.chat-message__reasoning-chevron--collapsed {
-  transform: rotate(-90deg);
+.chat-message__reasoning-chevron-icon--expanded {
+  transform: rotate(90deg);
 }
 
 .chat-message__reasoning-body {
@@ -1736,102 +2053,195 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
-.assistant-composer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-  padding: 12px 22px 10px;
+.assistant-composer-ds {
+  --dsw-alias-brand-text: #3357c2;
+  --dsw-alias-label-primary: #1f2430;
+  padding: 8px 22px 18px;
   border-top: 1px solid rgba(16, 24, 40, 0.05);
 }
 
-.assistant-composer__input {
+.aaff8b8f {
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 20px;
+  background: #ffffff;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
+}
+
+._77cefa5,
+._9996a53,
+._020ab5b {
   width: 100%;
-  resize: none;
-  border: 1px solid rgba(16, 24, 40, 0.08);
-  border-radius: 18px;
-  padding: 14px 16px;
+}
+
+._24fad49 {
+  position: relative;
+  padding: 10px 12px 0;
+}
+
+._27c9245 {
+  width: 100%;
+  min-height: 62px;
+  max-height: 180px;
+  resize: vertical;
+  border: none;
+  background: transparent;
   outline: none;
-  background: #fbfcfe;
-  font-size: 14px;
-  line-height: 1.65;
+  font-size: 15px;
+  line-height: 1.6;
+  color: #1f2430;
   font-family: inherit;
 }
 
-.assistant-composer__send {
-  align-self: end;
-  min-width: 88px;
-  height: 50px;
-  border: none;
-  border-radius: 16px;
-  background: linear-gradient(180deg, #1656b8, #15469a);
-  color: #fff;
-  font-weight: 700;
+._27c9245::placeholder {
+  color: #9ca3af;
 }
 
-.assistant-toolbar {
-  gap: 10px;
-  flex-wrap: wrap;
-  padding: 0 22px 18px;
+.b13855df {
+  height: 2px;
 }
 
-.assistant-toolbar__pill {
-  height: 38px;
-  padding: 0 14px;
-  border: 1px solid rgba(16, 24, 40, 0.06);
+.ec4f5d61 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 10px;
+}
+
+.ds-atom-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid rgba(15, 23, 42, 0.1);
   border-radius: 999px;
-  background: #f7f9fc;
-  color: #55657b;
+  background: #ffffff;
+  color: #1f2430;
   font-size: 13px;
+  line-height: 1;
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.ds-atom-button:hover {
+  border-color: rgba(15, 23, 42, 0.18);
+  background: #f8fafc;
+}
+
+.ds-atom-button .ds-atom-button__icon {
+  width: 14px;
+  height: 14px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.ds-toggle-button--selected {
+  border-color: rgba(57, 86, 178, 0.24);
+  background: #eef3ff;
+  color: var(--dsw-alias-brand-text);
+}
+
+.ds-toggle-button--selected:hover {
+  border-color: rgba(57, 86, 178, 0.34);
+  background: #e4ecff;
+}
+
+._6dbc175 {
   font-weight: 600;
+}
+
+.assistant-toolbar__pill--ds-model {
+  height: 32px;
+  padding: 0 8px 0 10px;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 999px;
+  background: #ffffff;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-}
-
-.assistant-toolbar__pill--active {
-  border-color: rgba(36, 102, 220, 0.16);
-  background: #edf4ff;
-  color: #225fc5;
-}
-
-.assistant-toolbar__pill--select {
-  padding: 0 10px 0 12px;
-  gap: 10px;
+  margin-right: auto;
+  min-width: 144px;
+  flex: 0 0 auto;
 }
 
 .assistant-toolbar__select-label {
-  color: #64758b;
-  font-weight: 700;
+  color: #4b5563;
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1;
+  white-space: nowrap;
+  writing-mode: horizontal-tb;
+  text-orientation: mixed;
+  flex: 0 0 auto;
 }
 
 .assistant-toolbar__select-box {
-  min-width: 84px;
+  min-width: 96px;
+  flex: 0 0 96px;
 }
 
 .assistant-toolbar__select-box :deep(.el-select__wrapper) {
-  min-height: 30px;
-  padding: 0 7px 0 10px;
-  border-radius: 10px;
+  min-height: 28px;
+  padding: 0 6px 0 8px;
+  border-radius: 9px;
   border: 1px solid transparent;
   box-shadow: none;
-  background: rgba(255, 255, 255, 0.7);
+  background: rgba(248, 250, 252, 0.9);
   transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 
 .assistant-toolbar__select-box:hover :deep(.el-select__wrapper) {
-  border-color: rgba(36, 102, 220, 0.18);
+  border-color: rgba(77, 107, 254, 0.24);
   background: #ffffff;
 }
 
 .assistant-toolbar__select-box :deep(.el-select__selected-item) {
-  color: #42526a;
-  font-size: 14px;
-  font-weight: 700;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .assistant-toolbar__select-box :deep(.el-select__caret) {
-  color: #627593;
-  font-size: 14px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.ds-icon-button {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #ffffff;
+  color: #4b5563;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.ds-icon-button .ds-icon {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+}
+
+._7436101.bcc55ca1 {
+  color: #ffffff;
+  background: #2f5af3;
+  border-color: #2f5af3;
+}
+
+._7436101.bcc55ca1:not(.ds-icon-button--disabled):hover {
+  background: #244ce0;
+  border-color: #244ce0;
+}
+
+.ds-icon-button--disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: #eef2ff;
+  color: #6b7280;
+  border-color: rgba(15, 23, 42, 0.08);
 }
 
 .typing-indicator {
@@ -1901,14 +2311,12 @@ onBeforeUnmount(() => {
   }
 
   .assistant-actions,
-  .assistant-composer,
-  .assistant-toolbar {
+  .assistant-composer-ds {
     padding-left: 18px;
     padding-right: 18px;
   }
 }
 </style>
-
 <style>
 .assistant-model-select-panel.el-popper {
   border-radius: 12px;
@@ -1937,3 +2345,4 @@ onBeforeUnmount(() => {
   background: rgba(51, 95, 194, 0.16);
 }
 </style>
+
