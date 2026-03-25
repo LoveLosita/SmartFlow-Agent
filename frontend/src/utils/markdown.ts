@@ -1,3 +1,7 @@
+import MarkdownIt from 'markdown-it'
+import hljs from 'highlight.js/lib/common'
+import 'highlight.js/styles/github.css'
+
 function escapeHtml(input: string) {
   return input
     .replaceAll('&', '&amp;')
@@ -7,152 +11,77 @@ function escapeHtml(input: string) {
     .replaceAll("'", '&#39;')
 }
 
-function parseInlineMarkdown(input: string) {
-  const inlineCodeBlocks: string[] = []
-  const htmlBreakToken = '@@HTML_BREAK@@'
-  let content = input.replace(/<br\s*\/?>/gi, htmlBreakToken)
+function renderHighlightedCode(sourceCode: string, language: string) {
+  const normalizedLanguage = language.trim()
+  const safeLanguageClass = normalizedLanguage ? ` language-${escapeHtml(normalizedLanguage)}` : ''
 
-  // 1. 先抽离行内代码，避免代码片段里的 Markdown / HTML 被后续规则误处理。
-  // 2. <br> 只做白名单放行，其它原始 HTML 仍统一转义，避免把模型输出直接注入页面。
-  // 3. 若用户就是想输入普通换行，外层段落逻辑仍会继续按 <br /> 渲染，不受这里影响。
-  content = escapeHtml(content)
+  try {
+    if (normalizedLanguage && hljs.getLanguage(normalizedLanguage)) {
+      const highlighted = hljs.highlight(sourceCode, {
+        language: normalizedLanguage,
+        ignoreIllegals: true,
+      }).value
+      return `<pre class="md-pre"><code class="md-code hljs${safeLanguageClass}">${highlighted}</code></pre>`
+    }
 
-  content = content.replace(/`([^`]+)`/g, (_, code: string) => {
-    const token = `@@INLINE_CODE_${inlineCodeBlocks.length}@@`
-    inlineCodeBlocks.push(`<code>${escapeHtml(code.replaceAll(htmlBreakToken, '<br>'))}</code>`)
-    return token
-  })
-
-  content = content.replace(
-    /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
-    (_, label: string, link: string) =>
-      `<a href="${escapeHtml(link)}" target="_blank" rel="noreferrer noopener">${label}</a>`,
-  )
-
-  content = content.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-  content = content.replace(/\*([^*]+)\*/g, '<em>$1</em>')
-  content = content.replace(/~~([^~]+)~~/g, '<del>$1</del>')
-  content = content.replaceAll(htmlBreakToken, '<br />')
-
-  return content.replace(/@@INLINE_CODE_(\d+)@@/g, (_, index: string) => inlineCodeBlocks[Number(index)] ?? '')
+    const highlighted = hljs.highlightAuto(sourceCode).value
+    return `<pre class="md-pre"><code class="md-code hljs">${highlighted}</code></pre>`
+  } catch {
+    const escaped = escapeHtml(sourceCode)
+    return `<pre class="md-pre"><code class="md-code${safeLanguageClass}">${escaped}</code></pre>`
+  }
 }
 
-// renderMarkdown 负责把常见 Markdown 文本安全转换为可展示 HTML。
+const markdownRenderer = new MarkdownIt({
+  // 1. 禁止渲染原始 HTML，避免模型输出被直接注入页面。
+  // 2. 保留换行语义，让对话消息中的软换行更接近聊天阅读习惯。
+  // 3. 开启 linkify，自动识别纯文本链接，减少“写成网址却不可点”的情况。
+  html: false,
+  breaks: true,
+  linkify: true,
+  // 1. 统一在渲染阶段做代码高亮，避免在组件层重复处理字符串。
+  // 2. 优先按模型返回的语言标记高亮，语言未知时自动推断。
+  // 3. 高亮异常时自动降级为转义后的纯文本代码块，保证渲染不会中断。
+  highlight(sourceCode: string, language: string) {
+    return renderHighlightedCode(sourceCode, language)
+  },
+})
+
+const defaultLinkOpenRenderer =
+  markdownRenderer.renderer.rules.link_open ??
+  ((tokens: any[], index: number, options: any, _env: any, self: any) =>
+    self.renderToken(tokens, index, options))
+
+markdownRenderer.renderer.rules.link_open = (
+  tokens: any[],
+  index: number,
+  options: any,
+  env: any,
+  self: any,
+) => {
+  const token = tokens[index]
+
+  // 1. 所有外链统一新窗口打开，避免覆盖当前对话页。
+  // 2. 强制附加 rel，降低反向标签页劫持风险。
+  token.attrSet('target', '_blank')
+  token.attrSet('rel', 'noreferrer noopener')
+
+  return defaultLinkOpenRenderer(tokens, index, options, env, self)
+}
+
+markdownRenderer.renderer.rules.table_open = () => '<div class="md-table-wrap"><table class="md-table">'
+markdownRenderer.renderer.rules.table_close = () => '</table></div>'
+
+// renderMarkdown 负责把聊天消息里的 Markdown 渲染为安全 HTML。
 // 职责边界：
-// 1. 负责处理标题、列表、引用、代码块、链接、粗斜体等常见场景。
-// 2. 不追求完整 CommonMark 兼容，只覆盖聊天消息里最常见的展示需求。
-// 3. 所有原始文本都会先做 HTML 转义，避免把模型输出直接当成原生 HTML 注入页面。
+// 1. 负责常见 GFM 语法（包含表格、代码块）渲染，不负责业务字段裁剪与内容截断。
+// 2. 负责输出可直接插入 v-html 的字符串，不负责 DOM 挂载与样式布局。
+// 3. 若输入为空，仅返回空串，不抛异常阻断对话主链路。
 export function renderMarkdown(input: string) {
   const normalized = (input || '').replace(/\r\n?/g, '\n').trim()
   if (!normalized) {
     return ''
   }
 
-  const fencedBlocks: string[] = []
-  let source = normalized.replace(/```([a-zA-Z0-9_-]+)?\n?([\s\S]*?)```/g, (_, language: string, code: string) => {
-    const token = `@@FENCED_BLOCK_${fencedBlocks.length}@@`
-    const languageClass = language ? ` language-${escapeHtml(language)}` : ''
-    fencedBlocks.push(
-      `<pre class="md-pre"><code class="md-code${languageClass}">${escapeHtml(code.trimEnd())}</code></pre>`,
-    )
-    return token
-  })
-
-  const lines = source.split('\n')
-  const htmlParts: string[] = []
-  let unorderedItems: string[] = []
-  let orderedItems: string[] = []
-  let quoteLines: string[] = []
-  let paragraphLines: string[] = []
-
-  function flushParagraph() {
-    if (paragraphLines.length === 0) {
-      return
-    }
-    htmlParts.push(`<p>${parseInlineMarkdown(paragraphLines.join('<br />'))}</p>`)
-    paragraphLines = []
-  }
-
-  function flushUnorderedList() {
-    if (unorderedItems.length === 0) {
-      return
-    }
-    htmlParts.push(`<ul>${unorderedItems.map((item) => `<li>${parseInlineMarkdown(item)}</li>`).join('')}</ul>`)
-    unorderedItems = []
-  }
-
-  function flushOrderedList() {
-    if (orderedItems.length === 0) {
-      return
-    }
-    htmlParts.push(`<ol>${orderedItems.map((item) => `<li>${parseInlineMarkdown(item)}</li>`).join('')}</ol>`)
-    orderedItems = []
-  }
-
-  function flushBlockquote() {
-    if (quoteLines.length === 0) {
-      return
-    }
-    htmlParts.push(`<blockquote>${quoteLines.map((line) => `<p>${parseInlineMarkdown(line)}</p>`).join('')}</blockquote>`)
-    quoteLines = []
-  }
-
-  function flushAllBlocks() {
-    flushParagraph()
-    flushUnorderedList()
-    flushOrderedList()
-    flushBlockquote()
-  }
-
-  for (const line of lines) {
-    const trimmed = line.trim()
-
-    if (!trimmed) {
-      flushAllBlocks()
-      continue
-    }
-
-    const headingMatch = trimmed.match(/^(#{1,6})\s+(.*)$/)
-    if (headingMatch) {
-      flushAllBlocks()
-      const level = headingMatch[1].length
-      htmlParts.push(`<h${level}>${parseInlineMarkdown(headingMatch[2])}</h${level}>`)
-      continue
-    }
-
-    const unorderedMatch = trimmed.match(/^[-*+]\s+(.*)$/)
-    if (unorderedMatch) {
-      flushParagraph()
-      flushOrderedList()
-      flushBlockquote()
-      unorderedItems.push(unorderedMatch[1])
-      continue
-    }
-
-    const orderedMatch = trimmed.match(/^\d+\.\s+(.*)$/)
-    if (orderedMatch) {
-      flushParagraph()
-      flushUnorderedList()
-      flushBlockquote()
-      orderedItems.push(orderedMatch[1])
-      continue
-    }
-
-    const quoteMatch = trimmed.match(/^>\s?(.*)$/)
-    if (quoteMatch) {
-      flushParagraph()
-      flushUnorderedList()
-      flushOrderedList()
-      quoteLines.push(quoteMatch[1])
-      continue
-    }
-
-    paragraphLines.push(trimmed)
-  }
-
-  flushAllBlocks()
-
-  return htmlParts
-    .join('')
-    .replace(/@@FENCED_BLOCK_(\d+)@@/g, (_, index: string) => fencedBlocks[Number(index)] ?? '')
+  return markdownRenderer.render(normalized)
 }

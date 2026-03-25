@@ -6,7 +6,9 @@ import (
 	"log"
 	"strings"
 
-	"github.com/LoveLosita/smartflow/backend/agent/scheduleplan"
+	agentgraph "github.com/LoveLosita/smartflow/backend/agent2/graph"
+	agentmodel "github.com/LoveLosita/smartflow/backend/agent2/model"
+	agentnode "github.com/LoveLosita/smartflow/backend/agent2/node"
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/pkg"
@@ -107,7 +109,7 @@ func (s *AgentService) runSchedulePlanFlow(
 	// 4. 执行 graph 主流程。
 	// 4.1 这里只负责参数拼装与调用，不在 service 层重复实现 graph 节点逻辑。
 	// 4.2 并发度/预算从配置注入，避免把调优参数写死在代码中。
-	state := scheduleplan.NewSchedulePlanState(traceID, userID, chatID)
+	state := agentmodel.NewSchedulePlanState(traceID, userID, chatID)
 	// 4.3 连续对话微调注入：
 	// 4.3.1 若命中上轮预览，则把任务类/混合条目/分配结果注入 state；
 	// 4.3.2 这样 rough_build 可按需复用旧底板，避免每轮都重新粗排。
@@ -118,10 +120,10 @@ func (s *AgentService) runSchedulePlanFlow(
 		state.PreviousAllocatedItems = cloneTaskClassItems(previousPreview.AllocatedItems)
 		state.PreviousCandidatePlans = cloneWeekSchedules(previousPreview.CandidatePlans)
 	}
-	finalState, runErr := scheduleplan.RunSchedulePlanGraph(ctx, scheduleplan.SchedulePlanGraphRunInput{
+	finalState, runErr := agentgraph.RunSchedulePlanGraph(ctx, agentnode.SchedulePlanGraphRunInput{
 		Model: selectedModel,
 		State: state,
-		Deps: scheduleplan.SchedulePlanToolDeps{
+		Deps: agentnode.SchedulePlanToolDeps{
 			SmartPlanningMultiRaw:       s.SmartPlanningMultiRawFunc,
 			HybridScheduleWithPlanMulti: s.HybridScheduleWithPlanMultiFunc,
 			ResolvePlanningWindow:       s.ResolvePlanningWindowFunc,
@@ -155,6 +157,6 @@ func (s *AgentService) runSchedulePlanFlow(
 	// 6. 旁路写入排程预览缓存（结构化 JSON），给查询接口拉取。
 	// 6.1 失败只记日志，不影响本次对话回复；
 	// 6.2 成功后前端可通过 conversation_id 获取 candidate_plans。
-	s.saveSchedulePlanPreview(ctx, userID, chatID, finalState)
+	s.saveSchedulePlanPreviewAgent2(ctx, userID, chatID, finalState)
 	return reply, nil
 }

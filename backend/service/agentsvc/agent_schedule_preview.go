@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/agent/scheduleplan"
+	agentmodel "github.com/LoveLosita/smartflow/backend/agent2/model"
+	agentshared "github.com/LoveLosita/smartflow/backend/agent2/shared"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
 )
@@ -63,6 +65,62 @@ func (s *AgentService) saveSchedulePlanPreview(ctx context.Context, userID int, 
 	// 4.3 revision 自增由 DAO 的 upsert 冲突更新负责。
 	if s.repo != nil {
 		snapshot := buildSchedulePlanSnapshotFromState(userID, normalizedChatID, finalState)
+		if err := s.repo.UpsertScheduleStateSnapshot(ctx, snapshot); err != nil {
+			log.Printf("写入排程状态快照失败 chat_id=%s: %v", normalizedChatID, err)
+		}
+	}
+}
+
+// saveSchedulePlanPreviewAgent2 把 agent2 的 schedule_plan 结果写入 Redis 预览与 MySQL 快照。
+//
+// 职责边界：
+// 1. 负责承接“新 agent2 首次排程链路”的最终状态；
+// 2. 负责沿用现有预览缓存/状态快照协议，保证查询接口与 refine 读取逻辑不需要跟着重写；
+// 3. 不负责 refine 状态转换，refine 仍继续走旧链路的 saveSchedulePlanPreview。
+func (s *AgentService) saveSchedulePlanPreviewAgent2(ctx context.Context, userID int, chatID string, finalState *agentmodel.SchedulePlanState) {
+	// 1. 基础前置校验：state 为空时直接返回，避免写入半成品快照。
+	if s == nil || finalState == nil {
+		return
+	}
+	normalizedChatID := strings.TrimSpace(chatID)
+	if normalizedChatID == "" {
+		return
+	}
+
+	// 2. 组装缓存快照。
+	// 2.1 summary 优先取 final summary，空值时使用统一兜底文案；
+	// 2.2 candidate_plans / hybrid_entries / allocated_items 统一深拷贝，避免缓存与 graph state 共用底层切片；
+	// 2.3 generated_at 用于前端判断“当前预览是否为最新方案”。
+	summary := strings.TrimSpace(finalState.FinalSummary)
+	if summary == "" {
+		summary = "排程流程已完成，但未生成结果摘要。"
+	}
+	preview := &model.SchedulePlanPreviewCache{
+		UserID:         userID,
+		ConversationID: normalizedChatID,
+		TraceID:        strings.TrimSpace(finalState.TraceID),
+		Summary:        summary,
+		CandidatePlans: cloneWeekSchedules(finalState.CandidatePlans),
+		TaskClassIDs:   append([]int(nil), finalState.TaskClassIDs...),
+		HybridEntries:  cloneHybridEntries(finalState.HybridEntries),
+		AllocatedItems: cloneTaskClassItems(finalState.AllocatedItems),
+		GeneratedAt:    time.Now(),
+	}
+
+	// 3. 先写 Redis 预览，保证前端查询接口能立即读取结构化结果。
+	// 3.1 Redis 是“快路径”；
+	// 3.2 失败只记录日志，不中断聊天主链路。
+	if s.cacheDAO != nil {
+		if err := s.cacheDAO.SetSchedulePlanPreviewToCache(ctx, userID, normalizedChatID, preview); err != nil {
+			log.Printf("写入排程预览缓存失败 chat_id=%s: %v", normalizedChatID, err)
+		}
+	}
+
+	// 4. 同步写 MySQL 快照，保证 Redis 失效后仍能恢复预览与连续微调上下文。
+	// 4.1 这里继续保持“同步写库”策略，因为下一轮微调对快照读取是强实时依赖；
+	// 4.2 写库失败只打日志，不阻断本轮给用户的文本回复。
+	if s.repo != nil {
+		snapshot := buildSchedulePlanSnapshotFromAgent2State(userID, normalizedChatID, finalState)
 		if err := s.repo.UpsertScheduleStateSnapshot(ctx, snapshot); err != nil {
 			log.Printf("写入排程状态快照失败 chat_id=%s: %v", normalizedChatID, err)
 		}
@@ -137,62 +195,17 @@ func (s *AgentService) GetSchedulePlanPreview(ctx context.Context, userID int, c
 
 // cloneWeekSchedules 对周视图排程结果做深拷贝，避免切片引用共享。
 func cloneWeekSchedules(src []model.UserWeekSchedule) []model.UserWeekSchedule {
-	if len(src) == 0 {
-		return nil
-	}
-	dst := make([]model.UserWeekSchedule, 0, len(src))
-	for _, week := range src {
-		eventsCopy := make([]model.WeeklyEventBrief, len(week.Events))
-		copy(eventsCopy, week.Events)
-		dst = append(dst, model.UserWeekSchedule{
-			Week:   week.Week,
-			Events: eventsCopy,
-		})
-	}
-	return dst
+	return agentshared.CloneWeekSchedules(src)
 }
 
 // cloneHybridEntries 深拷贝混合条目切片，避免缓存/状态之间相互污染。
 func cloneHybridEntries(src []model.HybridScheduleEntry) []model.HybridScheduleEntry {
-	if len(src) == 0 {
-		return nil
-	}
-	dst := make([]model.HybridScheduleEntry, len(src))
-	copy(dst, src)
-	return dst
+	return agentshared.CloneHybridEntries(src)
 }
 
 // cloneTaskClassItems 深拷贝任务块切片（包含指针字段），避免跨请求引用共享。
 func cloneTaskClassItems(src []model.TaskClassItem) []model.TaskClassItem {
-	if len(src) == 0 {
-		return nil
-	}
-	dst := make([]model.TaskClassItem, 0, len(src))
-	for _, item := range src {
-		copied := item
-		if item.CategoryID != nil {
-			v := *item.CategoryID
-			copied.CategoryID = &v
-		}
-		if item.Order != nil {
-			v := *item.Order
-			copied.Order = &v
-		}
-		if item.Content != nil {
-			v := *item.Content
-			copied.Content = &v
-		}
-		if item.Status != nil {
-			v := *item.Status
-			copied.Status = &v
-		}
-		if item.EmbeddedTime != nil {
-			t := *item.EmbeddedTime
-			copied.EmbeddedTime = &t
-		}
-		dst = append(dst, copied)
-	}
-	return dst
+	return agentshared.CloneTaskClassItems(src)
 }
 
 // buildSchedulePlanSnapshotFromState 把 graph 运行结果映射成可持久化快照 DTO。
@@ -202,6 +215,35 @@ func cloneTaskClassItems(src []model.TaskClassItem) []model.TaskClassItem {
 // 2. 负责补齐 state_version 默认值；
 // 3. 不负责数据库写入（写入由 DAO 承担）。
 func buildSchedulePlanSnapshotFromState(userID int, conversationID string, st *scheduleplan.SchedulePlanState) *model.SchedulePlanStateSnapshot {
+	if st == nil {
+		return nil
+	}
+	return &model.SchedulePlanStateSnapshot{
+		UserID:           userID,
+		ConversationID:   conversationID,
+		StateVersion:     model.SchedulePlanStateVersionV1,
+		TaskClassIDs:     append([]int(nil), st.TaskClassIDs...),
+		Constraints:      append([]string(nil), st.Constraints...),
+		HybridEntries:    cloneHybridEntries(st.HybridEntries),
+		AllocatedItems:   cloneTaskClassItems(st.AllocatedItems),
+		CandidatePlans:   cloneWeekSchedules(st.CandidatePlans),
+		UserIntent:       strings.TrimSpace(st.UserIntent),
+		Strategy:         strings.TrimSpace(st.Strategy),
+		AdjustmentScope:  strings.TrimSpace(st.AdjustmentScope),
+		RestartRequested: st.RestartRequested,
+		FinalSummary:     strings.TrimSpace(st.FinalSummary),
+		Completed:        st.Completed,
+		TraceID:          strings.TrimSpace(st.TraceID),
+	}
+}
+
+// buildSchedulePlanSnapshotFromAgent2State 把 agent2 的排程状态映射成可持久化快照 DTO。
+//
+// 调用目的：
+// 1. 这轮只迁移 schedule_plan，不动 refine；
+// 2. 因此 preview/快照协议继续复用老结构，但要补一个“agent2 state -> snapshot DTO”的映射层；
+// 3. 这样可以做到：计划创建链路切到 agent2，而 refine / 预览查询链路暂时无需大改。
+func buildSchedulePlanSnapshotFromAgent2State(userID int, conversationID string, st *agentmodel.SchedulePlanState) *model.SchedulePlanStateSnapshot {
 	if st == nil {
 		return nil
 	}

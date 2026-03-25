@@ -42,6 +42,19 @@ interface StreamEventPayload {
   error?: StreamErrorPayload
 }
 
+type ModelType = 'worker' | 'strategist'
+
+const props = withDefaults(
+  defineProps<{
+    initialHistoryWidth?: number
+    viewMode?: 'embedded' | 'standalone'
+  }>(),
+  {
+    initialHistoryWidth: 228,
+    viewMode: 'embedded',
+  },
+)
+
 const authStore = useAuthStore()
 
 const assistantBodyRef = ref<HTMLElement | null>(null)
@@ -52,10 +65,10 @@ const conversationLoadingMore = ref(false)
 const chatLoading = ref(false)
 const historyExpanded = ref(true)
 const selectedConversationId = ref('')
-const selectedModel = ref<'worker' | 'strategist'>('worker')
+const selectedModel = ref<ModelType>('worker')
 const thinkingEnabled = ref(false)
 const messageInput = ref('')
-const historyPanelWidth = ref(228)
+const historyPanelWidth = ref(props.initialHistoryWidth)
 const activeStreamingMessageId = ref('')
 
 const conversationPage = ref(1)
@@ -69,6 +82,8 @@ const conversationMessagesMap = reactive<Record<string, AssistantMessage[]>>({})
 const unavailableHistoryMap = reactive<Record<string, boolean>>({})
 const thinkingMessageMap = reactive<Record<string, boolean>>({})
 const reasoningCollapsedMap = reactive<Record<string, boolean>>({})
+const reasoningStartedAtMap = reactive<Record<string, number>>({})
+const reasoningDurationMap = reactive<Record<string, number>>({})
 
 const quickActions = [
   '帮我梳理今天最重要的三件事',
@@ -77,11 +92,23 @@ const quickActions = [
   '给我一个更稳妥的推进方案',
 ]
 
-let messageScrollRaf = 0
+const MODEL_PREFERENCE_STORAGE_KEY = 'smartflow.assistant.model.byConversation.v1'
 
-const assistantBodyStyle = computed(() => ({
-  '--assistant-history-width': `${historyExpanded.value ? historyPanelWidth.value : 68}px`,
-}))
+let messageScrollRaf = 0
+let reasoningTicker = 0
+const reasoningDisplayNow = ref(Date.now())
+
+const isStandaloneMode = computed(() => props.viewMode === 'standalone')
+
+const assistantBodyStyle = computed(() => {
+  if (isStandaloneMode.value) {
+    return {}
+  }
+
+  return {
+    '--assistant-history-width': `${historyExpanded.value ? historyPanelWidth.value : 68}px`,
+  }
+})
 
 const selectedConversation = computed(() =>
   conversationList.value.find((item) => item.conversation_id === selectedConversationId.value),
@@ -135,6 +162,86 @@ const shouldShowHistoryFallback = computed(() => {
     (selectedConversation.value?.message_count ?? 0) > 0
   )
 })
+
+function isModelType(value: unknown): value is ModelType {
+  return value === 'worker' || value === 'strategist'
+}
+
+function loadModelPreferenceMap() {
+  if (typeof window === 'undefined') {
+    return {} as Record<string, ModelType>
+  }
+
+  try {
+    const raw = window.localStorage.getItem(MODEL_PREFERENCE_STORAGE_KEY)
+    if (!raw) {
+      return {} as Record<string, ModelType>
+    }
+
+    const parsed = JSON.parse(raw) as unknown
+    const normalized: Record<string, ModelType> = {}
+    const entries = typeof parsed === 'object' && parsed ? Object.entries(parsed) : []
+
+    // 1. 只接收结构合法且值在白名单内的记录，避免脏数据把模型值污染为非法字符串。
+    // 2. 键为空字符串的记录直接丢弃，防止“新建会话未落库”场景写入无效索引。
+    // 3. 解析失败时回退为空对象，不阻塞聊天主流程。
+    for (const [conversationId, model] of entries) {
+      if (!conversationId || !isModelType(model)) {
+        continue
+      }
+      normalized[conversationId] = model
+    }
+
+    return normalized
+  } catch {
+    return {} as Record<string, ModelType>
+  }
+}
+
+const modelPreferenceMap = ref<Record<string, ModelType>>(loadModelPreferenceMap())
+
+function persistModelPreferenceMap() {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(MODEL_PREFERENCE_STORAGE_KEY, JSON.stringify(modelPreferenceMap.value))
+  } catch {
+    // 1. 本地存储失败只影响“记忆体验”，不影响消息收发主链路。
+    // 2. 这里静默处理，避免用户每次切模型都被错误提示打断。
+    // 3. 若用户清理缓存或隐私模式限制写入，后续会自动退化为会话内临时选择。
+  }
+}
+
+function savePreferredModel(conversationId: string, model: ModelType) {
+  if (!conversationId || modelPreferenceMap.value[conversationId] === model) {
+    return
+  }
+
+  modelPreferenceMap.value = {
+    ...modelPreferenceMap.value,
+    [conversationId]: model,
+  }
+  persistModelPreferenceMap()
+}
+
+function resolvePreferredModel(conversationId: string) {
+  if (!conversationId) {
+    return null
+  }
+
+  return modelPreferenceMap.value[conversationId] ?? null
+}
+
+function applyPreferredModelForConversation(conversationId: string) {
+  const preferredModel = resolvePreferredModel(conversationId)
+  if (!preferredModel || preferredModel === selectedModel.value) {
+    return
+  }
+
+  selectedModel.value = preferredModel
+}
 
 function ensureConversationBucket(conversationId: string) {
   if (!conversationMessagesMap[conversationId]) {
@@ -194,6 +301,16 @@ function migrateConversationState(fromConversationId: string, toConversationId: 
       conversation_id: toConversationId,
     }
     delete conversationMetaMap[fromConversationId]
+  }
+
+  if (modelPreferenceMap.value[fromConversationId]) {
+    const migratedModelMap = { ...modelPreferenceMap.value }
+    if (!migratedModelMap[toConversationId]) {
+      migratedModelMap[toConversationId] = migratedModelMap[fromConversationId]!
+    }
+    delete migratedModelMap[fromConversationId]
+    modelPreferenceMap.value = migratedModelMap
+    persistModelPreferenceMap()
   }
 
   const latestMap = new Map<string, ConversationListItem>()
@@ -276,7 +393,7 @@ function normalizeHistoryMessage(message: ConversationHistoryMessage, index: num
     reasoning: message.reasoning_content,
   }
 
-  thinkingMessageMap[id] = Boolean(message.reasoning_content?.trim())
+  thinkingMessageMap[id] = false
   reasoningCollapsedMap[id] = Boolean(message.reasoning_content?.trim())
   return normalized
 }
@@ -293,6 +410,47 @@ function isThinkingMessage(message: AssistantMessage) {
   return thinkingMessageMap[message.id] === true
 }
 
+function markReasoningStart(message: AssistantMessage) {
+  if (reasoningStartedAtMap[message.id]) {
+    return
+  }
+
+  const parsedCreatedAt = Date.parse(message.createdAt)
+  reasoningStartedAtMap[message.id] = Number.isFinite(parsedCreatedAt) ? parsedCreatedAt : Date.now()
+}
+
+function markReasoningFinished(message: AssistantMessage) {
+  const startedAt = reasoningStartedAtMap[message.id]
+  if (startedAt && !reasoningDurationMap[message.id]) {
+    reasoningDurationMap[message.id] = Math.max(1, Math.round((Date.now() - startedAt) / 1000))
+  }
+
+  thinkingMessageMap[message.id] = false
+}
+
+function getReasoningDurationSeconds(message: AssistantMessage) {
+  const fixedDuration = reasoningDurationMap[message.id]
+  if (fixedDuration) {
+    return fixedDuration
+  }
+
+  const startedAt = reasoningStartedAtMap[message.id]
+  if (!startedAt) {
+    return 0
+  }
+
+  return Math.max(1, Math.round((reasoningDisplayNow.value - startedAt) / 1000))
+}
+
+function getReasoningStatusLabel(message: AssistantMessage) {
+  const durationSeconds = getReasoningDurationSeconds(message)
+  if (durationSeconds > 0) {
+    return `已思考（用时 ${durationSeconds} 秒）`
+  }
+
+  return isStreamingMessage(message) && isThinkingMessage(message) ? '思考中' : '已思考'
+}
+
 function isReasoningCollapsed(messageId: string) {
   return reasoningCollapsedMap[messageId] === true
 }
@@ -306,6 +464,10 @@ function shouldShowReasoningBox(message: AssistantMessage) {
     Boolean(message.reasoning?.trim()) ||
     (isStreamingMessage(message) && isThinkingMessage(message))
   )
+}
+
+function shouldShowAnsweringIndicator(message: AssistantMessage) {
+  return isStreamingMessage(message) && !isThinkingMessage(message) && !message.content.trim()
 }
 
 function scheduleScrollMessagesToBottom(smooth = false) {
@@ -395,7 +557,7 @@ function handleHistoryScroll(event: Event) {
 // 3. 拖拽结束后统一解绑事件并清理全局样式，防止页面残留 col-resize 状态。
 function startResizeHistoryPanel(event: PointerEvent) {
   const body = assistantBodyRef.value
-  if (!body || window.innerWidth <= 960 || !historyExpanded.value) {
+  if (isStandaloneMode.value || !body || window.innerWidth <= 960 || !historyExpanded.value) {
     return
   }
 
@@ -463,6 +625,7 @@ async function ensureConversationMeta(conversationId: string) {
 
 async function selectConversation(conversationId: string) {
   selectedConversationId.value = conversationId
+  applyPreferredModelForConversation(conversationId)
   await Promise.allSettled([loadConversationMessages(conversationId), ensureConversationMeta(conversationId)])
   scheduleScrollMessagesToBottom(false)
 }
@@ -542,6 +705,9 @@ function processSseBlock(block: string, assistantMessage: AssistantMessage) {
   }
 
   if (payload === '[DONE]') {
+    if (isThinkingMessage(assistantMessage)) {
+      markReasoningFinished(assistantMessage)
+    }
     activeStreamingMessageId.value = ''
     reasoningCollapsedMap[assistantMessage.id] = true
     return
@@ -562,16 +728,30 @@ function processSseBlock(block: string, assistantMessage: AssistantMessage) {
   const delta = choice?.delta ?? parsed.delta ?? parsed
   const finishReason = choice?.finish_reason ?? parsed.finish_reason ?? null
 
-  if (typeof delta?.reasoning_content === 'string' && delta.reasoning_content) {
+  if (
+    typeof delta?.reasoning_content === 'string' &&
+    delta.reasoning_content &&
+    !assistantMessage.content.trim()
+  ) {
+    markReasoningStart(assistantMessage)
     assistantMessage.reasoning = `${assistantMessage.reasoning || ''}${delta.reasoning_content}`
     thinkingMessageMap[assistantMessage.id] = true
   }
 
   if (typeof delta?.content === 'string' && delta.content) {
+    if (isThinkingMessage(assistantMessage)) {
+      // 1. 一旦正文开始回流，立刻结束“思考中”阶段，避免两个等待动画同时出现。
+      // 2. 这样视觉上始终保持“先思考，再输出正文”的单阶段感知。
+      // 3. 若后端偶发交错发送 reasoning/content，也以前端阶段机兜底，优先保证阅读一致性。
+      markReasoningFinished(assistantMessage)
+    }
     assistantMessage.content += delta.content
   }
 
   if (finishReason) {
+    if (isThinkingMessage(assistantMessage)) {
+      markReasoningFinished(assistantMessage)
+    }
     activeStreamingMessageId.value = ''
     reasoningCollapsedMap[assistantMessage.id] = true
   }
@@ -596,6 +776,7 @@ async function sendMessage(preset?: string) {
   if (!selectedConversationId.value) {
     selectedConversationId.value = draftConversationId
   }
+  savePreferredModel(draftConversationId, selectedModel.value)
 
   ensureConversationBucket(draftConversationId)
   unavailableHistoryMap[draftConversationId] = false
@@ -691,7 +872,21 @@ watch(
   },
 )
 
+watch(
+  selectedModel,
+  (nextModel) => {
+    const conversationId = selectedConversationId.value
+    if (!conversationId) {
+      return
+    }
+    savePreferredModel(conversationId, nextModel)
+  },
+)
+
 onMounted(async () => {
+  reasoningTicker = window.setInterval(() => {
+    reasoningDisplayNow.value = Date.now()
+  }, 1000)
   await loadConversationListData(true)
 })
 
@@ -699,12 +894,16 @@ onBeforeUnmount(() => {
   if (messageScrollRaf) {
     cancelAnimationFrame(messageScrollRaf)
   }
+  if (reasoningTicker) {
+    window.clearInterval(reasoningTicker)
+    reasoningTicker = 0
+  }
   document.body.classList.remove('dashboard-resizing')
 })
 </script>
 
 <template>
-  <aside class="assistant-shell glass-panel">
+  <aside class="assistant-shell glass-panel" :class="{ 'assistant-shell--standalone': isStandaloneMode }">
     <header class="assistant-header">
       <div class="assistant-header__text">
         <span class="assistant-header__eyebrow">AI 对话</span>
@@ -717,7 +916,10 @@ onBeforeUnmount(() => {
     <div
       ref="assistantBodyRef"
       class="assistant-body"
-      :class="{ 'assistant-body--collapsed': !historyExpanded }"
+      :class="{
+        'assistant-body--collapsed': !historyExpanded,
+        'assistant-body--standalone': isStandaloneMode,
+      }"
       :style="assistantBodyStyle"
     >
       <aside class="assistant-history" :class="{ 'assistant-history--collapsed': !historyExpanded }">
@@ -764,7 +966,7 @@ onBeforeUnmount(() => {
 
       <div
         class="assistant-splitter"
-        :class="{ 'assistant-splitter--hidden': !historyExpanded }"
+        :class="{ 'assistant-splitter--hidden': !historyExpanded || isStandaloneMode }"
         role="separator"
         aria-label="调整会话列表宽度"
         @pointerdown.prevent="startResizeHistoryPanel"
@@ -801,26 +1003,50 @@ onBeforeUnmount(() => {
               <div v-if="shouldShowReasoningBox(message)" class="chat-message__reasoning">
                 <div class="chat-message__reasoning-head">
                   <div class="chat-message__reasoning-title">
-                    <span class="chat-message__reasoning-dot" />
-                    <strong>{{ isStreamingMessage(message) ? '深度思考中' : '深度思考' }}</strong>
+                    <span class="chat-message__reasoning-icon">
+                      <svg
+                        class="chat-message__reasoning-icon-svg"
+                        viewBox="0 0 16 16"
+                        fill="none"
+                        xmlns="http://www.w3.org/2000/svg"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M8.00195 6.64454C8.75029 6.64454 9.35735 7.25169 9.35742 8.00001C9.35742 8.74838 8.75033 9.35548 8.00195 9.35548C7.2537 9.35533 6.64746 8.74829 6.64746 8.00001C6.64753 7.25178 7.25374 6.64468 8.00195 6.64454Z"
+                          fill="currentColor"
+                        />
+                        <path
+                          fill-rule="evenodd"
+                          clip-rule="evenodd"
+                          d="M9.97168 1.29981C11.5854 0.718916 13.271 0.642197 14.3145 1.68555C15.3578 2.72902 15.2811 4.41466 14.7002 6.02833C14.4708 6.66561 14.1505 7.32937 13.75 8.00001C14.1505 8.67062 14.4708 9.33444 14.7002 9.97169C15.2811 11.5854 15.3579 13.271 14.3145 14.3145C13.271 15.3579 11.5854 15.2811 9.97168 14.7002C9.33443 14.4708 8.67062 14.1505 8 13.75C7.32936 14.1505 6.66561 14.4708 6.02832 14.7002C4.41464 15.2811 2.72902 15.3578 1.68555 14.3145C0.642186 13.271 0.718901 11.5854 1.29981 9.97169C1.52918 9.33454 1.84868 8.67049 2.24902 8.00001C1.84869 7.32953 1.52918 6.66544 1.29981 6.02833C0.718882 4.41459 0.6421 2.729 1.68555 1.68555C2.729 0.642112 4.41459 0.718887 6.02832 1.29981C6.66544 1.52918 7.32953 1.8487 8 2.24903C8.67048 1.84869 9.33454 1.52919 9.97168 1.29981ZM12.9404 9.2129C12.4391 9.893 11.8616 10.5681 11.2148 11.2149C10.5681 11.8616 9.89299 12.4391 9.21289 12.9404C9.62535 13.1579 10.0271 13.338 10.4121 13.4766C11.9146 14.0174 12.9173 13.8738 13.3955 13.3955C13.8737 12.9173 14.0174 11.9146 13.4766 10.4121C13.338 10.0271 13.1579 9.62535 12.9404 9.2129ZM3.05859 9.2129C2.84124 9.62523 2.662 10.0272 2.52344 10.4121C1.98255 11.9146 2.1263 12.9172 2.60449 13.3955C3.08281 13.8737 4.08548 14.0174 5.58789 13.4766C5.97267 13.338 6.37392 13.1577 6.78613 12.9404C6.10627 12.4393 5.43171 11.8614 4.78516 11.2149C4.13826 10.5679 3.55995 9.89313 3.05859 9.2129ZM7.99902 3.792C7.23182 4.31419 6.45309 4.95512 5.7041 5.70411C4.95512 6.45309 4.31418 7.23184 3.79199 7.99903C4.31434 8.76666 4.95474 9.54653 5.7041 10.2959C6.45312 11.0449 7.23274 11.6848 8 12.207C8.76728 11.6848 9.54686 11.0449 10.2959 10.2959C11.0449 9.54686 11.6848 8.76729 12.207 8.00001C11.6848 7.23275 11.0449 6.45312 10.2959 5.70411C9.54653 4.95475 8.76665 4.31434 7.99902 3.792ZM5.58789 2.52344C4.08536 1.98255 3.08275 2.12625 2.60449 2.6045C2.12624 3.08275 1.98255 4.08536 2.52344 5.5879C2.66192 5.97253 2.84143 6.37409 3.05859 6.78614C3.55986 6.10611 4.13843 5.43189 4.78516 4.78516C5.4319 4.13843 6.10609 3.55987 6.78613 3.0586C6.37408 2.84144 5.97252 2.66192 5.58789 2.52344ZM13.3955 2.6045C12.9172 2.12631 11.9146 1.98257 10.4121 2.52344C10.0272 2.66201 9.62522 2.84125 9.21289 3.0586C9.89313 3.55996 10.5679 4.13827 11.2148 4.78516C11.8614 5.43172 12.4392 6.10627 12.9404 6.78614C13.1577 6.37393 13.338 5.97267 13.4766 5.5879C14.0174 4.08549 13.8736 3.08281 13.3955 2.6045Z"
+                          fill="currentColor"
+                        />
+                      </svg>
+                    </span>
+                    <strong>{{ getReasoningStatusLabel(message) }}</strong>
                   </div>
                   <button
                     type="button"
                     class="chat-message__reasoning-toggle"
+                    :aria-label="isReasoningCollapsed(message.id) ? '展开深度思考' : '折叠深度思考'"
                     @click="toggleReasoningCollapse(message.id)"
                   >
-                    {{ isReasoningCollapsed(message.id) ? '展开' : '折叠' }}
+                    <span
+                      class="chat-message__reasoning-chevron"
+                      :class="{ 'chat-message__reasoning-chevron--collapsed': isReasoningCollapsed(message.id) }"
+                    >
+                      ⌄
+                    </span>
                   </button>
                 </div>
 
-                <div v-if="!isReasoningCollapsed(message.id)">
+                <div v-if="!isReasoningCollapsed(message.id)" class="chat-message__reasoning-body">
                   <div
                     v-if="message.reasoning"
                     class="chat-message__markdown chat-message__markdown--reasoning"
                     v-html="renderMessageMarkdown(message.reasoning)"
                   />
-                  <div v-else class="chat-message__streaming">
-                    <span>正在接收 reasoning 增量...</span>
+                  <div v-else class="chat-message__streaming chat-message__streaming--reasoning">
                     <div class="typing-indicator">
                       <span />
                       <span />
@@ -833,8 +1059,7 @@ onBeforeUnmount(() => {
               <div v-if="message.content" class="chat-message__assistant-content">
                 <div class="chat-message__markdown chat-message__markdown--assistant" v-html="renderMessageMarkdown(message.content)" />
               </div>
-              <div v-else-if="isStreamingMessage(message)" class="chat-message__streaming chat-message__streaming--plain">
-                <span>{{ message.reasoning ? '正在生成正文内容...' : '正在建立连接...' }}</span>
+              <div v-else-if="shouldShowAnsweringIndicator(message)" class="chat-message__streaming chat-message__streaming--plain">
                 <div class="typing-indicator">
                   <span />
                   <span />
@@ -887,13 +1112,20 @@ onBeforeUnmount(() => {
             深度思考
           </button>
 
-          <label class="assistant-toolbar__pill assistant-toolbar__pill--select">
-            <span>模型</span>
-            <select v-model="selectedModel" class="assistant-toolbar__select">
-              <option value="worker">标准</option>
-              <option value="strategist">策略</option>
-            </select>
-          </label>
+          <div class="assistant-toolbar__pill assistant-toolbar__pill--select">
+            <span class="assistant-toolbar__select-label">模型</span>
+            <el-select
+              v-model="selectedModel"
+              class="assistant-toolbar__select-box"
+              size="small"
+              popper-class="assistant-model-select-panel"
+              placement="top-start"
+              :teleported="true"
+            >
+              <el-option value="worker" label="标准" />
+              <el-option value="strategist" label="策略" />
+            </el-select>
+          </div>
         </div>
       </section>
     </div>
@@ -913,6 +1145,41 @@ onBeforeUnmount(() => {
     linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(247, 249, 252, 0.98)),
     radial-gradient(circle at top right, rgba(127, 169, 255, 0.16), transparent 34%);
   font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Segoe UI Variable Text', sans-serif;
+}
+
+.assistant-shell--standalone {
+  border-radius: 18px;
+  border-color: rgba(15, 23, 42, 0.08);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+  background: #ffffff;
+}
+
+.assistant-shell--standalone .assistant-header,
+.assistant-shell--standalone .assistant-history__toolbar,
+.assistant-shell--standalone .assistant-actions,
+.assistant-shell--standalone .assistant-composer,
+.assistant-shell--standalone .assistant-toolbar {
+  background: #ffffff;
+}
+
+.assistant-shell--standalone .assistant-header {
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+  background: #fafbfd;
+}
+
+.assistant-shell--standalone .assistant-header__eyebrow {
+  background: rgba(57, 99, 213, 0.1);
+  color: #315ec2;
+}
+
+.assistant-shell--standalone .assistant-header strong {
+  margin-top: 8px;
+  font-size: 18px;
+}
+
+.assistant-shell--standalone .assistant-header p {
+  color: #7e8a9f;
 }
 
 .assistant-header,
@@ -981,6 +1248,14 @@ onBeforeUnmount(() => {
 }
 
 .assistant-body--collapsed {
+  grid-template-columns: 68px 0 minmax(0, 1fr);
+}
+
+.assistant-body--standalone {
+  grid-template-columns: minmax(212px, 1fr) 8px minmax(0, 5fr);
+}
+
+.assistant-body--standalone.assistant-body--collapsed {
   grid-template-columns: 68px 0 minmax(0, 1fr);
 }
 
@@ -1067,6 +1342,17 @@ onBeforeUnmount(() => {
   background: linear-gradient(180deg, #f5f9ff, #eef5ff);
 }
 
+.assistant-shell--standalone .assistant-history {
+  background: linear-gradient(180deg, #f8f9fc 0%, #f4f6fa 100%);
+  border-right: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.assistant-shell--standalone .assistant-history__item--active {
+  border-color: rgba(49, 96, 202, 0.2);
+  background: #ffffff;
+  box-shadow: 0 6px 16px rgba(36, 67, 127, 0.08);
+}
+
 .assistant-history--collapsed .assistant-history__new,
 .assistant-history--collapsed .assistant-history__item {
   padding: 10px;
@@ -1130,6 +1416,10 @@ onBeforeUnmount(() => {
   grid-template-rows: minmax(0, 1fr) auto auto auto;
 }
 
+.assistant-shell--standalone .assistant-chat {
+  background: #ffffff;
+}
+
 .assistant-messages {
   min-height: 0;
   overflow-y: auto;
@@ -1140,6 +1430,12 @@ onBeforeUnmount(() => {
   background:
     linear-gradient(180deg, rgba(249, 251, 253, 0.42), rgba(255, 255, 255, 0.9) 28%, rgba(255, 255, 255, 1)),
     radial-gradient(circle at top center, rgba(129, 171, 255, 0.1), transparent 34%);
+}
+
+.assistant-shell--standalone .assistant-messages {
+  background:
+    linear-gradient(180deg, rgba(252, 253, 255, 1), rgba(255, 255, 255, 1)),
+    radial-gradient(circle at top center, rgba(126, 150, 199, 0.08), transparent 36%);
 }
 
 .assistant-chat__fallback,
@@ -1210,9 +1506,9 @@ onBeforeUnmount(() => {
 }
 
 .chat-message__reasoning {
-  padding: 14px 16px;
-  border-color: rgba(92, 122, 170, 0.14);
-  background: linear-gradient(180deg, rgba(245, 247, 251, 0.96), rgba(239, 243, 248, 0.98));
+  padding: 2px 0 0;
+  border: none;
+  background: transparent;
 }
 
 .chat-message__reasoning-head,
@@ -1226,31 +1522,57 @@ onBeforeUnmount(() => {
 .chat-message__reasoning-head {
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .chat-message__reasoning-title {
   display: flex;
   align-items: center;
   gap: 8px;
+  color: #4b596d;
 }
 
-.chat-message__reasoning-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: #5a98ff;
-  box-shadow: 0 0 0 0 rgba(90, 152, 255, 0.34);
-  animation: pulse-dot 1.6s ease-in-out infinite;
+.chat-message__reasoning-title strong {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.chat-message__reasoning-icon {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  color: #4f76ea;
+}
+
+.chat-message__reasoning-icon-svg {
+  width: 16px;
+  height: 16px;
+  display: block;
 }
 
 .chat-message__reasoning-toggle {
   border: none;
-  background: rgba(255, 255, 255, 0.72);
-  color: #5f728b;
-  font-size: 12px;
+  background: transparent;
+  color: #7b8798;
+  font-size: 18px;
   border-radius: 999px;
-  padding: 6px 10px;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.chat-message__reasoning-chevron {
+  display: inline-block;
+  transition: transform 0.15s ease;
+}
+
+.chat-message__reasoning-chevron--collapsed {
+  transform: rotate(-90deg);
+}
+
+.chat-message__reasoning-body {
+  margin-left: 7px;
+  padding-left: 14px;
+  border-left: 2px solid rgba(120, 134, 156, 0.24);
 }
 
 .chat-message__markdown {
@@ -1272,8 +1594,9 @@ onBeforeUnmount(() => {
 }
 
 .chat-message__markdown--reasoning {
-  font-size: 13px;
-  line-height: 1.8;
+  font-size: 14px;
+  line-height: 1.75;
+  color: #5b6676;
 }
 
 .chat-message__markdown :deep(p) {
@@ -1339,15 +1662,58 @@ onBeforeUnmount(() => {
   background: transparent;
 }
 
+.chat-message__markdown :deep(.md-pre .hljs) {
+  display: block;
+  padding: 0;
+  background: transparent;
+}
+
+.chat-message__markdown :deep(.md-table-wrap) {
+  margin: 0;
+  border-radius: 12px;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  overflow-x: auto;
+  background: #ffffff;
+}
+
+.chat-message__markdown :deep(.md-table) {
+  width: 100%;
+  min-width: 520px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.chat-message__markdown :deep(.md-table th),
+.chat-message__markdown :deep(.md-table td) {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+  text-align: left;
+  vertical-align: top;
+}
+
+.chat-message__markdown :deep(.md-table th) {
+  background: rgba(68, 98, 158, 0.08);
+  color: #1f2f47;
+  font-weight: 700;
+}
+
+.chat-message__markdown :deep(.md-table tr:last-child td) {
+  border-bottom: none;
+}
+
 .chat-message__streaming {
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 26px;
+  justify-content: flex-start;
+  gap: 0;
+  min-height: 22px;
   font-size: 13px;
 }
 
 .chat-message__streaming--plain {
-  padding-right: 10px;
+  padding: 2px 10px 2px 0;
+}
+
+.chat-message__streaming--reasoning {
+  padding: 2px 0;
 }
 
 .chat-message__time,
@@ -1429,15 +1795,43 @@ onBeforeUnmount(() => {
 }
 
 .assistant-toolbar__pill--select {
-  padding-right: 10px;
+  padding: 0 10px 0 12px;
+  gap: 10px;
 }
 
-.assistant-toolbar__select {
-  border: none;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  outline: none;
+.assistant-toolbar__select-label {
+  color: #64758b;
+  font-weight: 700;
+}
+
+.assistant-toolbar__select-box {
+  min-width: 84px;
+}
+
+.assistant-toolbar__select-box :deep(.el-select__wrapper) {
+  min-height: 30px;
+  padding: 0 7px 0 10px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  box-shadow: none;
+  background: rgba(255, 255, 255, 0.7);
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.assistant-toolbar__select-box:hover :deep(.el-select__wrapper) {
+  border-color: rgba(36, 102, 220, 0.18);
+  background: #ffffff;
+}
+
+.assistant-toolbar__select-box :deep(.el-select__selected-item) {
+  color: #42526a;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.assistant-toolbar__select-box :deep(.el-select__caret) {
+  color: #627593;
+  font-size: 14px;
 }
 
 .typing-indicator {
@@ -1512,5 +1906,34 @@ onBeforeUnmount(() => {
     padding-left: 18px;
     padding-right: 18px;
   }
+}
+</style>
+
+<style>
+.assistant-model-select-panel.el-popper {
+  border-radius: 12px;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.14);
+  padding: 6px;
+}
+
+.assistant-model-select-panel .el-select-dropdown__item {
+  height: 36px;
+  line-height: 36px;
+  border-radius: 8px;
+  padding: 0 12px;
+  color: #4d5d73;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.assistant-model-select-panel .el-select-dropdown__item.hover,
+.assistant-model-select-panel .el-select-dropdown__item:hover {
+  background: rgba(51, 95, 194, 0.1);
+}
+
+.assistant-model-select-panel .el-select-dropdown__item.is-selected {
+  color: #2f56b0;
+  background: rgba(51, 95, 194, 0.16);
 }
 </style>

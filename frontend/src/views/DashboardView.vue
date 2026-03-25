@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import AssistantPanel from '@/components/dashboard/AssistantPanel.vue'
 import TaskQuadrantCard from '@/components/dashboard/TaskQuadrantCard.vue'
@@ -13,6 +13,7 @@ import type { TaskItem, TodayEvent } from '@/types/dashboard'
 import { formatHeaderDate } from '@/utils/date'
 
 const router = useRouter()
+const route = useRoute()
 const authStore = useAuthStore()
 
 const pageLoading = ref(false)
@@ -39,12 +40,26 @@ const taskForm = reactive<{
   deadline_at: null,
 })
 
-const sidebarItems = [
-  { key: 'home', label: '总览', short: '总' },
+interface SidebarItem {
+  key: 'home' | 'task' | 'calendar' | 'ai'
+  label: string
+  short: string
+  to?: '/dashboard' | '/assistant'
+}
+
+const sidebarItems: SidebarItem[] = [
+  { key: 'home', label: '总览', short: '总', to: '/dashboard' },
   { key: 'task', label: '任务', short: '任' },
   { key: 'calendar', label: '日程', short: '程' },
-  { key: 'ai', label: '助手', short: 'AI' },
+  { key: 'ai', label: '助手', short: 'AI', to: '/assistant' },
 ]
+
+const activeSidebarKey = computed<SidebarItem['key']>(() => {
+  if (route.path.startsWith('/assistant')) {
+    return 'ai'
+  }
+  return 'home'
+})
 
 const quadrantOrder = [1, 2, 3, 4] as const
 
@@ -217,6 +232,20 @@ function handleCourseImportEntry() {
   ElMessage.info('课表导入入口已预留，下一步我可以继续把导入流程页接出来')
 }
 
+function handleSidebarNavigate(item: SidebarItem) {
+  // 1. 已接通路由的入口直接跳转，避免侧栏按钮成为“仅装饰”元素。
+  // 2. 未接通的入口先给出明确提示，防止用户误以为点击失效。
+  // 3. 同路由不重复 push，避免产生无意义导航与日志噪音。
+  if (item.to) {
+    if (route.path !== item.to) {
+      void router.push(item.to)
+    }
+    return
+  }
+
+  ElMessage.info(`${item.label} 页面正在开发中`)
+}
+
 function clampSidebarWidth(nextWidth: number) {
   return Math.min(110, Math.max(68, nextWidth))
 }
@@ -320,7 +349,8 @@ onBeforeUnmount(() => {
             :key="item.key"
             type="button"
             class="dashboard-sidebar__nav-item"
-            :class="{ 'dashboard-sidebar__nav-item--active': item.key === 'home' }"
+            :class="{ 'dashboard-sidebar__nav-item--active': item.key === activeSidebarKey }"
+            @click="handleSidebarNavigate(item)"
           >
             <span>{{ item.short }}</span>
             <small>{{ item.label }}</small>

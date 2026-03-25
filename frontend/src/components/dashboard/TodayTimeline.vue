@@ -4,42 +4,77 @@ import { computed } from 'vue'
 import type { TodayEvent } from '@/types/dashboard'
 import { formatTimeRange } from '@/utils/date'
 
-interface TimelineSlot {
+interface BaseSlot {
   key: string
-  kind: 'event' | 'pause'
-  label: string
-  timeText?: string
-  eventOrder?: number
+  title: string
 }
+
+interface EventSlot extends BaseSlot {
+  kind: 'event'
+  startTime: string
+  endTime: string
+}
+
+interface PauseSlot extends BaseSlot {
+  kind: 'pause'
+}
+
+type TimelineSlot = EventSlot | PauseSlot
+
+interface RenderEventSlot {
+  key: string
+  kind: 'event'
+  timeText: string
+  title: string
+  locationText: string
+  tone: string
+}
+
+interface RenderPauseSlot {
+  key: string
+  kind: 'pause'
+  title: string
+  hint: string
+}
+
+type RenderSlot = RenderEventSlot | RenderPauseSlot
 
 const props = defineProps<{
   events: TodayEvent[]
   loading?: boolean
 }>()
 
+// 1. 时间轴始终固定为 8 个槽位，顺序不再受当天是否有课影响。
+// 2. 课程槽位缺数据时显示“无课”，而不是直接消失，避免把后续块位挤乱。
+// 3. 午休和晚餐是纯占位块，不展示时间文本，只负责占住用户指定的位置。
 const slotBlueprint: TimelineSlot[] = [
-  { key: 'slot-1', kind: 'event', label: '上午', timeText: '08:00 - 09:40', eventOrder: 1 },
-  { key: 'slot-2', kind: 'event', label: '上午', timeText: '10:15 - 11:55', eventOrder: 2 },
-  { key: 'slot-noon', kind: 'pause', label: '午休' },
-  { key: 'slot-4', kind: 'event', label: '下午', timeText: '14:00 - 15:40', eventOrder: 4 },
-  // 1. 晚餐块固定放在 7-8 节与 9-10 节之间，作为晚间课程前的过渡占位。
-  // 2. 根据用户最新要求，它要出现在“17:55 结束的课块之后、19:00 黄色块之前”。
-  // 3. 用户要求该块只保留单独卡片，不展示时间文本。
-  { key: 'slot-dinner', kind: 'pause', label: '晚餐' },
-  { key: 'slot-5', kind: 'event', label: '下午', timeText: '16:15 - 17:55', eventOrder: 5 },
-  { key: 'slot-6', kind: 'event', label: '晚间', timeText: '19:00 - 20:40', eventOrder: 6 },
-  { key: 'slot-7', kind: 'event', label: '晚间', timeText: '20:50 - 22:30', eventOrder: 7 },
+  { key: 'slot-1', kind: 'event', title: '1-2节', startTime: '08:00', endTime: '09:40' },
+  { key: 'slot-2', kind: 'event', title: '3-4节', startTime: '10:15', endTime: '11:55' },
+  { key: 'slot-noon', kind: 'pause', title: '午休' },
+  { key: 'slot-4', kind: 'event', title: '5-6节', startTime: '14:00', endTime: '15:40' },
+  { key: 'slot-5', kind: 'event', title: '7-8节', startTime: '16:15', endTime: '17:55' },
+  { key: 'slot-dinner', kind: 'pause', title: '晚餐' },
+  { key: 'slot-6', kind: 'event', title: '9-10节', startTime: '19:00', endTime: '20:40' },
+  { key: 'slot-7', kind: 'event', title: '11-12节', startTime: '20:50', endTime: '22:30' },
 ]
 
+function buildTimeKey(start?: string | null, end?: string | null) {
+  return `${(start || '').trim()}|${(end || '').trim()}`
+}
+
 const eventMap = computed(() => {
-  const map = new Map<number, TodayEvent>()
+  const map = new Map<string, TodayEvent>()
   for (const event of props.events ?? []) {
-    map.set(event.order, event)
+    map.set(buildTimeKey(event.start_time, event.end_time), event)
   }
   return map
 })
 
-function resolveCardTone(event: TodayEvent) {
+function resolveCardTone(event: TodayEvent | null) {
+  if (!event) {
+    return 'neutral'
+  }
+
   if (event.type === 'course') {
     return 'course'
   }
@@ -48,19 +83,36 @@ function resolveCardTone(event: TodayEvent) {
     1: 'sky',
     2: 'violet',
     4: 'mint',
-    5: 'amber',
+    5: 'emerald',
+    6: 'amber',
     7: 'cyan',
   }
 
   return orderToneMap[event.order] ?? 'neutral'
 }
 
-function resolveSlotEvent(slot: TimelineSlot) {
-  if (typeof slot.eventOrder !== 'number') {
-    return null
-  }
-  return eventMap.value.get(slot.eventOrder) ?? null
-}
+const renderSlots = computed<RenderSlot[]>(() =>
+  slotBlueprint.map((slot) => {
+    if (slot.kind === 'pause') {
+      return {
+        key: slot.key,
+        kind: 'pause',
+        title: slot.title,
+        hint: '为中段留出缓冲与恢复时间',
+      }
+    }
+
+    const event = eventMap.value.get(buildTimeKey(slot.startTime, slot.endTime)) ?? null
+    return {
+      key: slot.key,
+      kind: 'event',
+      timeText: formatTimeRange(event?.start_time || slot.startTime, event?.end_time || slot.endTime),
+      title: event?.name || '无课',
+      locationText: event?.location || '休息时间',
+      tone: resolveCardTone(event),
+    }
+  }),
+)
 </script>
 
 <template>
@@ -78,36 +130,20 @@ function resolveSlotEvent(slot: TimelineSlot) {
     </div>
 
     <div v-else class="timeline-grid">
-      <template v-for="slot in slotBlueprint" :key="slot.key">
-        <article v-if="slot.kind === 'pause'" class="timeline-placeholder timeline-placeholder--pause">
-          <span v-if="slot.timeText" class="timeline-placeholder__time">{{ slot.timeText }}</span>
-          <strong class="timeline-placeholder__title">{{ slot.label }}</strong>
-          <span class="timeline-placeholder__hint">为中段留出缓冲与恢复时间</span>
-        </article>
-
+      <template v-for="slot in renderSlots" :key="slot.key">
         <article
-          v-else-if="resolveSlotEvent(slot)"
+          v-if="slot.kind === 'event'"
           class="timeline-event"
-          :class="`timeline-event--${resolveCardTone(resolveSlotEvent(slot)!)}`"
+          :class="`timeline-event--${slot.tone}`"
         >
-          <span class="timeline-event__time">
-            {{
-              formatTimeRange(
-                resolveSlotEvent(slot)?.start_time,
-                resolveSlotEvent(slot)?.end_time,
-              )
-            }}
-          </span>
-          <strong class="timeline-event__title">{{ resolveSlotEvent(slot)?.name }}</strong>
-          <span class="timeline-event__location">
-            {{ resolveSlotEvent(slot)?.location || '休息时间' }}
-          </span>
+          <span class="timeline-event__time">{{ slot.timeText }}</span>
+          <strong class="timeline-event__title">{{ slot.title }}</strong>
+          <span class="timeline-event__location">{{ slot.locationText }}</span>
         </article>
 
-        <article v-else class="timeline-event timeline-event--neutral">
-          <span class="timeline-event__time">{{ slot.timeText }}</span>
-          <strong class="timeline-event__title">无课</strong>
-          <span class="timeline-event__location">休息时间</span>
+        <article v-else class="timeline-placeholder timeline-placeholder--pause">
+          <strong class="timeline-placeholder__title">{{ slot.title }}</strong>
+          <span class="timeline-placeholder__hint">{{ slot.hint }}</span>
         </article>
       </template>
     </div>
@@ -154,9 +190,9 @@ function resolveSlotEvent(slot: TimelineSlot) {
 .timeline-grid {
   min-width: 0;
   display: grid;
-  /* 1. 改为 auto-fit 自适应列数，避免固定列数把左侧主区整体撑宽。 */
-  /* 2. 每张卡片保留可读最小宽度，空间不足时自动换行，而不是出现横向滚动条。 */
-  /* 3. 这样在左右近似二分的布局下，左侧信息板也能保持完整可见。 */
+  /* 1. 使用自适应列数，避免固定列数把左侧主区撑爆。 */
+  /* 2. 但槽位顺序固定，换行只影响视觉换行，不影响时间先后顺序。 */
+  /* 3. 这样无论是否缺课，8 个槽位都会按既定顺序逐个渲染。 */
   grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   gap: 12px;
   overflow: visible;
@@ -217,6 +253,14 @@ function resolveSlotEvent(slot: TimelineSlot) {
   background: #1669c1;
 }
 
+.timeline-event--sky {
+  background: linear-gradient(180deg, #f8fbff 0%, #f3f7fc 100%);
+}
+
+.timeline-event--sky::before {
+  background: #c8d6e8;
+}
+
 .timeline-event--violet {
   background: linear-gradient(180deg, #eef0ff 0%, #e6e8ff 100%);
 }
@@ -226,10 +270,18 @@ function resolveSlotEvent(slot: TimelineSlot) {
 }
 
 .timeline-event--mint {
-  background: linear-gradient(180deg, #e6f8f1 0%, #def5ec 100%);
+  background: linear-gradient(180deg, #e6f2ff 0%, #dceaff 100%);
 }
 
 .timeline-event--mint::before {
+  background: #2f7de1;
+}
+
+.timeline-event--emerald {
+  background: linear-gradient(180deg, #e6f8f1 0%, #def5ec 100%);
+}
+
+.timeline-event--emerald::before {
   background: #27b482;
 }
 
@@ -271,12 +323,6 @@ function resolveSlotEvent(slot: TimelineSlot) {
 
 .timeline-placeholder--pause {
   background: linear-gradient(180deg, #f5f9ff 0%, #eef4fb 100%);
-}
-
-.timeline-placeholder__time {
-  font-size: 12px;
-  font-weight: 700;
-  color: #4c6c97;
 }
 
 .timeline-placeholder__title {
