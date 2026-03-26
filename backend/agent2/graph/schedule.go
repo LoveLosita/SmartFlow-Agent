@@ -136,5 +136,67 @@ func RunScheduleRefineGraph(ctx context.Context, input agentnode.ScheduleRefineG
 	if input.State == nil {
 		return nil, errors.New("schedule refine graph: state is nil")
 	}
-	return agentnode.RunScheduleRefineGraph(ctx, input)
+
+	nodes, err := agentnode.NewScheduleRefineNodes(input)
+	if err != nil {
+		return nil, err
+	}
+
+	graph := compose.NewGraph[*agentmodel.ScheduleRefineState, *agentmodel.ScheduleRefineState]()
+	if err = graph.AddLambdaNode(agentnode.ScheduleRefineGraphNodeContract, compose.InvokableLambda(nodes.Contract)); err != nil {
+		return nil, err
+	}
+	if err = graph.AddLambdaNode(agentnode.ScheduleRefineGraphNodePlan, compose.InvokableLambda(nodes.Plan)); err != nil {
+		return nil, err
+	}
+	if err = graph.AddLambdaNode(agentnode.ScheduleRefineGraphNodeSlice, compose.InvokableLambda(nodes.Slice)); err != nil {
+		return nil, err
+	}
+	if err = graph.AddLambdaNode(agentnode.ScheduleRefineGraphNodeRoute, compose.InvokableLambda(nodes.Route)); err != nil {
+		return nil, err
+	}
+	if err = graph.AddLambdaNode(agentnode.ScheduleRefineGraphNodeReact, compose.InvokableLambda(nodes.React)); err != nil {
+		return nil, err
+	}
+	if err = graph.AddLambdaNode(agentnode.ScheduleRefineGraphNodeHardCheck, compose.InvokableLambda(nodes.HardCheck)); err != nil {
+		return nil, err
+	}
+	if err = graph.AddLambdaNode(agentnode.ScheduleRefineGraphNodeSummary, compose.InvokableLambda(nodes.Summary)); err != nil {
+		return nil, err
+	}
+
+	if err = graph.AddEdge(compose.START, agentnode.ScheduleRefineGraphNodeContract); err != nil {
+		return nil, err
+	}
+	if err = graph.AddEdge(agentnode.ScheduleRefineGraphNodeContract, agentnode.ScheduleRefineGraphNodePlan); err != nil {
+		return nil, err
+	}
+	if err = graph.AddEdge(agentnode.ScheduleRefineGraphNodePlan, agentnode.ScheduleRefineGraphNodeSlice); err != nil {
+		return nil, err
+	}
+	if err = graph.AddEdge(agentnode.ScheduleRefineGraphNodeSlice, agentnode.ScheduleRefineGraphNodeRoute); err != nil {
+		return nil, err
+	}
+	if err = graph.AddEdge(agentnode.ScheduleRefineGraphNodeRoute, agentnode.ScheduleRefineGraphNodeReact); err != nil {
+		return nil, err
+	}
+	if err = graph.AddEdge(agentnode.ScheduleRefineGraphNodeReact, agentnode.ScheduleRefineGraphNodeHardCheck); err != nil {
+		return nil, err
+	}
+	if err = graph.AddEdge(agentnode.ScheduleRefineGraphNodeHardCheck, agentnode.ScheduleRefineGraphNodeSummary); err != nil {
+		return nil, err
+	}
+	if err = graph.AddEdge(agentnode.ScheduleRefineGraphNodeSummary, compose.END); err != nil {
+		return nil, err
+	}
+
+	runnable, err := graph.Compile(ctx,
+		compose.WithGraphName(ScheduleRefineGraphName),
+		compose.WithMaxRunSteps(20),
+		compose.WithNodeTriggerMode(compose.AnyPredecessor),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return runnable.Invoke(ctx, input.State)
 }
