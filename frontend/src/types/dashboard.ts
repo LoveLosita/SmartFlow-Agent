@@ -88,6 +88,9 @@ export interface AssistantMessage {
   content: string
   createdAt: string
   reasoning?: string
+  retryGroupId?: string
+  retryIndex?: number
+  retryTotal?: number
 }
 
 export interface ChatStreamRequest {

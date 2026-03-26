@@ -50,6 +50,14 @@ interface ConversationGroup {
   items: ConversationListItem[]
 }
 
+interface RetryPageGroup {
+  groupId: string
+  total: number
+  latestIndex: number
+  visibleIndex: number
+  pages: Map<number, { user?: AssistantMessage; assistant?: AssistantMessage }>
+}
+
 const props = withDefaults(
   defineProps<{
     initialHistoryWidth?: number
@@ -76,6 +84,9 @@ const thinkingEnabled = ref(false)
 const messageInput = ref('')
 const historyPanelWidth = ref(props.initialHistoryWidth)
 const activeStreamingMessageId = ref('')
+const editingUserMessageId = ref('')
+const editingUserMessageDraft = ref('')
+const retryVisiblePageMap = reactive<Record<string, number>>({})
 
 const conversationPage = ref(1)
 const conversationPageSize = 12
@@ -101,10 +112,12 @@ const quickActions = [
 const MODEL_PREFERENCE_STORAGE_KEY = 'smartflow.assistant.model.byConversation.v1'
 
 let messageScrollRaf = 0
+let messageScrollReleaseRaf = 0
 let reasoningTicker = 0
 const reasoningDisplayNow = ref(Date.now())
 const shouldAutoFollowMessages = ref(true)
-const messageBottomTolerancePx = 6
+const messageBottomTolerancePx = 24
+const isProgrammaticMessageScroll = ref(false)
 
 const isStandaloneMode = computed(() => props.viewMode === 'standalone')
 
@@ -122,11 +135,82 @@ const selectedConversation = computed(() =>
   conversationList.value.find((item) => item.conversation_id === selectedConversationId.value),
 )
 
-const selectedMessages = computed(() => {
+const rawSelectedMessages = computed(() => {
   if (!selectedConversationId.value) {
     return []
   }
   return conversationMessagesMap[selectedConversationId.value] ?? []
+})
+
+const retryPageGroups = computed<Map<string, RetryPageGroup>>(() => {
+  const grouped = new Map<string, RetryPageGroup>()
+
+  for (const message of rawSelectedMessages.value) {
+    if (!message.retryGroupId || !message.retryIndex || !message.retryTotal || message.retryTotal <= 1) {
+      continue
+    }
+
+    const existed = grouped.get(message.retryGroupId) ?? {
+      groupId: message.retryGroupId,
+      total: message.retryTotal,
+      latestIndex: message.retryIndex,
+      visibleIndex: retryVisiblePageMap[message.retryGroupId] ?? message.retryTotal,
+      pages: new Map<number, { user?: AssistantMessage; assistant?: AssistantMessage }>(),
+    }
+
+    existed.total = Math.max(existed.total, message.retryTotal)
+    existed.latestIndex = Math.max(existed.latestIndex, message.retryIndex)
+    existed.visibleIndex = retryVisiblePageMap[message.retryGroupId] ?? existed.latestIndex
+
+    const page = existed.pages.get(message.retryIndex) ?? {}
+    if (message.role === 'user') {
+      page.user = message
+    }
+    if (message.role === 'assistant') {
+      page.assistant = message
+    }
+    existed.pages.set(message.retryIndex, page)
+    grouped.set(message.retryGroupId, existed)
+  }
+
+  return grouped
+})
+
+const selectedMessages = computed(() => {
+  const visible: AssistantMessage[] = []
+  const insertedRetryGroups = new Set<string>()
+
+  for (const message of rawSelectedMessages.value) {
+    if (!message.retryGroupId) {
+      visible.push(message)
+      continue
+    }
+
+    const retryGroup = retryPageGroups.value.get(message.retryGroupId)
+    if (!retryGroup || retryGroup.total <= 1 || !message.retryIndex) {
+      visible.push(message)
+      continue
+    }
+
+    if (insertedRetryGroups.has(message.retryGroupId)) {
+      continue
+    }
+
+    insertedRetryGroups.add(message.retryGroupId)
+    const nextPage =
+      retryGroup.pages.get(retryGroup.visibleIndex) ??
+      retryGroup.pages.get(retryGroup.latestIndex) ??
+      retryGroup.pages.get(1)
+
+    if (nextPage?.user) {
+      visible.push(nextPage.user)
+    }
+    if (nextPage?.assistant) {
+      visible.push(nextPage.assistant)
+    }
+  }
+
+  return visible
 })
 
 function resolveConversationGroupLabel(timeText?: string | null) {
@@ -207,7 +291,7 @@ const selectedConversationSubtitle = computed(() => {
 
   const meta = conversationMetaMap[selectedConversationId.value]
   const current = selectedConversation.value
-  const messageCount = meta?.message_count ?? current?.message_count ?? selectedMessages.value.length
+  const messageCount = meta?.message_count ?? current?.message_count ?? rawSelectedMessages.value.length
   const lastMessageAt = meta?.last_message_at ?? current?.last_message_at
   return `消息 ${messageCount} 条 · 最近更新 ${formatConversationTime(lastMessageAt)}`
 })
@@ -219,7 +303,7 @@ const shouldShowHistoryFallback = computed(() => {
 
   return (
     unavailableHistoryMap[selectedConversationId.value] === true &&
-    selectedMessages.value.length === 0 &&
+    rawSelectedMessages.value.length === 0 &&
     (selectedConversation.value?.message_count ?? 0) > 0
   )
 })
@@ -446,17 +530,84 @@ function prependConversationPreview(conversationId: string, previewText: string,
 
 function normalizeHistoryMessage(message: ConversationHistoryMessage, index: number): AssistantMessage {
   const id = `${message.id ?? `${message.role}-${index}`}`
+  const reasoningText = typeof message.reasoning_content === 'string' ? message.reasoning_content : ''
   const normalized: AssistantMessage = {
     id,
     role: message.role,
     content: message.content,
     createdAt: message.created_at ?? new Date().toISOString(),
-    reasoning: message.reasoning_content,
+    reasoning: reasoningText || undefined,
+    retryGroupId: typeof message.retry_group_id === 'string' ? message.retry_group_id : undefined,
+    retryIndex: typeof message.retry_index === 'number' ? message.retry_index : undefined,
+    retryTotal: typeof message.retry_total === 'number' ? message.retry_total : undefined,
+  }
+
+  // 1. 历史消息优先使用后端持久化的思考时长，避免刷新后重新按“当前时间 - 创建时间”误算。
+  // 2. 若后端当前未返回有效时长，则清掉旧缓存，回退为“仅展示已思考文案”。
+  // 3. 同时清理 startedAt，防止历史消息误进入前端实时计时分支。
+  delete reasoningStartedAtMap[id]
+  if (typeof message.reasoning_duration_seconds === 'number' && message.reasoning_duration_seconds > 0) {
+    reasoningDurationMap[id] = Math.max(1, Math.round(message.reasoning_duration_seconds))
+  } else {
+    delete reasoningDurationMap[id]
   }
 
   thinkingMessageMap[id] = false
-  reasoningCollapsedMap[id] = Boolean(message.reasoning_content?.trim())
+  reasoningCollapsedMap[id] = Boolean(reasoningText.trim())
   return normalized
+}
+
+function resolveMessageTimestamp(message: AssistantMessage) {
+  const parsed = Date.parse(message.createdAt)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function isSameLogicalMessage(left: AssistantMessage, right: AssistantMessage) {
+  return (
+    left.role === right.role &&
+    left.content === right.content &&
+    (left.reasoning || '') === (right.reasoning || '') &&
+    (left.retryGroupId || '') === (right.retryGroupId || '') &&
+    (left.retryIndex || 0) === (right.retryIndex || 0)
+  )
+}
+
+function mergeServerHistoryWithLocalState(
+  conversationId: string,
+  history: ConversationHistoryMessage[],
+) {
+  const existingBucket = conversationMessagesMap[conversationId] ?? []
+  const normalizedHistory = history.map(normalizeHistoryMessage)
+  const existingById = new Map(existingBucket.map((message) => [message.id, message]))
+
+  const mergedHistory = normalizedHistory.map((serverMessage) => {
+    const localMessage = existingById.get(serverMessage.id)
+    if (!localMessage) {
+      return serverMessage
+    }
+
+    return {
+      ...serverMessage,
+      retryGroupId: serverMessage.retryGroupId ?? localMessage.retryGroupId,
+      retryIndex: serverMessage.retryIndex ?? localMessage.retryIndex,
+      retryTotal: serverMessage.retryTotal ?? localMessage.retryTotal,
+    }
+  })
+
+  const mergedIds = new Set(mergedHistory.map((message) => message.id))
+  const optimisticMessages = existingBucket.filter((message) => {
+    if (mergedIds.has(message.id)) {
+      return false
+    }
+
+    if (!isLocalEphemeralMessageId(message.id)) {
+      return true
+    }
+
+    return !mergedHistory.some((serverMessage) => isSameLogicalMessage(serverMessage, message))
+  })
+
+  return [...mergedHistory, ...optimisticMessages].sort((left, right) => resolveMessageTimestamp(left) - resolveMessageTimestamp(right))
 }
 
 function renderMessageMarkdown(content: string) {
@@ -467,8 +618,185 @@ function isStreamingMessage(message: AssistantMessage) {
   return message.id === activeStreamingMessageId.value
 }
 
+function isEditingUserMessage(messageId: string) {
+  return editingUserMessageId.value === messageId
+}
+
 function isThinkingMessage(message: AssistantMessage) {
   return thinkingMessageMap[message.id] === true
+}
+
+function findMessageIndex(messageId: string) {
+  return selectedMessages.value.findIndex((message) => message.id === messageId)
+}
+
+function isLatestAssistantMessage(messageId: string) {
+  const lastAssistant = [...selectedMessages.value].reverse().find((message) => message.role === 'assistant')
+  return lastAssistant?.id === messageId
+}
+
+function resolveRetryPageGroup(message: AssistantMessage) {
+  if (!message.retryGroupId) {
+    return null
+  }
+  return retryPageGroups.value.get(message.retryGroupId) ?? null
+}
+
+function shouldShowRetryPager(message: AssistantMessage) {
+  if (message.role !== 'assistant') {
+    return false
+  }
+
+  const retryGroup = resolveRetryPageGroup(message)
+  return Boolean(retryGroup && retryGroup.total > 1)
+}
+
+function changeRetryPage(message: AssistantMessage, delta: number) {
+  const retryGroup = resolveRetryPageGroup(message)
+  if (!retryGroup) {
+    return
+  }
+
+  const nextPage = Math.min(Math.max(1, retryGroup.visibleIndex + delta), retryGroup.total)
+  if (nextPage === retryGroup.visibleIndex) {
+    return
+  }
+
+  retryVisiblePageMap[retryGroup.groupId] = nextPage
+}
+
+function resolveVisibleUserMessageBeforeAssistant(messageId: string) {
+  const index = findMessageIndex(messageId)
+  if (index <= 0) {
+    return null
+  }
+
+  for (let current = index - 1; current >= 0; current -= 1) {
+    const candidate = selectedMessages.value[current]
+    if (candidate?.role === 'user') {
+      return candidate
+    }
+  }
+
+  return null
+}
+
+function isLocalEphemeralMessageId(id: string) {
+  return /^(user|assistant|system)-\d{13}-[a-z0-9]+$/i.test(id)
+}
+
+function resolvePersistedMessageId(message: AssistantMessage | null) {
+  if (!message) {
+    return null
+  }
+
+  if (isLocalEphemeralMessageId(message.id)) {
+    return null
+  }
+
+  if (/^\d+$/.test(message.id)) {
+    return Number(message.id)
+  }
+
+  return message.id
+}
+
+function createRetryGroupId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `retry-${crypto.randomUUID()}`
+  }
+
+  return `retry-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function applyRetryGroupToExistingMessages(groupId: string, total: number, userMessageId: string, assistantMessageId: string) {
+  const conversationId = selectedConversationId.value
+  if (!conversationId) {
+    return
+  }
+
+  const bucket = conversationMessagesMap[conversationId] ?? []
+  for (const message of bucket) {
+    if (message.id === userMessageId || message.id === assistantMessageId || message.retryGroupId === groupId) {
+      message.retryGroupId = groupId
+      message.retryTotal = total
+      if (message.id === userMessageId || (message.retryGroupId === groupId && message.role === 'user' && !message.retryIndex)) {
+        message.retryIndex = 1
+      }
+      if (message.id === assistantMessageId || (message.retryGroupId === groupId && message.role === 'assistant' && !message.retryIndex)) {
+        message.retryIndex = 1
+      }
+    }
+  }
+
+  retryVisiblePageMap[groupId] = total
+}
+
+function resolvePromptBeforeAssistantMessage(messageId: string) {
+  const index = findMessageIndex(messageId)
+  if (index <= 0) {
+    return ''
+  }
+
+  for (let current = index - 1; current >= 0; current -= 1) {
+    const candidate = selectedMessages.value[current]
+    if (candidate?.role === 'user' && candidate.content.trim()) {
+      return candidate.content
+    }
+  }
+
+  return ''
+}
+
+async function copyText(text: string, successMessage: string) {
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const textarea = document.createElement('textarea')
+      textarea.value = text
+      textarea.style.position = 'fixed'
+      textarea.style.opacity = '0'
+      document.body.appendChild(textarea)
+      textarea.focus()
+      textarea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
+    }
+
+    ElMessage.success(successMessage)
+  } catch {
+    ElMessage.error('复制失败，请稍后重试')
+  }
+}
+
+function startEditUserMessage(message: AssistantMessage) {
+  editingUserMessageId.value = message.id
+  editingUserMessageDraft.value = message.content
+}
+
+function cancelEditUserMessage() {
+  editingUserMessageId.value = ''
+  editingUserMessageDraft.value = ''
+}
+
+function submitEditedUserMessage(message: AssistantMessage) {
+  const nextContent = editingUserMessageDraft.value.trim()
+  if (!nextContent) {
+    ElMessage.warning('消息内容不能为空')
+    return
+  }
+
+  if (chatLoading.value) {
+    ElMessage.info('当前正在生成回复，请稍后再发送修改后的消息')
+    return
+  }
+
+  // 1. “修改消息”当前按产品定义等价于“复制原消息到输入区后，编辑并重新发送一条新消息”。
+  // 2. 因此这里不改写历史里的旧消息，只关闭编辑态并走现有 sendMessage 主链路。
+  // 3. 这样无需后端新增接口，也能和普通发送保持完全一致的会话语义。
+  cancelEditUserMessage()
+  void sendMessage(nextContent)
 }
 
 function markReasoningStart(message: AssistantMessage) {
@@ -560,6 +888,11 @@ function handleMessageViewportScroll(event: Event) {
     return
   }
 
+  if (isProgrammaticMessageScroll.value) {
+    shouldAutoFollowMessages.value = true
+    return
+  }
+
   // 1. 若滚动到底部（最后一行完整露出），恢复自动跟随。
   // 2. 只要离底部有距离，就维持“手动阅读模式”，防止流式输出打断阅读。
   // 3. 该状态会影响后续 scheduleScrollMessagesToBottom，形成可控的跟随策略。
@@ -578,6 +911,9 @@ function scheduleScrollMessagesToBottom(smooth = false, force = false) {
   if (messageScrollRaf) {
     cancelAnimationFrame(messageScrollRaf)
   }
+  if (messageScrollReleaseRaf) {
+    cancelAnimationFrame(messageScrollReleaseRaf)
+  }
 
   messageScrollRaf = window.requestAnimationFrame(() => {
     if (!force && !shouldAutoFollowMessages.value) {
@@ -591,11 +927,26 @@ function scheduleScrollMessagesToBottom(smooth = false, force = false) {
       return
     }
 
+    // 1. 先标记为程序触发滚动，避免 scroll 事件把自动跟随错误关闭。
+    // 2. 采用双 requestAnimationFrame，等待本轮文本增量和布局波动稳定后再落到底部。
+    // 3. 下一帧统一释放程序滚动标记，恢复用户主动滚动的判断能力。
+    isProgrammaticMessageScroll.value = true
     viewport.scrollTo({
       top: viewport.scrollHeight,
       behavior: smooth ? 'smooth' : 'auto',
     })
-    messageScrollRaf = 0
+    messageScrollRaf = window.requestAnimationFrame(() => {
+      viewport.scrollTo({
+        top: viewport.scrollHeight,
+        behavior: 'auto',
+      })
+      messageScrollRaf = 0
+      messageScrollReleaseRaf = window.requestAnimationFrame(() => {
+        isProgrammaticMessageScroll.value = false
+        shouldAutoFollowMessages.value = isMessageViewportAtBottom(viewport)
+        messageScrollReleaseRaf = 0
+      })
+    })
   })
 }
 
@@ -698,18 +1049,18 @@ function toggleHistoryPanel() {
   historyExpanded.value = !historyExpanded.value
 }
 
-async function loadConversationMessages(conversationId: string) {
+async function loadConversationMessages(conversationId: string, forceReload = false) {
   if (!conversationId) {
     return
   }
 
-  if (conversationMessagesMap[conversationId] && unavailableHistoryMap[conversationId] !== true) {
+  if (!forceReload && conversationMessagesMap[conversationId] && unavailableHistoryMap[conversationId] !== true) {
     return
   }
 
   try {
     const history = await getConversationHistory(conversationId)
-    conversationMessagesMap[conversationId] = history.map(normalizeHistoryMessage)
+    conversationMessagesMap[conversationId] = mergeServerHistoryWithLocalState(conversationId, history)
     unavailableHistoryMap[conversationId] = false
   } catch {
     unavailableHistoryMap[conversationId] = true
@@ -733,6 +1084,7 @@ async function ensureConversationMeta(conversationId: string) {
 }
 
 async function selectConversation(conversationId: string) {
+  cancelEditUserMessage()
   selectedConversationId.value = conversationId
   applyPreferredModelForConversation(conversationId)
   await Promise.allSettled([loadConversationMessages(conversationId), ensureConversationMeta(conversationId)])
@@ -740,6 +1092,7 @@ async function selectConversation(conversationId: string) {
 }
 
 function startNewConversation() {
+  cancelEditUserMessage()
   selectedConversationId.value = ''
   messageInput.value = ''
   activeStreamingMessageId.value = ''
@@ -791,6 +1144,16 @@ async function fetchChatStream(body: ChatStreamRequest, attempt = 0): Promise<Re
   }
 
   return response
+}
+
+function prepareAssistantMessageForStreaming(message: AssistantMessage, createdAt: string) {
+  message.content = ''
+  message.reasoning = ''
+  message.createdAt = createdAt
+  thinkingMessageMap[message.id] = thinkingEnabled.value
+  reasoningCollapsedMap[message.id] = false
+  delete reasoningStartedAtMap[message.id]
+  delete reasoningDurationMap[message.id]
 }
 
 // processSseBlock 负责解析单个 SSE block，并把增量内容落到当前 assistant message 上。
@@ -869,6 +1232,81 @@ function processSseBlock(block: string, assistantMessage: AssistantMessage) {
   scheduleScrollMessagesToBottom(false)
 }
 
+async function streamAssistantReply(
+  draftConversationId: string,
+  text: string,
+  assistantMessage: AssistantMessage,
+  createdAt: string,
+  refreshPreview: boolean,
+  retryExtra?: {
+    retryGroupId: string
+    retryFromUserMessageId: string | number
+    retryFromAssistantMessageId: string | number
+  },
+) : Promise<string> {
+  const response = await fetchChatStream({
+    conversation_id: isDraftConversationId(draftConversationId) ? undefined : draftConversationId,
+    message: text,
+    model: selectedModel.value,
+    thinking: thinkingEnabled.value,
+    extra: retryExtra
+      ? {
+          request_mode: 'retry',
+          retry_group_id: retryExtra.retryGroupId,
+          retry_from_user_message_id: retryExtra.retryFromUserMessageId,
+          retry_from_assistant_message_id: retryExtra.retryFromAssistantMessageId,
+        }
+      : undefined,
+  })
+
+  const responseConversationId = response.headers.get('X-Conversation-ID')?.trim()
+  const actualConversationId = responseConversationId || draftConversationId
+
+  if (actualConversationId !== draftConversationId) {
+    migrateConversationState(draftConversationId, actualConversationId)
+    if (refreshPreview) {
+      prependConversationPreview(actualConversationId, text, createdAt)
+    }
+  }
+
+  const reader = response.body!.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) {
+      break
+    }
+
+    buffer += decoder.decode(value, { stream: true })
+    const blocks = buffer.split(/\r?\n\r?\n/)
+    buffer = blocks.pop() ?? ''
+
+    for (const block of blocks) {
+      processSseBlock(block, assistantMessage)
+    }
+  }
+
+  buffer += decoder.decode()
+  if (buffer.trim()) {
+    processSseBlock(buffer, assistantMessage)
+  }
+
+  if (!assistantMessage.content.trim()) {
+    assistantMessage.content = assistantMessage.reasoning?.trim()
+      ? '已完成深度思考，但当前响应未返回正文内容。'
+      : '暂未收到回复正文，请稍后重试。'
+  }
+
+  if (refreshPreview) {
+    await loadConversationListData(true)
+    await ensureConversationMeta(actualConversationId)
+  }
+
+  return actualConversationId
+}
+
 // sendMessage 负责执行“本地先上屏，再异步接流”的发送链路。
 // 职责边界：
 // 1. 先创建用户消息和 assistant 占位消息，让发送动作立即反馈到界面，等待建连过程无感化。
@@ -916,59 +1354,93 @@ async function sendMessage(preset?: string) {
   scheduleScrollMessagesToBottom(false, true)
 
   try {
-    const response = await fetchChatStream({
-      conversation_id: isDraftConversationId(draftConversationId) ? undefined : draftConversationId,
-      message: text,
-      model: selectedModel.value,
-      thinking: thinkingEnabled.value,
-    })
-
-    const responseConversationId = response.headers.get('X-Conversation-ID')?.trim()
-    const actualConversationId = responseConversationId || draftConversationId
-
-    if (actualConversationId !== draftConversationId) {
-      migrateConversationState(draftConversationId, actualConversationId)
-      prependConversationPreview(actualConversationId, text, now)
-    }
-
-    const reader = response.body!.getReader()
-    const decoder = new TextDecoder('utf-8')
-    let buffer = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) {
-        break
-      }
-
-      buffer += decoder.decode(value, { stream: true })
-      const blocks = buffer.split(/\r?\n\r?\n/)
-      buffer = blocks.pop() ?? ''
-
-      for (const block of blocks) {
-        processSseBlock(block, assistantMessage)
-      }
-    }
-
-    buffer += decoder.decode()
-    if (buffer.trim()) {
-      processSseBlock(buffer, assistantMessage)
-    }
-
-    if (!assistantMessage.content.trim()) {
-      assistantMessage.content = assistantMessage.reasoning?.trim()
-        ? '已完成深度思考，但当前响应未返回正文内容。'
-        : '暂未收到回复正文，请稍后重试。'
-    }
-
-    await loadConversationListData(true)
-    await ensureConversationMeta(actualConversationId)
+    const actualConversationId = await streamAssistantReply(draftConversationId, text, assistantMessage, now, true)
+    await loadConversationMessages(actualConversationId, true)
   } catch (error) {
     if (!assistantMessage.content.trim()) {
       assistantMessage.content = '本次回复已中断，请稍后重试。'
     }
     reasoningCollapsedMap[assistantMessage.id] = false
     ElMessage.error(error instanceof Error ? error.message : '发送消息失败，请稍后重试')
+  } finally {
+    activeStreamingMessageId.value = ''
+    chatLoading.value = false
+  }
+}
+
+async function regenerateAssistantMessage(message: AssistantMessage) {
+  if (chatLoading.value) {
+    return
+  }
+
+  const sourceUserMessage = resolveVisibleUserMessageBeforeAssistant(message.id)
+  const text = sourceUserMessage?.content.trim() || ''
+  const conversationId = selectedConversationId.value
+  const persistedUserMessageId = resolvePersistedMessageId(sourceUserMessage)
+  const persistedAssistantMessageId = resolvePersistedMessageId(message)
+  if (!text || !conversationId || !sourceUserMessage) {
+    ElMessage.warning('没有找到可用于重试的用户消息')
+    return
+  }
+
+  if (!persistedUserMessageId) {
+    ElMessage.info('当前消息仍在本地态，稍后刷新完成后再试重试')
+    return
+  }
+
+  if (!persistedAssistantMessageId) {
+    ElMessage.info('当前回复仍在本地态，稍后刷新完成后再试重试')
+    return
+  }
+
+  chatLoading.value = true
+  cancelEditUserMessage()
+
+  const retryGroup = resolveRetryPageGroup(message)
+  const retryGroupId = retryGroup?.groupId || createRetryGroupId()
+  const nextRetryIndex = (retryGroup?.total ?? 1) + 1
+  applyRetryGroupToExistingMessages(retryGroupId, nextRetryIndex, sourceUserMessage.id, message.id)
+
+  const now = new Date().toISOString()
+  appendConversationMessage(conversationId, {
+    id: createMessageId('user'),
+    role: 'user',
+    content: text,
+    createdAt: now,
+    retryGroupId,
+    retryIndex: nextRetryIndex,
+    retryTotal: nextRetryIndex,
+  })
+  const retryAssistantMessage = appendConversationMessage(conversationId, {
+    id: createMessageId('assistant'),
+    role: 'assistant',
+    content: '',
+    createdAt: now,
+    reasoning: '',
+    retryGroupId,
+    retryIndex: nextRetryIndex,
+    retryTotal: nextRetryIndex,
+  })
+
+  retryVisiblePageMap[retryGroupId] = nextRetryIndex
+  prependConversationPreview(conversationId, text, now)
+  prepareAssistantMessageForStreaming(retryAssistantMessage, now)
+  activeStreamingMessageId.value = retryAssistantMessage.id
+  scheduleScrollMessagesToBottom(false, true)
+
+  try {
+    const actualConversationId = await streamAssistantReply(conversationId, text, retryAssistantMessage, now, true, {
+      retryGroupId,
+      retryFromUserMessageId: persistedUserMessageId,
+      retryFromAssistantMessageId: persistedAssistantMessageId,
+    })
+    await loadConversationMessages(actualConversationId, true)
+  } catch (error) {
+    if (!retryAssistantMessage.content.trim()) {
+      retryAssistantMessage.content = '重新生成失败，请稍后重试。'
+    }
+    reasoningCollapsedMap[retryAssistantMessage.id] = false
+    ElMessage.error(error instanceof Error ? error.message : '重新生成失败，请稍后重试')
   } finally {
     activeStreamingMessageId.value = ''
     chatLoading.value = false
@@ -1003,6 +1475,9 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   if (messageScrollRaf) {
     cancelAnimationFrame(messageScrollRaf)
+  }
+  if (messageScrollReleaseRaf) {
+    cancelAnimationFrame(messageScrollReleaseRaf)
   }
   if (reasoningTicker) {
     window.clearInterval(reasoningTicker)
@@ -1142,7 +1617,48 @@ onBeforeUnmount(() => {
           >
             <div v-if="message.role === 'user'" class="chat-message__user-row">
               <div class="chat-message__user-bubble">
-                <div class="chat-message__markdown" v-html="renderMessageMarkdown(message.content)" />
+                <template v-if="isEditingUserMessage(message.id)">
+                  <div class="chat-message__editor">
+                    <textarea
+                      v-model="editingUserMessageDraft"
+                      class="chat-message__editor-textarea"
+                      rows="3"
+                    />
+                    <div class="chat-message__editor-actions">
+                      <button type="button" class="chat-message__editor-button chat-message__editor-button--ghost" @click="cancelEditUserMessage()">
+                        取消
+                      </button>
+                      <button type="button" class="chat-message__editor-button chat-message__editor-button--primary" @click="submitEditedUserMessage(message)">
+                        发送
+                      </button>
+                    </div>
+                  </div>
+                </template>
+                <div v-else class="chat-message__markdown" v-html="renderMessageMarkdown(message.content)" />
+              </div>
+              <div v-if="!isEditingUserMessage(message.id)" class="chat-message__action-bar chat-message__action-bar--user">
+                <button
+                  type="button"
+                  class="chat-message__icon-button"
+                  aria-label="复制消息"
+                  @click="copyText(message.content, '已复制用户消息')"
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M6.14923 4.02032C7.11191 4.02032 7.87977 4.02017 8.49591 4.07599C9.12122 4.1327 9.65786 4.25188 10.1414 4.53107C10.7201 4.8653 11.2008 5.34591 11.535 5.92462C11.8142 6.40818 11.9333 6.94482 11.9901 7.57013C12.0459 8.18625 12.0457 8.9542 12.0457 9.91681C12.0457 10.8795 12.0459 11.6474 11.9901 12.2635C11.9333 12.8888 11.8142 13.4254 11.535 13.909C11.2008 14.4877 10.7201 14.9683 10.1414 15.3026C9.65786 15.5817 9.12122 15.7009 8.49591 15.7576C7.87977 15.8134 7.1119 15.8133 6.14923 15.8133C5.18661 15.8133 4.41868 15.8134 3.80255 15.7576C3.17724 15.7009 2.6406 15.5817 2.15704 15.3026C1.57834 14.9684 1.09772 14.4877 0.763489 13.909C0.484305 13.4254 0.365123 12.8888 0.308411 12.2635C0.252587 11.6474 0.252747 10.8795 0.252747 9.91681C0.252747 8.95419 0.252603 8.18625 0.308411 7.57013C0.365123 6.94482 0.484305 6.40818 0.763489 5.92462C1.09771 5.3459 1.57833 4.86529 2.15704 4.53107C2.6406 4.25188 3.17724 4.1327 3.80255 4.07599C4.41868 4.02018 5.1866 4.02032 6.14923 4.02032Z" fill="currentColor" />
+                    <path d="M9.80157 0.367981C10.7637 0.367981 11.5313 0.367886 12.1473 0.423645C12.7725 0.480313 13.3093 0.598765 13.7928 0.877747C14.3716 1.21192 14.852 1.69355 15.1863 2.27228C15.4655 2.75575 15.5857 3.29165 15.6424 3.91681C15.6982 4.53301 15.6971 5.30161 15.6971 6.26447V7.8299C15.6971 8.29265 15.6989 8.58994 15.6649 8.84845C15.4667 10.3525 14.4009 11.5738 12.9832 11.9988V10.5467C13.6973 10.1903 14.2104 9.49662 14.3192 8.67169C14.3387 8.52348 14.3406 8.3358 14.3406 7.8299V6.26447C14.3406 5.27707 14.3398 4.58149 14.2908 4.04083C14.2427 3.50969 14.1526 3.19373 14.0125 2.95099C13.7974 2.5785 13.4875 2.2687 13.1151 2.05353C12.8723 1.91347 12.5563 1.82237 12.0252 1.77423C11.4846 1.72528 10.7888 1.7254 9.80157 1.7254H7.71466C6.75614 1.72559 5.92659 2.27697 5.52325 3.07892H4.07013C4.54215 1.51132 5.99314 0.368192 7.71466 0.367981H9.80157Z" fill="currentColor" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  class="chat-message__icon-button"
+                  aria-label="修改消息"
+                  @click="startEditUserMessage(message)"
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M9.94073 1.34942C10.7047 0.902314 11.6503 0.902418 12.4143 1.34942C12.706 1.52016 12.9687 1.79118 13.3104 2.13284C13.652 2.47448 13.9231 2.73721 14.0938 3.02894C14.5408 3.79295 14.5409 4.73856 14.0938 5.50251C13.9231 5.79415 13.652 6.05704 13.3104 6.39861L6.65929 13.0497C6.28065 13.4284 6.00692 13.7108 5.6654 13.9097C5.32388 14.1085 4.94312 14.2074 4.42702 14.3498L3.24391 14.6761C2.77524 14.8054 2.34535 14.9262 2.00128 14.9684C1.65193 15.0112 1.17961 15.0013 0.810733 14.6325C0.44189 14.2637 0.432076 13.7913 0.474829 13.442C0.517004 13.0979 0.63787 12.668 0.767151 12.1993L1.09349 11.0162C1.23585 10.5001 1.33478 10.1194 1.53356 9.77785C1.73246 9.43633 2.01487 9.1626 2.39352 8.78395L9.04463 2.13284C9.38622 1.79126 9.64908 1.52017 9.94073 1.34942Z" fill="currentColor" />
+                    <path d="M15.5427 14.8398H7.5522L8.96704 13.425H15.5427V14.8398Z" fill="currentColor" />
+                  </svg>
+                </button>
               </div>
               <span class="chat-message__time chat-message__time--user">{{ formatMessageTime(message.createdAt) }}</span>
             </div>
@@ -1226,6 +1742,51 @@ onBeforeUnmount(() => {
                 </div>
               </div>
 
+              <div v-if="message.content" class="chat-message__action-bar">
+                <button
+                  type="button"
+                  class="chat-message__icon-button"
+                  aria-label="复制回复"
+                  @click="copyText(message.content, '已复制回复内容')"
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M6.14923 4.02032C7.11191 4.02032 7.87977 4.02017 8.49591 4.07599C9.12122 4.1327 9.65786 4.25188 10.1414 4.53107C10.7201 4.8653 11.2008 5.34591 11.535 5.92462C11.8142 6.40818 11.9333 6.94482 11.9901 7.57013C12.0459 8.18625 12.0457 8.9542 12.0457 9.91681C12.0457 10.8795 12.0459 11.6474 11.9901 12.2635C11.9333 12.8888 11.8142 13.4254 11.535 13.909C11.2008 14.4877 10.7201 14.9683 10.1414 15.3026C9.65786 15.5817 9.12122 15.7009 8.49591 15.7576C7.87977 15.8134 7.1119 15.8133 6.14923 15.8133C5.18661 15.8133 4.41868 15.8134 3.80255 15.7576C3.17724 15.7009 2.6406 15.5817 2.15704 15.3026C1.57834 14.9684 1.09772 14.4877 0.763489 13.909C0.484305 13.4254 0.365123 12.8888 0.308411 12.2635C0.252587 11.6474 0.252747 10.8795 0.252747 9.91681C0.252747 8.95419 0.252603 8.18625 0.308411 7.57013C0.365123 6.94482 0.484305 6.40818 0.763489 5.92462C1.09771 5.3459 1.57833 4.86529 2.15704 4.53107C2.6406 4.25188 3.17724 4.1327 3.80255 4.07599C4.41868 4.02018 5.1866 4.02032 6.14923 4.02032Z" fill="currentColor" />
+                    <path d="M9.80157 0.367981C10.7637 0.367981 11.5313 0.367886 12.1473 0.423645C12.7725 0.480313 13.3093 0.598765 13.7928 0.877747C14.3716 1.21192 14.852 1.69355 15.1863 2.27228C15.4655 2.75575 15.5857 3.29165 15.6424 3.91681C15.6982 4.53301 15.6971 5.30161 15.6971 6.26447V7.8299C15.6971 8.29265 15.6989 8.58994 15.6649 8.84845C15.4667 10.3525 14.4009 11.5738 12.9832 11.9988V10.5467C13.6973 10.1903 14.2104 9.49662 14.3192 8.67169C14.3387 8.52348 14.3406 8.3358 14.3406 7.8299V6.26447C14.3406 5.27707 14.3398 4.58149 14.2908 4.04083C14.2427 3.50969 14.1526 3.19373 14.0125 2.95099C13.7974 2.5785 13.4875 2.2687 13.1151 2.05353C12.8723 1.91347 12.5563 1.82237 12.0252 1.77423C11.4846 1.72528 10.7888 1.7254 9.80157 1.7254H7.71466C6.75614 1.72559 5.92659 2.27697 5.52325 3.07892H4.07013C4.54215 1.51132 5.99314 0.368192 7.71466 0.367981H9.80157Z" fill="currentColor" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  class="chat-message__icon-button"
+                  aria-label="重新生成"
+                  :disabled="chatLoading"
+                  @click="regenerateAssistantMessage(message)"
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M7.92139 0.349152C10.3744 0.349234 12.5564 1.5052 13.9558 3.29894L15.1281 2.12759C15.3304 1.92546 15.6767 2.06943 15.6767 2.35538V5.53923C15.6766 5.71626 15.5329 5.85976 15.3559 5.86002H12.171C11.8855 5.8597 11.7426 5.51465 11.9443 5.31249L12.9641 4.29056C11.8237 2.74305 9.98911 1.74106 7.92139 1.74097C4.46439 1.74097 1.66236 4.543 1.66236 8C1.66236 11.457 4.46439 14.259 7.92139 14.259C11.3783 14.2589 14.1804 11.4569 14.1804 8H15.5722C15.5722 12.2251 12.1465 15.6507 7.92139 15.6508C3.69617 15.6508 0.270538 12.2252 0.270538 8C0.270538 3.77478 3.69617 0.349152 7.92139 0.349152Z" fill="currentColor" />
+                  </svg>
+                </button>
+                <div v-if="shouldShowRetryPager(message)" class="chat-message__retry-pager">
+                  <button
+                    type="button"
+                    class="chat-message__retry-pager-button"
+                    :disabled="resolveRetryPageGroup(message)?.visibleIndex === 1"
+                    @click="changeRetryPage(message, -1)"
+                  >
+                    &lt;
+                  </button>
+                  <span class="chat-message__retry-pager-label">
+                    {{ resolveRetryPageGroup(message)?.visibleIndex }}/{{ resolveRetryPageGroup(message)?.total }}
+                  </span>
+                  <button
+                    type="button"
+                    class="chat-message__retry-pager-button"
+                    :disabled="resolveRetryPageGroup(message)?.visibleIndex === resolveRetryPageGroup(message)?.total"
+                    @click="changeRetryPage(message, 1)"
+                  >
+                    &gt;
+                  </button>
+                </div>
+              </div>
               <span class="chat-message__time">{{ formatMessageTime(message.createdAt) }}</span>
             </div>
           </article>
@@ -1251,7 +1812,7 @@ onBeforeUnmount(() => {
                   <textarea
                     v-model="messageInput"
                     class="_27c9245 ds-scroll-area ds-scroll-area--show-on-focus-within d96f2d2a"
-                    placeholder="给 DeepSeek 发送消息 "
+                    placeholder="输入消息，按 Enter 发送"
                     rows="2"
                     @keydown.enter.exact.prevent="sendMessage()"
                   />
@@ -1805,6 +2366,139 @@ onBeforeUnmount(() => {
 
 .chat-message__assistant-content {
   padding-right: 10px;
+}
+
+.chat-message__action-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.chat-message__action-bar--user {
+  justify-content: flex-end;
+}
+
+.chat-message__icon-button {
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: #7b8798;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.chat-message__icon-button:hover {
+  background: rgba(79, 118, 234, 0.1);
+  color: #3f69d3;
+}
+
+.chat-message__icon-button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.chat-message__retry-pager {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 2px;
+}
+
+.chat-message__retry-pager-button {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: #7b8798;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.chat-message__retry-pager-button:hover {
+  background: rgba(79, 118, 234, 0.1);
+  color: #3f69d3;
+}
+
+.chat-message__retry-pager-button:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.chat-message__retry-pager-label {
+  min-width: 34px;
+  text-align: center;
+  color: #6f7b8e;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chat-message__editor {
+  width: min(100%, 640px);
+  border: 1px solid rgba(77, 107, 254, 0.22);
+  border-radius: 22px;
+  background: #ffffff;
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.05);
+}
+
+.chat-message__editor-textarea {
+  width: 100%;
+  min-height: 82px;
+  border: none;
+  outline: none;
+  resize: vertical;
+  background: transparent;
+  padding: 12px 16px 0;
+  font: inherit;
+  font-size: 16px;
+  line-height: 24px;
+  color: #1f2b3f;
+  box-sizing: border-box;
+}
+
+.chat-message__editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 6px 10px 10px;
+}
+
+.chat-message__editor-button {
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.chat-message__editor-button--ghost {
+  border-color: rgba(15, 23, 42, 0.12);
+  background: #ffffff;
+  color: #475569;
+}
+
+.chat-message__editor-button--ghost:hover {
+  background: #f8fafc;
+}
+
+.chat-message__editor-button--primary {
+  background: #235ff1;
+  color: #ffffff;
+}
+
+.chat-message__editor-button--primary:hover {
+  background: #1b53d7;
 }
 
 .chat-message__reasoning {

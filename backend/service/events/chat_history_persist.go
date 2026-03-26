@@ -68,6 +68,12 @@ func RegisterChatHistoryPersistHandler(
 				payload.ConversationID,
 				payload.Role,
 				payload.Message,
+				payload.ReasoningContent,
+				payload.ReasoningDurationSeconds,
+				payload.RetryGroupID,
+				payload.RetryIndex,
+				payload.RetryFromUserMessageID,
+				payload.RetryFromAssistantMessageID,
 				payload.TokensConsumed,
 			)
 		})

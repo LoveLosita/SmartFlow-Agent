@@ -45,7 +45,7 @@ func (s *AgentService) GetConversationHistory(ctx context.Context, userID int, c
 		history, cacheErr := s.agentCache.GetHistory(ctx, normalizedChatID)
 		if cacheErr != nil {
 			log.Printf("读取会话历史缓存失败 chat_id=%s: %v", normalizedChatID, cacheErr)
-		} else if history != nil {
+		} else if history != nil && !cacheConversationHistoryHasRetryMetadata(history) {
 			return buildConversationHistoryItemsFromCache(history), nil
 		}
 	}
@@ -81,12 +81,15 @@ func buildConversationHistoryItemsFromCache(messages []*schema.Message) []model.
 			continue
 		}
 		items = append(items, model.GetConversationHistoryItem{
-			Role:             normalizeConversationHistoryRole(string(msg.Role)),
-			Content:          strings.TrimSpace(msg.Content),
-			ReasoningContent: strings.TrimSpace(msg.ReasoningContent),
+			Role:                     normalizeConversationHistoryRole(string(msg.Role)),
+			Content:                  strings.TrimSpace(msg.Content),
+			ReasoningContent:         strings.TrimSpace(msg.ReasoningContent),
+			ReasoningDurationSeconds: extractConversationReasoningDurationSeconds(msg),
+			RetryGroupID:             extractConversationRetryGroupID(msg),
+			RetryIndex:               extractConversationRetryIndex(msg),
 		})
 	}
-	return items
+	return attachConversationRetryTotals(items)
 }
 
 // buildConversationHistoryItemsFromDB 把数据库聊天记录转换为接口响应。
@@ -109,13 +112,154 @@ func buildConversationHistoryItemsFromDB(histories []model.ChatHistory) []model.
 		}
 
 		items = append(items, model.GetConversationHistoryItem{
-			ID:        history.ID,
-			Role:      role,
-			Content:   content,
-			CreatedAt: history.CreatedAt,
+			ID:                       history.ID,
+			Role:                     role,
+			Content:                  content,
+			CreatedAt:                history.CreatedAt,
+			ReasoningContent:         strings.TrimSpace(derefConversationHistoryText(history.ReasoningContent)),
+			ReasoningDurationSeconds: history.ReasoningDurationSeconds,
+			RetryGroupID:             cloneConversationStringPointer(history.RetryGroupID),
+			RetryIndex:               cloneConversationIntPointer(history.RetryIndex),
 		})
 	}
+	return attachConversationRetryTotals(items)
+}
+
+func derefConversationHistoryText(text *string) string {
+	if text == nil {
+		return ""
+	}
+	return *text
+}
+
+func extractConversationReasoningDurationSeconds(msg *schema.Message) int {
+	if msg == nil || msg.Extra == nil {
+		return 0
+	}
+	raw, ok := msg.Extra["reasoning_duration_seconds"]
+	if !ok {
+		return 0
+	}
+	switch v := raw.(type) {
+	case int:
+		return v
+	case int32:
+		return int(v)
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
+}
+
+func extractConversationRetryGroupID(msg *schema.Message) *string {
+	if msg == nil || msg.Extra == nil {
+		return nil
+	}
+	raw, ok := msg.Extra["retry_group_id"]
+	if !ok {
+		return nil
+	}
+	text, ok := raw.(string)
+	if !ok {
+		return nil
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	return &text
+}
+
+func extractConversationRetryIndex(msg *schema.Message) *int {
+	if msg == nil || msg.Extra == nil {
+		return nil
+	}
+	raw, ok := msg.Extra["retry_index"]
+	if !ok {
+		return nil
+	}
+	switch v := raw.(type) {
+	case int:
+		if v <= 0 {
+			return nil
+		}
+		return &v
+	case int32:
+		value := int(v)
+		if value <= 0 {
+			return nil
+		}
+		return &value
+	case int64:
+		value := int(v)
+		if value <= 0 {
+			return nil
+		}
+		return &value
+	case float64:
+		value := int(v)
+		if value <= 0 {
+			return nil
+		}
+		return &value
+	default:
+		return nil
+	}
+}
+
+func attachConversationRetryTotals(items []model.GetConversationHistoryItem) []model.GetConversationHistoryItem {
+	if len(items) == 0 {
+		return items
+	}
+	groupTotals := make(map[string]int)
+	for _, item := range items {
+		if item.RetryGroupID == nil || item.RetryIndex == nil {
+			continue
+		}
+		groupID := strings.TrimSpace(*item.RetryGroupID)
+		if groupID == "" {
+			continue
+		}
+		if *item.RetryIndex > groupTotals[groupID] {
+			groupTotals[groupID] = *item.RetryIndex
+		}
+	}
+	for idx := range items {
+		groupIDPtr := items[idx].RetryGroupID
+		if groupIDPtr == nil {
+			continue
+		}
+		groupID := strings.TrimSpace(*groupIDPtr)
+		total := groupTotals[groupID]
+		if total <= 0 {
+			continue
+		}
+		totalCopy := total
+		items[idx].RetryTotal = &totalCopy
+	}
 	return items
+}
+
+func cloneConversationStringPointer(src *string) *string {
+	if src == nil {
+		return nil
+	}
+	text := strings.TrimSpace(*src)
+	if text == "" {
+		return nil
+	}
+	return &text
+}
+
+func cloneConversationIntPointer(src *int) *int {
+	if src == nil || *src <= 0 {
+		return nil
+	}
+	value := *src
+	return &value
 }
 
 func normalizeConversationHistoryRole(role string) string {
@@ -127,4 +271,13 @@ func normalizeConversationHistoryRole(role string) string {
 	default:
 		return "system"
 	}
+}
+
+func cacheConversationHistoryHasRetryMetadata(messages []*schema.Message) bool {
+	for _, msg := range messages {
+		if extractConversationRetryGroupID(msg) != nil {
+			return true
+		}
+	}
+	return false
 }

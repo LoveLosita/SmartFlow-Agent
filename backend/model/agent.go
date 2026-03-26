@@ -7,29 +7,23 @@ type UserSendMessageRequest struct {
 	Message        string         `json:"message" binding:"required"`
 	Model          string         `json:"model,omitempty"`
 	Thinking       bool           `json:"thinking,omitempty"`
-	Extra          map[string]any `json:"extra,omitempty"` // 附加参数（如 task_class_id），供 agent 分支链路使用
+	Extra          map[string]any `json:"extra,omitempty"`
 }
 
-// ChatHistoryPersistPayload 是“聊天消息持久化请求”业务 DTO。
-//
-// 职责边界：
-// 1. 只描述聊天业务需要落库的核心字段；
-// 2. 可被同步直写路径与异步事件路径复用；
-// 3. 不包含 outbox/kafka 协议字段（这些字段由 infra 层统一封装）。
 type ChatHistoryPersistPayload struct {
-	UserID         int    `json:"user_id"`
-	ConversationID string `json:"conversation_id"`
-	Role           string `json:"role"`
-	Message        string `json:"message"`
-	TokensConsumed int    `json:"tokens_consumed"`
+	UserID                      int     `json:"user_id"`
+	ConversationID              string  `json:"conversation_id"`
+	Role                        string  `json:"role"`
+	Message                     string  `json:"message"`
+	ReasoningContent            string  `json:"reasoning_content,omitempty"`
+	ReasoningDurationSeconds    int     `json:"reasoning_duration_seconds,omitempty"`
+	RetryGroupID                *string `json:"retry_group_id,omitempty"`
+	RetryIndex                  *int    `json:"retry_index,omitempty"`
+	RetryFromUserMessageID      *int    `json:"retry_from_user_message_id,omitempty"`
+	RetryFromAssistantMessageID *int    `json:"retry_from_assistant_message_id,omitempty"`
+	TokensConsumed              int     `json:"tokens_consumed"`
 }
 
-// ChatTokenUsageAdjustPayload 是“会话 token 账本增量调整”事件载荷。
-//
-// 职责边界：
-// 1. 只表达“对哪个用户/会话增加多少 token”；
-// 2. 不承载 chat_histories 落库语义（消息正文由聊天持久化事件负责）；
-// 3. 不包含 outbox/kafka 协议字段（由基础设施层统一封装）。
 type ChatTokenUsageAdjustPayload struct {
 	UserID         int       `json:"user_id"`
 	ConversationID string    `json:"conversation_id"`
@@ -38,11 +32,6 @@ type ChatTokenUsageAdjustPayload struct {
 	TriggeredAt    time.Time `json:"triggered_at"`
 }
 
-// GetConversationMetaResponse 是会话元信息查询接口的返回结构。
-// 说明：
-// 1) title 可能为空字符串（表示标题尚未生成）；
-// 2) has_title 便于前端快速判断是否需要展示默认占位文案；
-// 3) 保留 message_count/last_message_at，方便前端后续扩展会话列表排序或角标。
 type GetConversationMetaResponse struct {
 	ConversationID string     `json:"conversation_id"`
 	Title          string     `json:"title"`
@@ -52,12 +41,6 @@ type GetConversationMetaResponse struct {
 	Status         string     `json:"status"`
 }
 
-// GetConversationListItem 是“会话列表”中的单项数据。
-//
-// 职责边界：
-// 1. 仅承载列表展示所需的轻量字段，不承载具体消息正文；
-// 2. title 允许为空字符串，has_title 用于前端快速判断占位文案；
-// 3. message_count/last_message_at 用于排序展示与角标扩展。
 type GetConversationListItem struct {
 	ConversationID string     `json:"conversation_id"`
 	Title          string     `json:"title"`
@@ -68,12 +51,6 @@ type GetConversationListItem struct {
 	CreatedAt      *time.Time `json:"created_at,omitempty"`
 }
 
-// GetConversationListResponse 是“获取用户会话列表”接口的统一响应体。
-//
-// 职责边界：
-// 1. list 承载当前页数据；
-// 2. page/page_size/total/has_more 承载分页语义；
-// 3. 不负责返回会话正文明细（正文仍由聊天历史接口承担）。
 type GetConversationListResponse struct {
 	List     []GetConversationListItem `json:"list"`
 	Page     int                       `json:"page"`
@@ -83,58 +60,30 @@ type GetConversationListResponse struct {
 	HasMore  bool                      `json:"has_more"`
 }
 
-// GetConversationHistoryItem 是“按会话读取聊天历史”接口的单条消息响应。
-//
-// 职责边界：
-// 1. role/content：承载前端渲染消息气泡所需的核心字段；
-// 2. id/created_at：仅在回源 DB 时可稳定提供，命中 Redis 时允许为空；
-// 3. reasoning_content：兼容模型推理内容，缓存命中时可直接透传。
 type GetConversationHistoryItem struct {
-	ID               int        `json:"id,omitempty"`
-	Role             string     `json:"role"`
-	Content          string     `json:"content"`
-	CreatedAt        *time.Time `json:"created_at,omitempty"`
-	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ID                       int        `json:"id,omitempty"`
+	Role                     string     `json:"role"`
+	Content                  string     `json:"content"`
+	CreatedAt                *time.Time `json:"created_at,omitempty"`
+	ReasoningContent         string     `json:"reasoning_content,omitempty"`
+	ReasoningDurationSeconds int        `json:"reasoning_duration_seconds,omitempty"`
+	RetryGroupID             *string    `json:"retry_group_id"`
+	RetryIndex               *int       `json:"retry_index"`
+	RetryTotal               *int       `json:"retry_total"`
 }
 
-// SchedulePlanPreviewCache 是“排程预览”在 Redis 中的缓存结构。
-//
-// 职责边界：
-// 1. 负责承载排程完成后的结构化预览快照（summary + candidate_plans）；
-// 2. 通过 user_id 做查询归属校验，避免跨用户越权读取；
-// 3. 仅用于缓存层读写，不表示已落库或已应用到正式日程；
-// 4. 通过 trace_id 标识本次预览来源，便于排查链路问题。
 type SchedulePlanPreviewCache struct {
-	UserID         int                `json:"user_id"`
-	ConversationID string             `json:"conversation_id"`
-	TraceID        string             `json:"trace_id,omitempty"`
-	Summary        string             `json:"summary"`
-	CandidatePlans []UserWeekSchedule `json:"candidate_plans"`
-	// TaskClassIDs 记录本次预览对应的任务类集合。
-	// 作用：
-	// 1. 连续对话微调时，若本轮请求未显式传 task_class_ids，可用该字段兜底；
-	// 2. 仅用于会话内上下文承接，不表示用户最终确认后的持久化状态。
-	TaskClassIDs []int `json:"task_class_ids,omitempty"`
-	// HybridEntries 保存“可优化的混合日程底板”。
-	// 作用：
-	// 1. 连续对话微调时复用上轮结果作为起点，避免每轮都从粗排重算；
-	// 2. 仅缓存态，生命周期受 Redis TTL 控制。
-	HybridEntries []HybridScheduleEntry `json:"hybrid_entries,omitempty"`
-	// AllocatedItems 保存建议任务块的当前分配状态。
-	// 作用：
-	// 1. 保证 final_check 的数量核对口径在连续微调场景下可持续；
-	// 2. return_preview 节点可继续回填 embedded_time。
-	AllocatedItems []TaskClassItem `json:"allocated_items,omitempty"`
-	GeneratedAt    time.Time       `json:"generated_at"`
+	UserID         int                   `json:"user_id"`
+	ConversationID string                `json:"conversation_id"`
+	TraceID        string                `json:"trace_id,omitempty"`
+	Summary        string                `json:"summary"`
+	CandidatePlans []UserWeekSchedule    `json:"candidate_plans"`
+	TaskClassIDs   []int                 `json:"task_class_ids,omitempty"`
+	HybridEntries  []HybridScheduleEntry `json:"hybrid_entries,omitempty"`
+	AllocatedItems []TaskClassItem       `json:"allocated_items,omitempty"`
+	GeneratedAt    time.Time             `json:"generated_at"`
 }
 
-// GetSchedulePlanPreviewResponse 是“按会话查询排程预览”接口返回结构。
-//
-// 职责边界：
-// 1. conversation_id：标识该预览属于哪个会话；
-// 2. summary：给用户展示的终审自然语言总结；
-// 3. candidate_plans：给前端渲染课表/时间轴用的结构化 JSON；
-// 4. generated_at：预览生成时间，便于前端判断是否是最新结果。
 type GetSchedulePlanPreviewResponse struct {
 	ConversationID string             `json:"conversation_id"`
 	TraceID        string             `json:"trace_id,omitempty"`
@@ -174,15 +123,20 @@ type AgentChat struct {
 func (AgentChat) TableName() string { return "agent_chats" }
 
 type ChatHistory struct {
-	ID             int        `gorm:"column:id;primaryKey;autoIncrement"`
-	ChatID         string     `gorm:"column:chat_id;type:varchar(36);not null;index:idx_user_chat,priority:2;index:idx_chat_id;comment:会话UUID"`
-	UserID         int        `gorm:"column:user_id;not null;index:idx_user_chat,priority:1"`
-	MessageContent *string    `gorm:"column:message_content;type:text;comment:消息内容"`
-	Role           *string    `gorm:"column:role;type:varchar(32);comment:消息角色"`
-	TokensConsumed int        `gorm:"column:tokens_consumed;not null;default:0;comment:本轮消耗Token"`
-	CreatedAt      *time.Time `gorm:"column:created_at;autoCreateTime"`
+	ID                          int        `gorm:"column:id;primaryKey;autoIncrement"`
+	ChatID                      string     `gorm:"column:chat_id;type:varchar(36);not null;index:idx_user_chat,priority:2;index:idx_chat_id;comment:会话UUID"`
+	UserID                      int        `gorm:"column:user_id;not null;index:idx_user_chat,priority:1"`
+	MessageContent              *string    `gorm:"column:message_content;type:text;comment:消息内容"`
+	ReasoningContent            *string    `gorm:"column:reasoning_content;type:text;comment:deep reasoning text"`
+	ReasoningDurationSeconds    int        `gorm:"column:reasoning_duration_seconds;not null;default:0;comment:deep reasoning duration seconds"`
+	RetryGroupID                *string    `gorm:"column:retry_group_id;type:varchar(64);index:idx_retry_group;comment:retry group id"`
+	RetryIndex                  *int       `gorm:"column:retry_index;comment:retry page index"`
+	RetryFromUserMessageID      *int       `gorm:"column:retry_from_user_message_id;comment:source user message id"`
+	RetryFromAssistantMessageID *int       `gorm:"column:retry_from_assistant_message_id;comment:source assistant message id"`
+	Role                        *string    `gorm:"column:role;type:varchar(32);comment:消息角色"`
+	TokensConsumed              int        `gorm:"column:tokens_consumed;not null;default:0;comment:本轮消耗Token"`
+	CreatedAt                   *time.Time `gorm:"column:created_at;autoCreateTime"`
 
-	// 只保留从聊天记录到会话的单向关联，避免迁移时出现循环依赖。
 	Chat AgentChat `gorm:"foreignKey:ChatID;references:ChatID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE"`
 }
 

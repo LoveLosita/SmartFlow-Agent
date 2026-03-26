@@ -1,26 +1,74 @@
 openapi: 3.0.3
 info:
-  title: SmartFlow Agent Query API
-  version: 0.8.0
-  description: Agent 会话列表与聊天历史查询接口。
+  title: SmartFlow Agent History API
+  version: 0.8.1
+  description: Latest conversation history API spec, including persisted reasoning content.
+
 servers:
   - url: http://localhost:8080
+
 paths:
+  /api/v1/agent/chat:
+    post:
+      tags:
+        - Agent
+      summary: Stream chat reply
+      description: |
+        Starts an Agent chat request.
+        Retry uses the same endpoint and passes retry metadata in `extra`.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentChatRequest'
+            examples:
+              normal:
+                value:
+                  conversation_id: 8df59142-29a2-4bf6-85b6-c5e3f4e9cb89
+                  message: Help me review tomorrow's tasks.
+                  model: worker
+                  thinking: true
+                  extra: {}
+              retry:
+                value:
+                  conversation_id: 8df59142-29a2-4bf6-85b6-c5e3f4e9cb89
+                  message: Help me review tomorrow's tasks.
+                  model: worker
+                  thinking: true
+                  extra:
+                    request_mode: retry
+                    retry_group_id: retry-group-001
+                    retry_from_user_message_id: 123
+                    retry_from_assistant_message_id: 456
+      responses:
+        '200':
+          description: SSE stream response
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /api/v1/agent/conversation-list:
     get:
       tags:
         - Agent
-      summary: 获取 Agent 会话列表
-      description: |
-        获取当前登录用户的 Agent 会话列表。
-        支持历史分页参数 `page/page_size`，并兼容懒加载参数 `limit`。
-        当同时传入 `page_size` 与 `limit` 时，以 `limit` 为准。
+      summary: Get conversation list
       security:
         - BearerAuth: []
       parameters:
         - name: page
           in: query
-          description: 页码，默认 1。
           required: false
           schema:
             type: integer
@@ -28,7 +76,6 @@ paths:
             example: 1
         - name: page_size
           in: query
-          description: 历史分页页大小，默认 20。
           required: false
           schema:
             type: integer
@@ -37,8 +84,8 @@ paths:
             example: 20
         - name: limit
           in: query
-          description: 懒加载条数，作为 `page_size` 的别名使用。
           required: false
+          description: Alias of page_size.
           schema:
             type: integer
             minimum: 1
@@ -46,67 +93,47 @@ paths:
             example: 20
         - name: status
           in: query
-          description: 会话状态过滤，仅支持 `active` 或 `archived`。
           required: false
           schema:
             type: string
-            enum:
-              - active
-              - archived
+            enum: [active, archived]
             example: active
       responses:
         '200':
-          description: 查询成功
+          description: Success
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConversationListEnvelope'
-              examples:
-                success:
-                  value:
-                    status: "10000"
-                    info: success
-                    data:
-                      list:
-                        - conversation_id: 8df59142-29a2-4bf6-85b6-c5e3f4e9cb89
-                          title: 明天课程与任务安排
-                          has_title: true
-                          message_count: 14
-                          last_message_at: "2026-03-24T22:18:45+08:00"
-                          status: active
-                          created_at: "2026-03-24T20:01:12+08:00"
-                      page: 1
-                      page_size: 20
-                      limit: 20
-                      total: 1
-                      has_more: false
         '400':
-          description: 参数错误或会话状态非法
+          description: Invalid request
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '401':
-          description: 未登录或 token 无效
+          description: Unauthorized
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+
   /api/v1/agent/conversation-history:
     get:
       tags:
         - Agent
-      summary: 获取 Agent 会话聊天历史
+      summary: Get conversation history
       description: |
-        获取指定会话的聊天历史。
-        服务端会先校验会话是否属于当前用户，再优先读取 Redis，
-        Redis 未命中时回源数据库，并把结果回填到 Redis。
+        Returns chat history for a conversation.
+        The service validates ownership first, then prefers Redis and falls back to MySQL.
+        `reasoning_content` is now returned from both cache hits and DB-backed history when available.
+        `reasoning_duration_seconds` is server-computed and persisted in seconds.
+        Retry groups are returned via `retry_group_id`, `retry_index`, and `retry_total`.
       security:
         - BearerAuth: []
       parameters:
         - name: conversation_id
           in: query
-          description: 会话 ID。
           required: true
           schema:
             type: string
@@ -114,7 +141,7 @@ paths:
             example: 8df59142-29a2-4bf6-85b6-c5e3f4e9cb89
       responses:
         '200':
-          description: 查询成功
+          description: Success
           content:
             application/json:
               schema:
@@ -127,31 +154,85 @@ paths:
                     data:
                       - id: 101
                         role: user
-                        content: 帮我看下明天最重要的任务
+                        content: Help me review tomorrow's most important task.
                         created_at: "2026-03-24T22:15:01+08:00"
+                        reasoning_content: ""
+                        reasoning_duration_seconds: 0
+                        retry_group_id: retry-group-001
+                        retry_index: 1
+                        retry_total: 2
                       - id: 102
                         role: assistant
-                        content: 明天优先处理数据库联调和接口验收。
+                        content: Tomorrow you should prioritize the DB integration and API validation.
                         created_at: "2026-03-24T22:15:06+08:00"
+                        reasoning_content: "Stage: request.accepted\nUser request accepted.\n\nStage: task_query.reflecting\nComparing the retrieved tasks and selecting the tightest deadlines."
+                        reasoning_duration_seconds: 5
+                        retry_group_id: retry-group-001
+                        retry_index: 2
+                        retry_total: 2
         '400':
-          description: 缺少参数或会话不存在
+          description: Missing parameter or conversation not found
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '401':
-          description: 未登录或 token 无效
+          description: Unauthorized
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+
 components:
   securitySchemes:
     BearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
+
   schemas:
+    AgentChatRequest:
+      type: object
+      required:
+        - message
+      properties:
+        conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+        message:
+          type: string
+        model:
+          type: string
+          nullable: true
+          example: worker
+        thinking:
+          type: boolean
+          example: true
+        extra:
+          $ref: '#/components/schemas/AgentChatExtra'
+
+    AgentChatExtra:
+      type: object
+      additionalProperties: true
+      properties:
+        request_mode:
+          type: string
+          description: Use `retry` when regenerating a previous answer version.
+          example: retry
+        retry_group_id:
+          type: string
+          nullable: true
+          example: retry-group-001
+        retry_from_user_message_id:
+          type: integer
+          nullable: true
+          example: 123
+        retry_from_assistant_message_id:
+          type: integer
+          nullable: true
+          example: 456
+
     ErrorResponse:
       type: object
       required:
@@ -164,6 +245,7 @@ components:
         info:
           type: string
           example: wrong param type
+
     ConversationListEnvelope:
       type: object
       required:
@@ -179,6 +261,7 @@ components:
           example: success
         data:
           $ref: '#/components/schemas/ConversationListResponse'
+
     ConversationListResponse:
       type: object
       required:
@@ -201,7 +284,6 @@ components:
           example: 20
         limit:
           type: integer
-          description: 当前实际使用的懒加载条数。
           example: 20
         total:
           type: integer
@@ -210,6 +292,7 @@ components:
         has_more:
           type: boolean
           example: true
+
     ConversationListItem:
       type: object
       required:
@@ -224,7 +307,7 @@ components:
           format: uuid
         title:
           type: string
-          example: 明天课程与任务安排
+          example: Tomorrow task review
         has_title:
           type: boolean
           example: true
@@ -242,6 +325,7 @@ components:
           type: string
           format: date-time
           nullable: true
+
     ConversationHistoryEnvelope:
       type: object
       required:
@@ -259,6 +343,7 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ConversationHistoryItem'
+
     ConversationHistoryItem:
       type: object
       required:
@@ -267,23 +352,39 @@ components:
       properties:
         id:
           type: integer
-          description: 数据库主键；命中 Redis 时可能为空。
+          description: Database primary key. May be omitted on pure cache hits.
           example: 102
         role:
           type: string
-          enum:
-            - user
-            - assistant
-            - system
+          enum: [user, assistant, system]
           example: assistant
         content:
           type: string
-          example: 明天优先处理数据库联调和接口验收。
+          example: Tomorrow you should prioritize the DB integration and API validation.
         created_at:
           type: string
           format: date-time
           nullable: true
         reasoning_content:
           type: string
-          description: 推理内容；命中数据库历史时通常为空。
-          example: ""
+          description: Aggregated reasoning text, including streamed model reasoning or stage-level thinking text.
+          example: "Stage: request.accepted\nUser request accepted."
+        reasoning_duration_seconds:
+          type: integer
+          description: Server-computed reasoning duration in seconds.
+          example: 5
+        retry_group_id:
+          type: string
+          nullable: true
+          description: Retry group identifier shared by the original answer and all retry versions.
+          example: retry-group-001
+        retry_index:
+          type: integer
+          nullable: true
+          description: 1-based version index within the retry group.
+          example: 2
+        retry_total:
+          type: integer
+          nullable: true
+          description: Total number of versions currently in the retry group.
+          example: 2

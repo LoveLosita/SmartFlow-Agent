@@ -34,6 +34,8 @@ type quickNoteProgressEmitter struct {
 	requestID  string
 	created    int64
 	enablePush bool
+	reasoning  strings.Builder
+	startedAt  *time.Time
 }
 
 // newQuickNoteProgressEmitter 构造“阶段进度推送器”。
@@ -69,6 +71,23 @@ func (e *quickNoteProgressEmitter) Emit(stage, detail string) {
 	if stage == "" && detail == "" {
 		return
 	}
+	if e.startedAt == nil {
+		now := time.Now()
+		e.startedAt = &now
+	}
+	if e.reasoning.Len() > 0 {
+		e.reasoning.WriteString("\n\n")
+	}
+	if stage != "" {
+		e.reasoning.WriteString("阶段：")
+		e.reasoning.WriteString(stage)
+	}
+	if detail != "" {
+		if stage != "" {
+			e.reasoning.WriteString("\n")
+		}
+		e.reasoning.WriteString(detail)
+	}
 
 	// 3. 调用目的：阶段提示统一走 agent2/stream 的 reasoning chunk 包装，
 	//    避免 service 层继续自己拼 OpenAI 兼容 JSON。
@@ -81,6 +100,31 @@ func (e *quickNoteProgressEmitter) Emit(stage, detail string) {
 		log.Printf("输出随口记阶段状态失败 stage=%s err=%v", stage, err)
 		return
 	}
+}
+
+func (e *quickNoteProgressEmitter) HistoryText() string {
+	if e == nil {
+		return ""
+	}
+	return strings.TrimSpace(e.reasoning.String())
+}
+
+func (e *quickNoteProgressEmitter) StartedAt() *time.Time {
+	if e == nil || e.startedAt == nil {
+		return nil
+	}
+	startCopy := *e.startedAt
+	return &startCopy
+}
+
+func (e *quickNoteProgressEmitter) DurationSeconds(end time.Time) int {
+	if e == nil || e.startedAt == nil {
+		return 0
+	}
+	if !end.After(*e.startedAt) {
+		return 0
+	}
+	return int(end.Sub(*e.startedAt) / time.Second)
 }
 
 // tryHandleQuickNoteWithGraph 尝试用“随口记 graph”处理本次用户输入。
@@ -268,39 +312,70 @@ func (s *AgentService) persistChatAfterReply(
 	chatID string,
 	userMessage string,
 	assistantReply string,
+	assistantReasoning string,
+	assistantReasoningDurationSeconds int,
+	retryMeta *chatRetryMeta,
 	userTokens int,
 	assistantTokens int,
 	errChan chan error,
 ) {
 	// 1. 先把用户消息写入 Redis，保证会话上下文“马上可见”。
-	if err := s.agentCache.PushMessage(ctx, chatID, &schema.Message{Role: schema.User, Content: userMessage}); err != nil {
+	userMsg := &schema.Message{Role: schema.User, Content: userMessage}
+	if retryExtra := retryMeta.CacheExtra(); len(retryExtra) > 0 {
+		userMsg.Extra = retryExtra
+	}
+	if err := s.agentCache.PushMessage(ctx, chatID, userMsg); err != nil {
 		log.Printf("写入用户消息到 Redis 失败: %v", err)
 	}
 
 	// 2. 再把用户消息写入可靠持久化通道（outbox 或同步 DB）。
 	if err := s.PersistChatHistory(ctx, model.ChatHistoryPersistPayload{
-		UserID:         userID,
-		ConversationID: chatID,
-		Role:           "user",
-		Message:        userMessage,
-		TokensConsumed: userTokens,
+		UserID:                      userID,
+		ConversationID:              chatID,
+		Role:                        "user",
+		Message:                     userMessage,
+		ReasoningContent:            "",
+		ReasoningDurationSeconds:    0,
+		RetryGroupID:                retryMeta.GroupIDPtr(),
+		RetryIndex:                  retryMeta.IndexPtr(),
+		RetryFromUserMessageID:      retryMeta.FromUserMessageIDPtr(),
+		RetryFromAssistantMessageID: retryMeta.FromAssistantMessageIDPtr(),
+		TokensConsumed:              userTokens,
 	}); err != nil {
 		pushErrNonBlocking(errChan, err)
 		return
 	}
 
 	// 3. 助手消息同样遵循“Redis 先行 + 可靠持久化补齐”策略。
-	if err := s.agentCache.PushMessage(context.Background(), chatID, &schema.Message{Role: schema.Assistant, Content: assistantReply}); err != nil {
+	assistantMsg := &schema.Message{Role: schema.Assistant, Content: assistantReply, ReasoningContent: assistantReasoning}
+	if assistantReasoningDurationSeconds > 0 {
+		assistantMsg.Extra = map[string]any{"reasoning_duration_seconds": assistantReasoningDurationSeconds}
+	}
+	if retryExtra := retryMeta.CacheExtra(); len(retryExtra) > 0 {
+		if assistantMsg.Extra == nil {
+			assistantMsg.Extra = make(map[string]any, len(retryExtra))
+		}
+		for key, value := range retryExtra {
+			assistantMsg.Extra[key] = value
+		}
+	}
+	if err := s.agentCache.PushMessage(context.Background(), chatID, assistantMsg); err != nil {
 		log.Printf("写入助手消息到 Redis 失败: %v", err)
 	}
 
 	// 4. 助手消息持久化失败不阻断主流程，通过 errChan 异步上报。
 	if err := s.PersistChatHistory(context.Background(), model.ChatHistoryPersistPayload{
-		UserID:         userID,
-		ConversationID: chatID,
-		Role:           "assistant",
-		Message:        assistantReply,
-		TokensConsumed: assistantTokens,
+		UserID:                      userID,
+		ConversationID:              chatID,
+		Role:                        "assistant",
+		Message:                     assistantReply,
+		ReasoningContent:            assistantReasoning,
+		ReasoningDurationSeconds:    assistantReasoningDurationSeconds,
+		RetryGroupID:                retryMeta.GroupIDPtr(),
+		RetryIndex:                  retryMeta.IndexPtr(),
+		RetryFromUserMessageID:      retryMeta.FromUserMessageIDPtr(),
+		RetryFromAssistantMessageID: retryMeta.FromAssistantMessageIDPtr(),
+		TokensConsumed:              assistantTokens,
 	}); err != nil {
 		pushErrNonBlocking(errChan, err)
 	}

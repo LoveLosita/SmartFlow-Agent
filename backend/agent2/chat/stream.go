@@ -29,7 +29,8 @@ func StreamChat(
 	traceID string,
 	chatID string,
 	requestStart time.Time,
-) (string, *schema.TokenUsage, error) {
+	reasoningStartAt *time.Time,
+) (string, string, int, *schema.TokenUsage, error) {
 	/*callStart := time.Now()*/
 
 	messages := make([]*schema.Message, 0)
@@ -49,7 +50,7 @@ func StreamChat(
 	/*connectStart := time.Now()*/
 	reader, err := llm.Stream(ctx, messages, ark.WithThinking(thinking))
 	if err != nil {
-		return "", nil, err
+		return "", "", 0, nil, err
 	}
 	defer reader.Close()
 
@@ -61,6 +62,12 @@ func StreamChat(
 	firstChunk := true
 	chunkCount := 0
 	var tokenUsage *schema.TokenUsage
+	var localReasoningStartAt *time.Time
+	if reasoningStartAt != nil && !reasoningStartAt.IsZero() {
+		startCopy := reasoningStartAt.In(time.Local)
+		localReasoningStartAt = &startCopy
+	}
+	var reasoningEndAt *time.Time
 	/*streamRecvStart := time.Now()
 
 	log.Printf("打点|流连接建立|trace_id=%s|chat_id=%s|request_id=%s|本步耗时_ms=%d|请求累计_ms=%d|history_len=%d",
@@ -73,13 +80,14 @@ func StreamChat(
 	)*/
 
 	var fullText strings.Builder
+	var reasoningText strings.Builder
 	for {
 		chunk, err := reader.Recv()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return "", nil, err
+			return "", "", 0, nil, err
 		}
 
 		// 优先记录模型真实 usage（通常在尾块返回，部分模型也可能中途返回）。
@@ -87,11 +95,22 @@ func StreamChat(
 			tokenUsage = agentllm.MergeUsage(tokenUsage, chunk.ResponseMeta.Usage)
 		}
 
-		fullText.WriteString(chunk.Content)
+		if chunk != nil {
+			if strings.TrimSpace(chunk.ReasoningContent) != "" && localReasoningStartAt == nil {
+				now := time.Now()
+				localReasoningStartAt = &now
+			}
+			if strings.TrimSpace(chunk.Content) != "" && localReasoningStartAt != nil && reasoningEndAt == nil {
+				now := time.Now()
+				reasoningEndAt = &now
+			}
+			fullText.WriteString(chunk.Content)
+			reasoningText.WriteString(chunk.ReasoningContent)
+		}
 
 		payload, err := agentstream.ToOpenAIStream(chunk, requestID, modelName, created, firstChunk)
 		if err != nil {
-			return "", nil, err
+			return "", "", 0, nil, err
 		}
 		if payload != "" {
 			outChan <- payload
@@ -112,7 +131,7 @@ func StreamChat(
 
 	finishChunk, err := agentstream.ToOpenAIFinishStream(requestID, modelName, created)
 	if err != nil {
-		return "", nil, err
+		return "", "", 0, nil, err
 	}
 	outChan <- finishChunk
 	outChan <- "[DONE]"
@@ -127,5 +146,16 @@ func StreamChat(
 		time.Since(requestStart).Milliseconds(),
 	)*/
 
-	return fullText.String(), tokenUsage, nil
+	reasoningDurationSeconds := 0
+	if localReasoningStartAt != nil {
+		if reasoningEndAt == nil {
+			now := time.Now()
+			reasoningEndAt = &now
+		}
+		if reasoningEndAt.After(*localReasoningStartAt) {
+			reasoningDurationSeconds = int(reasoningEndAt.Sub(*localReasoningStartAt) / time.Second)
+		}
+	}
+
+	return fullText.String(), reasoningText.String(), reasoningDurationSeconds, tokenUsage, nil
 }

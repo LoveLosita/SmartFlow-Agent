@@ -2,7 +2,9 @@ package agentsvc
 
 import (
 	"context"
+	"encoding/json"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -101,7 +103,20 @@ func (s *AgentService) PersistChatHistory(ctx context.Context, payload model.Cha
 	// 1. 未注入事件发布器时（例如本地极简环境），直接同步写 DB。
 	//    这样可以保证功能不依赖 Kafka 也能跑通。
 	if s.eventPublisher == nil {
-		return s.repo.SaveChatHistory(ctx, payload.UserID, payload.ConversationID, payload.Role, payload.Message, payload.TokensConsumed)
+		return s.repo.SaveChatHistory(
+			ctx,
+			payload.UserID,
+			payload.ConversationID,
+			payload.Role,
+			payload.Message,
+			payload.ReasoningContent,
+			payload.ReasoningDurationSeconds,
+			payload.RetryGroupID,
+			payload.RetryIndex,
+			payload.RetryFromUserMessageID,
+			payload.RetryFromAssistantMessageID,
+			payload.TokensConsumed,
+		)
 	}
 	// 2. 已启用异步总线时，只发布“持久化请求事件”，不在请求路径阻塞 Kafka。
 	// 2.1 发布成功仅代表“事件安全入队”，实际落库由消费者异步完成。
@@ -112,6 +127,185 @@ func (s *AgentService) PersistChatHistory(ctx context.Context, payload model.Cha
 // 迁移策略：先保留旧方法名，避免同轮改动跨文件过大；后续可统一替换为 PersistChatHistory。
 func (s *AgentService) saveChatHistoryReliable(ctx context.Context, payload model.ChatHistoryPersistPayload) error {
 	return s.PersistChatHistory(ctx, payload)
+}
+
+func mergeAgentReasoningText(parts ...string) string {
+	merged := make([]string, 0, len(parts))
+	for _, part := range parts {
+		text := strings.TrimSpace(part)
+		if text == "" {
+			continue
+		}
+		merged = append(merged, text)
+	}
+	return strings.Join(merged, "\n\n")
+}
+
+type chatRetryMeta struct {
+	GroupID                string
+	Index                  int
+	FromUserMessageID      int
+	FromAssistantMessageID int
+}
+
+func (m *chatRetryMeta) GroupIDPtr() *string {
+	if m == nil || strings.TrimSpace(m.GroupID) == "" {
+		return nil
+	}
+	groupID := strings.TrimSpace(m.GroupID)
+	return &groupID
+}
+
+func (m *chatRetryMeta) IndexPtr() *int {
+	if m == nil || m.Index <= 0 {
+		return nil
+	}
+	index := m.Index
+	return &index
+}
+
+func (m *chatRetryMeta) FromUserMessageIDPtr() *int {
+	if m == nil || m.FromUserMessageID <= 0 {
+		return nil
+	}
+	id := m.FromUserMessageID
+	return &id
+}
+
+func (m *chatRetryMeta) FromAssistantMessageIDPtr() *int {
+	if m == nil || m.FromAssistantMessageID <= 0 {
+		return nil
+	}
+	id := m.FromAssistantMessageID
+	return &id
+}
+
+func (m *chatRetryMeta) CacheExtra() map[string]any {
+	if m == nil || strings.TrimSpace(m.GroupID) == "" || m.Index <= 0 {
+		return nil
+	}
+	extra := map[string]any{
+		"retry_group_id": m.GroupID,
+		"retry_index":    m.Index,
+	}
+	if m.FromUserMessageID > 0 {
+		extra["retry_from_user_message_id"] = m.FromUserMessageID
+	}
+	if m.FromAssistantMessageID > 0 {
+		extra["retry_from_assistant_message_id"] = m.FromAssistantMessageID
+	}
+	return extra
+}
+
+func (s *AgentService) buildChatRetryMeta(ctx context.Context, userID int, chatID string, extra map[string]any) (*chatRetryMeta, error) {
+	if len(extra) == 0 {
+		return nil, nil
+	}
+	requestMode := strings.ToLower(strings.TrimSpace(readAgentExtraString(extra, "request_mode")))
+	if requestMode != "retry" {
+		return nil, nil
+	}
+
+	groupID := strings.TrimSpace(readAgentExtraString(extra, "retry_group_id"))
+	if groupID == "" {
+		groupID = uuid.NewString()
+	}
+
+	sourceUserMessageID := readAgentExtraInt(extra, "retry_from_user_message_id")
+	sourceAssistantMessageID := readAgentExtraInt(extra, "retry_from_assistant_message_id")
+
+	if err := s.repo.EnsureRetryGroupSeed(ctx, userID, chatID, groupID, sourceUserMessageID, sourceAssistantMessageID); err != nil {
+		return nil, err
+	}
+	if s.agentCache != nil && (sourceUserMessageID > 0 || sourceAssistantMessageID > 0) {
+		if cacheErr := s.agentCache.ApplyRetrySeed(ctx, chatID, groupID, sourceUserMessageID, sourceAssistantMessageID); cacheErr != nil {
+			log.Printf("更新重试分组缓存失败 chat=%s group=%s err=%v", chatID, groupID, cacheErr)
+		}
+	}
+
+	nextIndex, err := s.repo.GetRetryGroupNextIndex(ctx, userID, chatID, groupID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &chatRetryMeta{
+		GroupID:                groupID,
+		Index:                  nextIndex,
+		FromUserMessageID:      sourceUserMessageID,
+		FromAssistantMessageID: sourceAssistantMessageID,
+	}, nil
+}
+
+func readAgentExtraString(extra map[string]any, key string) string {
+	if len(extra) == 0 {
+		return ""
+	}
+	raw, ok := extra[key]
+	if !ok {
+		return ""
+	}
+	text, ok := raw.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(text)
+}
+
+func readAgentExtraInt(extra map[string]any, key string) int {
+	if len(extra) == 0 {
+		return 0
+	}
+	raw, ok := extra[key]
+	if !ok {
+		return 0
+	}
+	// 1. 前端的历史消息 id 在本地态里可能是 string，也可能是 number。
+	// 2. 重试链路只要这里解析失败，父消息 id 就会退化成 0，后续写库自然会落成 NULL。
+	// 3. 因此这里统一做“宽松整型解析”，兼容 JSON number、前端字符串数字和常见整数类型。
+	value, ok := parseAgentLooseInt(raw)
+	if !ok || value <= 0 {
+		return 0
+	}
+	return value
+}
+
+// parseAgentLooseInt 负责把 extra 中的“弱类型数字”归一成 int。
+//
+// 职责边界：
+// 1. 负责兼容前端 JSON 解码后的常见数值类型，以及字符串形式的数字。
+// 2. 不负责业务语义校验；例如是否必须大于 0，由调用方自行决定。
+// 3. 解析失败时返回 ok=false，调用方可按各自场景走兜底逻辑。
+func parseAgentLooseInt(raw any) (value int, ok bool) {
+	switch v := raw.(type) {
+	case int:
+		return v, true
+	case int32:
+		return int(v), true
+	case int64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	case json.Number:
+		if parsed, err := v.Int64(); err == nil {
+			return int(parsed), true
+		}
+		if parsed, err := v.Float64(); err == nil {
+			return int(parsed), true
+		}
+		return 0, false
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return 0, false
+		}
+		parsed, err := strconv.Atoi(trimmed)
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	default:
+		return 0, false
+	}
 }
 
 // pushErrNonBlocking 向错误通道“尽力投递”错误。
@@ -135,6 +329,9 @@ func (s *AgentService) runNormalChatFlow(
 	selectedModel *ark.ChatModel,
 	resolvedModelName string,
 	userMessage string,
+	assistantReasoningPrefix string,
+	assistantReasoningStartedAt *time.Time,
+	retryMeta *chatRetryMeta,
 	ifThinking bool,
 	userID int,
 	chatID string,
@@ -192,11 +389,12 @@ func (s *AgentService) runNormalChatFlow(
 
 	// 6. 执行真正的流式聊天。
 	//    fullText 用于后续写 Redis/持久化，outChan 用于把流片段实时推给前端。
-	fullText, streamUsage, streamErr := agentchat.StreamChat(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, chatHistory, outChan, traceID, chatID, requestStart)
+	fullText, reasoningText, reasoningDurationSeconds, streamUsage, streamErr := agentchat.StreamChat(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, chatHistory, outChan, traceID, chatID, requestStart, assistantReasoningStartedAt)
 	if streamErr != nil {
 		pushErrNonBlocking(errChan, streamErr)
 		return
 	}
+	assistantReasoning := mergeAgentReasoningText(assistantReasoningPrefix, reasoningText)
 
 	// 6.1 流式 usage 并入请求级 token 统计器：
 	// 6.1.1 route/quicknote/taskquery 等 Generate 调用由 callback 自动累加；
@@ -212,15 +410,25 @@ func (s *AgentService) runNormalChatFlow(
 	// 7. 后置持久化（用户消息）：
 	//    7.1 先写 Redis，保证“最新会话上下文”可立即用于下一轮推理；
 	//    7.2 再走可靠持久化入口（outbox 或同步 DB）。
-	if err = s.agentCache.PushMessage(ctx, chatID, &schema.Message{Role: schema.User, Content: userMessage}); err != nil {
+	userMsg := &schema.Message{Role: schema.User, Content: userMessage}
+	if retryExtra := retryMeta.CacheExtra(); len(retryExtra) > 0 {
+		userMsg.Extra = retryExtra
+	}
+	if err = s.agentCache.PushMessage(ctx, chatID, userMsg); err != nil {
 		log.Printf("写入用户消息到 Redis 失败: %v", err)
 	}
 
 	if err = s.PersistChatHistory(ctx, model.ChatHistoryPersistPayload{
-		UserID:         userID,
-		ConversationID: chatID,
-		Role:           "user",
-		Message:        userMessage,
+		UserID:                      userID,
+		ConversationID:              chatID,
+		Role:                        "user",
+		Message:                     userMessage,
+		ReasoningContent:            "",
+		ReasoningDurationSeconds:    0,
+		RetryGroupID:                retryMeta.GroupIDPtr(),
+		RetryIndex:                  retryMeta.IndexPtr(),
+		RetryFromUserMessageID:      retryMeta.FromUserMessageIDPtr(),
+		RetryFromAssistantMessageID: retryMeta.FromAssistantMessageIDPtr(),
 		// 口径B：用户消息固定记 0；本轮总 token 统一记在助手消息。
 		TokensConsumed: 0,
 	}); err != nil {
@@ -233,15 +441,33 @@ func (s *AgentService) runNormalChatFlow(
 	// 8. 后置持久化（助手消息）：
 	//    8.1 先写 Redis，保证下一轮上下文可见；
 	//    8.2 再异步可靠落库，失败通过 errChan 回传给上层。
-	if err = s.agentCache.PushMessage(context.Background(), chatID, &schema.Message{Role: schema.Assistant, Content: fullText}); err != nil {
+	assistantMsg := &schema.Message{Role: schema.Assistant, Content: fullText, ReasoningContent: assistantReasoning}
+	if reasoningDurationSeconds > 0 {
+		assistantMsg.Extra = map[string]any{"reasoning_duration_seconds": reasoningDurationSeconds}
+	}
+	if retryExtra := retryMeta.CacheExtra(); len(retryExtra) > 0 {
+		if assistantMsg.Extra == nil {
+			assistantMsg.Extra = make(map[string]any, len(retryExtra))
+		}
+		for key, value := range retryExtra {
+			assistantMsg.Extra[key] = value
+		}
+	}
+	if err = s.agentCache.PushMessage(context.Background(), chatID, assistantMsg); err != nil {
 		log.Printf("写入助手消息到 Redis 失败: %v", err)
 	}
 
 	if saveErr := s.PersistChatHistory(context.Background(), model.ChatHistoryPersistPayload{
-		UserID:         userID,
-		ConversationID: chatID,
-		Role:           "assistant",
-		Message:        fullText,
+		UserID:                      userID,
+		ConversationID:              chatID,
+		Role:                        "assistant",
+		Message:                     fullText,
+		ReasoningContent:            assistantReasoning,
+		ReasoningDurationSeconds:    reasoningDurationSeconds,
+		RetryGroupID:                retryMeta.GroupIDPtr(),
+		RetryIndex:                  retryMeta.IndexPtr(),
+		RetryFromUserMessageID:      retryMeta.FromUserMessageIDPtr(),
+		RetryFromAssistantMessageID: retryMeta.FromAssistantMessageIDPtr(),
 		// 口径B：助手消息记录“本轮请求总 token”。
 		TokensConsumed: requestTotalTokens,
 	}); saveErr != nil {
@@ -303,6 +529,14 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 		}
 	}
 
+	retryMeta, err := s.buildChatRetryMeta(requestCtx, userID, chatID, extra)
+	if err != nil {
+		errChan <- err
+		close(outChan)
+		close(errChan)
+		return outChan, errChan
+	}
+
 	// 3) 统一异步分流：
 	// 3.1 先走“通用控制码路由”决定 action（chat / quick_note_create / task_query）；
 	// 3.2 quick_note_create 进入随口记 graph；
@@ -322,7 +556,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 
 		// 3.2 chat：直接走普通聊天主链路。
 		if routing.Action == agentrouter.ActionChat {
-			s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
+			s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, "", nil, retryMeta, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
 			return
 		}
 
@@ -358,7 +592,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 
 				// 3.4.2 对随口记回复执行统一后置持久化（Redis + outbox/DB）。
 				requestTotalTokens := snapshotRequestTokenMeter(requestCtx).TotalTokens
-				s.persistChatAfterReply(requestCtx, userID, chatID, userMessage, quickReply, 0, requestTotalTokens, errChan)
+				s.persistChatAfterReply(requestCtx, userID, chatID, userMessage, quickReply, progress.HistoryText(), progress.DurationSeconds(time.Now()), retryMeta, 0, requestTotalTokens, errChan)
 				// 3.4.3 随口记链路同样异步生成会话标题（仅首次写入）。
 				s.ensureConversationTitleAsync(userID, chatID)
 				return
@@ -366,7 +600,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 
 			// 3.4.4 路由误判或 graph 判定非随口记时，回落普通聊天，保证“能聊”。
 			progress.Emit("quick_note.fallback", "当前输入不是随口记请求，切换到普通对话。")
-			s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
+			s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, progress.HistoryText(), progress.StartedAt(), retryMeta, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
 			return
 		}
 
@@ -377,7 +611,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 				// 3.5.1 任务查询失败时回退普通聊天，避免请求直接中断。
 				log.Printf("任务查询 tool-calling 执行失败，回退普通聊天 trace_id=%s chat_id=%s err=%v", traceID, chatID, queryErr)
 				progress.Emit("task_query.fallback", "任务查询暂不可用，先切回普通对话。")
-				s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
+				s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, progress.HistoryText(), progress.StartedAt(), retryMeta, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
 				return
 			}
 
@@ -387,7 +621,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 				return
 			}
 			requestTotalTokens := snapshotRequestTokenMeter(requestCtx).TotalTokens
-			s.persistChatAfterReply(requestCtx, userID, chatID, userMessage, reply, 0, requestTotalTokens, errChan)
+			s.persistChatAfterReply(requestCtx, userID, chatID, userMessage, reply, progress.HistoryText(), progress.DurationSeconds(time.Now()), retryMeta, 0, requestTotalTokens, errChan)
 			s.ensureConversationTitleAsync(userID, chatID)
 			return
 		}
@@ -398,7 +632,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 			if planErr != nil {
 				log.Printf("智能排程 graph 执行失败，回退普通聊天 trace_id=%s chat_id=%s err=%v", traceID, chatID, planErr)
 				progress.Emit("schedule_plan.fallback", "智能排程暂不可用，先切回普通对话。")
-				s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
+				s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, progress.HistoryText(), progress.StartedAt(), retryMeta, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
 				return
 			}
 
@@ -407,7 +641,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 				return
 			}
 			requestTotalTokens := snapshotRequestTokenMeter(requestCtx).TotalTokens
-			s.persistChatAfterReply(requestCtx, userID, chatID, userMessage, reply, 0, requestTotalTokens, errChan)
+			s.persistChatAfterReply(requestCtx, userID, chatID, userMessage, reply, progress.HistoryText(), progress.DurationSeconds(time.Now()), retryMeta, 0, requestTotalTokens, errChan)
 			s.ensureConversationTitleAsync(userID, chatID)
 			return
 		}
@@ -426,13 +660,13 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 				return
 			}
 			requestTotalTokens := snapshotRequestTokenMeter(requestCtx).TotalTokens
-			s.persistChatAfterReply(requestCtx, userID, chatID, userMessage, reply, 0, requestTotalTokens, errChan)
+			s.persistChatAfterReply(requestCtx, userID, chatID, userMessage, reply, progress.HistoryText(), progress.DurationSeconds(time.Now()), retryMeta, 0, requestTotalTokens, errChan)
 			s.ensureConversationTitleAsync(userID, chatID)
 			return
 		}
 
 		// 3.8 未知 action 兜底：走普通聊天，保证可用性。
-		s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
+		s.runNormalChatFlow(requestCtx, selectedModel, resolvedModelName, userMessage, progress.HistoryText(), progress.StartedAt(), retryMeta, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
 	}()
 
 	return outChan, errChan
