@@ -68,7 +68,7 @@ function handleSidebarNavigate(item: SidebarItem) {
         <button type="button" class="dashboard-sidebar__settings">设</button>
       </aside>
 
-      <AssistantPanel class="assistant-view__panel" view-mode="standalone" />
+      <AssistantPanel class="assistant-view__panel" view-mode="standalone" :initial-history-width="248" />
     </section>
   </main>
 </template>

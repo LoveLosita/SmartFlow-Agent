@@ -144,12 +144,22 @@ function resolveCellMeta(event?: ScheduleWeekEvent) {
 
 <style scoped>
 .planning-board {
+  --planning-grid-padding-x: 24px;
+  --planning-grid-padding-y: 28px;
+  --planning-grid-gap-x: 12px;
+  --planning-grid-gap-y: 10px;
+  --planning-time-column-width: 74px;
+  --planning-day-column-min: 96px;
+  --planning-cell-height: clamp(72px, 9.2vh, 112px);
   min-width: 0;
   min-height: 0;
   border-radius: 28px;
   border: 1px solid rgba(214, 223, 236, 0.82);
   background: linear-gradient(180deg, rgba(252, 253, 255, 0.98), rgba(248, 251, 255, 0.98));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .planning-board__header {
@@ -161,10 +171,13 @@ function resolveCellMeta(event?: ScheduleWeekEvent) {
 
 .planning-board__grid {
   min-width: 0;
+  min-height: 0;
   display: grid;
-  grid-template-columns: 74px repeat(7, minmax(0, 1fr));
-  gap: 10px 12px;
-  padding: 28px 24px 24px;
+  grid-template-columns: var(--planning-time-column-width) repeat(7, minmax(var(--planning-day-column-min), 1fr));
+  gap: var(--planning-grid-gap-y) var(--planning-grid-gap-x);
+  padding: var(--planning-grid-padding-y) var(--planning-grid-padding-x) 24px;
+  overflow: auto;
+  scrollbar-gutter: stable both-edges;
 }
 
 .planning-board__corner {
@@ -189,7 +202,7 @@ function resolveCellMeta(event?: ScheduleWeekEvent) {
 }
 
 .planning-board__time-cell {
-  min-height: 112px;
+  min-height: var(--planning-cell-height);
   display: grid;
   align-content: center;
   justify-items: end;
@@ -211,7 +224,7 @@ function resolveCellMeta(event?: ScheduleWeekEvent) {
 
 .planning-board__cell {
   position: relative;
-  min-height: 112px;
+  min-height: var(--planning-cell-height);
   border-radius: 22px;
   border: 1px solid rgba(228, 234, 243, 0.92);
   padding: 18px 14px;
@@ -225,6 +238,7 @@ function resolveCellMeta(event?: ScheduleWeekEvent) {
 .planning-board__cell-main {
   display: grid;
   gap: 10px;
+  min-width: 0;
 }
 
 .planning-board__cell-main strong {
@@ -232,11 +246,15 @@ function resolveCellMeta(event?: ScheduleWeekEvent) {
   font-size: 15px;
   line-height: 1.35;
   font-weight: 700;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .planning-board__cell-main span {
   color: #9badc5;
   font-size: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .planning-board__cell--course {
@@ -321,7 +339,99 @@ function resolveCellMeta(event?: ScheduleWeekEvent) {
 
 @media (max-width: 1560px) {
   .planning-board__grid {
-    grid-template-columns: 64px repeat(7, minmax(118px, 1fr));
+    --planning-time-column-width: 64px;
+    --planning-day-column-min: 92px;
+    --planning-grid-padding-x: 18px;
+    --planning-grid-padding-y: 22px;
+    --planning-grid-gap-x: 10px;
+  }
+}
+
+@media (max-width: 1380px) {
+  .planning-board__header {
+    padding: 16px 20px 14px;
+  }
+
+  .planning-board__grid {
+    --planning-time-column-width: 58px;
+    --planning-day-column-min: 84px;
+    --planning-grid-padding-x: 14px;
+    --planning-grid-padding-y: 18px;
+    --planning-grid-gap-x: 8px;
+    --planning-grid-gap-y: 8px;
+  }
+
+  .planning-board__time-cell,
+  .planning-board__cell {
+    min-height: 98px;
+  }
+
+  .planning-board__cell {
+    padding: 14px 10px;
+    border-radius: 18px;
+  }
+
+  .planning-board__cell-main {
+    gap: 8px;
+  }
+
+  .planning-board__cell-main strong {
+    font-size: 14px;
+  }
+}
+
+@media (max-width: 1180px) {
+  .planning-board__grid {
+    --planning-time-column-width: 56px;
+    --planning-day-column-min: 78px;
+  }
+
+  .planning-board__day-head span {
+    font-size: 13px;
+  }
+
+  .planning-board__day-head small,
+  .planning-board__cell-main span {
+    font-size: 11px;
+  }
+}
+
+@media (max-height: 900px) {
+  .planning-board {
+    --planning-grid-padding-y: 18px;
+    --planning-cell-height: clamp(66px, 8.2vh, 92px);
+  }
+
+  .planning-board__header {
+    padding-top: 14px;
+    padding-bottom: 12px;
+  }
+
+  .planning-board__header strong {
+    font-size: 16px;
+  }
+}
+
+@media (max-height: 820px) {
+  .planning-board {
+    --planning-grid-padding-y: 14px;
+    --planning-grid-gap-y: 6px;
+    --planning-cell-height: clamp(58px, 7.2vh, 82px);
+  }
+
+  .planning-board__time-cell strong,
+  .planning-board__cell-main strong {
+    font-size: 13px;
+  }
+
+  .planning-board__time-cell small,
+  .planning-board__day-head small,
+  .planning-board__cell-main span {
+    font-size: 10px;
+  }
+
+  .planning-board__cell {
+    padding: 12px 8px;
   }
 }
 </style>

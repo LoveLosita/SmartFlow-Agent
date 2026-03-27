@@ -435,6 +435,19 @@ func (s *AgentService) runNormalChatFlow(
 		pushErrNonBlocking(errChan, err)
 		return
 	}
+	s.appendConversationHistoryCacheOptimistically(
+		context.Background(),
+		userID,
+		chatID,
+		buildOptimisticConversationHistoryItem(
+			"user",
+			userMessage,
+			"",
+			0,
+			retryMeta,
+			requestStart,
+		),
+	)
 
 	// 普通聊天链路也需要把助手回复写入 Redis，
 	// 否则会出现“数据库有助手消息，但 Redis 最新会话只有用户消息”的口径不一致。
@@ -472,6 +485,20 @@ func (s *AgentService) runNormalChatFlow(
 		TokensConsumed: requestTotalTokens,
 	}); saveErr != nil {
 		pushErrNonBlocking(errChan, saveErr)
+	} else {
+		s.appendConversationHistoryCacheOptimistically(
+			context.Background(),
+			userID,
+			chatID,
+			buildOptimisticConversationHistoryItem(
+				"assistant",
+				fullText,
+				assistantReasoning,
+				reasoningDurationSeconds,
+				retryMeta,
+				time.Now(),
+			),
+		)
 	}
 
 	// 9. 在主回复完成后异步尝试生成会话标题（仅首次、仅标题为空时生效）。

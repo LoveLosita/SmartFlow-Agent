@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import type { TaskClassDetail, TaskClassListItem } from '@/types/schedule'
 
@@ -21,6 +21,10 @@ const emit = defineEmits<{
 }>()
 
 const taskClassCountLabel = computed(() => `共 ${props.taskClasses.length} 个`)
+const viewportHeight = ref(typeof window === 'undefined' ? 900 : window.innerHeight)
+const taskClassListRef = ref<HTMLElement | null>(null)
+const listViewportHeight = ref(0)
+let listResizeObserver: ResizeObserver | null = null
 
 function isExpanded(taskClassId: number) {
   return props.expandedTaskClassId === taskClassId && !props.taskClassMultiSelectMode
@@ -40,6 +44,76 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
   const day = `${date.getDate()}`.padStart(2, '0')
   return `${month}.${day} ${value.section_from}-${value.section_to}节`
 }
+
+function syncViewportHeight() {
+  viewportHeight.value = window.innerHeight
+}
+
+function syncTaskClassListViewportHeight() {
+  listViewportHeight.value = taskClassListRef.value?.clientHeight ?? 0
+}
+
+function resolveDetailPanelStyle(items: TaskClassDetail['items']) {
+  const count = items.length
+  const itemHeight = viewportHeight.value <= 820 ? 54 : viewportHeight.value <= 900 ? 58 : 62
+  const gap = 6
+  const panelPadding = 14
+  const preferredHeight = count * itemHeight + Math.max(0, count - 1) * gap + panelPadding
+  const maxVisibleItems = viewportHeight.value <= 820 ? 4 : viewportHeight.value <= 900 ? 5 : 6
+  const maxHeightByItemCount =
+    maxVisibleItems * itemHeight + Math.max(0, maxVisibleItems - 1) * gap + panelPadding
+  const maxHeightByContainer = Math.max(
+    180,
+    (listViewportHeight.value || Math.round(viewportHeight.value * 0.6)) - 116,
+  )
+  const finalHeight = Math.min(preferredHeight, maxHeightByItemCount, maxHeightByContainer)
+
+  // 1. 条目少时让卡片自然长高，避免只有两三条时还出现大块留白。
+  // 2. 条目超过“当前屏幕可安全展示的最大条数”后，立即锁住高度并进入内部滚动。
+  // 3. 这样像 8 条 task_item 这类中等长度列表会稳定触发滚动，不会再因为估算过大而失效。
+  return {
+    height: `${finalHeight}px`,
+    maxHeight: `${finalHeight}px`,
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('resize', syncViewportHeight)
+  window.addEventListener('resize', syncTaskClassListViewportHeight)
+  syncTaskClassListViewportHeight()
+  if (typeof ResizeObserver !== 'undefined') {
+    listResizeObserver = new ResizeObserver(() => {
+      syncTaskClassListViewportHeight()
+    })
+    if (taskClassListRef.value) {
+      listResizeObserver.observe(taskClassListRef.value)
+    }
+  }
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', syncViewportHeight)
+  window.removeEventListener('resize', syncTaskClassListViewportHeight)
+  listResizeObserver?.disconnect()
+  listResizeObserver = null
+})
+
+watch(
+  () => props.expandedTaskClassId,
+  async (expandedId) => {
+    await nextTick()
+    syncTaskClassListViewportHeight()
+    if (!expandedId || !taskClassListRef.value) {
+      return
+    }
+
+    const expandedCard = taskClassListRef.value.querySelector<HTMLElement>('.task-class-card--expanded')
+    expandedCard?.scrollIntoView({
+      block: 'nearest',
+      inline: 'nearest',
+    })
+  },
+)
 </script>
 
 <template>
@@ -68,7 +142,7 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
       <div v-for="index in 4" :key="index" class="task-class-sidebar__skeleton-item" />
     </div>
 
-    <div v-else class="task-class-sidebar__list">
+    <div v-else ref="taskClassListRef" class="task-class-sidebar__list">
       <article
         v-for="taskClass in taskClasses"
         :key="taskClass.id"
@@ -98,7 +172,11 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
           </span>
         </button>
 
-        <div v-if="isExpanded(taskClass.id)" class="task-class-card__detail">
+        <div
+          v-if="isExpanded(taskClass.id)"
+          class="task-class-card__detail"
+          :style="expandedTaskClassDetail ? resolveDetailPanelStyle(expandedTaskClassDetail.items) : undefined"
+        >
           <div v-if="detailLoading" class="task-class-card__detail-loading">正在载入任务块…</div>
 
           <div v-else-if="expandedTaskClassDetail" class="task-class-card__detail-list">
@@ -146,6 +224,7 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
   grid-template-rows: auto minmax(0, 1fr);
   border-right: 1px solid rgba(196, 209, 227, 0.55);
   background: linear-gradient(180deg, rgba(251, 253, 255, 0.96), rgba(247, 250, 254, 0.98));
+  overflow: hidden;
 }
 
 .task-class-sidebar__header {
@@ -153,6 +232,7 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
   border-bottom: 1px solid rgba(214, 223, 238, 0.68);
   display: grid;
   gap: 12px;
+  min-width: 0;
 }
 
 .task-class-sidebar__title-row {
@@ -160,6 +240,8 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .task-class-sidebar__title-wrap {
@@ -167,11 +249,13 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
   align-items: center;
   gap: 10px;
   color: #1f2c42;
+  min-width: 0;
 }
 
 .task-class-sidebar__title-wrap strong {
   font-size: 15px;
   font-weight: 800;
+  min-width: 0;
 }
 
 .task-class-sidebar__title-icon {
@@ -213,10 +297,12 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
 .task-class-sidebar__skeleton {
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 24px;
   display: grid;
   align-content: start;
   gap: 14px;
+  scrollbar-gutter: stable;
 }
 
 .task-class-sidebar__skeleton-item {
@@ -228,6 +314,7 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
 }
 
 .task-class-card {
+  min-width: 0;
   border-radius: 24px;
   border: 1px solid rgba(216, 225, 238, 0.9);
   background: linear-gradient(180deg, #fdfefe 0%, #f8fbff 100%);
@@ -242,6 +329,7 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
 
 .task-class-card__summary {
   width: 100%;
+  min-width: 0;
   border: none;
   background: transparent;
   padding: 18px 20px 18px 18px;
@@ -284,6 +372,7 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
   font-size: 16px;
   line-height: 1.35;
   font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .task-class-card__content span {
@@ -292,6 +381,7 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
 }
 
 .task-class-card__corner {
+  flex: 0 0 auto;
   width: 48px;
   height: 48px;
   border-radius: 999px;
@@ -304,7 +394,14 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
 }
 
 .task-class-card__detail {
+  min-width: 0;
   padding: 0 14px 14px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(114, 130, 157, 0.65) transparent;
 }
 
 .task-class-card__detail-loading {
@@ -313,14 +410,29 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
   font-size: 13px;
 }
 
+.task-class-card__detail::-webkit-scrollbar {
+  width: 8px;
+}
+
+.task-class-card__detail::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.task-class-card__detail::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(114, 130, 157, 0.55);
+}
+
 .task-class-card__detail-list {
   display: grid;
   gap: 6px;
+  min-width: 0;
+  padding-right: 4px;
 }
 
 .task-class-card__detail-item {
   min-width: 0;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border-radius: 16px;
   border: 1px solid rgba(197, 209, 226, 0.8);
   background: rgba(255, 255, 255, 0.92);
@@ -346,11 +458,13 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
 }
 
 .task-class-card__detail-status {
+  max-width: 100%;
   padding: 4px 10px;
   border-radius: 999px;
   background: #f1f5f9;
   color: #74839a;
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .task-class-card__detail-status--arranged {
@@ -376,6 +490,7 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
 }
 
 .task-class-sidebar__create {
+  min-width: 0;
   min-height: 108px;
   border: 1px dashed rgba(204, 216, 232, 0.92);
   border-radius: 24px;
@@ -415,5 +530,108 @@ function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_ti
   100% {
     background-position: -200% 0;
   }
+}
+
+@media (max-width: 1520px) {
+  .task-class-sidebar__header,
+  .task-class-sidebar__list,
+  .task-class-sidebar__skeleton {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+
+  .task-class-card__summary {
+    padding: 16px 16px 16px 15px;
+  }
+}
+
+@media (max-width: 1380px) {
+  .task-class-sidebar {
+    border-right: none;
+    border-bottom: 1px solid rgba(196, 209, 227, 0.55);
+  }
+}
+
+@media (max-width: 1180px) {
+  .task-class-card__detail-item {
+    grid-template-columns: 28px minmax(0, 1fr) 24px;
+    align-items: start;
+  }
+
+  .task-class-card__detail-status {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .task-class-card__detail-delete {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+    align-self: center;
+  }
+}
+
+@media (max-height: 900px) {
+  .task-class-sidebar__header {
+    padding-top: 12px;
+    padding-bottom: 12px;
+    gap: 10px;
+  }
+
+  .task-class-sidebar__list,
+  .task-class-sidebar__skeleton {
+    padding-top: 16px;
+    padding-bottom: 16px;
+    gap: 10px;
+  }
+
+  .task-class-card {
+    border-radius: 20px;
+  }
+
+  .task-class-card__summary {
+    padding: 14px 14px 14px 13px;
+  }
+
+  .task-class-card__content {
+    gap: 6px;
+  }
+
+  .task-class-card__content strong {
+    font-size: 15px;
+  }
+
+  .task-class-sidebar__create {
+    min-height: 88px;
+  }
+
+}
+
+@media (max-height: 820px) {
+  .task-class-sidebar__header,
+  .task-class-sidebar__list,
+  .task-class-sidebar__skeleton {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .task-class-card__summary {
+    padding: 12px;
+  }
+
+  .task-class-card__corner {
+    width: 40px;
+    height: 40px;
+  }
+
+  .task-class-card__content strong {
+    font-size: 14px;
+  }
+
+  .task-class-card__content span,
+  .task-class-card__detail-text,
+  .task-class-card__detail-status {
+    font-size: 12px;
+  }
+
 }
 </style>

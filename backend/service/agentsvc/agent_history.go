@@ -2,14 +2,15 @@ package agentsvc
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"sort"
 	"strings"
+	"time"
 
-	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/LoveLosita/smartflow/backend/respond"
-	"github.com/cloudwego/eino/schema"
 	"gorm.io/gorm"
 )
 
@@ -37,59 +38,91 @@ func (s *AgentService) GetConversationHistory(ctx context.Context, userID int, c
 		return nil, gorm.ErrRecordNotFound
 	}
 
-	// 2. 优先读 Redis：
-	// 2.1 命中时直接返回，复用当前聊天主链路维护的最近消息窗口；
-	// 2.2 失败策略：缓存读取异常只记日志并继续回源 DB，避免缓存抖动导致接口不可用；
-	// 2.3 注意：缓存消息不包含稳定的 DB 主键与创建时间，因此这些字段允许为空。
-	if s.agentCache != nil {
-		history, cacheErr := s.agentCache.GetHistory(ctx, normalizedChatID)
+	// 2. 优先读取“会话历史视图缓存”：
+	// 2.1 这层缓存专门服务 conversation-history，字段口径与前端展示一致；
+	// 2.2 与 Agent 上下文热缓存解耦，避免为了历史多版本而拖慢首 token；
+	// 2.3 若命中则直接返回，miss 再回源 DB。
+	if s.cacheDAO != nil {
+		items, cacheErr := s.cacheDAO.GetConversationHistoryFromCache(ctx, userID, normalizedChatID)
 		if cacheErr != nil {
-			log.Printf("读取会话历史缓存失败 chat_id=%s: %v", normalizedChatID, cacheErr)
-		} else if history != nil && !cacheConversationHistoryHasRetryMetadata(history) {
-			return buildConversationHistoryItemsFromCache(history), nil
+			log.Printf("读取会话历史视图缓存失败 chat_id=%s: %v", normalizedChatID, cacheErr)
+		} else if items != nil {
+			return items, nil
 		}
 	}
 
-	// 3. Redis 未命中时回源 DB：
-	// 3.1 复用现有 GetUserChatHistories 读取最近 N 条历史，保证查询链路和主聊天链路口径一致；
-	// 3.2 失败时直接上抛，由 API 层统一处理；
-	// 3.3 成功后若缓存可用，则顺手回填 Redis，降低后续冷启动成本。
+	// 3. Redis miss 时回源 DB：
+	// 3.1 复用现有 GetUserChatHistories 读取最近 N 条历史，保证“重试版本、落库主键、创建时间”口径稳定；
+	// 3.2 再把 DB 结果转换成接口 DTO，作为历史视图缓存回填；
+	// 3.3 失败时直接上抛，由 API 层统一处理。
 	histories, err := s.repo.GetUserChatHistories(ctx, userID, pkg.HistoryFetchLimitByModel("worker"), normalizedChatID)
 	if err != nil {
 		return nil, err
 	}
 
-	if s.agentCache != nil {
-		if setErr := s.agentCache.BackfillHistory(ctx, normalizedChatID, conv.ToEinoMessages(histories)); setErr != nil {
-			log.Printf("回填会话历史缓存失败 chat_id=%s: %v", normalizedChatID, setErr)
+	items := buildConversationHistoryItemsFromDB(histories)
+
+	if s.cacheDAO != nil {
+		if setErr := s.cacheDAO.SetConversationHistoryToCache(ctx, userID, normalizedChatID, items); setErr != nil {
+			log.Printf("回填会话历史视图缓存失败 chat_id=%s: %v", normalizedChatID, setErr)
 		}
 	}
 
-	return buildConversationHistoryItemsFromDB(histories), nil
+	return items, nil
 }
 
-// buildConversationHistoryItemsFromCache 把 Redis 中的 Eino 消息转换为接口响应。
+// appendConversationHistoryCacheOptimistically 把“刚生成但尚未完成 DB 持久化确认”的消息追加到历史视图缓存。
 //
 // 职责边界：
-// 1. 只做字段映射，不做权限校验或排序调整；
-// 2. 不补 created_at/id，因为当前缓存模型不承载这两个字段；
-// 3. role 统一输出为 user / assistant / system，避免前端再感知 schema.RoleType。
-func buildConversationHistoryItemsFromCache(messages []*schema.Message) []model.GetConversationHistoryItem {
-	items := make([]model.GetConversationHistoryItem, 0, len(messages))
-	for _, msg := range messages {
-		if msg == nil {
-			continue
-		}
-		items = append(items, model.GetConversationHistoryItem{
-			Role:                     normalizeConversationHistoryRole(string(msg.Role)),
-			Content:                  strings.TrimSpace(msg.Content),
-			ReasoningContent:         strings.TrimSpace(msg.ReasoningContent),
-			ReasoningDurationSeconds: extractConversationReasoningDurationSeconds(msg),
-			RetryGroupID:             extractConversationRetryGroupID(msg),
-			RetryIndex:               extractConversationRetryIndex(msg),
-		})
+// 1. 只服务前端会话历史展示，不参与 Agent 上下文热缓存；
+// 2. 优先复用现有历史视图缓存，miss 时再用 DB 历史做一次启动兜底；
+// 3. 不保证最终权威性，最终仍以 DB 落库成功后的缓存失效与回源结果为准。
+func (s *AgentService) appendConversationHistoryCacheOptimistically(
+	ctx context.Context,
+	userID int,
+	chatID string,
+	newItems ...model.GetConversationHistoryItem,
+) {
+	if s == nil || s.cacheDAO == nil {
+		return
 	}
-	return attachConversationRetryTotals(items)
+	normalizedChatID := strings.TrimSpace(chatID)
+	if userID <= 0 || normalizedChatID == "" || len(newItems) == 0 {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// 1. 优先取历史视图缓存，避免每轮乐观追加都回源 DB。
+	items, err := s.cacheDAO.GetConversationHistoryFromCache(ctx, userID, normalizedChatID)
+	if err != nil {
+		log.Printf("读取会话历史视图缓存失败 chat_id=%s: %v", normalizedChatID, err)
+		return
+	}
+
+	// 2. 缓存 miss 时，用当前 DB 已有历史做一次基线兜底。
+	// 2.1 这样即便本轮是“缓存刚被 retry 补种操作删掉”，也不会只留下最新两条消息；
+	// 2.2 失败策略：DB 兜底失败只记日志并跳过，不阻塞主回复流程。
+	if items == nil {
+		histories, hisErr := s.repo.GetUserChatHistories(ctx, userID, pkg.HistoryFetchLimitByModel("worker"), normalizedChatID)
+		if hisErr != nil {
+			log.Printf("乐观追加历史缓存时回源 DB 失败 chat_id=%s: %v", normalizedChatID, hisErr)
+			return
+		}
+		items = buildConversationHistoryItemsFromDB(histories)
+	}
+
+	merged := append([]model.GetConversationHistoryItem(nil), items...)
+	for _, item := range newItems {
+		merged = appendConversationHistoryItemIfMissing(merged, item)
+	}
+	sortConversationHistoryItems(merged)
+	merged = attachConversationRetryTotals(merged)
+
+	if err = s.cacheDAO.SetConversationHistoryToCache(ctx, userID, normalizedChatID, merged); err != nil {
+		log.Printf("乐观追加会话历史视图缓存失败 chat_id=%s: %v", normalizedChatID, err)
+	}
 }
 
 // buildConversationHistoryItemsFromDB 把数据库聊天记录转换为接口响应。
@@ -130,84 +163,6 @@ func derefConversationHistoryText(text *string) string {
 		return ""
 	}
 	return *text
-}
-
-func extractConversationReasoningDurationSeconds(msg *schema.Message) int {
-	if msg == nil || msg.Extra == nil {
-		return 0
-	}
-	raw, ok := msg.Extra["reasoning_duration_seconds"]
-	if !ok {
-		return 0
-	}
-	switch v := raw.(type) {
-	case int:
-		return v
-	case int32:
-		return int(v)
-	case int64:
-		return int(v)
-	case float64:
-		return int(v)
-	default:
-		return 0
-	}
-}
-
-func extractConversationRetryGroupID(msg *schema.Message) *string {
-	if msg == nil || msg.Extra == nil {
-		return nil
-	}
-	raw, ok := msg.Extra["retry_group_id"]
-	if !ok {
-		return nil
-	}
-	text, ok := raw.(string)
-	if !ok {
-		return nil
-	}
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return nil
-	}
-	return &text
-}
-
-func extractConversationRetryIndex(msg *schema.Message) *int {
-	if msg == nil || msg.Extra == nil {
-		return nil
-	}
-	raw, ok := msg.Extra["retry_index"]
-	if !ok {
-		return nil
-	}
-	switch v := raw.(type) {
-	case int:
-		if v <= 0 {
-			return nil
-		}
-		return &v
-	case int32:
-		value := int(v)
-		if value <= 0 {
-			return nil
-		}
-		return &value
-	case int64:
-		value := int(v)
-		if value <= 0 {
-			return nil
-		}
-		return &value
-	case float64:
-		value := int(v)
-		if value <= 0 {
-			return nil
-		}
-		return &value
-	default:
-		return nil
-	}
 }
 
 func attachConversationRetryTotals(items []model.GetConversationHistoryItem) []model.GetConversationHistoryItem {
@@ -273,11 +228,89 @@ func normalizeConversationHistoryRole(role string) string {
 	}
 }
 
-func cacheConversationHistoryHasRetryMetadata(messages []*schema.Message) bool {
-	for _, msg := range messages {
-		if extractConversationRetryGroupID(msg) != nil {
-			return true
+func buildOptimisticConversationHistoryItem(
+	role string,
+	content string,
+	reasoningContent string,
+	reasoningDurationSeconds int,
+	retryMeta *chatRetryMeta,
+	createdAt time.Time,
+) model.GetConversationHistoryItem {
+	item := model.GetConversationHistoryItem{
+		Role:                     normalizeConversationHistoryRole(role),
+		Content:                  strings.TrimSpace(content),
+		ReasoningContent:         strings.TrimSpace(reasoningContent),
+		ReasoningDurationSeconds: reasoningDurationSeconds,
+	}
+	if !createdAt.IsZero() {
+		t := createdAt
+		item.CreatedAt = &t
+	}
+	if retryMeta != nil {
+		item.RetryGroupID = retryMeta.GroupIDPtr()
+		item.RetryIndex = retryMeta.IndexPtr()
+		item.RetryTotal = retryMeta.IndexPtr()
+	}
+	return item
+}
+
+func appendConversationHistoryItemIfMissing(
+	items []model.GetConversationHistoryItem,
+	item model.GetConversationHistoryItem,
+) []model.GetConversationHistoryItem {
+	targetKey := conversationHistoryItemSignature(item)
+	for _, existed := range items {
+		if conversationHistoryItemSignature(existed) == targetKey {
+			return items
 		}
 	}
-	return false
+	return append(items, item)
+}
+
+func conversationHistoryItemSignature(item model.GetConversationHistoryItem) string {
+	if item.ID > 0 {
+		return fmt.Sprintf("id:%d", item.ID)
+	}
+
+	groupID := ""
+	if item.RetryGroupID != nil {
+		groupID = strings.TrimSpace(*item.RetryGroupID)
+	}
+	retryIndex := 0
+	if item.RetryIndex != nil {
+		retryIndex = *item.RetryIndex
+	}
+	createdAt := ""
+	if item.CreatedAt != nil {
+		createdAt = item.CreatedAt.UTC().Format(time.RFC3339Nano)
+	}
+
+	return fmt.Sprintf(
+		"%s|%s|%s|%s|%d|%d|%s",
+		strings.TrimSpace(item.Role),
+		strings.TrimSpace(item.Content),
+		strings.TrimSpace(item.ReasoningContent),
+		groupID,
+		retryIndex,
+		item.ReasoningDurationSeconds,
+		createdAt,
+	)
+}
+
+func sortConversationHistoryItems(items []model.GetConversationHistoryItem) {
+	sort.SliceStable(items, func(i, j int) bool {
+		left := conversationHistoryTimestamp(items[i])
+		right := conversationHistoryTimestamp(items[j])
+		if left.Equal(right) {
+			return conversationHistoryItemSignature(items[i]) < conversationHistoryItemSignature(items[j])
+		}
+		return left.Before(right)
+	})
+}
+
+func conversationHistoryTimestamp(item model.GetConversationHistoryItem) time.Time {
+	if item.CreatedAt == nil {
+		return time.Time{}
+	}
+	return *item.CreatedAt
 }

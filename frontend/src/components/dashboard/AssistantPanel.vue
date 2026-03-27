@@ -122,10 +122,6 @@ const isProgrammaticMessageScroll = ref(false)
 const isStandaloneMode = computed(() => props.viewMode === 'standalone')
 
 const assistantBodyStyle = computed(() => {
-  if (isStandaloneMode.value) {
-    return {}
-  }
-
   return {
     '--assistant-history-width': `${historyExpanded.value ? historyPanelWidth.value : 68}px`,
   }
@@ -1010,6 +1006,37 @@ function handleHistoryScroll(event: Event) {
   }
 }
 
+function getHistoryPanelWidthBounds(containerWidth: number) {
+  const standalone = isStandaloneMode.value
+  const minHistoryWidth = standalone ? 196 : 188
+  const minChatWidth = standalone ? 560 : 420
+  const splitterWidth = 8
+  const rawMaxHistoryWidth = standalone
+    ? Math.min(320, containerWidth - splitterWidth - minChatWidth)
+    : containerWidth - splitterWidth - minChatWidth
+
+  return {
+    minHistoryWidth,
+    maxHistoryWidth: Math.max(minHistoryWidth, rawMaxHistoryWidth),
+  }
+}
+
+function syncHistoryPanelWidthForViewport() {
+  if (!historyExpanded.value) {
+    return
+  }
+
+  const body = assistantBodyRef.value
+  const containerWidth =
+    body?.getBoundingClientRect().width ??
+    Math.max(0, window.innerWidth - (isStandaloneMode.value ? 120 : 0))
+  const bounds = getHistoryPanelWidthBounds(containerWidth)
+  historyPanelWidth.value = Math.min(
+    Math.max(historyPanelWidth.value, bounds.minHistoryWidth),
+    bounds.maxHistoryWidth,
+  )
+}
+
 // startResizeHistoryPanel 负责处理会话列表与聊天主区之间的横向拖拽。
 // 职责边界：
 // 1. 只负责更新助手面板内部的历史区宽度，不修改外层 Dashboard 的左右二分布局。
@@ -1017,21 +1044,27 @@ function handleHistoryScroll(event: Event) {
 // 3. 拖拽结束后统一解绑事件并清理全局样式，防止页面残留 col-resize 状态。
 function startResizeHistoryPanel(event: PointerEvent) {
   const body = assistantBodyRef.value
-  if (isStandaloneMode.value || !body || window.innerWidth <= 960 || !historyExpanded.value) {
+  if (!body || !historyExpanded.value) {
+    return
+  }
+
+  const isStandalone = isStandaloneMode.value
+  const minViewportWidth = isStandalone ? 860 : 960
+  if (window.innerWidth <= minViewportWidth) {
     return
   }
 
   const rect = body.getBoundingClientRect()
   const startX = event.clientX
   const startWidth = historyPanelWidth.value
+  const bounds = getHistoryPanelWidthBounds(rect.width)
 
   const handlePointerMove = (moveEvent: PointerEvent) => {
     const deltaX = moveEvent.clientX - startX
-    const minHistoryWidth = 188
-    const minChatWidth = 420
-    const splitterWidth = 8
-    const maxHistoryWidth = rect.width - splitterWidth - minChatWidth
-    historyPanelWidth.value = Math.min(Math.max(startWidth + deltaX, minHistoryWidth), maxHistoryWidth)
+    historyPanelWidth.value = Math.min(
+      Math.max(startWidth + deltaX, bounds.minHistoryWidth),
+      bounds.maxHistoryWidth,
+    )
   }
 
   const stopResize = () => {
@@ -1469,7 +1502,10 @@ onMounted(async () => {
   reasoningTicker = window.setInterval(() => {
     reasoningDisplayNow.value = Date.now()
   }, 1000)
+  window.addEventListener('resize', syncHistoryPanelWidthForViewport)
+  syncHistoryPanelWidthForViewport()
   await loadConversationListData(true)
+  syncHistoryPanelWidthForViewport()
 })
 
 onBeforeUnmount(() => {
@@ -1483,6 +1519,7 @@ onBeforeUnmount(() => {
     window.clearInterval(reasoningTicker)
     reasoningTicker = 0
   }
+  window.removeEventListener('resize', syncHistoryPanelWidthForViewport)
   document.body.classList.remove('dashboard-resizing')
 })
 </script>
@@ -1584,7 +1621,7 @@ onBeforeUnmount(() => {
 
       <div
         class="assistant-splitter"
-        :class="{ 'assistant-splitter--hidden': !historyExpanded || isStandaloneMode }"
+        :class="{ 'assistant-splitter--hidden': !historyExpanded }"
         role="separator"
         aria-label="调整会话列表宽度"
         @pointerdown.prevent="startResizeHistoryPanel"
@@ -1994,7 +2031,7 @@ onBeforeUnmount(() => {
 }
 
 .assistant-body--standalone {
-  grid-template-columns: minmax(212px, 1fr) 8px minmax(0, 5fr);
+  grid-template-columns: var(--assistant-history-width) 8px minmax(0, 1fr);
 }
 
 .assistant-body--standalone.assistant-body--collapsed {
@@ -2073,15 +2110,20 @@ onBeforeUnmount(() => {
 .assistant-history__content {
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   display: grid;
   align-content: start;
   gap: 12px;
   padding: 0 10px 14px 12px;
+  scrollbar-gutter: stable;
 }
 
 .assistant-history__new {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
   height: 42px;
+  box-sizing: border-box;
   border: 1px solid rgba(15, 23, 42, 0.1);
   border-radius: 12px;
   background: #ffffff;
@@ -2114,6 +2156,7 @@ onBeforeUnmount(() => {
 .assistant-history__group {
   display: grid;
   gap: 6px;
+  min-width: 0;
 }
 
 .assistant-history__group-title {
@@ -2127,17 +2170,21 @@ onBeforeUnmount(() => {
 
 .assistant-history__item {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
   min-height: 38px;
   padding: 8px 10px;
+  box-sizing: border-box;
   border: 1px solid transparent;
   border-radius: 10px;
   background: transparent;
   color: #1f2937;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
   text-align: left;
+  overflow: hidden;
   transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
 }
 
@@ -2148,6 +2195,7 @@ onBeforeUnmount(() => {
 
 .assistant-history__item-title {
   min-width: 0;
+  max-width: 100%;
   font-size: 13px;
   line-height: 1.3;
   color: inherit;
@@ -2174,12 +2222,35 @@ onBeforeUnmount(() => {
 .assistant-shell--standalone .assistant-history {
   background: linear-gradient(180deg, #f8f9fc 0%, #f4f7fb 100%);
   border-right: 1px solid rgba(15, 23, 42, 0.08);
+  overflow: hidden;
 }
 
 .assistant-shell--standalone .assistant-history__item--active {
   border-color: rgba(49, 96, 202, 0.3);
   background: #edf2ff;
   box-shadow: 0 4px 10px rgba(36, 67, 127, 0.08);
+}
+
+.assistant-shell--standalone .assistant-history__toolbar {
+  padding: 10px 9px 8px 10px;
+}
+
+.assistant-shell--standalone .assistant-history__content {
+  gap: 10px;
+  padding: 0 8px 12px 10px;
+}
+
+.assistant-shell--standalone .assistant-history__new {
+  height: 40px;
+}
+
+.assistant-shell--standalone .assistant-history__item {
+  min-height: 54px;
+  padding: 10px 10px 10px 11px;
+}
+
+.assistant-shell--standalone .assistant-history__item-title {
+  font-size: 12px;
 }
 
 .assistant-history--collapsed .assistant-history__toolbar {
@@ -2263,6 +2334,14 @@ onBeforeUnmount(() => {
 .assistant-splitter--hidden {
   opacity: 0;
   pointer-events: none;
+}
+
+.assistant-body--standalone .assistant-splitter {
+  display: flex;
+}
+
+.assistant-shell--standalone .assistant-splitter__line {
+  background: linear-gradient(180deg, rgba(130, 148, 180, 0.18), rgba(78, 110, 168, 0.32), rgba(130, 148, 180, 0.18));
 }
 
 .assistant-splitter__line {
@@ -3008,6 +3087,57 @@ onBeforeUnmount(() => {
   .assistant-composer-ds {
     padding-left: 18px;
     padding-right: 18px;
+  }
+}
+
+@media (max-width: 1280px) {
+  .assistant-body--standalone {
+    grid-template-columns: var(--assistant-history-width) 8px minmax(0, 1fr);
+  }
+
+  .assistant-shell--standalone .assistant-history__content {
+    padding-left: 7px;
+    padding-right: 7px;
+  }
+}
+
+@media (max-width: 1120px) {
+  .assistant-body--standalone {
+    grid-template-columns: var(--assistant-history-width) 8px minmax(0, 1fr);
+  }
+
+  .assistant-shell--standalone .assistant-history__toolbar {
+    padding-inline: 8px;
+  }
+
+  .assistant-shell--standalone .assistant-history__content {
+    gap: 8px;
+    padding-inline: 6px;
+  }
+
+  .assistant-shell--standalone .assistant-history__item {
+    min-height: 50px;
+    padding: 9px 9px 9px 10px;
+  }
+
+  .assistant-shell--standalone .assistant-history__item-title {
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 860px) {
+  .assistant-body--standalone,
+  .assistant-body--standalone.assistant-body--collapsed {
+    grid-template-columns: 1fr;
+  }
+
+  .assistant-shell--standalone .assistant-history {
+    border-right: none;
+    border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+  }
+
+  .assistant-shell--standalone .assistant-history__content {
+    max-height: 260px;
   }
 }
 </style>

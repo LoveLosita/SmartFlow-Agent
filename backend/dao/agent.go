@@ -223,7 +223,10 @@ func (a *AgentDAO) EnsureRetryGroupSeed(ctx context.Context, userID int, chatID,
 	}
 
 	return a.db.WithContext(ctx).
-		Model(&model.ChatHistory{}).
+		Model(&model.ChatHistory{
+			UserID: userID,
+			ChatID: chatID,
+		}).
 		Where("user_id = ? AND chat_id = ? AND id IN ?", userID, chatID, ids).
 		Where("(retry_group_id IS NULL OR retry_group_id = '')").
 		Updates(map[string]any{

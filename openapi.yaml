@@ -1,8 +1,8 @@
 openapi: 3.0.3
 info:
-  title: SmartFlow Agent History API
+  title: SmartFlow 智能体历史记录接口
   version: 0.8.1
-  description: Latest conversation history API spec, including persisted reasoning content.
+  description: 最新的会话历史接口规范，包含持久化后的推理内容。
 
 servers:
   - url: http://localhost:8080
@@ -11,11 +11,11 @@ paths:
   /api/v1/agent/chat:
     post:
       tags:
-        - Agent
-      summary: Stream chat reply
+        - 智能体
+      summary: 流式聊天回复
       description: |
-        Starts an Agent chat request.
-        Retry uses the same endpoint and passes retry metadata in `extra`.
+        发起一轮智能体聊天请求。
+        重试仍使用同一个接口，并通过 extra 字段传递重试元数据。
       security:
         - BearerAuth: []
       requestBody:
@@ -28,14 +28,14 @@ paths:
               normal:
                 value:
                   conversation_id: 8df59142-29a2-4bf6-85b6-c5e3f4e9cb89
-                  message: Help me review tomorrow's tasks.
+                  message: 帮我看看明天的任务安排。
                   model: worker
                   thinking: true
                   extra: {}
               retry:
                 value:
                   conversation_id: 8df59142-29a2-4bf6-85b6-c5e3f4e9cb89
-                  message: Help me review tomorrow's tasks.
+                  message: 帮我看看明天的任务安排。
                   model: worker
                   thinking: true
                   extra:
@@ -45,15 +45,15 @@ paths:
                     retry_from_assistant_message_id: 456
       responses:
         '200':
-          description: SSE stream response
+          description: SSE 流式响应
         '400':
-          description: Invalid request
+          description: 请求参数非法
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '401':
-          description: Unauthorized
+          description: 未授权
           content:
             application/json:
               schema:
@@ -62,8 +62,8 @@ paths:
   /api/v1/agent/conversation-list:
     get:
       tags:
-        - Agent
-      summary: Get conversation list
+        - 智能体
+      summary: 获取会话列表
       security:
         - BearerAuth: []
       parameters:
@@ -85,7 +85,7 @@ paths:
         - name: limit
           in: query
           required: false
-          description: Alias of page_size.
+          description: page_size 的别名。
           schema:
             type: integer
             minimum: 1
@@ -100,19 +100,19 @@ paths:
             example: active
       responses:
         '200':
-          description: Success
+          description: 成功
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConversationListEnvelope'
         '400':
-          description: Invalid request
+          description: 请求参数非法
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '401':
-          description: Unauthorized
+          description: 未授权
           content:
             application/json:
               schema:
@@ -121,14 +121,14 @@ paths:
   /api/v1/agent/conversation-history:
     get:
       tags:
-        - Agent
-      summary: Get conversation history
+        - 智能体
+      summary: 获取会话历史
       description: |
-        Returns chat history for a conversation.
-        The service validates ownership first, then prefers Redis and falls back to MySQL.
-        `reasoning_content` is now returned from both cache hits and DB-backed history when available.
-        `reasoning_duration_seconds` is server-computed and persisted in seconds.
-        Retry groups are returned via `retry_group_id`, `retry_index`, and `retry_total`.
+        返回指定会话的聊天历史。
+        服务会先校验归属关系，再优先读取 Redis，必要时回退到 MySQL。
+        reasoning_content 现已支持在缓存命中和数据库历史两种场景下返回（若可用）。
+        reasoning_duration_seconds 由服务端计算，并以秒为单位持久化。
+        重试分组通过 retry_group_id、retry_index 和 retry_total 返回。
       security:
         - BearerAuth: []
       parameters:
@@ -141,7 +141,7 @@ paths:
             example: 8df59142-29a2-4bf6-85b6-c5e3f4e9cb89
       responses:
         '200':
-          description: Success
+          description: 成功
           content:
             application/json:
               schema:
@@ -150,11 +150,11 @@ paths:
                 success:
                   value:
                     status: "10000"
-                    info: success
+                    info: 成功
                     data:
                       - id: 101
                         role: user
-                        content: Help me review tomorrow's most important task.
+                        content: 帮我看看明天最重要的任务是什么。
                         created_at: "2026-03-24T22:15:01+08:00"
                         reasoning_content: ""
                         reasoning_duration_seconds: 0
@@ -163,21 +163,21 @@ paths:
                         retry_total: 2
                       - id: 102
                         role: assistant
-                        content: Tomorrow you should prioritize the DB integration and API validation.
+                        content: 明天你应该优先处理数据库联调和接口校验。
                         created_at: "2026-03-24T22:15:06+08:00"
-                        reasoning_content: "Stage: request.accepted\nUser request accepted.\n\nStage: task_query.reflecting\nComparing the retrieved tasks and selecting the tightest deadlines."
+                        reasoning_content: "阶段：request.accepted\n用户请求已接收。\n\n阶段：task_query.reflecting\n正在对比检索到的任务并选择截止时间最紧的事项。"
                         reasoning_duration_seconds: 5
                         retry_group_id: retry-group-001
                         retry_index: 2
                         retry_total: 2
         '400':
-          description: Missing parameter or conversation not found
+          description: 缺少参数或会话不存在
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '401':
-          description: Unauthorized
+          description: 未授权
           content:
             application/json:
               schema:
@@ -218,7 +218,7 @@ components:
       properties:
         request_mode:
           type: string
-          description: Use `retry` when regenerating a previous answer version.
+          description: 当需要重新生成上一版回答时，使用 retry。
           example: retry
         retry_group_id:
           type: string
@@ -244,7 +244,7 @@ components:
           example: "40005"
         info:
           type: string
-          example: wrong param type
+          example: 参数类型错误
 
     ConversationListEnvelope:
       type: object
@@ -258,7 +258,7 @@ components:
           example: "10000"
         info:
           type: string
-          example: success
+          example: 成功
         data:
           $ref: '#/components/schemas/ConversationListResponse'
 
@@ -307,7 +307,7 @@ components:
           format: uuid
         title:
           type: string
-          example: Tomorrow task review
+          example: 明日任务复盘
         has_title:
           type: boolean
           example: true
@@ -338,7 +338,7 @@ components:
           example: "10000"
         info:
           type: string
-          example: success
+          example: 成功
         data:
           type: array
           items:
@@ -352,7 +352,7 @@ components:
       properties:
         id:
           type: integer
-          description: Database primary key. May be omitted on pure cache hits.
+          description: 数据库主键。纯缓存命中场景下可能为空。
           example: 102
         role:
           type: string
@@ -360,31 +360,31 @@ components:
           example: assistant
         content:
           type: string
-          example: Tomorrow you should prioritize the DB integration and API validation.
+          example: 明天你应该优先处理数据库联调和接口校验。
         created_at:
           type: string
           format: date-time
           nullable: true
         reasoning_content:
           type: string
-          description: Aggregated reasoning text, including streamed model reasoning or stage-level thinking text.
-          example: "Stage: request.accepted\nUser request accepted."
+          description: 聚合后的推理文本，包含模型流式推理内容或阶段级思考文本。
+          example: "阶段：request.accepted\n用户请求已接收。"
         reasoning_duration_seconds:
           type: integer
-          description: Server-computed reasoning duration in seconds.
+          description: 由服务端计算的推理耗时，单位为秒。
           example: 5
         retry_group_id:
           type: string
           nullable: true
-          description: Retry group identifier shared by the original answer and all retry versions.
+          description: 原始回答与所有重试版本共享的重试分组标识。
           example: retry-group-001
         retry_index:
           type: integer
           nullable: true
-          description: 1-based version index within the retry group.
+          description: 在重试分组内的版本序号，从 1 开始。
           example: 2
         retry_total:
           type: integer
           nullable: true
-          description: Total number of versions currently in the retry group.
+          description: 当前重试分组内的总版本数。
           example: 2

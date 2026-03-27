@@ -197,6 +197,9 @@ function handleSubmit() {
 .task-class-dialog__body {
   display: grid;
   gap: 22px;
+  min-height: 0;
+  max-height: min(72vh, 760px);
+  overflow: hidden;
 }
 
 .task-class-dialog__grid {
@@ -230,6 +233,8 @@ function handleSubmit() {
 .task-class-dialog__items {
   display: grid;
   gap: 14px;
+  min-width: 0;
+  min-height: 0;
 }
 
 .task-class-dialog__items-head {
@@ -237,6 +242,8 @@ function handleSubmit() {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .task-class-dialog__add {
@@ -254,6 +261,13 @@ function handleSubmit() {
 .task-class-dialog__items-list {
   display: grid;
   gap: 10px;
+  min-width: 0;
+  max-height: min(44vh, 360px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
 }
 
 .task-class-dialog__item {
@@ -261,6 +275,7 @@ function handleSubmit() {
   grid-template-columns: 36px minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
+  min-width: 0;
 }
 
 .task-class-dialog__item-order {
@@ -297,9 +312,46 @@ function handleSubmit() {
   justify-content: flex-end;
 }
 
+@media (max-height: 900px) {
+  .task-class-dialog__body {
+    max-height: min(76vh, 680px);
+    gap: 18px;
+  }
+
+  .task-class-dialog__items-list {
+    max-height: min(40vh, 300px);
+  }
+}
+
+@media (max-height: 820px) {
+  .task-class-dialog__items-list {
+    max-height: min(34vh, 240px);
+  }
+}
+
 @media (max-width: 840px) {
   .task-class-dialog__grid {
     grid-template-columns: 1fr;
   }
+
+  .task-class-dialog__item {
+    grid-template-columns: 32px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .task-class-dialog__item-remove {
+    grid-column: 2;
+    justify-self: start;
+  }
+}
+
+.task-class-dialog :deep(.el-dialog) {
+  width: min(720px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  overflow: hidden;
+}
+
+.task-class-dialog :deep(.el-dialog__body) {
+  overflow: hidden;
 }
 </style>

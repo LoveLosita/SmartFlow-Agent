@@ -35,44 +35,48 @@ func (d *CacheDAO) schedulePreviewKey(userID int, conversationID string) string 
 	return fmt.Sprintf("smartflow:schedule_preview:u:%d:c:%s", userID, conversationID)
 }
 
-// SetBlacklist 鎶?Token 鎵旇繘榛戝悕鍗?
+func (d *CacheDAO) conversationHistoryKey(userID int, conversationID string) string {
+	return fmt.Sprintf("smartflow:conversation_history:u:%d:c:%s", userID, conversationID)
+}
+
+// SetBlacklist 把 Token 写入黑名单。
 func (d *CacheDAO) SetBlacklist(jti string, expiration time.Duration) error {
 	return d.client.Set(context.Background(), "blacklist:"+jti, "1", expiration).Err()
 }
 
-// IsBlacklisted 妫€鏌?Token 鏄惁鍦ㄩ粦鍚嶅崟涓?
+// IsBlacklisted 检查 Token 是否在黑名单中。
 func (d *CacheDAO) IsBlacklisted(jti string) (bool, error) {
 	result, err := d.client.Get(context.Background(), "blacklist:"+jti).Result()
 	if errors.Is(err, redis.Nil) {
-		return false, nil // 涓嶅湪榛戝悕鍗?
+		return false, nil // 不在黑名单中
 	} else if err != nil {
-		return false, err // 鍏朵粬閿欒
+		return false, err // 其他错误
 	}
-	return result == "1", nil // 鍦ㄩ粦鍚嶅崟
+	return result == "1", nil // 在黑名单中
 }
 
 func (d *CacheDAO) AddTaskClassList(ctx context.Context, userID int, list *model.UserGetTaskClassesResponse) error {
-	// 1. 瀹氫箟 Key锛屼娇鐢?userID 闅旂涓嶅悓鐢ㄦ埛鐨勬暟鎹?
+	// 1. 定义 Key，使用 userID 隔离不同用户的数据。
 	key := fmt.Sprintf("smartflow:task_classes:%d", userID)
-	// 2. 搴忓垪鍖栵細灏嗙粨鏋勪綋杞负 []byte
+	// 2. 序列化：将结构体转为 []byte。
 	data, err := json.Marshal(list)
 	if err != nil {
 		return err
 	}
-	// 3. 瀛樺偍锛氳缃?30 鍒嗛挓杩囨湡锛堟牴鎹笟鍔＄伒娲昏皟鏁达級
+	// 3. 存储：设置 30 分钟过期，可按业务需要调整。
 	return d.client.Set(ctx, key, data, 30*time.Minute).Err()
 }
 
 func (d *CacheDAO) GetTaskClassList(ctx context.Context, userID int) (*model.UserGetTaskClassesResponse, error) {
 	key := fmt.Sprintf("smartflow:task_classes:%d", userID)
 	var resp model.UserGetTaskClassesResponse
-	// 1. 浠?Redis 鑾峰彇瀛楃涓?
+	// 1. 从 Redis 获取字符串。
 	val, err := d.client.Get(ctx, key).Result()
 	if err != nil {
-		// 娉ㄦ剰锛氬鏋滄槸 redis.Nil锛屼氦缁?Service 灞傚鐞嗘煡搴撻€昏緫
+		// 注意：若是 redis.Nil，则交给 Service 层处理回源查询逻辑。
 		return &resp, err
 	}
-	// 2. 鍙嶅簭鍒楀寲锛氬皢 JSON 杩樺師鍥炵粨鏋勪綋
+	// 2. 反序列化：将 JSON 还原回结构体。
 	err = json.Unmarshal([]byte(val), &resp)
 	return &resp, err
 }
@@ -85,9 +89,9 @@ func (d *CacheDAO) DeleteTaskClassList(ctx context.Context, userID int) error {
 func (d *CacheDAO) GetRecord(ctx context.Context, key string) (string, error) {
 	val, err := d.client.Get(ctx, key).Result()
 	if errors.Is(err, redis.Nil) {
-		return "", nil // 姝ｅ父娌″懡涓殑鎯呭喌
+		return "", nil // 正常未命中
 	}
-	return val, err // 鐪熸鐨?Redis 鎶ラ敊
+	return val, err // 真正的 Redis 错误
 }
 
 func (d *CacheDAO) SaveRecord(ctx context.Context, key string, val string, ttl time.Duration) error {
@@ -118,7 +122,7 @@ func (d *CacheDAO) GetUserTasksFromCache(ctx context.Context, userID int) ([]mod
 	var tasks []model.Task
 	val, err := d.client.Get(ctx, key).Result()
 	if err != nil {
-		return nil, err // 娉ㄦ剰锛氬鏋滄槸 redis.Nil锛屼氦缁?Service 灞傚鐞嗘煡搴撻€昏緫
+		return nil, err // 注意：若是 redis.Nil，则交给 Service 层处理回源查询逻辑
 	}
 	err = json.Unmarshal([]byte(val), &tasks)
 	return tasks, err
@@ -154,7 +158,7 @@ func (d *CacheDAO) GetUserTodayScheduleFromCache(ctx context.Context, userID int
 	var schedules []model.UserTodaySchedule
 	val, err := d.client.Get(ctx, key).Result()
 	if err != nil {
-		return nil, err // 娉ㄦ剰锛氬鏋滄槸 redis.Nil锛屼氦缁?Service 灞傚鐞嗘煡搴撻€昏緫
+		return nil, err // 注意：若是 redis.Nil，则交给 Service 层处理回源查询逻辑
 	}
 	err = json.Unmarshal([]byte(val), &schedules)
 	return schedules, err
@@ -166,7 +170,7 @@ func (d *CacheDAO) SetUserTodayScheduleToCache(ctx context.Context, userID int, 
 	if err != nil {
 		return err
 	}
-	// 璁剧疆杩囨湡鏃堕棿涓哄綋澶╁墿浣欑殑鏃堕棿锛岀‘淇濇瘡澶╂洿鏂颁竴娆＄紦瀛?
+	// 设置过期时间为“当天剩余时间”，保证每天自然刷新一次缓存。
 	return d.client.Set(ctx, key, data, time.Until(time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day()+1, 0, 0, 0, 0, time.Now().Location()))).Err()
 }
 
@@ -180,7 +184,7 @@ func (d *CacheDAO) GetUserWeeklyScheduleFromCache(ctx context.Context, userID in
 	var schedules model.UserWeekSchedule
 	val, err := d.client.Get(ctx, key).Result()
 	if err != nil {
-		return nil, err // 娉ㄦ剰锛氬鏋滄槸 redis.Nil锛屼氦缁?Service 灞傚鐞嗘煡搴撻€昏緫
+		return nil, err // 注意：若是 redis.Nil，则交给 Service 层处理回源查询逻辑
 	}
 	err = json.Unmarshal([]byte(val), &schedules)
 	return &schedules, err
@@ -192,7 +196,7 @@ func (d *CacheDAO) SetUserWeeklyScheduleToCache(ctx context.Context, userID int,
 	if err != nil {
 		return err
 	}
-	// 璁剧疆杩囨湡鏃堕棿涓轰竴澶?
+	// 设置过期时间为一天。
 	return d.client.Set(ctx, key, data, 24*time.Hour).Err()
 }
 
@@ -206,7 +210,7 @@ func (d *CacheDAO) GetUserRecentCompletedSchedulesFromCache(ctx context.Context,
 	var resp model.UserRecentCompletedScheduleResponse
 	val, err := d.client.Get(ctx, key).Result()
 	if err != nil {
-		return &resp, err // 娉ㄦ剰锛氬鏋滄槸 redis.Nil锛屼氦缁?Service 灞傚鐞嗘煡搴撻€昏緫
+		return &resp, err // 注意：若是 redis.Nil，则交给 Service 层处理回源查询逻辑
 	}
 	err = json.Unmarshal([]byte(val), &resp)
 	return &resp, err
@@ -218,7 +222,7 @@ func (d *CacheDAO) SetUserRecentCompletedSchedulesToCache(ctx context.Context, u
 	if err != nil {
 		return err
 	}
-	// 璁剧疆杩囨湡鏃堕棿涓?0鍒嗛挓
+	// 设置过期时间为 30 分钟。
 	return d.client.Set(ctx, key, data, 30*time.Minute).Err()
 }
 
@@ -232,7 +236,7 @@ func (d *CacheDAO) DeleteUserRecentCompletedSchedulesFromCache(ctx context.Conte
 			return err
 		}
 		if len(keys) > 0 {
-			// 鐢?UNLINK\(\) 寮傛鍒犻櫎锛岄檷浣庨樆濉為闄╋紱濡傞渶寮轰竴鑷村垹闄ゅ彲鏀圭敤 Del\(\)
+			// 使用 UNLINK() 异步删除，降低阻塞风险；若需要强一致删除可改用 Del()。
 			if err := d.client.Unlink(ctx, keys...).Err(); err != nil {
 				return err
 			}
@@ -250,10 +254,10 @@ func (d *CacheDAO) GetUserOngoingScheduleFromCache(ctx context.Context, userID i
 	var schedule model.OngoingSchedule
 	val, err := d.client.Get(ctx, key).Result()
 	if err != nil {
-		return &schedule, err // 娉ㄦ剰锛氬鏋滄槸 redis.Nil锛屼氦缁?Service 灞傚鐞嗘煡搴撻€昏緫
+		return &schedule, err // 注意：若是 redis.Nil，则交给 Service 层处理回源查询逻辑
 	}
 	if val == "null" {
-		return nil, nil // 涔嬪墠缂撳瓨杩囨病鏈夋鍦ㄨ繘琛岀殑鏃ョ▼锛岀洿鎺ヨ繑鍥?nil
+		return nil, nil // 之前缓存过“当前没有正在进行的日程”，这里直接返回 nil
 	}
 	err = json.Unmarshal([]byte(val), &schedule)
 	return &schedule, err
@@ -261,7 +265,7 @@ func (d *CacheDAO) GetUserOngoingScheduleFromCache(ctx context.Context, userID i
 
 func (d *CacheDAO) SetUserOngoingScheduleToCache(ctx context.Context, userID int, schedule *model.OngoingSchedule) error {
 	if schedule == nil {
-		// 濡傛灉娌℃湁姝ｅ湪杩涜鐨勬棩绋嬶紝璁剧疆绌哄€煎苟鐭殏杩囨湡锛岄伩鍏嶉绻佹煡搴?
+		// 如果当前没有正在进行的日程，则缓存空值并短暂过期，避免频繁回源查询。
 		key := fmt.Sprintf("smartflow:ongoing_schedule:%d", userID)
 		return d.client.Set(ctx, key, "null", 5*time.Minute).Err()
 	}
@@ -270,7 +274,7 @@ func (d *CacheDAO) SetUserOngoingScheduleToCache(ctx context.Context, userID int
 	if err != nil {
 		return err
 	}
-	// 璁剧疆杩囨湡鏃堕棿涓哄埌 endTime 鐨勫墿浣欐椂闂达紙鑻ュ凡杩囨湡鍒欎笉鍐欏叆缂撳瓨锛?
+	// 设置过期时间为距离 endTime 的剩余时长；若已过期，则不再写入缓存。
 	ttl := time.Until(schedule.EndTime)
 	if ttl <= 0 {
 		return nil
@@ -442,4 +446,82 @@ func (d *CacheDAO) DeleteSchedulePlanPreviewFromCache(ctx context.Context, userI
 		return errors.New("conversation_id is empty")
 	}
 	return d.client.Del(ctx, d.schedulePreviewKey(userID, normalizedConversationID)).Err()
+}
+
+// SetConversationHistoryToCache 写入“会话历史视图”缓存。
+//
+// 职责边界：
+// 1. 负责按 user_id + conversation_id 写入前端历史查询所需的稳定 DTO；
+// 2. 只负责缓存当前可展示历史，不负责上下文窗口缓存；
+// 3. 不负责 DB 回源，也不负责重试分组补算。
+func (d *CacheDAO) SetConversationHistoryToCache(ctx context.Context, userID int, conversationID string, items []model.GetConversationHistoryItem) error {
+	if d == nil || d.client == nil {
+		return errors.New("cache dao is not initialized")
+	}
+	if userID <= 0 {
+		return fmt.Errorf("invalid user_id: %d", userID)
+	}
+	normalizedConversationID := strings.TrimSpace(conversationID)
+	if normalizedConversationID == "" {
+		return errors.New("conversation_id is empty")
+	}
+
+	data, err := json.Marshal(items)
+	if err != nil {
+		return fmt.Errorf("marshal conversation history failed: %w", err)
+	}
+	return d.client.Set(ctx, d.conversationHistoryKey(userID, normalizedConversationID), data, 1*time.Hour).Err()
+}
+
+// GetConversationHistoryFromCache 读取“会话历史视图”缓存。
+//
+// 输入输出语义：
+// 1. 命中时返回历史 DTO 切片与 nil error；
+// 2. 未命中时返回 (nil, nil)；
+// 3. Redis 异常或反序列化失败时返回 error。
+func (d *CacheDAO) GetConversationHistoryFromCache(ctx context.Context, userID int, conversationID string) ([]model.GetConversationHistoryItem, error) {
+	if d == nil || d.client == nil {
+		return nil, errors.New("cache dao is not initialized")
+	}
+	if userID <= 0 {
+		return nil, fmt.Errorf("invalid user_id: %d", userID)
+	}
+	normalizedConversationID := strings.TrimSpace(conversationID)
+	if normalizedConversationID == "" {
+		return nil, errors.New("conversation_id is empty")
+	}
+
+	raw, err := d.client.Get(ctx, d.conversationHistoryKey(userID, normalizedConversationID)).Result()
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var items []model.GetConversationHistoryItem
+	if err = json.Unmarshal([]byte(raw), &items); err != nil {
+		return nil, fmt.Errorf("unmarshal conversation history failed: %w", err)
+	}
+	return items, nil
+}
+
+// DeleteConversationHistoryFromCache 删除“会话历史视图”缓存。
+//
+// 说明：
+// 1. 删除操作是幂等的，key 不存在也视为成功；
+// 2. 该方法用于 chat_histories 写入/补种 retry 分组后触发失效；
+// 3. 这里只处理前端历史视图缓存，不影响 Agent 上下文热缓存。
+func (d *CacheDAO) DeleteConversationHistoryFromCache(ctx context.Context, userID int, conversationID string) error {
+	if d == nil || d.client == nil {
+		return errors.New("cache dao is not initialized")
+	}
+	if userID <= 0 {
+		return fmt.Errorf("invalid user_id: %d", userID)
+	}
+	normalizedConversationID := strings.TrimSpace(conversationID)
+	if normalizedConversationID == "" {
+		return errors.New("conversation_id is empty")
+	}
+	return d.client.Del(ctx, d.conversationHistoryKey(userID, normalizedConversationID)).Err()
 }

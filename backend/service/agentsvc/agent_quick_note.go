@@ -345,6 +345,20 @@ func (s *AgentService) persistChatAfterReply(
 		pushErrNonBlocking(errChan, err)
 		return
 	}
+	userCreatedAt := time.Now()
+	s.appendConversationHistoryCacheOptimistically(
+		context.Background(),
+		userID,
+		chatID,
+		buildOptimisticConversationHistoryItem(
+			"user",
+			userMessage,
+			"",
+			0,
+			retryMeta,
+			userCreatedAt,
+		),
+	)
 
 	// 3. 助手消息同样遵循“Redis 先行 + 可靠持久化补齐”策略。
 	assistantMsg := &schema.Message{Role: schema.Assistant, Content: assistantReply, ReasoningContent: assistantReasoning}
@@ -378,5 +392,19 @@ func (s *AgentService) persistChatAfterReply(
 		TokensConsumed:              assistantTokens,
 	}); err != nil {
 		pushErrNonBlocking(errChan, err)
+		return
 	}
+	s.appendConversationHistoryCacheOptimistically(
+		context.Background(),
+		userID,
+		chatID,
+		buildOptimisticConversationHistoryItem(
+			"assistant",
+			assistantReply,
+			assistantReasoning,
+			assistantReasoningDurationSeconds,
+			retryMeta,
+			userCreatedAt.Add(time.Millisecond),
+		),
+	)
 }

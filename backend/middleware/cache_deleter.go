@@ -65,7 +65,11 @@ func (p *GormCachePlugin) dispatchCacheLogic(modelObj interface{}, db *gorm.DB) 
 		p.invalidTaskCache(m.UserID)
 	case model.AgentScheduleState:
 		p.invalidSchedulePlanPreviewCache(m.UserID, m.ConversationID)
-	case model.AgentOutboxMessage, model.ChatHistory, model.AgentChat, model.User:
+	case model.ChatHistory:
+		p.invalidConversationHistoryCache(m.UserID, m.ChatID)
+	case model.AgentChat:
+		p.invalidConversationHistoryCache(m.UserID, m.ChatID)
+	case model.AgentOutboxMessage, model.User:
 		// 这些模型目前没有定义缓存逻辑，先不处理
 	default:
 		// 只有真正没定义的模型才会到这里
@@ -122,5 +126,22 @@ func (p *GormCachePlugin) invalidSchedulePlanPreviewCache(userID int, conversati
 			return
 		}
 		log.Printf("[GORM-Cache] Invalidated schedule preview cache for user %d conversation %s", userID, normalizedConversationID)
+	}()
+}
+
+func (p *GormCachePlugin) invalidConversationHistoryCache(userID int, conversationID string) {
+	normalizedConversationID := strings.TrimSpace(conversationID)
+	if userID == 0 || normalizedConversationID == "" {
+		return
+	}
+	go func() {
+		// 1. 这里的调用目的：当聊天历史写入或重试补种更新后，删除“前端历史视图缓存”。
+		// 2. 这样下次访问 conversation-history 时会回源 DB，并把最新 retry 版本完整回填缓存。
+		// 3. 注意：这里只删历史视图缓存，不删 Agent 上下文热缓存，避免影响聊天首 token。
+		if err := p.cacheDAO.DeleteConversationHistoryFromCache(context.Background(), userID, normalizedConversationID); err != nil {
+			log.Printf("[GORM-Cache] Failed to invalidate conversation history cache for user %d conversation %s: %v", userID, normalizedConversationID, err)
+			return
+		}
+		log.Printf("[GORM-Cache] Invalidated conversation history cache for user %d conversation %s", userID, normalizedConversationID)
 	}()
 }
