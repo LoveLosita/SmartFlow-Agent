@@ -6,9 +6,9 @@ import (
 	"log"
 	"strings"
 
-	agentgraph "github.com/LoveLosita/smartflow/backend/agent2/graph"
-	agentmodel "github.com/LoveLosita/smartflow/backend/agent2/model"
-	agentnode "github.com/LoveLosita/smartflow/backend/agent2/node"
+	agentgraph "github.com/LoveLosita/smartflow/backend/agent/graph"
+	agentmodel "github.com/LoveLosita/smartflow/backend/agent/model"
+	agentnode "github.com/LoveLosita/smartflow/backend/agent/node"
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/pkg"
@@ -157,6 +157,6 @@ func (s *AgentService) runSchedulePlanFlow(
 	// 6. 旁路写入排程预览缓存（结构化 JSON），给查询接口拉取。
 	// 6.1 失败只记日志，不影响本次对话回复；
 	// 6.2 成功后前端可通过 conversation_id 获取 candidate_plans。
-	s.saveSchedulePlanPreviewAgent2(ctx, userID, chatID, finalState)
+	s.saveSchedulePlanPreview(ctx, userID, chatID, finalState)
 	return reply, nil
 }

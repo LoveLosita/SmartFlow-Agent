@@ -46,7 +46,7 @@ func (s *AgentService) GetConversationHistory(ctx context.Context, userID int, c
 		items, cacheErr := s.cacheDAO.GetConversationHistoryFromCache(ctx, userID, normalizedChatID)
 		if cacheErr != nil {
 			log.Printf("读取会话历史视图缓存失败 chat_id=%s: %v", normalizedChatID, cacheErr)
-		} else if items != nil {
+		} else if conversationHistoryCacheCanServe(items) {
 			return items, nil
 		}
 	}
@@ -226,6 +226,18 @@ func normalizeConversationHistoryRole(role string) string {
 	default:
 		return "system"
 	}
+}
+
+func conversationHistoryCacheCanServe(items []model.GetConversationHistoryItem) bool {
+	// 1. 历史接口一旦被前端用于“重试/编辑”等二次动作，消息 id 就必须稳定可追溯。
+	// 2. 乐观缓存里的新消息在 DB 落库前没有自增主键，若直接返回，会让前端拿到占位 id。
+	// 3. 因此只有“缓存里的每条消息都带稳定 DB id”时，才允许直接命中缓存；否则强制回源 DB。
+	for _, item := range items {
+		if item.ID <= 0 {
+			return false
+		}
+	}
+	return items != nil
 }
 
 func buildOptimisticConversationHistoryItem(

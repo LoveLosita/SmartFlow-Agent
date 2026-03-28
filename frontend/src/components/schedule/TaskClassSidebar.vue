@@ -72,7 +72,6 @@ function resolveDetailPanelStyle(items: TaskClassDetail['items']) {
   // 2. 条目超过“当前屏幕可安全展示的最大条数”后，立即锁住高度并进入内部滚动。
   // 3. 这样像 8 条 task_item 这类中等长度列表会稳定触发滚动，不会再因为估算过大而失效。
   return {
-    height: `${finalHeight}px`,
     maxHeight: `${finalHeight}px`,
   }
 }
@@ -299,13 +298,15 @@ watch(
   overflow-y: auto;
   overflow-x: hidden;
   padding: 24px;
-  display: grid;
-  align-content: start;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
   gap: 14px;
   scrollbar-gutter: stable;
 }
 
 .task-class-sidebar__skeleton-item {
+  flex: 0 0 auto;
   height: 120px;
   border-radius: 24px;
   background: linear-gradient(90deg, rgba(234, 239, 246, 0.9), rgba(248, 251, 255, 1), rgba(234, 239, 246, 0.9));
@@ -314,6 +315,7 @@ watch(
 }
 
 .task-class-card {
+  flex: 0 0 auto;
   min-width: 0;
   border-radius: 24px;
   border: 1px solid rgba(216, 225, 238, 0.9);
@@ -330,6 +332,7 @@ watch(
 .task-class-card__summary {
   width: 100%;
   min-width: 0;
+  min-height: 92px;
   border: none;
   background: transparent;
   padding: 18px 20px 18px 18px;
@@ -394,7 +397,9 @@ watch(
 }
 
 .task-class-card__detail {
+  box-sizing: border-box;
   min-width: 0;
+  min-height: 0;
   padding: 0 14px 14px;
   overflow-y: auto;
   overflow-x: hidden;
@@ -490,6 +495,7 @@ watch(
 }
 
 .task-class-sidebar__create {
+  flex: 0 0 auto;
   min-width: 0;
   min-height: 108px;
   border: 1px dashed rgba(204, 216, 232, 0.92);
@@ -542,6 +548,7 @@ watch(
 
   .task-class-card__summary {
     padding: 16px 16px 16px 15px;
+    min-height: 84px;
   }
 }
 
@@ -590,6 +597,7 @@ watch(
 
   .task-class-card__summary {
     padding: 14px 14px 14px 13px;
+    min-height: 76px;
   }
 
   .task-class-card__content {
@@ -616,6 +624,7 @@ watch(
 
   .task-class-card__summary {
     padding: 12px;
+    min-height: 72px;
   }
 
   .task-class-card__corner {

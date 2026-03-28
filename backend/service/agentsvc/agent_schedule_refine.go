@@ -6,9 +6,9 @@ import (
 	"log"
 	"strings"
 
-	agentgraph "github.com/LoveLosita/smartflow/backend/agent2/graph"
-	agentmodel "github.com/LoveLosita/smartflow/backend/agent2/model"
-	agentnode "github.com/LoveLosita/smartflow/backend/agent2/node"
+	agentgraph "github.com/LoveLosita/smartflow/backend/agent/graph"
+	agentmodel "github.com/LoveLosita/smartflow/backend/agent/model"
+	agentnode "github.com/LoveLosita/smartflow/backend/agent/node"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
 	"github.com/cloudwego/eino-ext/components/model/ark"
@@ -69,7 +69,7 @@ func (s *AgentService) runScheduleRefineFlow(
 	// 4.2 杩欓噷鎶?refine state 鏄犲皠涓?scheduleplan state锛屽鐢ㄥ凡鏈夎惤鐩橀摼璺紱
 	// 4.3 浣嗚嫢鏄€滅嫭绔嬪鍚堝垎鏀凡鍑虹珯銆佺粓瀹′粛澶辫触鈥濓紝鍒欎笉瑕嗙洊涓婁竴鐗堥瑙堬紝閬垮厤澶栭儴璇互涓烘柊鏂规宸查獙璇侀€氳繃銆?
 	if shouldPersistScheduleRefinePreview(finalState) {
-		s.saveSchedulePlanPreviewAgent2(ctx, userID, chatID, convertRefineStateToPlanState(finalState))
+		s.saveSchedulePlanPreview(ctx, userID, chatID, convertRefineStateToPlanState(finalState))
 	} else {
 		emitStage("schedule_refine.preview.skipped", "复合分支终审未通过，本轮结果不覆盖上一版预览。")
 	}

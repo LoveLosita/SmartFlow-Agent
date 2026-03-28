@@ -235,6 +235,55 @@ func (a *AgentDAO) EnsureRetryGroupSeed(ctx context.Context, userID int, chatID,
 		}).Error
 }
 
+// ValidateRetrySourceMessages 校验重试父消息是否真实存在且角色匹配。
+//
+// 职责边界：
+// 1. 负责校验 retry 请求引用的父 user/assistant 消息是否属于当前用户、当前会话。
+// 2. 负责校验两条父消息的角色语义，避免把占位 id、串号 id 或交换角色的 id 写进数据库。
+// 3. 不负责补种 retry_group_id；分组补种仍由 EnsureRetryGroupSeed 负责。
+func (a *AgentDAO) ValidateRetrySourceMessages(ctx context.Context, userID int, chatID string, sourceUserMessageID, sourceAssistantMessageID int) error {
+	// 1. retry 是“基于既有一问一答重新生成”，因此两条父消息 id 必须同时有效。
+	// 2. 只要任意一个缺失，就直接返回错误，禁止继续写出 index=1 的脏重试数据。
+	if sourceUserMessageID <= 0 || sourceAssistantMessageID <= 0 {
+		return errors.New("retry source message ids are invalid")
+	}
+
+	type retrySourceRow struct {
+		ID   int
+		Role *string
+	}
+
+	ids := []int{sourceUserMessageID, sourceAssistantMessageID}
+	rows := make([]retrySourceRow, 0, len(ids))
+	if err := a.db.WithContext(ctx).
+		Model(&model.ChatHistory{}).
+		Select("id", "role").
+		Where("user_id = ? AND chat_id = ? AND id IN ?", userID, chatID, ids).
+		Find(&rows).Error; err != nil {
+		return err
+	}
+	if len(rows) != len(ids) {
+		return errors.New("retry source messages not found in current conversation")
+	}
+
+	roleByID := make(map[int]string, len(rows))
+	for _, row := range rows {
+		if row.Role == nil {
+			roleByID[row.ID] = ""
+			continue
+		}
+		roleByID[row.ID] = strings.ToLower(strings.TrimSpace(*row.Role))
+	}
+
+	if roleByID[sourceUserMessageID] != "user" {
+		return errors.New("retry source user message is invalid")
+	}
+	if roleByID[sourceAssistantMessageID] != "assistant" {
+		return errors.New("retry source assistant message is invalid")
+	}
+	return nil
+}
+
 func (a *AgentDAO) GetRetryGroupNextIndex(ctx context.Context, userID int, chatID, retryGroupID string) (int, error) {
 	normalizedGroupID := strings.TrimSpace(retryGroupID)
 	if normalizedGroupID == "" {

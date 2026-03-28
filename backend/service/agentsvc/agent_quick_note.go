@@ -7,12 +7,12 @@ import (
 	"strings"
 	"time"
 
-	agentgraph "github.com/LoveLosita/smartflow/backend/agent2/graph"
-	agentllm "github.com/LoveLosita/smartflow/backend/agent2/llm"
-	agentmodel "github.com/LoveLosita/smartflow/backend/agent2/model"
-	agentnode "github.com/LoveLosita/smartflow/backend/agent2/node"
-	agentrouter "github.com/LoveLosita/smartflow/backend/agent2/router"
-	agentstream "github.com/LoveLosita/smartflow/backend/agent2/stream"
+	agentgraph "github.com/LoveLosita/smartflow/backend/agent/graph"
+	agentllm "github.com/LoveLosita/smartflow/backend/agent/llm"
+	agentmodel "github.com/LoveLosita/smartflow/backend/agent/model"
+	agentnode "github.com/LoveLosita/smartflow/backend/agent/node"
+	agentrouter "github.com/LoveLosita/smartflow/backend/agent/router"
+	agentstream "github.com/LoveLosita/smartflow/backend/agent/stream"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/cloudwego/eino-ext/components/model/ark"
 	"github.com/cloudwego/eino/schema"
@@ -89,7 +89,7 @@ func (e *quickNoteProgressEmitter) Emit(stage, detail string) {
 		e.reasoning.WriteString(detail)
 	}
 
-	// 3. 调用目的：阶段提示统一走 agent2/stream 的 reasoning chunk 包装，
+	// 3. 调用目的：阶段提示统一走 Agent/stream 的 reasoning chunk 包装，
 	//    避免 service 层继续自己拼 OpenAI 兼容 JSON。
 	err := agentstream.EmitStageAsReasoning(func(payload string) error {
 		e.outChan <- payload
@@ -295,10 +295,10 @@ func buildQuickNoteFinalReply(ctx context.Context, selectedModel *ark.ChatModel,
 }
 
 // decideQuickNoteRouting 决定当前输入是否进入“随口记 graph”。
-// 该函数只是服务层薄封装，具体控制码解析逻辑已下沉到 agent/route 包。
+// 该函数只是服务层薄封装，具体控制码解析逻辑已下沉到 Agent/router 包。
 func (s *AgentService) decideQuickNoteRouting(ctx context.Context, selectedModel *ark.ChatModel, userMessage string) quickNoteRoutingDecision {
 	// 这里保留方法是为了让 AgentService 对外语义完整，
-	// 同时避免上层调用方直接依赖 route 包，降低耦合。
+	// 同时避免上层调用方直接依赖 Agent/router，降低耦合。
 	_ = s
 	return agentrouter.DecideQuickNoteRouting(ctx, selectedModel, userMessage)
 }

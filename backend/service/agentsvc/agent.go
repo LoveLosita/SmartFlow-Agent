@@ -3,13 +3,14 @@ package agentsvc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"strconv"
 	"strings"
 	"time"
 
-	agentchat "github.com/LoveLosita/smartflow/backend/agent2/chat"
-	agentrouter "github.com/LoveLosita/smartflow/backend/agent2/router"
+	agentchat "github.com/LoveLosita/smartflow/backend/agent/chat"
+	agentrouter "github.com/LoveLosita/smartflow/backend/agent/router"
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
@@ -213,6 +214,17 @@ func (s *AgentService) buildChatRetryMeta(ctx context.Context, userID int, chatI
 
 	sourceUserMessageID := readAgentExtraInt(extra, "retry_from_user_message_id")
 	sourceAssistantMessageID := readAgentExtraInt(extra, "retry_from_assistant_message_id")
+	// 1. retry 请求必须明确指向“被重试的那一轮 user + assistant”。
+	// 2. 若这里拿不到有效父消息 id，继续写库只会生成一组孤立的 index=1 重试消息。
+	// 3. 因此直接拒绝本次请求，让前端刷新历史后重试，比静默写脏数据更安全。
+	if sourceUserMessageID <= 0 || sourceAssistantMessageID <= 0 {
+		return nil, errors.New("重试请求缺少有效的父消息ID，请刷新会话后重试")
+	}
+	// 4. 再进一步校验父消息确实属于当前用户与当前会话，且角色语义正确。
+	// 5. 这样即便前端误把占位 id 或串号 id 发过来，后端也不会继续落错库。
+	if err := s.repo.ValidateRetrySourceMessages(ctx, userID, chatID, sourceUserMessageID, sourceAssistantMessageID); err != nil {
+		return nil, errors.New("重试引用的父消息无效，请刷新会话后重试")
+	}
 
 	if err := s.repo.EnsureRetryGroupSeed(ctx, userID, chatID, groupID, sourceUserMessageID, sourceAssistantMessageID); err != nil {
 		return nil, err

@@ -3,7 +3,7 @@ package agentsvc
 import (
 	"context"
 
-	agentrouter "github.com/LoveLosita/smartflow/backend/agent2/router"
+	agentrouter "github.com/LoveLosita/smartflow/backend/agent/router"
 	"github.com/cloudwego/eino-ext/components/model/ark"
 )
 

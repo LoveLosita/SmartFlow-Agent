@@ -33,6 +33,86 @@ interface WeekDayHeader {
   dateLabel: string
 }
 
+interface SchedulePreviewRuntimeState {
+  weeks: ScheduleWeekData[] | null
+  taskClassIds: number[]
+  currentWeek: number | null
+}
+
+interface PreviewMovePayload {
+  week: number
+  sourceDayOfWeek: number
+  sourceOrder: number
+  targetDayOfWeek: number
+  targetOrder: number
+}
+
+interface SuggestedPreviewItem {
+  id: number
+  name: string
+  type: string
+  span: number
+}
+
+interface SchedulePreviewSlotRef {
+  week: number
+  dayOfWeek: number
+  order: number
+}
+
+type SchedulePageWindow = Window & {
+  __schedulePreviewBeforeUnloadRegistered__?: boolean
+}
+
+// schedulePreviewRuntimeState 负责在“单页应用未刷新”的生命周期内保留智能编排预览。
+//
+// 设计说明：
+// 1. 这里故意不用 sessionStorage/localStorage，因为用户明确要求“刷新就丢”，所以只保留运行时内存。
+// 2. 这里负责跨路由回到 /schedule 时恢复预览；不负责持久化到浏览器磁盘。
+// 3. 真正需要清空预览的时机，统一由 clearPreviewState 显式控制，避免切周时误清空。
+const schedulePreviewRuntimeState: SchedulePreviewRuntimeState = {
+  weeks: null,
+  taskClassIds: [],
+  currentWeek: null,
+}
+
+const EMPTY_EMBEDDED_TASK_INFO = {
+  id: 0,
+  name: '',
+  type: 'task',
+}
+
+const SCHEDULE_SECTION_TIME_MAP: Record<number, [string, string]> = {
+  1: ['08:00', '09:40'],
+  2: ['10:15', '11:55'],
+  3: ['14:00', '15:40'],
+  4: ['16:15', '17:55'],
+  5: ['19:00', '20:40'],
+  6: ['20:50', '22:30'],
+}
+
+// handleSchedulePreviewBeforeUnload 负责在存在未应用预览时阻止页面刷新/关闭。
+//
+// 职责边界：
+// 1. 这里只负责触发浏览器原生确认弹框，不负责展示自定义 UI。
+// 2. 只有存在未应用的智能编排结果时才拦截，避免影响正常刷新体验。
+function handleSchedulePreviewBeforeUnload(event: BeforeUnloadEvent) {
+  if (!schedulePreviewRuntimeState.weeks?.length) {
+    return
+  }
+
+  event.preventDefault()
+  event.returnValue = ''
+}
+
+if (typeof window !== 'undefined') {
+  const schedulePageWindow = window as SchedulePageWindow
+  if (!schedulePageWindow.__schedulePreviewBeforeUnloadRegistered__) {
+    window.addEventListener('beforeunload', handleSchedulePreviewBeforeUnload)
+    schedulePageWindow.__schedulePreviewBeforeUnloadRegistered__ = true
+  }
+}
+
 const router = useRouter()
 const route = useRoute()
 
@@ -61,10 +141,19 @@ const scheduleSelectionMode = ref(false)
 const selectedScheduleEventIds = ref<number[]>([])
 
 const liveWeeks = ref<ScheduleWeekData[]>([])
-const previewWeeks = ref<ScheduleWeekData[] | null>(null)
-const currentWeek = ref<number | null>(null)
+const previewWeeks = ref<ScheduleWeekData[] | null>(schedulePreviewRuntimeState.weeks)
+const previewTaskClassIds = ref<number[]>([...schedulePreviewRuntimeState.taskClassIds])
+const currentWeek = ref<number | null>(schedulePreviewRuntimeState.currentWeek)
 const weekBase = ref<number | null>(null)
 const baseMonday = ref<Date | null>(null)
+const lastStableWeekData = ref<ScheduleWeekData | null>(null)
+const weekScheduleCache = ref<Record<number, ScheduleWeekData>>({})
+
+const MIN_SCHEDULE_WEEK = 1
+const MAX_SCHEDULE_WEEK = 24
+
+let weekRequestSequence = 0
+let activeWeekRequestSequence = 0
 
 const activeSidebarKey = computed<SidebarItem['key']>(() => {
   if (route.path.startsWith('/assistant')) {
@@ -84,15 +173,45 @@ const effectiveSelectedTaskClassIds = computed(() => {
   return expandedTaskClassId.value ? [expandedTaskClassId.value] : []
 })
 
-const currentWeekData = computed(() => {
-  const source = previewWeeks.value ?? liveWeeks.value
-  if (!source.length) {
+const previewWeekLookup = computed(() => {
+  const map = new Map<number, ScheduleWeekData>()
+
+  for (const item of previewWeeks.value ?? []) {
+    map.set(item.week, item)
+  }
+
+  return map
+})
+
+const liveWeekLookup = computed(() => {
+  const map = new Map<number, ScheduleWeekData>()
+
+  for (const item of liveWeeks.value) {
+    map.set(item.week, item)
+  }
+
+  return map
+})
+
+const hasPendingPreview = computed(() => Boolean(previewWeeks.value?.length))
+
+const resolvedCurrentWeekData = computed(() => {
+  if (!previewWeeks.value?.length && !liveWeeks.value.length) {
     return null
   }
 
-  const targetWeek = currentWeek.value ?? source[0].week
-  return source.find((item) => item.week === targetWeek) ?? source[0]
+  if (currentWeek.value === null) {
+    return previewWeeks.value?.[0] ?? liveWeeks.value[0] ?? null
+  }
+
+  return previewWeekLookup.value.get(currentWeek.value)
+    ?? liveWeekLookup.value.get(currentWeek.value)
+    ?? null
 })
+
+const currentWeekData = computed(() =>
+  resolvedCurrentWeekData.value ?? lastStableWeekData.value,
+)
 
 const weekHeaders = computed<WeekDayHeader[]>(() => {
   const weekdayMap = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
@@ -131,8 +250,15 @@ const showDeleteModeButton = computed(() =>
 
 const showApplyButton = computed(() =>
   !scheduleSelectionMode.value &&
-  Boolean(previewWeeks.value?.length) &&
-  effectiveSelectedTaskClassIds.value.length === 1,
+  hasPendingPreview.value,
+)
+
+const canGoPreviousWeek = computed(() =>
+  currentWeek.value !== null && currentWeek.value > MIN_SCHEDULE_WEEK,
+)
+
+const canGoNextWeek = computed(() =>
+  currentWeek.value !== null && currentWeek.value < MAX_SCHEDULE_WEEK,
 )
 
 function handleSidebarNavigate(item: SidebarItem) {
@@ -178,6 +304,277 @@ function numberToChinese(value: number) {
   return `${digits[tens]}十${units ? digits[units] : ''}`
 }
 
+// clampWeekIntoRange 负责把周次限制在后端允许的 1-24 周内。
+//
+// 职责边界：
+// 1. 这里只做前端边界保护，不替代后端校验。
+// 2. 调用方若需要交互提示，应在函数外自行决定是否提示。
+function clampWeekIntoRange(week: number) {
+  return Math.min(MAX_SCHEDULE_WEEK, Math.max(MIN_SCHEDULE_WEEK, week))
+}
+
+// syncLiveWeeksFromCache 负责把按周缓存拍平成页面当前使用的 liveWeeks 数组。
+//
+// 设计说明：
+// 1. 页面内部仍按数组消费周数据，因此缓存层统一在这里做结构转换。
+// 2. 固定按 week 升序输出，避免切周过快时 currentWeekData 出现不稳定回退。
+function syncLiveWeeksFromCache() {
+  liveWeeks.value = Object.values(weekScheduleCache.value)
+    .sort((left, right) => left.week - right.week)
+}
+
+// cacheWeekSchedules 负责把成功请求到的周数据写入页面级本地缓存。
+//
+// 设计说明：
+// 1. 只缓存 1-24 周的合法结果，越界数据直接丢弃，避免污染页面状态。
+// 2. 相同周次直接覆盖，保证强刷后的新结果能够替换旧缓存。
+function cacheWeekSchedules(weeks: ScheduleWeekData[]) {
+  for (const item of weeks) {
+    if (item.week < MIN_SCHEDULE_WEEK || item.week > MAX_SCHEDULE_WEEK) {
+      continue
+    }
+
+    weekScheduleCache.value[item.week] = item
+  }
+
+  syncLiveWeeksFromCache()
+}
+
+// setPreviewState 负责同步“组件内预览态”和“模块级运行时预览态”。
+//
+// 设计说明：
+// 1. 统一从这个入口写预览，避免 ref 和模块级缓存出现一边更新、一边遗漏。
+// 2. taskClassIds 记录本次预览来自哪个任务类，用于刷新前提示、回到页面后继续应用。
+// 3. 这里不负责决定何时清空预览，清空策略由 clearPreviewState 和具体业务动作控制。
+function setPreviewState(weeks: ScheduleWeekData[] | null, taskClassIds: number[] = []) {
+  previewWeeks.value = weeks
+  previewTaskClassIds.value = [...taskClassIds]
+  schedulePreviewRuntimeState.weeks = weeks
+  schedulePreviewRuntimeState.taskClassIds = [...taskClassIds]
+}
+
+// clearPreviewState 负责显式清空未应用的智能编排结果。
+//
+// 职责边界：
+// 1. 这里只做状态清理，不做消息提示。
+// 2. 调用方负责在“应用成功 / 删除后重算 / 用户主动替换预览”等时机决定是否清空。
+function clearPreviewState() {
+  setPreviewState(null, [])
+}
+
+function isSuggestedPreviewEvent(event?: ScheduleWeekEvent) {
+  return Boolean(event && event.status === 'suggested')
+}
+
+function cloneScheduleEvent(event: ScheduleWeekEvent): ScheduleWeekEvent {
+  return {
+    ...event,
+    embedded_task_info: event.embedded_task_info
+      ? { ...event.embedded_task_info }
+      : { ...EMPTY_EMBEDDED_TASK_INFO },
+  }
+}
+
+// clonePreviewWeeks 负责复制 preview 周数据，确保拖拽编辑只改前端预览态，不污染原引用。
+//
+// 设计说明：
+// 1. 这里只做前端内存数据的浅层结构复制 + 事件深复制，足够支撑拖拽改位。
+// 2. 不负责校验事件语义是否合法，语义校验由后面的 move helper 负责。
+function clonePreviewWeeks(weeks: ScheduleWeekData[]) {
+  return weeks.map((week) => ({
+    ...week,
+    events: week.events.map((event) => cloneScheduleEvent(event)),
+  }))
+}
+
+function findPreviewEventIndex(weeks: ScheduleWeekData[], slot: SchedulePreviewSlotRef) {
+  const weekIndex = weeks.findIndex((week) => week.week === slot.week)
+  if (weekIndex < 0) {
+    return { weekIndex: -1, eventIndex: -1 }
+  }
+
+  const eventIndex = weeks[weekIndex]!.events.findIndex((event) =>
+    event.day_of_week === slot.dayOfWeek && event.order === slot.order)
+
+  return { weekIndex, eventIndex }
+}
+
+function buildEmptyPreviewEvent(slot: SchedulePreviewSlotRef): ScheduleWeekEvent {
+  const [startTime, endTime] = SCHEDULE_SECTION_TIME_MAP[slot.order] ?? ['', '']
+
+  return {
+    id: 0,
+    order: slot.order,
+    day_of_week: slot.dayOfWeek,
+    name: '空白',
+    start_time: startTime,
+    end_time: endTime,
+    location: '',
+    type: 'empty',
+    span: 2,
+    status: 'normal',
+    embedded_task_info: { ...EMPTY_EMBEDDED_TASK_INFO },
+  }
+}
+
+function extractSuggestedPreviewItem(event?: ScheduleWeekEvent): SuggestedPreviewItem | null {
+  if (!isSuggestedPreviewEvent(event)) {
+    return null
+  }
+
+  if (event!.type === 'course' && event!.embedded_task_info?.id) {
+    return {
+      id: event!.embedded_task_info.id,
+      name: event!.embedded_task_info.name,
+      type: event!.embedded_task_info.type || 'task',
+      span: event!.span || 2,
+    }
+  }
+
+  return {
+    id: event!.id,
+    name: event!.name,
+    type: event!.type || 'task',
+    span: event!.span || 2,
+  }
+}
+
+function canDropSuggestedIntoCell(event?: ScheduleWeekEvent) {
+  if (!event || event.type === 'empty') {
+    return true
+  }
+
+  if (event.status === 'suggested') {
+    return true
+  }
+
+  return event.type === 'course'
+}
+
+// buildPreviewEventWithSuggested 负责把“某个格子的底板”与“某个 suggested 任务”重新拼装成最终事件。
+//
+// 职责边界：
+// 1. 课程格收到 suggested 时，转换为“课程 + embedded_task_info + suggested 状态”。
+// 2. 空白格收到 suggested 时，转换为独立 task 建议块。
+// 3. 不带 suggested 时，会把格子还原成普通课程或空白格，保证拖拽前后 JSON 与画面一致。
+function buildPreviewEventWithSuggested(
+  baseEvent: ScheduleWeekEvent | undefined,
+  slot: SchedulePreviewSlotRef,
+  suggestedItem: SuggestedPreviewItem | null,
+): ScheduleWeekEvent {
+  if (baseEvent?.type === 'course') {
+    return {
+      ...cloneScheduleEvent(baseEvent),
+      status: suggestedItem ? 'suggested' : 'normal',
+      embedded_task_info: suggestedItem
+        ? {
+            id: suggestedItem.id,
+            name: suggestedItem.name,
+            type: suggestedItem.type || 'task',
+          }
+        : { ...EMPTY_EMBEDDED_TASK_INFO },
+    }
+  }
+
+  if (!suggestedItem) {
+    return buildEmptyPreviewEvent(slot)
+  }
+
+  const [startTime, endTime] = SCHEDULE_SECTION_TIME_MAP[slot.order] ?? ['', '']
+  return {
+    id: suggestedItem.id,
+    order: slot.order,
+    day_of_week: slot.dayOfWeek,
+    name: suggestedItem.name,
+    start_time: startTime,
+    end_time: endTime,
+    location: '',
+    type: suggestedItem.type || 'task',
+    span: suggestedItem.span || 2,
+    status: 'suggested',
+    embedded_task_info: { ...EMPTY_EMBEDDED_TASK_INFO },
+  }
+}
+
+function replacePreviewEventAtSlot(
+  weeks: ScheduleWeekData[],
+  slot: SchedulePreviewSlotRef,
+  nextEvent: ScheduleWeekEvent,
+) {
+  const { weekIndex, eventIndex } = findPreviewEventIndex(weeks, slot)
+  if (weekIndex < 0) {
+    return
+  }
+
+  if (eventIndex >= 0) {
+    weeks[weekIndex]!.events[eventIndex] = nextEvent
+  } else {
+    weeks[weekIndex]!.events.push(nextEvent)
+  }
+
+  weeks[weekIndex]!.events.sort((left, right) => {
+    if (left.day_of_week !== right.day_of_week) {
+      return left.day_of_week - right.day_of_week
+    }
+    return left.order - right.order
+  })
+}
+
+// handleMovePreviewEvent 负责把用户拖拽后的 suggested 位置回写到前端预览 JSON。
+//
+// 处理步骤：
+// 1. 只允许修改当前内存中的 previewWeeks；正式课表与后端缓存都不在这里改。
+// 2. 源格必须是 suggested；目标格允许是空白、课程或另一个 suggested（交换）。
+// 3. 修改完成后立即回写 setPreviewState，保证界面显示与最终 apply 用到的 JSON 完全一致。
+function handleMovePreviewEvent(payload: PreviewMovePayload) {
+  if (!previewWeeks.value?.length) {
+    return
+  }
+
+  const sourceSlot: SchedulePreviewSlotRef = {
+    week: payload.week,
+    dayOfWeek: payload.sourceDayOfWeek,
+    order: payload.sourceOrder,
+  }
+  const targetSlot: SchedulePreviewSlotRef = {
+    week: payload.week,
+    dayOfWeek: payload.targetDayOfWeek,
+    order: payload.targetOrder,
+  }
+
+  if (
+    sourceSlot.dayOfWeek === targetSlot.dayOfWeek &&
+    sourceSlot.order === targetSlot.order
+  ) {
+    return
+  }
+
+  const nextWeeks = clonePreviewWeeks(previewWeeks.value)
+  const sourceLocate = findPreviewEventIndex(nextWeeks, sourceSlot)
+  const targetLocate = findPreviewEventIndex(nextWeeks, targetSlot)
+  if (sourceLocate.weekIndex < 0 || sourceLocate.eventIndex < 0) {
+    return
+  }
+
+  const sourceEvent = nextWeeks[sourceLocate.weekIndex]!.events[sourceLocate.eventIndex]
+  const targetEvent = targetLocate.weekIndex >= 0 && targetLocate.eventIndex >= 0
+    ? nextWeeks[targetLocate.weekIndex]!.events[targetLocate.eventIndex]
+    : undefined
+
+  const sourceSuggestedItem = extractSuggestedPreviewItem(sourceEvent)
+  if (!sourceSuggestedItem || !canDropSuggestedIntoCell(targetEvent)) {
+    return
+  }
+
+  const targetSuggestedItem = extractSuggestedPreviewItem(targetEvent)
+  const nextSourceEvent = buildPreviewEventWithSuggested(sourceEvent, sourceSlot, targetSuggestedItem)
+  const nextTargetEvent = buildPreviewEventWithSuggested(targetEvent, targetSlot, sourceSuggestedItem)
+
+  replacePreviewEventAtSlot(nextWeeks, sourceSlot, nextSourceEvent)
+  replacePreviewEventAtSlot(nextWeeks, targetSlot, nextTargetEvent)
+  setPreviewState(nextWeeks, previewTaskClassIds.value)
+}
+
 async function loadTaskClasses() {
   taskClassLoading.value = true
   try {
@@ -189,26 +586,55 @@ async function loadTaskClasses() {
   }
 }
 
-async function loadWeekData(week?: number) {
+async function loadWeekData(week?: number, options: { force?: boolean } = {}) {
+  const normalizedWeek = typeof week === 'number' ? clampWeekIntoRange(week) : undefined
+
+  // 1. 已缓存的周直接命中本地数据，避免左右来回切周时重复请求后端。
+  // 2. force 只用于“应用/删除后刷新当前周”，此时必须跳过缓存回源拿最新结果。
+  if (typeof normalizedWeek === 'number' && !options.force) {
+    const cachedWeek = weekScheduleCache.value[normalizedWeek]
+    if (cachedWeek) {
+      syncLiveWeeksFromCache()
+      currentWeek.value = normalizedWeek
+      return
+    }
+  }
+
+  // 1. 每次真实请求都分配一个递增序号。
+  // 2. 只有“当前最新”的那次请求才允许修改 loading 与当前展示周。
+  // 3. 旧请求如果晚回，只允许悄悄写缓存，不能把页面状态回滚。
+  const requestSequence = ++weekRequestSequence
+  activeWeekRequestSequence = requestSequence
   weekLoading.value = true
+
   try {
-    const result = await getWeekSchedule(week)
-    liveWeeks.value = result
+    const result = await getWeekSchedule(normalizedWeek)
+    cacheWeekSchedules(result)
 
     if (result[0]?.week && weekBase.value === null) {
       weekBase.value = result[0].week
       baseMonday.value = startOfWeek(new Date())
     }
 
-    if (typeof week === 'number') {
-      currentWeek.value = week
+    if (requestSequence !== activeWeekRequestSequence) {
+      return
+    }
+
+    if (typeof normalizedWeek === 'number') {
+      currentWeek.value = normalizedWeek
     } else if (result[0]?.week) {
       currentWeek.value = result[0].week
     }
   } catch (error) {
+    if (requestSequence !== activeWeekRequestSequence) {
+      return
+    }
+
     ElMessage.error(error instanceof Error ? error.message : '周日程加载失败')
   } finally {
-    weekLoading.value = false
+    if (requestSequence === activeWeekRequestSequence) {
+      weekLoading.value = false
+    }
   }
 }
 
@@ -234,7 +660,6 @@ async function handleActivateTaskClass(taskClassId: number) {
 
   scheduleSelectionMode.value = false
   selectedScheduleEventIds.value = []
-  previewWeeks.value = null
 
   if (expandedTaskClassId.value === taskClassId) {
     expandedTaskClassId.value = null
@@ -249,7 +674,6 @@ async function handleActivateTaskClass(taskClassId: number) {
 
 function handleToggleTaskClassMultiMode() {
   taskClassMultiSelectMode.value = !taskClassMultiSelectMode.value
-  previewWeeks.value = null
   scheduleSelectionMode.value = false
   selectedScheduleEventIds.value = []
 
@@ -285,9 +709,11 @@ async function handleSmartPlanning() {
 
   smartPlanningLoading.value = true
   try {
-    previewWeeks.value = ids.length === 1 ? await smartPlanning(ids[0]!) : await smartPlanningMulti(ids)
-    if (previewWeeks.value[0]?.week) {
-      currentWeek.value = previewWeeks.value[0].week
+    const plannedWeeks = ids.length === 1 ? await smartPlanning(ids[0]!) : await smartPlanningMulti(ids)
+    setPreviewState(plannedWeeks, ids)
+
+    if (plannedWeeks[0]?.week) {
+      currentWeek.value = plannedWeeks[0].week
     }
     ElMessage.success(ids.length === 1 ? '已生成粗排预览' : '已生成批量粗排预览')
   } catch (error) {
@@ -326,8 +752,8 @@ async function handleDeleteSelectedScheduleEvents() {
     ElMessage.success('已完成解除安排')
     scheduleSelectionMode.value = false
     selectedScheduleEventIds.value = []
-    previewWeeks.value = null
-    await loadWeekData(currentWeek.value ?? undefined)
+    clearPreviewState()
+    await loadWeekData(currentWeek.value ?? undefined, { force: true })
     await loadTaskClasses()
     if (expandedTaskClassId.value) {
       await loadTaskClassDetail(expandedTaskClassId.value)
@@ -367,24 +793,82 @@ function buildApplyItemsFromPreview(weeks: ScheduleWeekData[]) {
   return items
 }
 
-async function handleApplyPreview() {
-  if (!previewWeeks.value?.length || effectiveSelectedTaskClassIds.value.length !== 1) {
-    ElMessage.info('当前预览暂不支持正式应用')
-    return
+// buildApplyGroupsFromPreview 负责把当前预览里的 suggested 任务按“所属任务类”重新分组。
+//
+// 处理步骤：
+// 1. 单任务类预览直接复用现有单接口，不做额外解析。
+// 2. 多任务类预览先拉各任务类详情，建立 task_item_id -> task_class_id 映射。
+// 3. 再把预览中的建议项按任务类分桶，后续逐桶调用现有 applyBatchIntoSchedule。
+//
+// 说明：
+// 1. 这里不改 preview JSON，只负责为“正式应用”准备提交载荷。
+// 2. 如果发现某个 suggested 任务找不到所属任务类，直接报错，避免提交错桶导致脏数据。
+async function buildApplyGroupsFromPreview(
+  weeks: ScheduleWeekData[],
+  taskClassIds: number[],
+) {
+  const items = buildApplyItemsFromPreview(weeks)
+  const groupedItems = new Map<number, ApplyBatchIntoScheduleItem[]>()
+
+  if (items.length === 0) {
+    return groupedItems
   }
 
-  const items = buildApplyItemsFromPreview(previewWeeks.value)
-  if (!items.length) {
-    ElMessage.info('当前预览没有可应用的建议排程')
+  if (taskClassIds.length === 1) {
+    groupedItems.set(taskClassIds[0]!, items)
+    return groupedItems
+  }
+
+  const ownerMap = new Map<number, number>()
+  const details = await Promise.all(taskClassIds.map(async (taskClassId) => ({
+    taskClassId,
+    detail: await getTaskClassDetail(taskClassId),
+  })))
+
+  for (const { taskClassId, detail } of details) {
+    for (const item of detail.items) {
+      if (typeof item.id === 'number' && item.id > 0) {
+        ownerMap.set(item.id, taskClassId)
+      }
+    }
+  }
+
+  for (const item of items) {
+    const ownerTaskClassId = ownerMap.get(item.task_item_id)
+    if (!ownerTaskClassId) {
+      throw new Error(`未找到任务块 ${item.task_item_id} 对应的任务类，无法正式应用批量粗排结果`)
+    }
+
+    if (!groupedItems.has(ownerTaskClassId)) {
+      groupedItems.set(ownerTaskClassId, [])
+    }
+    groupedItems.get(ownerTaskClassId)!.push(item)
+  }
+
+  return groupedItems
+}
+
+async function handleApplyPreview() {
+  if (!previewWeeks.value?.length || previewTaskClassIds.value.length === 0) {
+    ElMessage.info('当前没有可正式应用的预览结果')
     return
   }
 
   applyingLoading.value = true
   try {
-    await applyBatchIntoSchedule(effectiveSelectedTaskClassIds.value[0]!, items)
-    ElMessage.success('已正式应用到日程')
-    previewWeeks.value = null
-    await loadWeekData(currentWeek.value ?? undefined)
+    const groupedItems = await buildApplyGroupsFromPreview(previewWeeks.value, previewTaskClassIds.value)
+    if (!groupedItems.size) {
+      ElMessage.info('当前预览没有可应用的建议排程')
+      return
+    }
+
+    for (const [taskClassId, items] of groupedItems) {
+      await applyBatchIntoSchedule(taskClassId, items)
+    }
+
+    ElMessage.success(previewTaskClassIds.value.length > 1 ? '已正式应用批量粗排结果' : '已正式应用到日程')
+    clearPreviewState()
+    await loadWeekData(currentWeek.value ?? undefined, { force: true })
     await loadTaskClasses()
     if (expandedTaskClassId.value) {
       await loadTaskClassDetail(expandedTaskClassId.value)
@@ -411,14 +895,14 @@ async function handleCreateTaskClass(payload: Parameters<typeof createTaskClass>
 }
 
 function goPreviousWeek() {
-  if (currentWeek.value === null) {
+  if (currentWeek.value === null || currentWeek.value <= MIN_SCHEDULE_WEEK) {
     return
   }
   currentWeek.value -= 1
 }
 
 function goNextWeek() {
-  if (currentWeek.value === null) {
+  if (currentWeek.value === null || currentWeek.value >= MAX_SCHEDULE_WEEK) {
     return
   }
   currentWeek.value += 1
@@ -429,19 +913,33 @@ watch(currentWeek, async (nextWeek, previousWeek) => {
     return
   }
 
+  const normalizedWeek = clampWeekIntoRange(nextWeek)
+  if (normalizedWeek !== nextWeek) {
+    currentWeek.value = normalizedWeek
+    return
+  }
+
   if (previewWeeks.value?.some((item) => item.week === nextWeek)) {
     return
   }
 
-  if (previewWeeks.value) {
-    previewWeeks.value = null
-  }
-
-  await loadWeekData(nextWeek)
+  await loadWeekData(normalizedWeek)
 })
 
+watch(currentWeek, (nextWeek) => {
+  schedulePreviewRuntimeState.currentWeek = nextWeek
+}, { immediate: true })
+
+watch(resolvedCurrentWeekData, (nextWeekData) => {
+  // 1. 只有真正解析到“当前目标周”的数据时，才更新稳定展示态。
+  // 2. 当目标周仍在请求中时，这里保持旧值不动，避免课表闪回到别的周。
+  if (nextWeekData) {
+    lastStableWeekData.value = nextWeekData
+  }
+}, { immediate: true })
+
 onMounted(async () => {
-  await Promise.all([loadTaskClasses(), loadWeekData()])
+  await Promise.all([loadTaskClasses(), loadWeekData(currentWeek.value ?? undefined)])
 })
 </script>
 
@@ -535,6 +1033,7 @@ onMounted(async () => {
                 <button
                   type="button"
                   class="schedule-board__toolbar-button schedule-board__toolbar-button--ghost"
+                  :disabled="!canGoPreviousWeek"
                   @click="goPreviousWeek"
                 >
                   上一周
@@ -542,6 +1041,7 @@ onMounted(async () => {
                 <button
                   type="button"
                   class="schedule-board__toolbar-button schedule-board__toolbar-button--primary"
+                  :disabled="!canGoNextWeek"
                   @click="goNextWeek"
                 >
                   下一周
@@ -555,7 +1055,9 @@ onMounted(async () => {
               :week-data="currentWeekData"
               :schedule-selection-mode="scheduleSelectionMode"
               :selected-schedule-event-ids="selectedScheduleEventIds"
+              :preview-drag-enabled="hasPendingPreview"
               @toggle-schedule-event="handleToggleScheduleEvent"
+              @move-preview-event="handleMovePreviewEvent"
             />
 
             <div v-if="showApplyButton || scheduleSelectionMode" class="schedule-board__footer">

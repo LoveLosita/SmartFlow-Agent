@@ -1,4 +1,4 @@
-﻿# 1 项目概览
+# 1 项目概览
 
 ## 1.1 总体介绍
 
@@ -359,7 +359,7 @@ flowchart TD
     A["/api/v1/agent/chat<br/>解析请求体 + 规范 conversation_id<br/>Header 写入 X-Conversation-ID"] --> B["AgentService.AgentChat<br/>创建 outChan / errChan"]
     B --> C["规范 chat_id + 选择模型(worker/strategist)"]
     C --> D["确保会话存在<br/>先查 Redis 状态<br/>未命中回源 DB + 必要时创建"]
-    D --> E["模型控制码路由<br/>route.DecideActionRouting<br/>action=chat/quick_note_create/task_query/schedule_plan"]
+    D --> E["模型控制码路由<br/>route.DecideActionRouting<br/>action=chat/quick_note_create/task_query/schedule_plan_create/schedule_plan_refine"]
     E --> F{"RouteFailed?"}
 
     F -- "是" --> G["pushErrNonBlocking(errChan, RouteControlInternalError)<br/>API 侧 SSE 输出 error + [DONE]"]
@@ -381,12 +381,17 @@ flowchart TD
     K1 -- "是" --> K2["记录日志 + 发 fallback 阶段块<br/>回退 runNormalChatFlow"]
     K1 -- "否" --> K3["emitSingleAssistantCompletion<br/>persistChatAfterReply + 异步标题"]
 
-    H -- "schedule_plan" --> L["runSchedulePlanFlow -> SchedulePlanGraph<br/>并写入排程预览缓存"]
+    H -- "schedule_plan_create" --> L["runSchedulePlanFlow -> SchedulePlanGraph<br/>并写入排程预览缓存"]
     L --> L1{"排程链路报错?"}
     L1 -- "是" --> L2["记录日志 + 发 fallback 阶段块<br/>回退 runNormalChatFlow"]
     L1 -- "否" --> L3["emitSingleAssistantCompletion<br/>persistChatAfterReply + 异步标题"]
 
-    H -- "未知 action" --> M["兜底回退 runNormalChatFlow"]
+    H -- "schedule_plan_refine" --> M["runScheduleRefineFlow -> ScheduleRefineGraph<br/>读取上一版排程预览上下文"]
+    M --> M1{"连续微调链路报错?"}
+    M1 -- "是" --> M2["直接上报错误<br/>不回退普通聊天"]
+    M1 -- "否" --> M3["emitSingleAssistantCompletion<br/>persistChatAfterReply + 异步标题"]
+
+    H -- "未知 action" --> N["兜底回退 runNormalChatFlow"]
 
     I2 --> Z["API c.Stream 转发 outChan/errChan<br/>正常收尾或错误收尾"]
     J2 --> Z
@@ -395,7 +400,9 @@ flowchart TD
     K3 --> Z
     L2 --> Z
     L3 --> Z
-    M --> Z
+    M2 --> Z
+    M3 --> Z
+    N --> Z
     G --> Z
 ```
 
@@ -431,7 +438,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["用户消息进入 /agent/chat"] --> B["通用控制码分流<br/>action=chat/quick_note_create/task_query/schedule_plan"]
+    A["用户消息进入 /agent/chat"] --> B["通用控制码分流<br/>action=chat/quick_note_create/task_query/schedule_plan_create/schedule_plan_refine"]
     B --> C{"action 是否为 task_query"}
     C -- 否 --> D["走其它分支<br/>普通聊天或随口记"]
     C -- 是 --> E["进入 TaskQueryGraph"]
@@ -452,11 +459,11 @@ flowchart TD
     Q --> R["后置持久化<br/>user+assistant 写 Redis + outbox/DB"]
 ```
 
-### 4) 命中“智能排程”后的业务流转图
+### 4) 命中新建“智能排程”后的业务流转图
 
 ```mermaid
 flowchart TD
-    A["命中 action=schedule_plan<br/>发 request.accepted 阶段块"] --> B["runSchedulePlanFlow 入口"]
+    A["命中 action=schedule_plan_create<br/>发 request.accepted 阶段块"] --> B["runSchedulePlanFlow 入口"]
     B --> B1{"依赖齐全?<br/>model + 3个函数注入"}
     B1 -- "否" --> B2["返回 error 给上层<br/>上层回退普通聊天"]
     B1 -- "是" --> C["清理旧预览缓存<br/>DeleteSchedulePlanPreview<br/>失败仅记日志"]
@@ -498,15 +505,211 @@ flowchart TD
     H2 --> Z
 ```
 
+### 5) 命中“排程连续微调”后的业务流转图
+
+```mermaid
+flowchart TD
+    A["命中 action=schedule_plan_refine<br/>发 request.accepted 阶段块"] --> B["runScheduleRefineFlow 入口"]
+    B --> C{"selectedModel 非空?"}
+    C -- "否" --> C1["直接返回错误<br/>不回退普通聊天"]
+    C -- "是" --> D["loadSchedulePreviewContext<br/>Redis 预览优先 -> miss 回源 MySQL 快照"]
+    D --> E{"上一版预览存在?"}
+    E -- "否" --> E1["返回 SchedulePlanPreviewNotFound<br/>直接上报错误"]
+    E -- "是" --> F["NewScheduleRefineState<br/>注入 HybridEntries / AllocatedItems / CandidatePlans / OriginOrderMap"]
+    F --> G["RunScheduleRefineGraph"]
+
+    G --> H["contract<br/>抽取 intent / strategy / hard_assertions<br/>默认 keep_relative_order=true"]
+    H --> I["plan<br/>生成 3~4 步执行计划<br/>必要时注入复合工具硬条件"]
+    I --> J["slice<br/>提取 week/source_days/target_days<br/>编译 objective + workset"]
+    J --> K["route<br/>命中 SpreadEven / MinContextSwitch 时先走复合路由<br/>首次 + 最多2次重试"]
+    K --> K1{"CompositeRouteSucceeded?"}
+    K1 -- "是" --> L["react<br/>检测到已收口，直接 skip"]
+    K1 -- "否" --> M["react<br/>单任务微步循环<br/>失败后禁复合，只用基础工具"]
+    L --> N["hard_check<br/>先锁定业务目标<br/>再按需顺序归位 / 一次修复"]
+    M --> N
+    N --> O["summary<br/>回填 AllocatedItems + CandidatePlans<br/>Completed 仅由终审是否通过决定"]
+
+    O --> P{"shouldPersistScheduleRefinePreview?"}
+    P -- "是" --> Q["saveSchedulePlanPreview<br/>覆盖 Redis + MySQL 快照"]
+    P -- "否" --> R["emit schedule_refine.preview.skipped<br/>保留上一版预览基线"]
+    Q --> S["emitSingleAssistantCompletion<br/>输出 FinalSummary"]
+    R --> S
+    S --> T["persistChatAfterReply<br/>统一后置持久化 + 异步标题"]
+
+    C1 --> Z["错误直接返回前端"]
+    E1 --> Z
+    T --> Z
+```
+
 # 6 前端实现
 
-## 6.1 设计策略
+## 6.1 当前前端技术栈与工程约定
 
+当前前端位于 `frontend/` 目录，已经落地为一个可独立运行的 Vue 单页应用。
 
+技术栈如下：
 
-## 6.2 组件拆解
+| 分类 | 当前选型 | 说明 |
+| --- | --- | --- |
+| 前端框架 | Vue 3 | 统一使用 Composition API 与 `<script setup>` 编写页面与组件 |
+| 构建工具 | Vite 6 | 本地开发、代理联调、生产构建均由 Vite 提供 |
+| 语言 | TypeScript | 页面、接口层、类型定义均已类型化 |
+| UI 组件库 | Element Plus | 用于表单、输入框、下拉框、消息提示、弹窗等基础交互 |
+| 状态管理 | Pinia | 当前主要承载登录态与 token 持久化 |
+| 路由 | Vue Router 4 | 已配置鉴权守卫、访客页守卫与页面跳转 |
+| HTTP | Axios + 原生 fetch | 常规 JSON 接口走 Axios；AI 对话流式 SSE 走原生 `fetch` |
+| Markdown 渲染 | markdown-it + highlight.js | AI 回复正文支持 Markdown 渲染与代码高亮 |
 
+当前前端工程结构如下：
 
+```text
+frontend/src
+├─ api/                  # 接口封装：auth / task / schedule / scheduleCenter / agent
+├─ components/
+│  ├─ dashboard/         # 首页与 AI 面板相关组件
+│  └─ schedule/          # 智能排程页相关组件
+├─ router/               # 路由定义与前置守卫
+├─ stores/               # Pinia store（当前主要是 auth）
+├─ types/                # 页面与接口类型定义
+├─ utils/                # 日期、HTTP 错误、Markdown、幂等 key 等工具
+└─ views/                # Auth / Dashboard / Assistant / Schedule 四个主视图
+```
+
+工程约定如下：
+
+1. 所有业务请求默认走 `/api/v1` 前缀。
+2. 本地开发通过 Vite 代理把 `/api` 转发到 `http://127.0.0.1:8080`。
+3. 常规接口统一走 `frontend/src/api/http.ts`，内置 `401 -> refresh token -> 原请求重放`。
+4. 对话流接口 `POST /api/v1/agent/chat` 因为要消费 SSE，所以单独用原生 `fetch`。
+5. 写操作尽量补 `X-Idempotency-Key`，当前任务创建、日程应用、日程删除、任务块删除都已经这样处理。
+
+## 6.2 当前页面与路由状态
+
+当前前端已经接通的页面路由如下：
+
+| 路由 | 页面状态 | 说明 |
+| --- | --- | --- |
+| `/auth` | 已完成 | 登录/注册同页切换，登录成功后按 `redirect` 返回目标页 |
+| `/dashboard` | 已完成 | 首页工作台，展示四象限任务、今日日程、快捷创建任务、左侧导航 |
+| `/assistant` | 已完成 | 独立 AI 对话页，复用同一套 AI 面板组件，支持历史会话与流式消息 |
+| `/schedule` | 已完成 | 周课表与任务编排中心，支持任务类、粗排、预览、拖拽、应用 |
+
+当前仍处于占位/未独立成页的入口：
+
+1. 左侧导航里的“任务”按钮目前还是占位提示，没有独立路由页。
+2. 侧边栏底部“设置”按钮目前也是视觉占位，没有接出 `/settings`。
+
+## 6.3 认证页 `/auth`
+
+对应文件：
+
+- `frontend/src/views/AuthView.vue`
+- `frontend/src/stores/auth.ts`
+- `frontend/src/api/auth.ts`
+
+当前行为：
+
+1. 登录与注册共用一页，通过 tab 切换。
+2. 登录成功后会写入 `access_token`、`refresh_token` 与最近一次登录用户名。
+3. 路由守卫会阻止未登录用户进入 `/dashboard`、`/assistant`、`/schedule`。
+4. 登录态失效时，Axios 拦截器会自动尝试刷新 token；刷新失败则清空本地登录态并跳回登录页。
+
+## 6.4 首页工作台 `/dashboard`
+
+对应文件：
+
+- `frontend/src/views/DashboardView.vue`
+- `frontend/src/components/dashboard/TaskQuadrantCard.vue`
+- `frontend/src/components/dashboard/TodayTimeline.vue`
+
+当前已实现能力：
+
+1. 左侧导航栏与顶部欢迎区已经落地，首页与 `/assistant` 使用统一的主视觉语言。
+2. 中心区展示四象限任务卡片，支持获取任务列表、创建任务、完成任务、撤销完成任务。
+3. 右侧展示“今日日程”，通过 `/schedule/today` 拉取当天事件。
+4. 首页整体做了缩放适配，目标是在 100% 缩放下尽量完整展示主要内容，而不是依赖用户手动缩放浏览器。
+5. 首页右侧已经不再承载完整 AI 对话页；AI 对话已收口到独立 `/assistant` 页面。
+
+## 6.5 AI 对话页 `/assistant`
+
+对应文件：
+
+- `frontend/src/views/AssistantView.vue`
+- `frontend/src/components/dashboard/AssistantPanel.vue`
+- `frontend/src/api/agent.ts`
+
+当前已实现能力：
+
+1. 页面拆成“左侧主导航 + 右侧 AI 面板”两部分，最左侧侧栏样式已与首页统一。
+2. AI 面板同时支持嵌入态和独立页态；`/assistant` 使用独立页态。
+3. 已接通的对话相关接口包括：
+   - `POST /api/v1/agent/chat`
+   - `GET /api/v1/agent/conversation-list`
+   - `GET /api/v1/agent/conversation-meta`
+   - `GET /api/v1/agent/conversation-history`
+4. 支持流式 SSE 回复，并区分深度思考内容、正文内容，以及刷新后从历史接口恢复的 `reasoning_duration_seconds`。
+5. 历史消息支持重试分页元数据：`retry_group_id`、`retry_index`、`retry_total`。
+6. 助手消息底部已支持复制、重新生成、版本分页切换。
+7. 用户消息底部已支持复制、修改消息；当前“修改消息”的语义是“复制到输入框后重新发送一条新消息”，不会覆盖旧消息。
+8. “重新生成”按钮当前的前端策略是：
+   - 先尝试直接使用当前消息上的持久化 ID；
+   - 若命中的是本地乐观态消息，则先静默调用一次历史接口补抓真实 ID；
+   - 仍然拿不到时，再提示：`消息正在处理，请稍后再重试，或者直接复制消息重新发送`。
+9. 历史消息与本地乐观态消息会做合并，避免刷新历史时把当前页内正在看的消息直接抹掉。
+10. 消息区实现了“自动跟随到底部 / 用户手动上滚后停止跟随”的双态滚动策略。
+
+## 6.6 日程编排页 `/schedule`
+
+对应文件：
+
+- `frontend/src/views/ScheduleView.vue`
+- `frontend/src/components/schedule/TaskClassSidebar.vue`
+- `frontend/src/components/schedule/WeekPlanningBoard.vue`
+- `frontend/src/components/schedule/CreateTaskClassDialog.vue`
+- `frontend/src/api/scheduleCenter.ts`
+
+当前已实现能力：
+
+1. 左侧为任务类侧栏，右侧为周课表/排程画板。
+2. 任务类侧栏支持获取任务类列表、展开任务类详情、删除单个任务块、新建任务类弹窗、单选与批量多选模式切换。
+3. 当任务类较多时，左侧侧栏改为固定卡片高度 + 列表滚动，不再通过压缩卡片高度硬塞。
+4. 单个任务类展开后，其内部任务块列表也支持独立滚动，避免详情直接溢出容器。
+5. 周课表支持周次切换，当前前端限制为 `1 ~ 24` 周，不允许继续越界请求。
+6. 已接通的课表/编排相关接口包括：
+   - `GET /api/v1/schedule/week`
+   - `GET /api/v1/task-class/list`
+   - `GET /api/v1/task-class/get`
+   - `POST /api/v1/task-class/add`
+   - `DELETE /api/v1/task-class/delete-item`
+   - `GET /api/v1/schedule/smart-planning`
+   - `POST /api/v1/schedule/smart-planning-multi`
+   - `PUT /api/v1/task-class/apply-batch-into-schedule`
+   - `DELETE /api/v1/schedule/delete`
+7. 智能编排结果当前分为单任务类粗排和多任务类批量粗排。
+8. 预览态结果不会立刻写入正式课表，而是先保存在前端运行时内存中；用户确认后再应用到后端。
+9. 预览态结果的生命周期是“当前单页应用存活期间”，刷新页面会丢失，因此页面已挂载 `beforeunload` 原生拦截提示。
+10. 已请求过的周课表会缓存在前端内存中，当前页切换周次时优先复用缓存，避免反复打后端。
+11. 周请求增加了序列号保护，快速切周时只认最后一次请求结果，用来降低闪动。
+12. 预览态 `suggested` 任务支持拖拽调整位置，并且拖拽会同步修改前端持有的预览 JSON，保证“用户看到的布局”和“最终提交给后端的布局”一致。
+13. 对于嵌入课程中的预览任务，只有拖到嵌入任务本身时才允许把它单独拖出来，不会整块课程卡一起被拖动。
+14. 预览态支持批量应用；如果是多任务类批量粗排，前端会先把预览结果按任务类分桶，再逐桶调用现有应用接口。
+
+## 6.7 当前前后端衔接边界
+
+当前前端已经覆盖的主业务链路：
+
+1. 登录 / 注册 / 自动续签
+2. 首页任务获取、创建、完成、撤销
+3. 今日日程展示
+4. AI 对话、历史会话、深度思考展示、重新生成、消息复制、消息修改
+5. 任务类管理、智能粗排、批量粗排、预览拖拽、正式应用、删除日程
+
+当前仍明确留给后续迭代的部分：
+
+1. “任务”独立页面与“设置”独立页面尚未接出。
+2. 课表导入流程入口已在首页预留，但还没有完整的导入页与导入向导。
+3. 用户消息“修改后原地提交并替换旧消息”的真正后端语义尚未实现，目前按“发送一条新消息”处理。
+4. 更多 AI 工具态页面（例如结构化预览页、设置面板、统计页）尚未独立拆页。
 
 # 7 部署与监控
 
@@ -520,5 +723,42 @@ flowchart TD
 
 # 8 快速开始
 
+## 8.1 启动前端开发环境
 
+前端目录在 `frontend/`，本地开发步骤如下：
 
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+默认启动信息：
+
+1. Vite 开发端口：`5173`
+2. 开发代理目标：`http://127.0.0.1:8080`
+3. 因此前端本地联调前，需要先确保后端服务已经启动在 `8080`
+
+## 8.2 前端生产构建
+
+```bash
+cd frontend
+npm run build
+npm run preview
+```
+
+说明：
+
+1. `npm run build` 会先执行 `vue-tsc -b` 做类型检查，再执行 `vite build`。
+2. 当前构建是可通过的；但由于主包仍然偏大，Vite 会给出 chunk size warning，这属于现阶段可接受状态。
+
+## 8.3 建议的前后端联调顺序
+
+建议按下面顺序启动和验证：
+
+1. 启动后端服务，确认 `http://127.0.0.1:8080` 可用。
+2. 启动前端 `npm run dev`。
+3. 先验证 `/auth` 的登录注册链路。
+4. 再验证 `/dashboard` 的任务与今日日程。
+5. 再验证 `/assistant` 的 SSE 对话、历史消息、重试分页与深度思考展示。
+6. 最后验证 `/schedule` 的任务类、周课表、智能粗排、拖拽预览与正式应用。

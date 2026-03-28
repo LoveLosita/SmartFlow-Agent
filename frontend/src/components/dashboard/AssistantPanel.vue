@@ -677,6 +677,27 @@ function resolveVisibleUserMessageBeforeAssistant(messageId: string) {
   return null
 }
 
+function findMessageIndexInList(messages: AssistantMessage[], messageId: string) {
+  return messages.findIndex((message) => message.id === messageId)
+}
+
+function resolveUserMessageBeforeAssistantInBucket(conversationId: string, assistantMessageId: string) {
+  const bucket = conversationMessagesMap[conversationId] ?? []
+  const index = findMessageIndexInList(bucket, assistantMessageId)
+  if (index <= 0) {
+    return null
+  }
+
+  for (let current = index - 1; current >= 0; current -= 1) {
+    const candidate = bucket[current]
+    if (candidate?.role === 'user') {
+      return candidate
+    }
+  }
+
+  return null
+}
+
 function isLocalEphemeralMessageId(id: string) {
   return /^(user|assistant|system)-\d{13}-[a-z0-9]+$/i.test(id)
 }
@@ -695,6 +716,81 @@ function resolvePersistedMessageId(message: AssistantMessage | null) {
   }
 
   return message.id
+}
+
+function resolveBestMatchedMessageFromBucket(conversationId: string, targetMessage: AssistantMessage) {
+  const bucket = conversationMessagesMap[conversationId] ?? []
+  const directMatchedMessage = bucket.find((message) => message.id === targetMessage.id)
+  if (directMatchedMessage) {
+    return directMatchedMessage
+  }
+
+  const targetTimestamp = resolveMessageTimestamp(targetMessage)
+  const logicalMatchedMessages = bucket
+    .filter((message) => isSameLogicalMessage(message, targetMessage))
+    .sort((left, right) => {
+      // 1. 优先命中已经拿到后端稳定主键的消息，避免继续引用本地占位态。
+      // 2. 若候选状态一致，则优先选择时间更接近原消息的那条。
+      // 3. 时间也一致时再按较新的记录兜底，降低重复文案时误命中旧消息的概率。
+      const persistedScoreDiff =
+        Number(!isLocalEphemeralMessageId(right.id)) - Number(!isLocalEphemeralMessageId(left.id))
+      if (persistedScoreDiff !== 0) {
+        return persistedScoreDiff
+      }
+
+      const leftGap = Math.abs(resolveMessageTimestamp(left) - targetTimestamp)
+      const rightGap = Math.abs(resolveMessageTimestamp(right) - targetTimestamp)
+      if (leftGap !== rightGap) {
+        return leftGap - rightGap
+      }
+
+      return resolveMessageTimestamp(right) - resolveMessageTimestamp(left)
+    })
+
+  return logicalMatchedMessages[0] ?? null
+}
+
+async function resolveRetrySourceMessages(
+  conversationId: string,
+  sourceUserMessage: AssistantMessage,
+  sourceAssistantMessage: AssistantMessage,
+) {
+  let resolvedUserMessage: AssistantMessage | null = sourceUserMessage
+  let resolvedAssistantMessage: AssistantMessage | null = sourceAssistantMessage
+
+  let persistedUserMessageId = resolvePersistedMessageId(resolvedUserMessage)
+  let persistedAssistantMessageId = resolvePersistedMessageId(resolvedAssistantMessage)
+
+  if (persistedUserMessageId && persistedAssistantMessageId) {
+    return {
+      sourceUserMessage: resolvedUserMessage,
+      sourceAssistantMessage: resolvedAssistantMessage,
+      persistedUserMessageId,
+      persistedAssistantMessageId,
+    }
+  }
+
+  // 1. 若当前点击时仍是本地占位消息，先静默拉一次权威历史，尽量把真实 ID 补回来。
+  // 2. 这里复用现有 history 接口即可，避免为了一次重试再新增额外查询接口。
+  // 3. 若静默刷新后依然拿不到稳定 ID，则说明消息大概率仍处于异步持久化窗口期。
+  await loadConversationMessages(conversationId, true)
+
+  resolvedAssistantMessage =
+    resolveBestMatchedMessageFromBucket(conversationId, sourceAssistantMessage) ?? sourceAssistantMessage
+  resolvedUserMessage =
+    resolveUserMessageBeforeAssistantInBucket(conversationId, resolvedAssistantMessage.id) ??
+    resolveBestMatchedMessageFromBucket(conversationId, sourceUserMessage) ??
+    sourceUserMessage
+
+  persistedUserMessageId = resolvePersistedMessageId(resolvedUserMessage)
+  persistedAssistantMessageId = resolvePersistedMessageId(resolvedAssistantMessage)
+
+  return {
+    sourceUserMessage: resolvedUserMessage,
+    sourceAssistantMessage: resolvedAssistantMessage,
+    persistedUserMessageId,
+    persistedAssistantMessageId,
+  }
 }
 
 function createRetryGroupId() {
@@ -1407,32 +1503,36 @@ async function regenerateAssistantMessage(message: AssistantMessage) {
   }
 
   const sourceUserMessage = resolveVisibleUserMessageBeforeAssistant(message.id)
-  const text = sourceUserMessage?.content.trim() || ''
   const conversationId = selectedConversationId.value
-  const persistedUserMessageId = resolvePersistedMessageId(sourceUserMessage)
-  const persistedAssistantMessageId = resolvePersistedMessageId(message)
-  if (!text || !conversationId || !sourceUserMessage) {
+  if (!conversationId || !sourceUserMessage) {
     ElMessage.warning('没有找到可用于重试的用户消息')
     return
   }
 
-  if (!persistedUserMessageId) {
-    ElMessage.info('当前消息仍在本地态，稍后刷新完成后再试重试')
+  const retrySource = await resolveRetrySourceMessages(conversationId, sourceUserMessage, message)
+  const text = retrySource.sourceUserMessage?.content.trim() || sourceUserMessage.content.trim()
+  if (!text) {
+    ElMessage.warning('没有找到可用于重试的用户消息')
     return
   }
 
-  if (!persistedAssistantMessageId) {
-    ElMessage.info('当前回复仍在本地态，稍后刷新完成后再试重试')
+  if (!retrySource.persistedUserMessageId || !retrySource.persistedAssistantMessageId) {
+    ElMessage.info('消息正在处理，请稍后再重试，或者直接复制消息重新发送')
     return
   }
 
   chatLoading.value = true
   cancelEditUserMessage()
 
-  const retryGroup = resolveRetryPageGroup(message)
+  const retryGroup = resolveRetryPageGroup(retrySource.sourceAssistantMessage)
   const retryGroupId = retryGroup?.groupId || createRetryGroupId()
   const nextRetryIndex = (retryGroup?.total ?? 1) + 1
-  applyRetryGroupToExistingMessages(retryGroupId, nextRetryIndex, sourceUserMessage.id, message.id)
+  applyRetryGroupToExistingMessages(
+    retryGroupId,
+    nextRetryIndex,
+    retrySource.sourceUserMessage.id,
+    retrySource.sourceAssistantMessage.id,
+  )
 
   const now = new Date().toISOString()
   appendConversationMessage(conversationId, {
@@ -1464,8 +1564,8 @@ async function regenerateAssistantMessage(message: AssistantMessage) {
   try {
     const actualConversationId = await streamAssistantReply(conversationId, text, retryAssistantMessage, now, true, {
       retryGroupId,
-      retryFromUserMessageId: persistedUserMessageId,
-      retryFromAssistantMessageId: persistedAssistantMessageId,
+      retryFromUserMessageId: retrySource.persistedUserMessageId,
+      retryFromAssistantMessageId: retrySource.persistedAssistantMessageId,
     })
     await loadConversationMessages(actualConversationId, true)
   } catch (error) {
@@ -3169,4 +3269,3 @@ onBeforeUnmount(() => {
   background: rgba(51, 95, 194, 0.16);
 }
 </style>
-

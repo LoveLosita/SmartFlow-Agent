@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	agentgraph "github.com/LoveLosita/smartflow/backend/agent2/graph"
-	agentmodel "github.com/LoveLosita/smartflow/backend/agent2/model"
-	agentnode "github.com/LoveLosita/smartflow/backend/agent2/node"
+	agentgraph "github.com/LoveLosita/smartflow/backend/agent/graph"
+	agentmodel "github.com/LoveLosita/smartflow/backend/agent/model"
+	agentnode "github.com/LoveLosita/smartflow/backend/agent/node"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
 	"github.com/cloudwego/eino-ext/components/model/ark"

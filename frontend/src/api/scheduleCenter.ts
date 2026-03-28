@@ -11,14 +11,31 @@ import type {
 import { extractErrorMessage } from '@/utils/http'
 import { createIdempotencyKey } from '@/utils/idempotency'
 
+type WeekScheduleResponseData = ScheduleWeekData | ScheduleWeekData[] | null | undefined
+
+function normalizeWeekScheduleData(data: WeekScheduleResponseData): ScheduleWeekData[] {
+  if (Array.isArray(data)) {
+    return data
+  }
+
+  if (data && typeof data === 'object') {
+    return [data]
+  }
+
+  return []
+}
+
 export async function getWeekSchedule(week?: number) {
   try {
-    const response = await http.get<ApiResponse<ScheduleWeekData[]>>('/schedule/week', {
-      params: typeof week === 'number' ? { week } : undefined,
+    const response = await http.get<ApiResponse<WeekScheduleResponseData>>('/schedule/week', {
+      params: {
+        week: typeof week === 'number' ? week : 0,
+      },
     })
-    return response.data.data ?? []
+
+    return normalizeWeekScheduleData(response.data.data)
   } catch (error) {
-    throw new Error(extractErrorMessage(error, '周日程加载失败，请稍后重试'))
+    throw new Error(extractErrorMessage(error, '\u5468\u603b\u65e5\u7a0b\u52a0\u8f7d\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5'))
   }
 }
 
@@ -27,7 +44,7 @@ export async function getTaskClassList() {
     const response = await http.get<ApiResponse<{ task_classes: TaskClassListItem[] }>>('/task-class/list')
     return response.data.data?.task_classes ?? []
   } catch (error) {
-    throw new Error(extractErrorMessage(error, '任务类列表加载失败，请稍后重试'))
+    throw new Error(extractErrorMessage(error, '\u4efb\u52a1\u7c7b\u5217\u8868\u52a0\u8f7d\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5'))
   }
 }
 
@@ -40,7 +57,7 @@ export async function getTaskClassDetail(taskClassId: number) {
     })
     return response.data.data
   } catch (error) {
-    throw new Error(extractErrorMessage(error, '任务类详情加载失败，请稍后重试'))
+    throw new Error(extractErrorMessage(error, '\u4efb\u52a1\u7c7b\u8be6\u60c5\u52a0\u8f7d\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5'))
   }
 }
 
@@ -53,7 +70,7 @@ export async function createTaskClass(payload: TaskClassCreatePayload, idempoten
     })
     return response.data
   } catch (error) {
-    throw new Error(extractErrorMessage(error, '创建任务类失败，请稍后重试'))
+    throw new Error(extractErrorMessage(error, '\u521b\u5efa\u4efb\u52a1\u7c7b\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5'))
   }
 }
 
@@ -66,7 +83,7 @@ export async function smartPlanning(taskClassId: number) {
     })
     return response.data.data ?? []
   } catch (error) {
-    throw new Error(extractErrorMessage(error, '智能粗排失败，请稍后重试'))
+    throw new Error(extractErrorMessage(error, '\u667a\u80fd\u7c97\u6392\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5'))
   }
 }
 
@@ -77,7 +94,7 @@ export async function smartPlanningMulti(taskClassIds: number[]) {
     })
     return response.data.data ?? []
   } catch (error) {
-    throw new Error(extractErrorMessage(error, '批量智能粗排失败，请稍后重试'))
+    throw new Error(extractErrorMessage(error, '\u6279\u91cf\u667a\u80fd\u7c97\u6392\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5'))
   }
 }
 
@@ -97,7 +114,7 @@ export async function applyBatchIntoSchedule(taskClassId: number, items: ApplyBa
     )
     return response.data
   } catch (error) {
-    throw new Error(extractErrorMessage(error, '正式应用日程失败，请稍后重试'))
+    throw new Error(extractErrorMessage(error, '\u6b63\u5f0f\u5e94\u7528\u65e5\u7a0b\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5'))
   }
 }
 
@@ -111,7 +128,7 @@ export async function deleteScheduleEntries(items: ScheduleDeletePayloadItem[], 
     })
     return response.data
   } catch (error) {
-    throw new Error(extractErrorMessage(error, '解除安排失败，请稍后重试'))
+    throw new Error(extractErrorMessage(error, '\u89e3\u9664\u5b89\u6392\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5'))
   }
 }
 
@@ -127,6 +144,6 @@ export async function deleteTaskClassItem(taskItemId: number, idempotencyKey = c
     })
     return response.data
   } catch (error) {
-    throw new Error(extractErrorMessage(error, '删除任务块失败，请稍后重试'))
+    throw new Error(extractErrorMessage(error, '\u5220\u9664\u4efb\u52a1\u5757\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5'))
   }
 }

@@ -1,192 +1,270 @@
-# 智能排程 Agent — ReAct 精排引擎 决策记录（2026-03-21 更新版）
+# 智能排程 Agent — ReAct 精排引擎 决策记录（2026-03-28 更新版）
 
 ## 0. 文档说明（先看这里）
 - 本文档分为两部分：
-  1. **上半部分**：当前线上代码对应的“最终链路决策”（2026-03-21 版本）。
-  2. **下半部分**：2026-03-19 的原始决策内容，**原样保留**作为发展历程。
+  1. 上半部分：当前线上代码对应的 `schedule_plan_refine` 连续微调链路。
+  2. 下半部分：2026-03-19 的原始决策内容，原样保留作为发展历程。
 - 这样做的目的：
-  1. 评审时先看“现在系统到底怎么跑”；
-  2. 复盘时还能追踪“从旧方案到现方案”的演进路径。
+  1. 评审时先看“现在连续微调到底怎么跑”；
+  2. 复盘时还能追踪“从早期 schedule_plan 内部 ReAct，到当前独立 refine graph”的演进路径。
 
 ## 1. 基本信息（当前版本）
-- 记录编号：FDR-008B
-- 功能名称：智能排程 ReAct 精排引擎（阶段 2：多任务类分流 + 日级并发 + 周级并发单步优化 + 双通道交付）
-- 记录日期：2026-03-21
+- 记录编号：FDR-008C
+- 功能名称：智能排程连续微调 ReAct 引擎（`schedule_plan_refine`）
+- 记录日期：2026-03-28
 - 决策状态：已采纳，已落地
 - 负责人：SmartFlow 团队
-- 关联需求：FDR-008（初版）、FDR-007（智能排程 Agent 阶段 1）
+- 关联需求：FDR-008（初版 ReAct 精排）、FDR-008B（新建排程阶段 2）、连续微调链路独立拆分
 
-## 2. 本轮最终决策（A->B 最终态）
+## 2. 本轮最终决策（当前最终态）
 ### 2.1 决策摘要
-- 决策 1：智能排程入口继续走统一 Agent 分流（`action=schedule_plan`），不新增独立聊天接口。
-- 决策 2：图内分流改为“**按 task_class_ids 长度**”：
-  1. `len(task_class_ids) == 1`：跳过 `daily_split/daily_refine/merge`，直接周级优化；
-  2. `len(task_class_ids) >= 2`：先日级并发优化，再周级并发优化。
-- 决策 3：周级优化改为“**单步动作模式**”（每轮只允许 1 个 `Move/Swap` 或 `done`）。
-- 决策 4：周级预算改为“双预算 + 每有效周保底 + 负载加权”：
-  1. 总预算：成功/失败都扣；
-  2. 有效预算：仅成功动作扣；
-  3. 每个有效周至少 1 个总预算和 1 个有效预算；
-  4. 额外预算按周负载加权分配。
-- 决策 5：输出采用双通道：
-  1. SSE 主通道仅返回终审自然语言（`FinalSummary`）；
-  2. 结构化 `candidate_plans` 走 `/api/v1/agent/schedule-preview` 查询（Redis 快照）。
+- 决策 1：连续微调已独立为 `action=schedule_plan_refine`，不再复用 `schedule_plan` 图内的 ReAct 精排逻辑。
+- 决策 2：`schedule_refine` 固定采用 7 节点图编排：`contract -> plan -> slice -> route -> react -> hard_check -> summary`。
+- 决策 3：全局目标只对两类复合工具开专门路由：
+  1. `SpreadEven`：均匀分散；
+  2. `MinContextSwitch`：最少上下文切换。
+- 决策 4：复合路由在进入 ReAct 前先直达执行一次，并允许最多重试 2 次；若仍失败，则切入“禁复合兜底模式”，后续只允许基础工具逐任务搬运。
+- 决策 5：ReAct 执行器采用“单任务微步”模式：当前轮只能围绕 `CURRENT_TASK` 动手，不能同时主动改别的任务。
+- 决策 6：顺序约束不再卡执行期；执行期只管把坑位分布排好，顺序统一在终审阶段由后端归位或校验。
+- 决策 7：终审优先走后端确定性校验；只有目标无法编译成确定性 objective 时，才退回语义 Review。
+- 决策 8：连续微调失败不再回退普通聊天；对用户直接返回错误。只有图执行成功后才进入总结、SSE 输出和后置持久化。
+- 决策 9：连续微调沿用排程预览快照作为唯一基线：先读 Redis，未命中再回源 MySQL；最终预览仍写回同一套 `saveSchedulePlanPreview` 通道。
 
 ### 2.2 为什么这样改
-- 目标 1：把“单任务类”和“多任务类混排”拆开治理，减少无效模型调用。
-- 目标 2：把周级优化从“模型大段犹豫”改成“走一步看一步”，缩短长尾。
-- 目标 3：前端同时拿到“可读结论”和“结构化预览”，避免 SSE 里吐 JSON 影响体验。
-- 目标 4：预算治理可解释，避免某些有效周被分配为 0 导致“看起来没优化”。
+- 目标 1：降低主路由和 `schedule_plan` 主图的复杂度，让“新建排程”和“局部微调”彻底分治。
+- 目标 2：对于“均匀分散/最少切换”这类全局目标，优先一次性调用复合工具，避免模型在逐任务循环里低效试错。
+- 目标 3：一旦进入兜底，就彻底禁止再次调用复合工具，避免在同一条失败路径上反复震荡。
+- 目标 4：把“执行期的坑位调整”和“终审期的顺序/物理一致性裁决”拆开，减少执行期被顺序约束误卡死。
+- 目标 5：保证预览缓存既能优先读缓存，也能在 Redis 失效后通过 MySQL 快照恢复连续微调上下文。
 
 ## 3. 当前全链路（代码真实流程）
-### 3.1 Agent 总分流（与 schedule_plan 的关系）
+### 3.1 Agent 总分流与 service 入口
 1. `POST /api/v1/agent/chat` 进入 `AgentService.AgentChat`。
-2. 先做会话存在性检查（Redis -> DB -> 必要时创建）。
-3. 调 `route.DecideActionRouting` 获取 action。
-4. 若 `RouteFailed=true`：直接返回内部错误（不再回落聊天）。
-5. 若 `action=schedule_plan`：进入 `runSchedulePlanFlow`。
-6. 若 `runSchedulePlanFlow` 报错：当前策略是记录日志 + 发 fallback 阶段块 + 回退普通聊天（可用性优先）。
+2. `route.DecideActionRouting` 返回 `action=schedule_plan_refine`。
+3. service 层进入 `runScheduleRefineFlow`，先发 `schedule_refine.context.loading` 阶段块。
+4. `loadSchedulePreviewContext` 按“Redis 预览优先 -> MySQL 快照兜底”的顺序加载上一版排程上下文。
+5. 若没有上一版预览，直接返回 `SchedulePlanPreviewNotFound`，不回退普通聊天。
+6. 有预览时构造 `ScheduleRefineState`，注入：
+   1. `HybridEntries`
+   2. `AllocatedItems`
+   3. `CandidatePlans`
+   4. `OriginOrderMap`
+7. 调用 `RunScheduleRefineGraph` 执行独立 refine 图。
+8. 图执行成功后：
+   1. 若允许覆盖预览，则调用 `saveSchedulePlanPreview` 回写 Redis + MySQL 快照；
+   2. 若命中“复合路由已出站但终审未通过”，发 `schedule_refine.preview.skipped`，保留上一版预览基线。
+9. 最后把 `FinalSummary` 通过 SSE 输出，并走统一聊天后置持久化。
 
-### 3.2 schedule_plan 图编排（当前版本）
 ```mermaid
 flowchart TD
-    START([START]) --> plan["plan<br/>提取意图/约束/strategy/task_class_ids/task_tags"]
-    plan --> p1{"FinalSummary 非空<br/>或 task_class_ids 为空?"}
-    p1 -- "是" --> exit["exit -> END"]
-    p1 -- "否" --> rough["rough_build<br/>HybridScheduleWithPlanMulti<br/>+ 可选 ResolvePlanningWindow"]
+    A["/api/v1/agent/chat\nroute.DecideActionRouting"] --> B{"action = schedule_plan_refine ?"}
+    B -- "否" --> X["进入其它分支"]
+    B -- "是" --> C["runScheduleRefineFlow\n发 schedule_refine.context.loading"]
+    C --> D["loadSchedulePreviewContext\nRedis 预览优先 -> MySQL 快照兜底"]
+    D --> E{"上一版预览存在?"}
+    E -- "否" --> F["返回 SchedulePlanPreviewNotFound\n直接上报错误"]
+    E -- "是" --> G["NewScheduleRefineState\n注入 HybridEntries / CandidatePlans / OriginOrderMap"]
+    G --> H["RunScheduleRefineGraph"]
+    H --> I{"graph 执行成功?"}
+    I -- "否" --> J["直接上报错误\n不回退普通聊天"]
+    I -- "是" --> K{"shouldPersistScheduleRefinePreview?"}
+    K -- "是" --> L["saveSchedulePlanPreview\n覆盖 Redis + MySQL 快照"]
+    K -- "否" --> M["emit schedule_refine.preview.skipped\n保留上一版预览基线"]
+    L --> N["emitSingleAssistantCompletion\n输出 FinalSummary"]
+    M --> N
+    N --> O["persistChatAfterReply\n统一后置持久化 + 异步标题"]
+```
 
-    rough --> p2{"构建失败或 HybridEntries 为空?"}
-    p2 -- "是" --> exit
-    p2 -- "否" --> p3{"len(task_class_ids) >= 2 ?"}
+### 3.2 `ScheduleRefineGraph` 编排（当前版本）
+```mermaid
+flowchart TD
+    START([START]) --> A["contract\n抽取 intent / strategy / hard_assertions\n默认 keep_relative_order=true"]
+    A --> B["plan\n生成 3~4 步执行计划\n必要时注入复合工具硬条件"]
+    B --> C["slice\n抽取 week/source_days/target_days\n编译 objective + workset"]
+    C --> D["route\n识别 SpreadEven / MinContextSwitch\n首次 + 最多 2 次重试"]
+    D --> E["react\n若 CompositeRouteSucceeded=true 则直接 skip\n否则进入单任务微步 ReAct"]
+    E --> F["hard_check\n锁定业务目标 -> 顺序归位/校验 -> 最多 1 次修复"]
+    F --> G["summary\n回填 AllocatedItems + CandidatePlans\nCompleted 仅由终审是否通过决定"]
+    G --> END([END])
+```
 
-    p3 -- "是" --> split["daily_split<br/>按天拆组 + ContextTag 注入 + SkipRefine 标记"]
-    split --> drefine["daily_refine(并发)<br/>单天 ReAct，失败回退原天"]
-    drefine --> merge["merge<br/>合并结果，冲突回退"]
-    merge --> wrefine["weekly_refine(并发按周)<br/>单步 Move/Swap + 双预算"]
-
-    p3 -- "否" --> wrefine
-    wrefine --> final["final_check<br/>物理校验 + 总结生成"]
-    final --> preview["return_preview<br/>回填 AllocatedItems + 产出 CandidatePlans"]
-    preview --> END([END])
+### 3.3 `route + react` 组合策略（当前版本）
+```mermaid
+flowchart TD
+    A["route 节点"] --> B{"命中全局复合目标?\nSpreadEven / MinContextSwitch"}
+    B -- "否" --> C["直接进入 ReAct 兜底链路"]
+    B -- "是" --> D["构造 task_item_ids + target 范围\n首次执行 + 最多重试 2 次"]
+    D --> E{"复合工具成功且允许直接出站?"}
+    E -- "是" --> F["CompositeRouteSucceeded=true\nreact 节点直接 skip"]
+    E -- "否" --> G["DisableCompositeTools=true\n清空 RequiredCompositeTool\n切换禁复合兜底模式"]
+    G --> H["react.fallback_mode\n只允许基础工具逐任务调整"]
+    C --> H
 ```
 
 ## 4. 节点级职责边界（当前实现）
-### 4.1 `plan`
-1. 先合并 `extra.task_class_ids`（显式参数优先）；
-2. 再用模型抽取 `intent/constraints/strategy/task_tags`；
-3. 模型失败但有 `task_class_ids` 时，使用参数兜底继续；
-4. 最终仍无任务类时，写入 `FinalSummary` 并提前退出。
+### 4.1 `contract`
+1. 使用模型把自然语言请求抽成 `RefineContract`。
+2. 默认保持顺序：只有用户明确说“可以打乱顺序”才会放开 `keep_relative_order=false`。
+3. 优先信任结构化 `hard_assertions`；若模型没给，会按用户表达兜底推断（如“一半/50%”）。
+4. 模型调用或 JSON 解析失败时，降级为后端 fallback contract，不中断链路。
 
-### 4.2 `rough_build`
-1. 调 `HybridScheduleWithPlanMulti` 统一构建混合条目（existing + suggested）；
-2. 生成 `CandidatePlans`（预览结构）；
-3. 可选解析全局窗口边界（`PlanStartWeek/Day` ~ `PlanEndWeek/Day`），供周级 Move 硬校验；
-4. 失败时写 `FinalSummary` 并提前退出。
+### 4.2 `plan`
+1. Planner 只生成执行路径，不直接执行动作。
+2. 若命中“均匀分散/最少上下文切换”，后端会把“复合工具必须成功后才允许收口”的硬条件注入到计划里。
+3. `BatchMove` 不是默认开放能力，只有 plan 文本明确允许时才会放开。
+4. Planner 失败或解析失败时，切到后端 fallback plan；必要时可在后续失败后触发 replan。
 
-### 4.3 `daily_split`
-1. 按 `(week, day)` 拆成 `DayGroup`；
-2. 按 `task_item_id -> tag` 注入 `ContextTag`；
-3. `suggested <= 2` 标记 `SkipRefine=true`，减少低收益模型调用。
+### 4.3 `slice`
+1. 从用户文本提取：
+   1. `week_filter`
+   2. `source_days`
+   3. `target_days`
+   4. `exclude_sections`
+2. 支持方向型表达解析，例如“从周四到周五收敛到周一到周三”。
+3. 基于切片结果构建 `workset`，只把当前要动的 suggested 任务放进微循环。
+4. 同时把自然语言目标编译成 `RefineObjective`：
+   1. `move_all`
+   2. `move_ratio`
+   3. `none`
+5. 若无法构成来源范围或目标范围，则 deterministic objective 不启用，后续终审退回语义 Review。
 
-### 4.4 `daily_refine`（并发）
-1. 按天并发执行单天 ReAct；
-2. 单天失败只回退该天，不拖垮全局；
-3. 发“day_start/day_done”阶段块，并携带进度；
-4. Thinking 默认关闭（降低并发阶段长尾）。
+### 4.4 `route`
+1. 先由后端根据请求和契约识别本轮必用复合工具：
+   1. “均匀/分散/铺开” -> `SpreadEven`
+   2. “上下文切换最少/同科目连续” -> `MinContextSwitch`
+2. 命中后，直接按 `task_item_ids + target 范围` 调复合工具，不先进入逐任务 ReAct。
+3. 每次复合成功后，优先走后端确定性校验；若 objective 不可判定，则允许在“复合工具门禁已通过”时直接出站，把最终裁决交给 `hard_check`。
+4. 若复合路由失败，会设置：
+   1. `DisableCompositeTools=true`
+   2. `RequiredCompositeTool=""`
+   3. `BatchMoveAllowed=false`
+5. 这样后续 ReAct 只能使用基础工具，不能再次回到复合失败路径。
 
-### 4.5 `merge`
-1. 合并 `DailyResults`；
-2. 做冲突校验（同一 `(week,day,section)` 不能被阻塞条目重复占用）；
-3. 有冲突则整体回退到 merge 前快照；
-4. 产出 `MergeSnapshot`，供 `final_check` 二次回退。
+### 4.5 `react`
+1. 采用“单任务微步”模式：当前轮只能围绕 `CURRENT_TASK` 改动。
+2. 默认预算：
+   1. `ExecuteMax=24`
+   2. `PerTaskBudget=4`
+   3. `ReplanMax=2`
+   4. `CompositeRetryMax=2`
+   5. `RepairReserve=1`
+   6. `MaxRounds=25`
+3. 如果 `CompositeRouteSucceeded=true`，`react` 会直接 skip，不再空跑。
+4. 执行期顺序约束被放开，只在终审阶段统一收口；这样 Move/Swap 不会因为顺序问题提前被卡死。
+5. 后端额外做了多层 guard：
+   1. `CURRENT_TASK_MISMATCH`：动作必须包含当前任务；
+   2. `COMPOSITE_REQUIRED`：计划要求先成功复合工具时，禁止先走基础写工具；
+   3. `COMPOSITE_DISABLED`：进入兜底后禁止复合工具；
+   4. `BATCH_MOVE_DISABLED`：未授权时禁止 `BatchMove`；
+   5. `QUERY_REDUNDANT`：同版本排程下重复查同一空位范围会被拒绝。
+6. 当前任务满足切片目标时会自动收口；全局 objective 满足且复合门禁通过时，也会触发短路结束。
 
-### 4.6 `weekly_refine`（并发按周 + 单步动作）
-1. 先按周拆数据，仅对“有 suggested 的周”分配预算；
-2. 强制每个有效周至少 1 总预算 + 1 有效预算；
-3. 剩余预算按周负载加权分配；
-4. 单周 worker 循环：
-   1. 每轮仅 1 个工具调用（`Move/Swap`）或 `done`；
-   2. 总预算：调用即扣；
-   3. 有效预算：成功才扣；
-   4. Move 必须留在 worker 当前周，且受全局窗口 day 边界约束；
-   5. 工具结果回灌到下一轮上下文，形成“走一步看一步”。
+### 4.6 `hard_check`
+1. 先锁定“业务目标是否达成”的判定结果，再做顺序归位，避免“为了展示归位而反向改变目标成败”。
+2. 终审优先级：
+   1. 物理校验（冲突/越界/数量一致性）
+   2. 确定性 objective 校验
+   3. objective 不可判定时才退回语义 Review
+3. `MinContextSwitch` 成功后，顺序重排本身就是业务目标的一部分：
+   1. 会跳过按 `origin_rank` 的顺序归位；
+   2. 也会跳过顺序约束校验。
+4. 若终审失败且预算还够，会尝试 1 次修复动作，再重新终审。
+5. 修复失败或修复后仍未通过时，链路照样返回“当前最优结果”，但 `Completed=false`。
 
-### 4.7 `final_check`
-1. 物理校验三项：
-   1. 时间冲突；
-   2. 节次越界；
-   3. suggested 数量与 `AllocatedItems` 数量一致性。
-2. 校验失败时回退 `MergeSnapshot`；
-3. 再由模型生成 2-3 句最终总结（thinking 关闭）。
+### 4.7 `summary`
+1. 先把 `HybridEntries` 回填到 `AllocatedItems`，再生成新的 `CandidatePlans`。
+2. 然后调用总结 prompt，把终审结果翻译成用户可读的 2~4 句中文结论。
+3. 如果总结模型失败，会走后端兜底文案。
+4. `Completed` 只表示“最终终审是否通过”，不再等同于“链路执行完毕”。
 
-### 4.8 `return_preview`
-1. 把 `HybridEntries` 中 suggested 的最终位置回填到 `AllocatedItems`；
-2. 转换为 `CandidatePlans`；
-3. 若 `FinalSummary` 为空则兜底填充；
-4. 仅返回预览，不直接落库。
-
-## 5. 工具与约束（当前版本）
+## 5. 工具、预算与约束（当前版本）
 ### 5.1 工具集合
-1. `Swap`：交换两个 suggested 任务时间；
-2. `Move`：移动一个 suggested 任务到新时间；
-3. `TimeAvailable`：检查时间段可用性；
-4. `GetAvailableSlots`：列出可用槽位。
+| 分组 | Tool | 当前职责 |
+|------|------|----------|
+| 基础只读 | `QueryTargetTasks` | 查询当前目标任务集合 |
+| 基础只读 | `QueryAvailableSlots` | 查询可落点坑位，默认优先纯空位 |
+| 基础写入 | `Move` | 移动单个 suggested 任务 |
+| 基础写入 | `Swap` | 交换两个 suggested 任务 |
+| 基础写入 | `BatchMove` | 原子批量移动，需计划显式允许 |
+| 基础只读 | `Verify` | 执行确定性自检 |
+| 复合写入 | `SpreadEven` | 按“均匀铺开”一次规划并提交多任务移动 |
+| 复合写入 | `MinContextSwitch` | 在固定坑位集合内重排任务映射，降低上下文切换 |
 
-### 5.2 周级单步模式硬约束
-1. 仅允许 `Move/Swap`；
-2. 不允许跨 worker 周移动；
-3. 若启用全局窗口，`Move` 必须落在窗口允许的 day 区间；
-4. 失败返回工具失败结果，不抛异常中断整周。
+### 5.2 预算默认值
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `PlanMax` | 2 | Planner 最多生成/重生成次数 |
+| `ExecuteMax` | 24 | 正常动作总预算 |
+| `PerTaskBudget` | 4 | 单个任务最多允许的写动作次数 |
+| `ReplanMax` | 2 | 连续失败后的重规划上限 |
+| `CompositeRetryMax` | 2 | 复合路由失败后的重试次数（不含首次） |
+| `RepairReserve` | 1 | 终审修复保留动作数 |
+| `MaxRounds` | 25 | `ExecuteMax + RepairReserve` |
 
-## 6. 输出协议与接口契约（当前版本）
+### 5.3 当前硬约束
+1. 微调只允许改写 `status="suggested"` 的任务，禁止动 `existing`。
+2. 当前微循环只允许围绕 `CURRENT_TASK` 动手，不能跳着改别的任务。
+3. 执行期允许先把坑位排对，顺序问题统一后置到终审处理。
+4. 复合工具命中后，只有其成功通过门禁，才能允许整体收口。
+5. 一旦进入禁复合兜底模式，就不允许再次调用 `SpreadEven / MinContextSwitch / BatchMove`。
+
+## 6. 输出协议与持久化（当前版本）
 ### 6.1 SSE 主通道
-1. 阶段块（伪装 reasoning chunk）用于进度反馈；
-2. 最终正文为 `FinalSummary`（不再吐 JSON）；
-3. 结束块遵循 OpenAI 兼容流式格式。
+1. 阶段块会持续推送：`context.loading / contract / plan / slice / route / react / hard_check / summary`。
+2. 最终正文只输出 `FinalSummary`，不输出结构化排程 JSON。
+3. 连续微调链路如果报错，直接通过错误通道返回，不回退普通聊天。
 
-### 6.2 结构化预览通道
-1. 排程结束后把快照写 Redis（`user_id + conversation_id` 作用域）；
-2. 查询接口：`GET /api/v1/agent/schedule-preview?conversation_id=...`；
-3. 未命中返回业务错误码（预览不存在/过期）；
-4. 写预览失败只记日志，不阻塞聊天主链路。
+### 6.2 预览快照通道
+1. 连续微调和新建排程共用同一套预览快照读写：`saveSchedulePlanPreview`。
+2. refine 开始前先用 `loadSchedulePreviewContext` 读取上一版预览：
+   1. Redis 优先；
+   2. MySQL 快照兜底；
+   3. DB 命中时会回填 Redis。
+3. refine 成功后通常会覆盖上一版预览；唯一例外是：
+   1. `CompositeRouteSucceeded=true`
+   2. 但 `FinalHardCheckPassed=false`
+4. 这时会发 `schedule_refine.preview.skipped`，明确保留上一版预览基线，防止未通过终审的复合结果污染后续连续微调。
 
 ## 7. 失败策略与回退策略（当前版本）
-1. 路由控制码失败：直接报内部错误（不回落 chat）。
-2. schedule_plan 分支内部失败：上层当前策略仍回落普通聊天（可用性优先）。
-3. daily 单天失败：回退该天原方案。
-4. merge 冲突：回退 merge 前快照。
-5. final_check 失败：回退 `MergeSnapshot`。
-6. 预览缓存写失败：仅影响结构化查询，不影响 SSE 文本回复。
+1. 无上一版预览：直接返回 `SchedulePlanPreviewNotFound`。
+2. refine graph 执行失败：直接上报错误，不回退普通聊天。
+3. 复合路由失败：切入禁复合 ReAct 兜底，不直接判整轮失败。
+4. 单任务 ReAct 连续失败：允许 replan，但仍受 `ReplanMax` 限制。
+5. 终审失败：最多再做 1 次修复动作；若仍失败，返回 best-effort 结果，`Completed=false`。
+6. 总结模型失败：走后端兜底总结，不影响结果交付。
+7. 预览快照写失败：只影响结构化查询，不影响 SSE 主通道回复。
 
 ## 8. 影响范围（当前版本）
-### 8.1 主要模块
-1. `backend/agent/scheduleplan/*`（图编排、日级并发、周级并发、工具、预算、终审）
-2. `backend/service/agentsvc/agent_schedule_plan.go`（服务层接入 graph）
-3. `backend/service/agentsvc/agent_schedule_preview.go`（预览缓存读写）
-4. `backend/dao/agent-cache.go`（预览 Redis DAO）
-5. `backend/api/agent.go` + `backend/routers/routers.go`（预览查询接口）
-6. `backend/agent/route/route.go`（统一 action 分流）
+### 8.1 关键代码位置
+1. `backend/service/agentsvc/agent.go`：总分流，决定 `schedule_plan_refine` 如何进入 service。
+2. `backend/service/agentsvc/agent_schedule_refine.go`：连续微调 service 入口、上下文读取、结果持久化策略。
+3. `backend/agent/graph/schedule.go`：`ScheduleRefineGraph` 编排。
+4. `backend/agent/node/schedule_refine.go`：contract / plan / slice / route / react / hard_check / summary 主逻辑。
+5. `backend/agent/node/schedule_refine_tool.go`：基础工具与复合工具实现。
+6. `backend/agent/prompt/schedule_refine.go`：contract/planner/react/review/summary/repair prompt。
+7. `backend/service/agentsvc/agent_schedule_preview.go`：预览快照读写。
 
 ### 8.2 数据与存储
-1. 主排程流程不直接写最终排程库；
-2. 新增 Redis 预览快照读写；
+1. 连续微调本身不直接写最终排程库。
+2. 只读写预览缓存/快照，用于下一轮连续微调延续上下文。
 3. 聊天消息仍走统一后置持久化（Redis + outbox/DB）。
 
 ## 9. 验证与回滚（当前版本）
 ### 9.1 验证要点
-1. `task_class_ids=1` 时应跳过日级并发，直接周级优化；
-2. `task_class_ids>=2` 时应进入日级并发 + merge + 周级并发；
-3. SSE 正文应是自然语言，不应出现粗排 JSON；
-4. `/agent/schedule-preview` 能按 `conversation_id` 读到 `candidate_plans`；
-5. 预算日志应能解释每周预算分配和消耗。
+1. 路由能正确分出 `schedule_plan_create` 与 `schedule_plan_refine`。
+2. 没有上一版预览时，refine 必须直接报错，而不是回退普通聊天。
+3. “均匀分散/最少上下文切换”类请求，会先经过 `route` 复合路由，再决定是否进入 ReAct。
+4. 一旦进入兜底模式，复合工具必须被禁用，只能逐任务搬运。
+5. `MinContextSwitch` 成功后，终审必须跳过 origin_rank 归位与顺序校验。
+6. `Completed` 只能在终审完全通过时为 `true`。
+7. 复合路由出站但终审失败时，预览不能覆盖上一版基线。
 
 ### 9.2 回滚策略
-1. 软回滚：关闭 schedule_plan 路由命中（临时回落聊天解释）；
-2. 逻辑回滚：周级并发退回单线程或关掉 daily_refine；
-3. 通道回滚：保留 SSE 文本，临时下线 `schedule-preview` 查询。
+1. 软回滚：在路由层下线 `schedule_plan_refine` 命中，临时回到新建排程或普通聊天解释。
+2. 逻辑回滚：关闭 `route` 复合直达，只保留基础 ReAct 逐任务链路。
+3. 数据回滚：由于 refine 只写预览快照，不写最终排程库，风险面主要集中在缓存/快照，不涉及正式排程落库回滚。
 
 ---
-
 ## 附录 A：2026-03-19 原始内容（原文保留，作为发展历程）
 
 # 智能排程 Agent — ReAct 精排引擎 决策记录
@@ -424,3 +502,4 @@ flowchart TD
 - 实际效果：待补充
 - 与预期偏差：待补充
 - 后续是否需要二次决策：待补充
+
