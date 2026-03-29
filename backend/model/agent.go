@@ -1,6 +1,58 @@
 package model
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+)
+
+// AgentResumeType 表示本轮请求想恢复哪一类挂起交互。
+type AgentResumeType string
+
+const (
+	AgentResumeTypeAskUser           AgentResumeType = "ask_user"
+	AgentResumeTypeConfirm           AgentResumeType = "confirm"
+	AgentResumeTypeConnectionRecover AgentResumeType = "connection_recover"
+)
+
+// AgentResumeAction 表示用户这次恢复请求携带的动作类型。
+type AgentResumeAction string
+
+const (
+	AgentResumeActionReply   AgentResumeAction = "reply"
+	AgentResumeActionApprove AgentResumeAction = "approve"
+	AgentResumeActionReject  AgentResumeAction = "reject"
+	AgentResumeActionCancel  AgentResumeAction = "cancel"
+	AgentResumeActionResume  AgentResumeAction = "resume"
+)
+
+// AgentResumeRequest 是 extra.resume 的统一结构。
+//
+// 设计目的：
+// 1. 继续复用现有聊天入口，不再额外新增一条“确认专用接口”；
+// 2. 前端只提交“我要恢复哪次交互、这次动作是什么”，不直接改后端 state；
+// 3. 后端进入聊天主链路前，先读取这份结构，再决定走 confirm / ask_user / connection_recover 哪条恢复路径。
+//
+// 推荐前端请求形态：
+//
+//	{
+//	  "message": "",
+//	  "extra": {
+//	    "resume": {
+//	      "interaction_id": "xxx",
+//	      "type": "confirm",
+//	      "action": "approve"
+//	    }
+//	  }
+//	}
+//
+// TODO(newagent/api): 进入聊天主流程前，优先调用 req.ResumeRequest()；若命中恢复协议，则不要把本轮请求按普通聊天处理。
+type AgentResumeRequest struct {
+	InteractionID string            `json:"interaction_id"`
+	Type          AgentResumeType   `json:"type,omitempty"`
+	Action        AgentResumeAction `json:"action"`
+}
 
 type UserSendMessageRequest struct {
 	ConversationID string         `json:"conversation_id,omitempty"`
@@ -8,6 +60,118 @@ type UserSendMessageRequest struct {
 	Model          string         `json:"model,omitempty"`
 	Thinking       bool           `json:"thinking,omitempty"`
 	Extra          map[string]any `json:"extra,omitempty"`
+}
+
+// ResumeRequest 从 extra.resume 中解析结构化恢复请求。
+//
+// 步骤说明：
+// 1. 若 extra 或 extra.resume 不存在，则直接返回 nil，表示本轮是普通聊天请求；
+// 2. 先把任意 map/struct 形态统一转成 JSON，再反序列化到强类型结构，避免入口层到处手写断言；
+// 3. 解析成功后先做 Normalize，再做最小必要校验，防止后续业务层拿到脏协议继续流转；
+// 4. 这里只负责协议解析与基本校验，不负责真正恢复状态，也不负责改 Redis/MySQL。
+func (r *UserSendMessageRequest) ResumeRequest() (*AgentResumeRequest, error) {
+	if r == nil || len(r.Extra) == 0 {
+		return nil, nil
+	}
+
+	rawResume, ok := r.Extra["resume"]
+	if !ok || rawResume == nil {
+		return nil, nil
+	}
+
+	data, err := json.Marshal(rawResume)
+	if err != nil {
+		return nil, fmt.Errorf("序列化 extra.resume 失败: %w", err)
+	}
+
+	var resume AgentResumeRequest
+	if err := json.Unmarshal(data, &resume); err != nil {
+		return nil, fmt.Errorf("解析 extra.resume 失败: %w", err)
+	}
+
+	resume.Normalize()
+	if err := resume.Validate(); err != nil {
+		return nil, err
+	}
+	return &resume, nil
+}
+
+// Normalize 统一清洗恢复协议中的字符串字段。
+func (r *AgentResumeRequest) Normalize() {
+	if r == nil {
+		return
+	}
+	r.InteractionID = strings.TrimSpace(r.InteractionID)
+	r.Type = AgentResumeType(strings.TrimSpace(string(r.Type)))
+	r.Action = AgentResumeAction(strings.TrimSpace(string(r.Action)))
+}
+
+// Validate 校验恢复协议的最小合法性。
+//
+// 职责边界：
+// 1. 只校验“是否像一份合法的恢复协议”，不校验 interaction_id 是否真实存在；
+// 2. confirm / ask_user / connection_recover 共用一条入口，但动作集合不同，所以这里做显式分流校验；
+// 3. 对于 ask_user 回复，真正的回答正文仍建议优先放在顶层 message，这里不强制要求额外 answer 字段。
+func (r *AgentResumeRequest) Validate() error {
+	if r == nil {
+		return nil
+	}
+	if r.InteractionID == "" {
+		return fmt.Errorf("extra.resume.interaction_id 不能为空")
+	}
+	if r.Action == "" {
+		return fmt.Errorf("extra.resume.action 不能为空")
+	}
+
+	switch r.Type {
+	case "", AgentResumeTypeConfirm:
+		switch r.Action {
+		case AgentResumeActionApprove, AgentResumeActionReject, AgentResumeActionCancel:
+			return nil
+		default:
+			return fmt.Errorf("confirm 恢复动作非法: %s", r.Action)
+		}
+	case AgentResumeTypeAskUser:
+		switch r.Action {
+		case AgentResumeActionReply, AgentResumeActionCancel:
+			return nil
+		default:
+			return fmt.Errorf("ask_user 恢复动作非法: %s", r.Action)
+		}
+	case AgentResumeTypeConnectionRecover:
+		switch r.Action {
+		case AgentResumeActionResume, AgentResumeActionCancel:
+			return nil
+		default:
+			return fmt.Errorf("connection_recover 恢复动作非法: %s", r.Action)
+		}
+	default:
+		return fmt.Errorf("extra.resume.type 非法: %s", r.Type)
+	}
+}
+
+// IsConfirmResume 判断当前恢复请求是否属于 confirm 分支。
+func (r *AgentResumeRequest) IsConfirmResume() bool {
+	if r == nil {
+		return false
+	}
+	return r.Type == "" || r.Type == AgentResumeTypeConfirm
+}
+
+// IsAskUserResume 判断当前恢复请求是否属于 ask_user 分支。
+func (r *AgentResumeRequest) IsAskUserResume() bool {
+	if r == nil {
+		return false
+	}
+	return r.Type == AgentResumeTypeAskUser
+}
+
+// IsConnectionRecoverResume 判断当前恢复请求是否属于 connection_recover 分支。
+func (r *AgentResumeRequest) IsConnectionRecoverResume() bool {
+	if r == nil {
+		return false
+	}
+	return r.Type == AgentResumeTypeConnectionRecover
 }
 
 type ChatHistoryPersistPayload struct {
