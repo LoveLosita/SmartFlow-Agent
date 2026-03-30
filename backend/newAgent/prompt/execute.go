@@ -8,25 +8,18 @@ import (
 )
 
 const (
-	// ExecuteNextPlanSignal 表示“当前 plan 步骤已经完成，可以进入下一个步骤”。
-	//
-	// TODO(newagent/node): 后续 executeNode 识别到该信号后，调用 state.AdvanceStep() 或决定进入交付阶段。
+	// ExecuteNextPlanSignal 表示“当前 plan step 已完成，可以推进到下一个步骤”。
 	ExecuteNextPlanSignal = "[NEXT_PLAN]"
 
-	// ExecuteDoneSignal 表示“整个任务已经完成，可以结束执行链路”。
-	//
-	// TODO(newagent/node): 后续 executeNode 识别到该信号后，调用 state.Done() 并进入 deliver。
+	// ExecuteDoneSignal 表示“整个任务已经完成，可以进入最终交付”。
 	ExecuteDoneSignal = "[DONE]"
 
-	// ExecuteAskUserSignal 表示“执行阶段缺关键信息，需要向用户追问”。
-	//
-	// TODO(newagent/node): 后续若你决定支持 ask_user，这里可作为统一控制信号继续扩展。
+	// ExecuteAskUserSignal 表示“执行当前步骤缺少关键信息，需要向用户追问”。
 	ExecuteAskUserSignal = "[ASK_USER]"
 )
 
 const executeSystemPrompt = `
 你是 SmartFlow NewAgent 的执行器。
-
 你的职责是在“当前 plan 步骤”的约束下，进行思考、执行、观察，再决定下一步动作。
 
 请遵守以下规则：
@@ -52,13 +45,6 @@ func BuildExecuteSystemPrompt() string {
 }
 
 // BuildExecuteMessages 组装执行阶段的 messages。
-//
-// 职责边界：
-// 1. 负责收敛执行阶段需要的 system / pinned / history / runtime prompt；
-// 2. 负责把“完整 plan + 当前步骤 + 控制信号”显式告知模型；
-// 3. 不负责解析模型输出，也不负责真正调用工具。
-//
-// TODO(newagent/node): 后续 executeNode 应直接复用这个方法，而不是在节点内手拼执行提示词。
 func BuildExecuteMessages(state *newagentmodel.CommonState, ctx *newagentmodel.ConversationContext) []*schema.Message {
 	return buildStageMessages(
 		BuildExecuteSystemPrompt(),
@@ -94,8 +80,13 @@ func BuildExecuteUserPrompt(state *newagentmodel.CommonState) string {
 		sb.WriteString(ExecuteAskUserSignal)
 		sb.WriteString("。\n")
 		sb.WriteString("\n当前步骤正文：\n")
-		sb.WriteString(currentStep)
+		sb.WriteString(strings.TrimSpace(currentStep.Content))
 		sb.WriteString("\n")
+		if strings.TrimSpace(currentStep.DoneWhen) != "" {
+			sb.WriteString("\n当前步骤完成判定：\n")
+			sb.WriteString(strings.TrimSpace(currentStep.DoneWhen))
+			sb.WriteString("\n")
+		}
 	} else {
 		sb.WriteString("当前 plan 已存在，但当前步骤索引无效；请不要擅自执行其他步骤。\n")
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
+	newagentnode "github.com/LoveLosita/smartflow/backend/newAgent/node"
 	"github.com/cloudwego/eino/compose"
 )
 
@@ -19,23 +20,25 @@ const (
 	NodeDeliver   = "deliver"
 )
 
-func RunAgentGraph(ctx context.Context, state *newagentmodel.AgentRuntimeState) (*newagentmodel.AgentRuntimeState, error) {
+func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) (*newagentmodel.AgentGraphState, error) {
+	state := newagentmodel.NewAgentGraphState(input)
 	if state == nil {
-		return nil, errors.New("agent graph: state is nil")
+		return nil, errors.New("agent graph: graph state is nil")
 	}
 
-	flowState := state.EnsureCommonState()
+	flowState := state.EnsureFlowState()
 	if flowState == nil {
-		return nil, errors.New("agent graph: common state is nil")
+		return nil, errors.New("agent graph: flow state is nil")
 	}
 
-	g := compose.NewGraph[*newagentmodel.AgentRuntimeState, *newagentmodel.AgentRuntimeState]()
+	nodes := newagentnode.NewAgentNodes()
+	g := compose.NewGraph[*newagentmodel.AgentGraphState, *newagentmodel.AgentGraphState]()
 
 	// --- 注册节点 ---
 	if err := g.AddLambdaNode(NodeChat, compose.InvokableLambda(chatNode)); err != nil {
 		return nil, err
 	}
-	if err := g.AddLambdaNode(NodePlan, compose.InvokableLambda(planNode)); err != nil {
+	if err := g.AddLambdaNode(NodePlan, compose.InvokableLambda(nodes.Plan)); err != nil {
 		return nil, err
 	}
 	if err := g.AddLambdaNode(NodeConfirm, compose.InvokableLambda(confirmNode)); err != nil {
@@ -127,41 +130,32 @@ func RunAgentGraph(ctx context.Context, state *newagentmodel.AgentRuntimeState) 
 	return runnable.Invoke(ctx, state)
 }
 
-// --- 占位节点，后续由 node 层替换 ---
+// --- 占位节点，后续逐步由 node 层替换 ---
 
-func chatNode(_ context.Context, st *newagentmodel.AgentRuntimeState) (*newagentmodel.AgentRuntimeState, error) {
+func chatNode(_ context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
 	if st == nil {
 		return nil, errors.New("chat node: state is nil")
 	}
-	st.EnsureCommonState()
+	st.EnsureFlowState()
+	st.EnsureConversationContext()
+	st.EnsureChunkEmitter()
 
 	// TODO:
 	// 1. 识别当前请求是普通聊天、首次任务进入，还是从 pending interaction 恢复。
 	// 2. 若只是普通聊天，则生成回复并把 Phase 设为 PhaseChatting，后续直接 END。
 	// 3. 若识别到任务意图，则把 Phase 切到 planning / waiting_confirm / executing 对应阶段。
 	// 4. 若本轮是恢复请求，则这里只负责吞掉用户最新输入并准备恢复，不再重复输出闲聊回复。
+	// 5. 后续 chatNode 可直接读取 st.Request.UserInput、st.ConversationContext 与 st.Deps.ResolveChatClient()。
 	return st, nil
 }
 
-func planNode(_ context.Context, st *newagentmodel.AgentRuntimeState) (*newagentmodel.AgentRuntimeState, error) {
-	if st == nil {
-		return nil, errors.New("plan node: state is nil")
-	}
-	st.EnsureCommonState()
-
-	// TODO:
-	// 1. 每轮把“完整 plan + 当前步骤 + 置顶上下文”注入给 LLM，让模型只补一步规划。
-	// 2. 若缺少关键信息，则调用 st.OpenAskUserInteraction(...) 打开 ask_user 中断。
-	// 3. 若规划已经完整，则调用 st.FinishPlan(steps)，把流程切到 waiting_confirm。
-	// 4. 若规划未完成，则保持 PhasePlanning，分支回到 plan 继续循环。
-	return st, nil
-}
-
-func confirmNode(_ context.Context, st *newagentmodel.AgentRuntimeState) (*newagentmodel.AgentRuntimeState, error) {
+func confirmNode(_ context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
 	if st == nil {
 		return nil, errors.New("confirm node: state is nil")
 	}
-	st.EnsureCommonState()
+	st.EnsureFlowState()
+	st.EnsureConversationContext()
+	st.EnsureChunkEmitter()
 
 	// TODO:
 	// 1. 这里不再做“confirm 节点内自循环等待”，而是统一走中断恢复模式。
@@ -171,14 +165,18 @@ func confirmNode(_ context.Context, st *newagentmodel.AgentRuntimeState) (*newag
 	return st, nil
 }
 
-func executeNode(_ context.Context, st *newagentmodel.AgentRuntimeState) (*newagentmodel.AgentRuntimeState, error) {
+func executeNode(_ context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
 	if st == nil {
 		return nil, errors.New("execute node: state is nil")
 	}
-	flowState := st.EnsureCommonState()
+	flowState := st.EnsureFlowState()
+	st.EnsureConversationContext()
+	st.EnsureChunkEmitter()
 
 	// TODO:
 	// 1. 让 LLM 在“当前步骤”约束下做一轮 ReAct：思考 → 调工具/观察 → reflection。
+	// 1.1 执行阶段所需上下文应直接从 st.ConversationContext 读取。
+	// 1.2 执行阶段模型依赖应通过 st.Deps.ResolveExecuteClient() 获取。
 	// 2. 若执行中发现缺少关键用户信息，则调用 st.OpenAskUserInteraction(...) 并走 interrupt。
 	// 3. 若命中写工具确认闸门：
 	//    3.1 若走同连接确认，则把 Phase 置为 waiting_confirm 并跳到 confirm；
@@ -188,11 +186,13 @@ func executeNode(_ context.Context, st *newagentmodel.AgentRuntimeState) (*newag
 	return st, nil
 }
 
-func interruptNode(_ context.Context, st *newagentmodel.AgentRuntimeState) (*newagentmodel.AgentRuntimeState, error) {
+func interruptNode(_ context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
 	if st == nil {
 		return nil, errors.New("interrupt node: state is nil")
 	}
-	st.EnsureCommonState()
+	st.EnsureFlowState()
+	st.EnsureConversationContext()
+	st.EnsureChunkEmitter()
 
 	// TODO:
 	// 1. 若 PendingInteraction.Type=ask_user，则像普通聊天一样流式吐出问题文本。
@@ -202,11 +202,13 @@ func interruptNode(_ context.Context, st *newagentmodel.AgentRuntimeState) (*new
 	return st, nil
 }
 
-func deliverNode(_ context.Context, st *newagentmodel.AgentRuntimeState) (*newagentmodel.AgentRuntimeState, error) {
+func deliverNode(_ context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
 	if st == nil {
 		return nil, errors.New("deliver node: state is nil")
 	}
-	flowState := st.EnsureCommonState()
+	flowState := st.EnsureFlowState()
+	st.EnsureConversationContext()
+	st.EnsureChunkEmitter()
 
 	// TODO: 将执行结果推给用户，并在所有外部落库完成后再标记 done。
 	flowState.Done()
@@ -215,12 +217,12 @@ func deliverNode(_ context.Context, st *newagentmodel.AgentRuntimeState) (*newag
 
 // --- 分支函数 ---
 
-func branchAfterChat(_ context.Context, st *newagentmodel.AgentRuntimeState) (string, error) {
+func branchAfterChat(_ context.Context, st *newagentmodel.AgentGraphState) (string, error) {
 	if nextNode, interrupted := branchIfInterrupted(st); interrupted {
 		return nextNode, nil
 	}
 
-	flowState := st.EnsureCommonState()
+	flowState := st.EnsureFlowState()
 	switch flowState.Phase {
 	case newagentmodel.PhasePlanning:
 		return NodePlan, nil
@@ -236,24 +238,24 @@ func branchAfterChat(_ context.Context, st *newagentmodel.AgentRuntimeState) (st
 	}
 }
 
-func branchAfterPlan(_ context.Context, st *newagentmodel.AgentRuntimeState) (string, error) {
+func branchAfterPlan(_ context.Context, st *newagentmodel.AgentGraphState) (string, error) {
 	if nextNode, interrupted := branchIfInterrupted(st); interrupted {
 		return nextNode, nil
 	}
 
-	flowState := st.EnsureCommonState()
+	flowState := st.EnsureFlowState()
 	if flowState.Phase == newagentmodel.PhaseWaitingConfirm {
 		return NodeConfirm, nil
 	}
 	return NodePlan, nil
 }
 
-func branchAfterConfirm(_ context.Context, st *newagentmodel.AgentRuntimeState) (string, error) {
+func branchAfterConfirm(_ context.Context, st *newagentmodel.AgentGraphState) (string, error) {
 	if nextNode, interrupted := branchIfInterrupted(st); interrupted {
 		return nextNode, nil
 	}
 
-	flowState := st.EnsureCommonState()
+	flowState := st.EnsureFlowState()
 	switch flowState.Phase {
 	case newagentmodel.PhaseExecuting:
 		return NodeExecute, nil
@@ -266,12 +268,12 @@ func branchAfterConfirm(_ context.Context, st *newagentmodel.AgentRuntimeState) 
 	}
 }
 
-func branchAfterExecute(_ context.Context, st *newagentmodel.AgentRuntimeState) (string, error) {
+func branchAfterExecute(_ context.Context, st *newagentmodel.AgentGraphState) (string, error) {
 	if nextNode, interrupted := branchIfInterrupted(st); interrupted {
 		return nextNode, nil
 	}
 
-	flowState := st.EnsureCommonState()
+	flowState := st.EnsureFlowState()
 	if flowState.Phase == newagentmodel.PhaseWaitingConfirm {
 		return NodeConfirm, nil
 	}
@@ -281,11 +283,12 @@ func branchAfterExecute(_ context.Context, st *newagentmodel.AgentRuntimeState) 
 	return NodeExecute, nil
 }
 
-func branchIfInterrupted(st *newagentmodel.AgentRuntimeState) (string, bool) {
+func branchIfInterrupted(st *newagentmodel.AgentGraphState) (string, bool) {
 	if st == nil {
 		return "", false
 	}
-	if st.HasPendingInteraction() {
+	runtimeState := st.EnsureRuntimeState()
+	if runtimeState != nil && runtimeState.HasPendingInteraction() {
 		return NodeInterrupt, true
 	}
 	return "", false

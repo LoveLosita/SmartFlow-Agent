@@ -1,6 +1,6 @@
 package model
 
-// Phase 表示 agent 循环图当前所处的阶段。
+// Phase 表示 agent 主循环当前所处的大阶段。
 type Phase string
 
 const (
@@ -12,8 +12,14 @@ const (
 
 const DefaultMaxRounds = 30
 
+// CommonState 承载可持久化的主流程状态。
+//
+// 职责边界：
+// 1. 负责记录“当前处于哪个阶段、当前计划是什么、执行到了第几步、已经消耗了多少轮”；
+// 2. 负责提供最小必要的安全访问方法，避免 graph/node/prompt 层到处手写切片越界判断；
+// 3. 不负责承载对话历史、tool schema、pinned context 这类模型输入材料，它们仍然属于 ConversationContext。
 type CommonState struct {
-	// 身份
+	// 身份信息
 	TraceID        string
 	UserID         int
 	ConversationID string
@@ -21,8 +27,10 @@ type CommonState struct {
 	// 流程阶段
 	Phase Phase
 
-	// Plan
-	PlanSteps   []string
+	// 计划状态
+	// 1. 这里直接使用结构化的 PlanStep，避免 planning -> execute 之间丢失 done_when。
+	// 2. CurrentStep 表示“当前 plan 步骤下标”，不是 execute 内部 ReAct 的思考轮次。
+	PlanSteps   []PlanStep
 	CurrentStep int
 
 	// 安全边界
@@ -40,53 +48,58 @@ func NewCommonState(traceID string, userID int, conversationID string) *CommonSt
 	}
 }
 
-// NextRound 消耗一轮并返回是否还有余量。
+// NextRound 消耗一轮预算，并返回当前是否仍在允许范围内。
 func (s *CommonState) NextRound() bool {
 	s.RoundUsed++
 	return s.RoundUsed <= s.MaxRounds
 }
 
-// Exhausted 判断是否已耗尽轮次。
+// Exhausted 判断是否已经耗尽轮次预算。
 func (s *CommonState) Exhausted() bool {
 	return s.RoundUsed >= s.MaxRounds
 }
 
-// FinishPlan 标记 plan 完成，进入等待确认阶段。
-func (s *CommonState) FinishPlan(steps []string) {
+// FinishPlan 在 planning 完成后固化完整计划，并推进到待确认阶段。
+//
+// 步骤说明：
+// 1. 直接保存完整的 []PlanStep，避免 execute 阶段再去依赖 pinned context 回捞完成判定；
+// 2. 统一把 CurrentStep 重置到第 0 步，保证后续 confirm/execute 都从计划开头进入；
+// 3. 这里只负责状态切换，不负责刷新 ConversationContext 中的置顶 plan 文本。
+func (s *CommonState) FinishPlan(steps []PlanStep) {
 	s.PlanSteps = steps
 	s.CurrentStep = 0
 	s.Phase = PhaseWaitingConfirm
 }
 
-// ConfirmPlan 用户确认后进入执行阶段。
+// ConfirmPlan 表示用户已确认计划，流程进入执行阶段。
 func (s *CommonState) ConfirmPlan() {
 	s.Phase = PhaseExecuting
 }
 
-// RejectPlan 用户拒绝，回到规划阶段。
+// RejectPlan 表示用户拒绝当前计划，清空计划并回退到 planning。
 func (s *CommonState) RejectPlan() {
 	s.PlanSteps = nil
 	s.CurrentStep = 0
 	s.Phase = PhasePlanning
 }
 
-// AdvanceStep 推进到下一个 plan 步骤，返回是否还有剩余步骤。
+// AdvanceStep 推进到下一个计划步骤，并返回是否仍有剩余步骤。
 func (s *CommonState) AdvanceStep() bool {
 	s.CurrentStep++
 	return s.CurrentStep < len(s.PlanSteps)
 }
 
-// Done 标记整个流程结束。
+// Done 标记整个任务流程已经结束。
 func (s *CommonState) Done() {
 	s.Phase = PhaseDone
 }
 
-// HasPlan 判断当前 state 是否已经持有一份可执行的 plan。
+// HasPlan 判断当前 state 是否已经持有一份完整计划。
 //
 // 职责边界：
-// 1. 负责把“外部直接判断 len(PlanSteps) > 0”的零散逻辑收口到 state 内部；
-// 2. 只回答“是否存在 plan”，不判断当前索引是否有效；
-// 3. 当 state 为空时返回 false，调用方可据此决定是否回退到重新规划。
+// 1. 负责收口“是否存在 plan”这一层判断，避免外层到处写 len(PlanSteps) > 0；
+// 2. 不判断 CurrentStep 当前是否有效，当前步骤是否合法由 HasCurrentPlanStep 回答；
+// 3. state 为空时统一返回 false，调用方可据此决定是否回退到 planning。
 func (s *CommonState) HasPlan() bool {
 	if s == nil {
 		return false
@@ -94,40 +107,35 @@ func (s *CommonState) HasPlan() bool {
 	return len(s.PlanSteps) > 0
 }
 
-// CurrentPlanStep 返回当前正在执行的 plan 步骤文本。
+// CurrentPlanStep 返回当前正在执行的结构化计划步骤。
 //
 // 职责边界：
-// 1. 负责根据 CurrentStep 安全读取 PlanSteps，避免调用方重复写切片越界判断；
-// 2. 当 state 为空、plan 为空、或当前索引越界时，统一返回 ("", false)；
+// 1. 负责根据 CurrentStep 安全读取 PlanSteps，避免 graph/node/prompt 层重复写越界判断；
+// 2. 若 state 为空、plan 为空、或当前索引越界，则统一返回 (PlanStep{}, false)；
 // 3. 不负责推进步骤，也不负责修正 CurrentStep 的取值。
-func (s *CommonState) CurrentPlanStep() (string, bool) {
+func (s *CommonState) CurrentPlanStep() (PlanStep, bool) {
 	if s == nil {
-		return "", false
+		return PlanStep{}, false
 	}
 	if s.CurrentStep < 0 || s.CurrentStep >= len(s.PlanSteps) {
-		return "", false
+		return PlanStep{}, false
 	}
 	return s.PlanSteps[s.CurrentStep], true
 }
 
 // HasCurrentPlanStep 判断“当前步骤”是否存在且可安全读取。
-//
-// 职责边界：
-// 1. 负责给 graph / node 层提供一个更直白的布尔判断入口；
-// 2. 内部复用 CurrentPlanStep，避免两处维护相同的索引边界逻辑；
-// 3. 不返回步骤内容，只回答“当前是否还有可注入的步骤”。
 func (s *CommonState) HasCurrentPlanStep() bool {
 	_, ok := s.CurrentPlanStep()
 	return ok
 }
 
-// PlanProgress 返回当前 plan 的执行进度。
+// PlanProgress 返回当前计划的执行进度。
 //
 // 输出语义：
-// 1. current 使用对人类更友好的 1-based 序号，适合直接写入 prompt 或日志；
-// 2. total 表示当前 plan 总步数；
-// 3. 若尚未生成 plan，则返回 (0, 0)；
-// 4. 若 CurrentStep 已越过末尾，则 current 会被收敛到 total，避免上层出现 total+1 这类噪音值。
+// 1. current 使用更适合给用户看的 1-based 序号；
+// 2. total 表示当前计划的总步数；
+// 3. 若当前还没有计划，则返回 (0, 0)；
+// 4. 若 CurrentStep 已越界到末尾之后，则把 current 收敛到 total，避免出现 total+1 这种噪音值。
 func (s *CommonState) PlanProgress() (current int, total int) {
 	if s == nil {
 		return 0, 0
