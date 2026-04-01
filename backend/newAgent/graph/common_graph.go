@@ -35,7 +35,7 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	g := compose.NewGraph[*newagentmodel.AgentGraphState, *newagentmodel.AgentGraphState]()
 
 	// --- 注册节点 ---
-	if err := g.AddLambdaNode(NodeChat, compose.InvokableLambda(chatNode)); err != nil {
+	if err := g.AddLambdaNode(NodeChat, compose.InvokableLambda(nodes.Chat)); err != nil {
 		return nil, err
 	}
 	if err := g.AddLambdaNode(NodePlan, compose.InvokableLambda(nodes.Plan)); err != nil {
@@ -44,7 +44,7 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	if err := g.AddLambdaNode(NodeConfirm, compose.InvokableLambda(confirmNode)); err != nil {
 		return nil, err
 	}
-	if err := g.AddLambdaNode(NodeExecute, compose.InvokableLambda(executeNode)); err != nil {
+	if err := g.AddLambdaNode(NodeExecute, compose.InvokableLambda(nodes.Execute)); err != nil {
 		return nil, err
 	}
 	if err := g.AddLambdaNode(NodeInterrupt, compose.InvokableLambda(interruptNode)); err != nil {
@@ -56,11 +56,11 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 
 	// --- 连边 ---
 	// 1. 所有请求统一先过 chat 入口，这样普通聊天、首次任务、恢复执行都走同一入口。
-	// 2. chat 不再负责旧式“多业务图路由”，只负责决定后续应该进入哪个统一节点。
+	// 2. chat 不再负责旧式多业务图路由，只负责决定后续应该进入哪个统一节点。
 	if err := g.AddEdge(compose.START, NodeChat); err != nil {
 		return nil, err
 	}
-	// Chat → END(普通聊天) / Plan / Confirm / Execute / Deliver / Interrupt
+	// Chat -> END(普通聊天) / Plan / Confirm / Execute / Deliver / Interrupt
 	if err := g.AddBranch(NodeChat, compose.NewGraphBranch(
 		branchAfterChat,
 		map[string]bool{
@@ -74,7 +74,7 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	)); err != nil {
 		return nil, err
 	}
-	// Plan → Plan(继续规划) / Confirm(规划完成) / Interrupt(需要追问用户)
+	// Plan -> Plan(继续规划) / Confirm(规划完成) / Interrupt(需要追问用户)
 	if err := g.AddBranch(NodePlan, compose.NewGraphBranch(
 		branchAfterPlan,
 		map[string]bool{
@@ -85,7 +85,7 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	)); err != nil {
 		return nil, err
 	}
-	// Confirm → Plan(用户拒绝或重规划) / Execute(确认后继续执行) / Interrupt(产出确认中断并等待外部回调)
+	// Confirm -> Plan(用户拒绝或重规划) / Execute(确认后继续执行) / Interrupt(产出确认中断并等待外部回调)
 	if err := g.AddBranch(NodeConfirm, compose.NewGraphBranch(
 		branchAfterConfirm,
 		map[string]bool{
@@ -96,7 +96,7 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	)); err != nil {
 		return nil, err
 	}
-	// Execute → Execute(继续 ReAct) / Confirm(写操作待确认) / Deliver(完成) / Interrupt(需要追问用户)
+	// Execute -> Execute(继续 ReAct) / Confirm(写操作待确认) / Deliver(完成) / Interrupt(需要追问用户)
 	if err := g.AddBranch(NodeExecute, compose.NewGraphBranch(
 		branchAfterExecute,
 		map[string]bool{
@@ -108,11 +108,11 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	)); err != nil {
 		return nil, err
 	}
-	// Interrupt → END：当前连接必须在这里收口，等待用户输入或确认回调恢复。
+	// Interrupt -> END：当前连接必须在这里收口，等待用户输入或确认回调恢复。
 	if err := g.AddEdge(NodeInterrupt, compose.END); err != nil {
 		return nil, err
 	}
-	// Deliver → END
+	// Deliver -> END
 	if err := g.AddEdge(NodeDeliver, compose.END); err != nil {
 		return nil, err
 	}
@@ -132,23 +132,6 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 
 // --- 占位节点，后续逐步由 node 层替换 ---
 
-func chatNode(_ context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
-	if st == nil {
-		return nil, errors.New("chat node: state is nil")
-	}
-	st.EnsureFlowState()
-	st.EnsureConversationContext()
-	st.EnsureChunkEmitter()
-
-	// TODO:
-	// 1. 识别当前请求是普通聊天、首次任务进入，还是从 pending interaction 恢复。
-	// 2. 若只是普通聊天，则生成回复并把 Phase 设为 PhaseChatting，后续直接 END。
-	// 3. 若识别到任务意图，则把 Phase 切到 planning / waiting_confirm / executing 对应阶段。
-	// 4. 若本轮是恢复请求，则这里只负责吞掉用户最新输入并准备恢复，不再重复输出闲聊回复。
-	// 5. 后续 chatNode 可直接读取 st.Request.UserInput、st.ConversationContext 与 st.Deps.ResolveChatClient()。
-	return st, nil
-}
-
 func confirmNode(_ context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
 	if st == nil {
 		return nil, errors.New("confirm node: state is nil")
@@ -158,31 +141,10 @@ func confirmNode(_ context.Context, st *newagentmodel.AgentGraphState) (*newagen
 	st.EnsureChunkEmitter()
 
 	// TODO:
-	// 1. 这里不再做“confirm 节点内自循环等待”，而是统一走中断恢复模式。
+	// 1. 这里不再做 confirm 节点内自循环等待，而是统一走中断恢复模式。
 	// 2. 节点职责是生成确认事件、固化待执行工具快照，并调用 st.OpenConfirmInteraction(...)。
 	// 3. 当前连接随后会流向 interrupt 节点收口；用户确认/取消后，由外部回调恢复到 executing 或 planning。
 	// 4. 这里不要直接执行写工具，必须先把待执行工具调用固化为 pending snapshot。
-	return st, nil
-}
-
-func executeNode(_ context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
-	if st == nil {
-		return nil, errors.New("execute node: state is nil")
-	}
-	flowState := st.EnsureFlowState()
-	st.EnsureConversationContext()
-	st.EnsureChunkEmitter()
-
-	// TODO:
-	// 1. 让 LLM 在“当前步骤”约束下做一轮 ReAct：思考 → 调工具/观察 → reflection。
-	// 1.1 执行阶段所需上下文应直接从 st.ConversationContext 读取。
-	// 1.2 执行阶段模型依赖应通过 st.Deps.ResolveExecuteClient() 获取。
-	// 2. 若执行中发现缺少关键用户信息，则调用 st.OpenAskUserInteraction(...) 并走 interrupt。
-	// 3. 若命中写工具确认闸门：
-	//    3.1 若走同连接确认，则把 Phase 置为 waiting_confirm 并跳到 confirm；
-	//    3.2 若走短连接恢复，则调用 st.OpenConfirmInteraction(...) 并走 interrupt。
-	// 4. 若当前步骤已完成，则由 node 层决定是 AdvanceStep() 继续，还是 Done() 进入交付。
-	flowState.NextRound()
 	return st, nil
 }
 

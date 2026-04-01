@@ -119,7 +119,20 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 		writePlanPinnedBlocks(conversationContext, decision.PlanSteps)
 		return nil
 	default:
-		return fmt.Errorf("未支持的规划动作: %s", decision.Action)
+		// 1. LLM 输出了不支持的 action，不应直接报错终止，而应给它修正机会。
+		// 2. 使用通用修正函数追加错误反馈，让 Graph 继续循环。
+		// 3. LLM 下一轮会看到错误反馈并修正自己的输出。
+		llmOutput := decision.Speak
+		if strings.TrimSpace(llmOutput) == "" {
+			llmOutput = decision.Reason
+		}
+		AppendLLMCorrectionWithHint(
+			conversationContext,
+			llmOutput,
+			fmt.Sprintf("你输出的 action \"%s\" 不是合法的执行动作。", decision.Action),
+			"合法的 action 包括：continue（继续当前步骤）、ask_user（追问用户）、next_plan（推进到下一步）、done（任务完成）。",
+		)
+		return nil
 	}
 }
 

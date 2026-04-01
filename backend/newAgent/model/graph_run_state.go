@@ -14,7 +14,8 @@ import (
 // 2. 不负责承载可持久化流程状态，流程状态仍归 AgentRuntimeState；
 // 3. 不负责承载 LLM / emitter / store 等依赖，这些统一放进 AgentGraphDeps。
 type AgentGraphRequest struct {
-	UserInput string
+	UserInput     string
+	ConfirmAction string // "accept" / "reject" / ""，仅 confirm 恢复场景由前端传入
 }
 
 // Normalize 统一清洗请求级输入中的字符串字段。
@@ -23,6 +24,7 @@ func (r *AgentGraphRequest) Normalize() {
 		return
 	}
 	r.UserInput = strings.TrimSpace(r.UserInput)
+	r.ConfirmAction = strings.TrimSpace(r.ConfirmAction)
 }
 
 // AgentGraphDeps 描述 graph/node 层运行时真正依赖的可插拔能力。
