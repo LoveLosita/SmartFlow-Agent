@@ -5,6 +5,20 @@ import (
 	"strings"
 )
 
+// PlanComplexity 表示规划阶段评估的任务复杂度。
+type PlanComplexity string
+
+const (
+	// PlanComplexitySimple 表示简单明确的操作，步骤之间无复杂依赖。
+	PlanComplexitySimple PlanComplexity = "simple"
+
+	// PlanComplexityModerate 表示多步操作，需要一定推理但不涉及深度分析。
+	PlanComplexityModerate PlanComplexity = "moderate"
+
+	// PlanComplexityComplex 表示需要深度推理、多方案比较或复杂依赖关系的任务。
+	PlanComplexityComplex PlanComplexity = "complex"
+)
+
 // PlanAction 表示规划阶段单轮决策的动作类型。
 //
 // 设计原则：
@@ -32,10 +46,12 @@ const (
 // 3. Reason 是给后端和日志看的简短解释；
 // 4. PlanSteps 只在 plan_done 时要求返回，表示本轮最终确认下来的完整自然语言计划。
 type PlanDecision struct {
-	Speak     string     `json:"speak,omitempty"`
-	Action    PlanAction `json:"action"`
-	Reason    string     `json:"reason,omitempty"`
-	PlanSteps []PlanStep `json:"plan_steps,omitempty"`
+	Speak        string         `json:"speak,omitempty"`
+	Action       PlanAction     `json:"action"`
+	Reason       string         `json:"reason,omitempty"`
+	Complexity   PlanComplexity `json:"complexity"`
+	NeedThinking bool           `json:"need_thinking"`
+	PlanSteps    []PlanStep     `json:"plan_steps,omitempty"`
 }
 
 // Normalize 统一清洗规划决策中的字符串字段。
@@ -46,6 +62,7 @@ func (d *PlanDecision) Normalize() {
 	d.Speak = strings.TrimSpace(d.Speak)
 	d.Action = PlanAction(strings.TrimSpace(string(d.Action)))
 	d.Reason = strings.TrimSpace(d.Reason)
+	d.Complexity = PlanComplexity(strings.TrimSpace(string(d.Complexity)))
 	for i := range d.PlanSteps {
 		d.PlanSteps[i].Normalize()
 	}
@@ -65,6 +82,16 @@ func (d *PlanDecision) Validate() error {
 	d.Normalize()
 	if d.Action == "" {
 		return fmt.Errorf("plan decision.action 不能为空")
+	}
+
+	// 复杂度兜底：未填写时默认 moderate，不因此拒绝整个决策。
+	switch d.Complexity {
+	case PlanComplexitySimple, PlanComplexityModerate, PlanComplexityComplex:
+		// ok
+	case "":
+		d.Complexity = PlanComplexityModerate
+	default:
+		return fmt.Errorf("未知 complexity: %s", d.Complexity)
 	}
 
 	switch d.Action {

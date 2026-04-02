@@ -38,10 +38,11 @@ const (
 // 3. Reason 是给后端和日志看的简短解释，不直接等价于完成证明；
 // 4. ToolCall 只是“意图”，不代表工具已经真正执行成功。
 type ExecuteDecision struct {
-	Speak    string          `json:"speak,omitempty"`
-	Action   ExecuteAction   `json:"action"`
-	Reason   string          `json:"reason,omitempty"`
-	ToolCall *ToolCallIntent `json:"tool_call,omitempty"`
+	Speak     string          `json:"speak,omitempty"`
+	Action    ExecuteAction   `json:"action"`
+	Reason    string          `json:"reason,omitempty"`
+	GoalCheck string          `json:"goal_check,omitempty"`
+	ToolCall  *ToolCallIntent `json:"tool_call,omitempty"`
 }
 
 // Normalize 统一清洗 execute 决策中的字符串字段。
@@ -52,6 +53,7 @@ func (d *ExecuteDecision) Normalize() {
 	d.Speak = strings.TrimSpace(d.Speak)
 	d.Action = ExecuteAction(strings.TrimSpace(string(d.Action)))
 	d.Reason = strings.TrimSpace(d.Reason)
+	d.GoalCheck = strings.TrimSpace(d.GoalCheck)
 	if d.ToolCall != nil {
 		d.ToolCall.Normalize()
 	}

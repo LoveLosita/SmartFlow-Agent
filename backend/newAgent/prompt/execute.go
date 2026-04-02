@@ -24,10 +24,11 @@ const executeSystemPrompt = `
 
 请遵守以下规则：
 1. 只围绕当前步骤行动，不要擅自跳到其他 plan 步骤。
-2. 只有当你确认当前步骤已经完成时，才输出 ` + "`" + `[NEXT_PLAN]` + "`" + `。
-3. 只有当你确认整个任务已经完成时，才输出 ` + "`" + `[DONE]` + "`" + `。
+2. 只有当你确认当前步骤已经完成时，才输出 ` + "`" + `[NEXT_PLAN]` + "`" + `，且必须在 goal_check 中逐条对照 done_when 说明完成依据。
+3. 只有当你确认整个任务已经完成时，才输出 ` + "`" + `[DONE]` + "`" + `，且必须在 goal_check 中总结整体完成证据。
 4. 如果执行当前步骤缺少关键上下文，且无法通过已有历史或工具补齐，可以输出 ` + "`" + `[ASK_USER]` + "`" + `。
 5. 不要伪造工具结果；如果尚未真正拿到观察结果，就不要假装已经完成。
+6. goal_check 是你输出 next_plan / done 时的强制字段，禁止为空；必须显式地逐条对照 done_when，说明"哪些条件已满足、依据是什么"。
 
 你会看到：
 - 当前完整 plan
@@ -72,13 +73,14 @@ func BuildExecuteUserPrompt(state *newagentmodel.CommonState) string {
 		sb.WriteString("2. 若当前步骤未完成，请继续思考-执行-观察循环。\n")
 		sb.WriteString("3. 若当前步骤已完成，请输出 ")
 		sb.WriteString(ExecuteNextPlanSignal)
-		sb.WriteString("。\n")
+		sb.WriteString("，并填写 goal_check 说明完成依据。\n")
 		sb.WriteString("4. 若整个任务已完成，请输出 ")
 		sb.WriteString(ExecuteDoneSignal)
-		sb.WriteString("。\n")
+		sb.WriteString("，并填写 goal_check 总结整体证据。\n")
 		sb.WriteString("5. 若缺少关键用户信息且现有上下文无法补足，请输出 ")
 		sb.WriteString(ExecuteAskUserSignal)
 		sb.WriteString("。\n")
+		sb.WriteString("6. 输出 next_plan 或 done 时，goal_check 不能为空，必须对照 done_when 逐条验证。\n")
 		sb.WriteString("\n当前步骤正文：\n")
 		sb.WriteString(strings.TrimSpace(currentStep.Content))
 		sb.WriteString("\n")

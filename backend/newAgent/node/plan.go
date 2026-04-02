@@ -38,13 +38,14 @@ type PlanNodeInput struct {
 // RunPlanNode 执行一轮规划节点逻辑。
 //
 // 步骤说明：
-//  1. 先校验最小依赖，并推送一条“正在规划”的状态，避免用户空等；
-//  2. 再用 prompt/plan.go 组装 messages，请模型严格输出 PlanDecision JSON；
-//  3. 若模型先对用户说了话，则先把 speak 伪流式推给前端，并写回 history；
-//  4. 最后按 action 推进流程：
-//     4.1 continue：继续停留在 planning；
-//     4.2 ask_user：打开 pending interaction，后续交给 interrupt 收口；
-//     4.3 plan_done：固化完整计划，刷新 pinned context，并进入 waiting_confirm。
+//  1. 先校验最小依赖，并推送一条”正在规划”的状态，避免用户空等；
+//  2. Phase 1（快速评估）：不开 thinking，让 LLM 同时产出复杂度评估和规划结果；
+//  3. Phase 2（深度规划）：若 LLM 自评需要深度思考且规划已完成，开 thinking 重跑；
+//  4. 若模型先对用户说了话，则先把 speak 伪流式推给前端，并写回 history；
+//  5. 最后按 action 推进流程：
+//     5.1 continue：继续停留在 planning；
+//     5.2 ask_user：打开 pending interaction，后续交给 interrupt 收口；
+//     5.3 plan_done：固化完整计划，刷新 pinned context，并进入 waiting_confirm。
 func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 	runtimeState, conversationContext, emitter, err := preparePlanNodeInput(input)
 	if err != nil {
@@ -63,8 +64,10 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 		return fmt.Errorf("规划阶段状态推送失败: %w", err)
 	}
 
-	// 2. 构造本轮规划输入，并要求模型输出结构化 PlanDecision。
+	// 2. 构造本轮规划输入。
 	messages := newagentprompt.BuildPlanMessages(flowState, conversationContext, input.UserInput)
+
+	// 3. Phase 1：快速评估（不开 thinking），让 LLM 同时产出复杂度评估和规划结果。
 	decision, rawResult, err := newagentllm.GenerateJSON[newagentmodel.PlanDecision](
 		ctx,
 		input.Client,
@@ -72,23 +75,60 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 		newagentllm.GenerateOptions{
 			Temperature: 0.2,
 			MaxTokens:   1600,
-			Thinking:    newagentllm.ThinkingModeEnabled,
+			Thinking:    newagentllm.ThinkingModeDisabled,
 			Metadata: map[string]any{
 				"stage": planStageName,
+				"phase": "assessment",
 			},
 		},
 	)
 	if err != nil {
 		if rawResult != nil && strings.TrimSpace(rawResult.Text) != "" {
-			return fmt.Errorf("规划输出解析失败，原始输出=%s，错误=%w", strings.TrimSpace(rawResult.Text), err)
+			return fmt.Errorf("规划评估解析失败，原始输出=%s，错误=%w", strings.TrimSpace(rawResult.Text), err)
 		}
-		return fmt.Errorf("规划阶段模型调用失败: %w", err)
+		return fmt.Errorf("规划评估阶段模型调用失败: %w", err)
 	}
 	if err := decision.Validate(); err != nil {
-		return fmt.Errorf("规划决策不合法: %w", err)
+		return fmt.Errorf("规划评估决策不合法: %w", err)
 	}
 
-	// 3. 若模型先对用户说了话，则先以伪流式推送，再写回 history，保证上下文连续。
+	// 4. Phase 2：若 LLM 自评需要深度思考且本轮规划已完成，则开启 thinking 重跑。
+	//    条件：NeedThinking=true + Action=plan_done → 说明 LLM 认为当前无 thinking 的计划质量不够。
+	//    其他 action（continue / ask_user）不需要 thinking，直接用 Phase 1 结果。
+	if decision.NeedThinking && decision.Action == newagentmodel.PlanActionDone {
+		if err := emitter.EmitStatus(
+			planStatusBlockID,
+			planStageName,
+			"deep_planning",
+			"正在深入思考，生成更完善的计划。",
+			false,
+		); err != nil {
+			return fmt.Errorf("深度规划状态推送失败: %w", err)
+		}
+
+		deepDecision, _, deepErr := newagentllm.GenerateJSON[newagentmodel.PlanDecision](
+			ctx,
+			input.Client,
+			messages,
+			newagentllm.GenerateOptions{
+				Temperature: 0.2,
+				MaxTokens:   3200,
+				Thinking:    newagentllm.ThinkingModeEnabled,
+				Metadata: map[string]any{
+					"stage": planStageName,
+					"phase": "deep_planning",
+				},
+			},
+		)
+		if deepErr == nil && deepDecision != nil {
+			if validateErr := deepDecision.Validate(); validateErr == nil {
+				decision = deepDecision
+			}
+		}
+		// 深度规划失败时静默降级到 Phase 1 结果，不中断流程。
+	}
+
+	// 5. 若模型先对用户说了话，则先以伪流式推送，再写回 history，保证上下文连续。
 	if strings.TrimSpace(decision.Speak) != "" {
 		if err := emitter.EmitPseudoAssistantText(
 			ctx,
@@ -102,7 +142,7 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 		conversationContext.AppendHistory(schema.AssistantMessage(decision.Speak, nil))
 	}
 
-	// 4. 按规划动作推进流程状态。
+	// 6. 按规划动作推进流程状态。
 	switch decision.Action {
 	case newagentmodel.PlanActionContinue:
 		flowState.Phase = newagentmodel.PhasePlanning

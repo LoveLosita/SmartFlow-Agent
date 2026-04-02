@@ -131,6 +131,20 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		return fmt.Errorf("执行决策不合法: %w", err)
 	}
 
+	// 自省校验：next_plan / done 必须附带 goal_check，否则不推进，追加修正让 LLM 重试。
+	if decision.Action == newagentmodel.ExecuteActionNextPlan ||
+		decision.Action == newagentmodel.ExecuteActionDone {
+		if strings.TrimSpace(decision.GoalCheck) == "" {
+			AppendLLMCorrectionWithHint(
+				conversationContext,
+				decision.Speak,
+				fmt.Sprintf("你输出了 action=%s，但 goal_check 为空。", decision.Action),
+				fmt.Sprintf("输出 %s 时，必须在 goal_check 中对照 done_when 逐条说明完成依据。", decision.Action),
+			)
+			return nil
+		}
+	}
+
 	// 6. 若 LLM 先对用户说话，则伪流式推送并写回历史。
 	if strings.TrimSpace(decision.Speak) != "" {
 		if err := emitter.EmitPseudoAssistantText(
