@@ -525,3 +525,82 @@ func (d *CacheDAO) DeleteConversationHistoryFromCache(ctx context.Context, userI
 	}
 	return d.client.Del(ctx, d.conversationHistoryKey(userID, normalizedConversationID)).Err()
 }
+
+// agentStateKey 返回 agent 运行态快照的 Redis key。
+//
+// Key 设计：
+// 1. 使用 smartflow:agent_state 前缀，与现有 key 命名空间隔离；
+// 2. 使用 conversationID 作为唯一标识，因为 agent 状态是按会话维度持久化的。
+func (d *CacheDAO) agentStateKey(conversationID string) string {
+	return fmt.Sprintf("smartflow:agent_state:%s", conversationID)
+}
+
+// SaveAgentState 序列化并保存 agent 运行态快照到 Redis。
+//
+// 职责边界：
+// 1. 只负责 JSON 序列化 + Redis SET，不做业务校验；
+// 2. TTL 默认 24h，过期自动清理，避免已完成任务的快照堆积；
+// 3. snapshot 为 nil 时直接返回，避免写入无效数据。
+func (d *CacheDAO) SaveAgentState(ctx context.Context, conversationID string, snapshot any) error {
+	if d == nil || d.client == nil {
+		return errors.New("cache dao is not initialized")
+	}
+	normalizedID := strings.TrimSpace(conversationID)
+	if normalizedID == "" {
+		return errors.New("conversation_id is empty")
+	}
+	if snapshot == nil {
+		return nil
+	}
+
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("marshal agent state failed: %w", err)
+	}
+	return d.client.Set(ctx, d.agentStateKey(normalizedID), data, 24*time.Hour).Err()
+}
+
+// LoadAgentState 从 Redis 读取并反序列化 agent 运行态快照。
+//
+// 返回值语义：
+// 1. (result, true, nil)：命中快照，正常返回；
+// 2. (nil, false, nil)：未命中，不是错误，调用方应走新建对话路径；
+// 3. (nil, false, error)：Redis 或反序列化错误。
+func (d *CacheDAO) LoadAgentState(ctx context.Context, conversationID string, result any) (bool, error) {
+	if d == nil || d.client == nil {
+		return false, errors.New("cache dao is not initialized")
+	}
+	normalizedID := strings.TrimSpace(conversationID)
+	if normalizedID == "" {
+		return false, errors.New("conversation_id is empty")
+	}
+
+	raw, err := d.client.Get(ctx, d.agentStateKey(normalizedID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	if err := json.Unmarshal([]byte(raw), result); err != nil {
+		return false, fmt.Errorf("unmarshal agent state failed: %w", err)
+	}
+	return true, nil
+}
+
+// DeleteAgentState 删除指定会话的 agent 运行态快照。
+//
+// 语义：
+// 1. 删除操作是幂等的，key 不存在也视为成功；
+// 2. 典型调用时机：Deliver 节点任务完成后清理。
+func (d *CacheDAO) DeleteAgentState(ctx context.Context, conversationID string) error {
+	if d == nil || d.client == nil {
+		return errors.New("cache dao is not initialized")
+	}
+	normalizedID := strings.TrimSpace(conversationID)
+	if normalizedID == "" {
+		return errors.New("conversation_id is empty")
+	}
+	return d.client.Del(ctx, d.agentStateKey(normalizedID)).Err()
+}

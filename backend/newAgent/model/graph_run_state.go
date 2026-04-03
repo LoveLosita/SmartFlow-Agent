@@ -39,6 +39,7 @@ type AgentGraphDeps struct {
 	ExecuteClient *newagentllm.Client
 	DeliverClient *newagentllm.Client
 	ChunkEmitter  *newagentstream.ChunkEmitter
+	StateStore    AgentStateStore
 }
 
 // EnsureChunkEmitter 保证 graph 运行时始终有一个可用的 chunk 发射器。

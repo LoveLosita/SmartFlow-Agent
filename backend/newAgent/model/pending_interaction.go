@@ -6,7 +6,7 @@ const (
 	// PhaseChatting 表示当前请求只需正常聊天，不进入 plan / execute 主链路。
 	PhaseChatting Phase = "chatting"
 
-	// PhaseInterrupted 表示本轮执行被“待用户交互”显式打断，当前连接应结束并等待恢复。
+	// PhaseInterrupted 表示本轮执行被"待用户交互"显式打断，当前连接应结束并等待恢复。
 	PhaseInterrupted Phase = "interrupted"
 )
 
@@ -30,49 +30,52 @@ const (
 	PendingInteractionStatusCanceled PendingInteractionStatus = "canceled"
 )
 
-// PendingToolCallSnapshot 保存“待确认工具调用”的最小快照。
+// PendingToolCallSnapshot 保存"待确认工具调用"的最小快照。
 //
 // 职责边界：
 // 1. 负责保存真正落库 / 落缓存恢复执行所需的最小信息；
 // 2. ArgsJSON 约定存已经序列化好的参数快照，避免此处反向依赖具体 tool 参数结构；
 // 3. 不负责工具执行，不负责幂等校验，不负责回滚。
 type PendingToolCallSnapshot struct {
-	ToolName string
-	ArgsJSON string
-	Summary  string
+	ToolName string `json:"tool_name"`
+	ArgsJSON string `json:"args_json"`
+	Summary  string `json:"summary"`
 }
 
-// PendingInteraction 保存“本轮需要中断并等待用户后续动作”的交互快照。
+// PendingInteraction 保存"本轮需要中断并等待用户后续动作"的交互快照。
 //
 // 设计目的：
 // 1. ask_user 与 confirm 都不是业务 tool，而是流程级中断，所以单独建模；
 // 2. ResumeNode / ResumePhase / ResumeStep 用来记录恢复点，避免用户回答后整条链路从头乱跑；
 // 3. 该结构设计成可被 Redis + MySQL 直接存储的快照骨架，后续只需要补序列化与持久化接线。
 //
-// TODO(newagent/store): 后续把该结构整体快照到 Redis + MySQL，形成双保险恢复点。
-// TODO(newagent/api): 后续由“用户追问回复接口 / 确认回调接口”读取这份快照并恢复运行。
+// TODO(newagent/api): 后续由"用户追问回复接口 / 确认回调接口"读取这份快照并恢复运行。
 type PendingInteraction struct {
-	Version       int
-	InteractionID string
-	Type          PendingInteractionType
-	Status        PendingInteractionStatus
-	DisplayText   string
-	ResumeNode    string
-	ResumePhase   Phase
-	ResumeStep    int
-	PendingTool   *PendingToolCallSnapshot
-	Metadata      map[string]any
+	Version       int                      `json:"version"`
+	InteractionID string                   `json:"interaction_id"`
+	Type          PendingInteractionType   `json:"type"`
+	Status        PendingInteractionStatus `json:"status"`
+	DisplayText   string                   `json:"display_text"`
+	ResumeNode    string                   `json:"resume_node"`
+	ResumePhase   Phase                    `json:"resume_phase"`
+	ResumeStep    int                      `json:"resume_step"`
+	PendingTool   *PendingToolCallSnapshot `json:"pending_tool,omitempty"`
+	Metadata      map[string]any           `json:"metadata,omitempty"`
 }
 
 // AgentRuntimeState 是 graph 运行时真正流转的状态容器。
 //
 // 职责边界：
 // 1. CommonState 继续只负责主流程控制；
-// 2. PendingInteraction 负责承载“需要中断后恢复”的交互快照；
+// 2. PendingInteraction 负责承载"需要中断后恢复"的交互快照；
 // 3. 这样既不污染 CommonState 的职责，又能让 graph 在一次入参里拿到完整运行态。
 type AgentRuntimeState struct {
-	*CommonState
-	PendingInteraction *PendingInteraction
+	*CommonState `json:"common_state"`
+	// PendingInteraction 承载挂起交互的持久化快照。
+	PendingInteraction *PendingInteraction `json:"pending_interaction,omitempty"`
+	// PendingConfirmTool 是 Execute → Confirm 之间传递待确认工具信息的临时邮箱。
+	// Execute 节点写入，Confirm 节点读出并清空，不参与持久化。
+	PendingConfirmTool *PendingToolCallSnapshot `json:"-"`
 }
 
 // NewAgentRuntimeState 创建 graph 运行态。
@@ -120,7 +123,7 @@ func (s *AgentRuntimeState) PendingInteractionType() PendingInteractionType {
 	return s.PendingInteraction.Type
 }
 
-// OpenAskUserInteraction 打开一个“向用户追问”的中断快照。
+// OpenAskUserInteraction 打开一个"向用户追问"的中断快照。
 func (s *AgentRuntimeState) OpenAskUserInteraction(interactionID, question, resumeNode string) {
 	s.openPendingInteraction(
 		PendingInteractionTypeAskUser,
@@ -131,7 +134,7 @@ func (s *AgentRuntimeState) OpenAskUserInteraction(interactionID, question, resu
 	)
 }
 
-// OpenConfirmInteraction 打开一个“写操作待确认”的中断快照。
+// OpenConfirmInteraction 打开一个"写操作待确认"的中断快照。
 func (s *AgentRuntimeState) OpenConfirmInteraction(interactionID, confirmText, resumeNode string, pendingTool *PendingToolCallSnapshot) {
 	s.openPendingInteraction(
 		PendingInteractionTypeConfirm,
@@ -166,7 +169,7 @@ func (s *AgentRuntimeState) ResumeFromPending() bool {
 //
 // 职责边界：
 // 1. 仅负责粗暴清空快照；
-// 2. 不自动恢复 phase / step，避免误把“取消交互”与“恢复执行”混为一谈；
+// 2. 不自动恢复 phase / step，避免误把"取消交互"与"恢复执行"混为一谈；
 // 3. 若需要恢复流程，应优先使用 ResumeFromPending。
 func (s *AgentRuntimeState) ClearPendingInteraction() {
 	if s == nil || s.PendingInteraction == nil {
@@ -207,7 +210,7 @@ func (s *AgentRuntimeState) openPendingInteraction(
 
 	// 1. 一旦进入 pending 状态，当前连接上的 graph 应立即停止向后执行。
 	// 2. 这里先统一把 Phase 置为 interrupted，后续恢复时再按快照写回原阶段。
-	// 3. 这样分支函数只需要判断 HasPendingInteraction()，无需猜测“当前 phase 是否仍可信”。
+	// 3. 这样分支函数只需要判断 HasPendingInteraction()，无需猜测"当前 phase 是否仍可信"。
 	flowState.Phase = PhaseInterrupted
 }
 

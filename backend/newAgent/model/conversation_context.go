@@ -6,45 +6,42 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// ConversationContext 承载“本轮要喂给模型的输入材料”。
+// ConversationContext 承载"本轮要喂给模型的输入材料"。
 //
 // 职责边界：
 // 1. 负责保存 system prompt、对话历史、置顶注入块、工具 schema 摘要；
 // 2. 负责提供最小必要的安全访问方法，避免 node / prompt 层直接散落切片操作；
 // 3. 不负责流程推进，phase / round / current step 仍归 CommonState 管；
 // 4. 不负责真正的 prompt 组装，消息如何拼接仍应放在 prompt 层处理。
-//
-// TODO(newagent/prompt): 后续由 plan / execute 的 prompt builder 读取这里的数据，组装真正发给 LLM 的 messages。
-// TODO(newagent/node): 后续 planNode / executeNode 只通过这里的访问方法读写上下文，避免多处直接改切片。
 type ConversationContext struct {
-	SystemPrompt string
-	History      []*schema.Message
-	PinnedBlocks []ContextBlock
-	ToolSchemas  []ToolSchemaContext
+	SystemPrompt string              `json:"system_prompt"`
+	History      []*schema.Message   `json:"history"`
+	PinnedBlocks []ContextBlock      `json:"pinned_blocks"`
+	ToolSchemas  []ToolSchemaContext `json:"-"` // 每次请求由 Service 层重新注入，不持久化
 }
 
-// ContextBlock 表示一段可被“置顶注入”的自然语言上下文。
+// ContextBlock 表示一段可被"置顶注入"的自然语言上下文。
 //
 // 设计目的：
 // 1. Key 用于让调用方按语义覆盖，例如 current_plan / current_step / execution_rule；
 // 2. Title 用于 prompt 层后续决定是否渲染成小标题；
-// 3. Content 存真正的自然语言内容，保持你当前“plan 用自然语言表达”的思路。
+// 3. Content 存真正的自然语言内容，保持你当前"plan 用自然语言表达"的思路。
 type ContextBlock struct {
-	Key     string
-	Title   string
-	Content string
+	Key     string `json:"key"`
+	Title   string `json:"title"`
+	Content string `json:"content"`
 }
 
 // ToolSchemaContext 是工具描述的轻量快照。
 //
 // 职责边界：
 // 1. 这里只保留 prompt 注入真正需要的摘要信息；
-// 2. SchemaText 约定存“已经整理好的自然语言 / JSON schema 摘要”；
+// 2. SchemaText 约定存"已经整理好的自然语言 / JSON schema 摘要"；
 // 3. 不直接耦合具体 tool registry 里的复杂结构，避免 model 层反向依赖工具实现。
 type ToolSchemaContext struct {
-	Name       string
-	Desc       string
-	SchemaText string
+	Name       string `json:"name"`
+	Desc       string `json:"desc"`
+	SchemaText string `json:"schema_text"`
 }
 
 // NewConversationContext 创建最小上下文容器。
@@ -65,7 +62,7 @@ func (c *ConversationContext) SetSystemPrompt(systemPrompt string) {
 // ReplaceHistory 整体替换对话历史。
 //
 // 职责边界：
-// 1. 负责把“会话快照恢复”这类场景需要的一次性覆盖入口收口到这里；
+// 1. 负责把"会话快照恢复"这类场景需要的一次性覆盖入口收口到这里；
 // 2. 只复制消息切片本身，避免调用方后续 append 污染同一底层数组；
 // 3. 不深拷贝每个 message 指针，消息对象本身仍默认由上游按只读方式使用。
 func (c *ConversationContext) ReplaceHistory(history []*schema.Message) {
@@ -105,7 +102,7 @@ func (c *ConversationContext) HistorySnapshot() []*schema.Message {
 //
 // 步骤说明：
 // 1. Key 为空时直接忽略，因为后续无法做稳定覆盖；
-// 2. 若已存在同 Key block，则原位覆盖，保证“当前 plan / 当前步骤”这类上下文始终只有一份；
+// 2. 若已存在同 Key block，则原位覆盖，保证"当前 plan / 当前步骤"这类上下文始终只有一份；
 // 3. 若不存在，则追加到末尾，至于渲染顺序由 prompt 层统一决定；
 // 4. 此处不自动裁剪旧内容，避免 model 层擅自丢信息。
 func (c *ConversationContext) UpsertPinnedBlock(block ContextBlock) {

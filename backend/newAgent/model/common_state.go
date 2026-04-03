@@ -15,27 +15,27 @@ const DefaultMaxRounds = 30
 // CommonState 承载可持久化的主流程状态。
 //
 // 职责边界：
-// 1. 负责记录“当前处于哪个阶段、当前计划是什么、执行到了第几步、已经消耗了多少轮”；
+// 1. 负责记录"当前处于哪个阶段、当前计划是什么、执行到了第几步、已经消耗了多少轮"；
 // 2. 负责提供最小必要的安全访问方法，避免 graph/node/prompt 层到处手写切片越界判断；
 // 3. 不负责承载对话历史、tool schema、pinned context 这类模型输入材料，它们仍然属于 ConversationContext。
 type CommonState struct {
 	// 身份信息
-	TraceID        string
-	UserID         int
-	ConversationID string
+	TraceID        string `json:"trace_id"`
+	UserID         int    `json:"user_id"`
+	ConversationID string `json:"conversation_id"`
 
 	// 流程阶段
-	Phase Phase
+	Phase Phase `json:"phase"`
 
 	// 计划状态
 	// 1. 这里直接使用结构化的 PlanStep，避免 planning -> execute 之间丢失 done_when。
-	// 2. CurrentStep 表示“当前 plan 步骤下标”，不是 execute 内部 ReAct 的思考轮次。
-	PlanSteps   []PlanStep
-	CurrentStep int
+	// 2. CurrentStep 表示"当前 plan 步骤下标"，不是 execute 内部 ReAct 的思考轮次。
+	PlanSteps   []PlanStep `json:"plan_steps"`
+	CurrentStep int        `json:"current_step"`
 
 	// 安全边界
-	MaxRounds int
-	RoundUsed int
+	MaxRounds int `json:"max_rounds"`
+	RoundUsed int `json:"round_used"`
 }
 
 func NewCommonState(traceID string, userID int, conversationID string) *CommonState {
@@ -97,7 +97,7 @@ func (s *CommonState) Done() {
 // HasPlan 判断当前 state 是否已经持有一份完整计划。
 //
 // 职责边界：
-// 1. 负责收口“是否存在 plan”这一层判断，避免外层到处写 len(PlanSteps) > 0；
+// 1. 负责收口"是否存在 plan"这一层判断，避免外层到处写 len(PlanSteps) > 0；
 // 2. 不判断 CurrentStep 当前是否有效，当前步骤是否合法由 HasCurrentPlanStep 回答；
 // 3. state 为空时统一返回 false，调用方可据此决定是否回退到 planning。
 func (s *CommonState) HasPlan() bool {
@@ -123,7 +123,7 @@ func (s *CommonState) CurrentPlanStep() (PlanStep, bool) {
 	return s.PlanSteps[s.CurrentStep], true
 }
 
-// HasCurrentPlanStep 判断“当前步骤”是否存在且可安全读取。
+// HasCurrentPlanStep 判断"当前步骤"是否存在且可安全读取。
 func (s *CommonState) HasCurrentPlanStep() bool {
 	_, ok := s.CurrentPlanStep()
 	return ok

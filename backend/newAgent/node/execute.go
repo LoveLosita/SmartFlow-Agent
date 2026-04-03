@@ -2,6 +2,7 @@ package newagentnode
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -177,6 +178,11 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		runtimeState.OpenAskUserInteraction(uuid.NewString(), question, strings.TrimSpace(input.ResumeNode))
 		return nil
 
+	case newagentmodel.ExecuteActionConfirm:
+		// LLM 申报了写操作意图，需要用户确认后才能真正执行。
+		// 步骤：1) 把 ToolCallIntent 转成快照暂存；2) 设 Phase → 下游 confirm 节点接管。
+		return handleExecuteActionConfirm(decision, runtimeState, flowState)
+
 	case newagentmodel.ExecuteActionNextPlan:
 		// LLM 判定当前步骤已完成，推进到下一步。
 		// 后端信任 LLM 判断，不做硬校验。
@@ -251,6 +257,39 @@ func resolveExecuteAskUserText(decision *newagentmodel.ExecuteDecision) string {
 		return strings.TrimSpace(decision.Reason)
 	}
 	return "执行过程中遇到不确定的情况，需要向你确认。"
+}
+
+// handleExecuteActionConfirm 处理 LLM 申报的写操作确认请求。
+//
+// 步骤：
+// 1. 把 ToolCallIntent 转成 PendingToolCallSnapshot 暂存到运行态；
+// 2. 设 Phase = PhaseWaitingConfirm，让下游 confirm 节点接管；
+// 3. 不执行工具，也不生成确认事件 — 这些都是 confirm 节点的职责。
+func handleExecuteActionConfirm(
+	decision *newagentmodel.ExecuteDecision,
+	runtimeState *newagentmodel.AgentRuntimeState,
+	flowState *newagentmodel.CommonState,
+) error {
+	toolCall := decision.ToolCall
+
+	// 序列化工具参数。
+	argsJSON := ""
+	if toolCall.Arguments != nil {
+		if raw, err := json.Marshal(toolCall.Arguments); err == nil {
+			argsJSON = string(raw)
+		}
+	}
+
+	// 暂存到运行态邮箱，confirm 节点会读出来。
+	runtimeState.PendingConfirmTool = &newagentmodel.PendingToolCallSnapshot{
+		ToolName: toolCall.Name,
+		ArgsJSON: argsJSON,
+		Summary:  strings.TrimSpace(decision.Speak),
+	}
+
+	// 设 Phase，让 branchAfterExecute 路由到 confirm 节点。
+	flowState.Phase = newagentmodel.PhaseWaitingConfirm
+	return nil
 }
 
 // executeToolCall 执行工具调用并记录证据。

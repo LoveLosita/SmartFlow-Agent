@@ -41,16 +41,16 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	if err := g.AddLambdaNode(NodePlan, compose.InvokableLambda(nodes.Plan)); err != nil {
 		return nil, err
 	}
-	if err := g.AddLambdaNode(NodeConfirm, compose.InvokableLambda(confirmNode)); err != nil {
+	if err := g.AddLambdaNode(NodeConfirm, compose.InvokableLambda(nodes.Confirm)); err != nil {
 		return nil, err
 	}
 	if err := g.AddLambdaNode(NodeExecute, compose.InvokableLambda(nodes.Execute)); err != nil {
 		return nil, err
 	}
-	if err := g.AddLambdaNode(NodeInterrupt, compose.InvokableLambda(interruptNode)); err != nil {
+	if err := g.AddLambdaNode(NodeInterrupt, compose.InvokableLambda(nodes.Interrupt)); err != nil {
 		return nil, err
 	}
-	if err := g.AddLambdaNode(NodeDeliver, compose.InvokableLambda(deliverNode)); err != nil {
+	if err := g.AddLambdaNode(NodeDeliver, compose.InvokableLambda(nodes.Deliver)); err != nil {
 		return nil, err
 	}
 
@@ -130,61 +130,20 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	return runnable.Invoke(ctx, state)
 }
 
-// --- 占位节点，后续逐步由 node 层替换 ---
-
-func confirmNode(_ context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
-	if st == nil {
-		return nil, errors.New("confirm node: state is nil")
-	}
-	st.EnsureFlowState()
-	st.EnsureConversationContext()
-	st.EnsureChunkEmitter()
-
-	// TODO:
-	// 1. 这里不再做 confirm 节点内自循环等待，而是统一走中断恢复模式。
-	// 2. 节点职责是生成确认事件、固化待执行工具快照，并调用 st.OpenConfirmInteraction(...)。
-	// 3. 当前连接随后会流向 interrupt 节点收口；用户确认/取消后，由外部回调恢复到 executing 或 planning。
-	// 4. 这里不要直接执行写工具，必须先把待执行工具调用固化为 pending snapshot。
-	return st, nil
-}
-
-func interruptNode(_ context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
-	if st == nil {
-		return nil, errors.New("interrupt node: state is nil")
-	}
-	st.EnsureFlowState()
-	st.EnsureConversationContext()
-	st.EnsureChunkEmitter()
-
-	// TODO:
-	// 1. 若 PendingInteraction.Type=ask_user，则像普通聊天一样流式吐出问题文本。
-	// 2. 若 PendingInteraction.Type=confirm，则推送前端可识别的确认事件，并把待执行工具调用一起带上。
-	// 3. 输出完成后，立刻把 AgentRuntimeState 快照持久化到 Redis + MySQL，形成后续恢复点。
-	// 4. 当前节点结束后必须断开连接，等待用户聊天回复或确认回调重新进入 graph。
-	return st, nil
-}
-
-func deliverNode(_ context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
-	if st == nil {
-		return nil, errors.New("deliver node: state is nil")
-	}
-	flowState := st.EnsureFlowState()
-	st.EnsureConversationContext()
-	st.EnsureChunkEmitter()
-
-	// TODO: 将执行结果推给用户，并在所有外部落库完成后再标记 done。
-	flowState.Done()
-	return st, nil
-}
-
 // --- 分支函数 ---
 
 func branchAfterChat(_ context.Context, st *newagentmodel.AgentGraphState) (string, error) {
+	if st == nil {
+		return compose.END, nil
+	}
 	if nextNode, interrupted := branchIfInterrupted(st); interrupted {
 		return nextNode, nil
 	}
 
 	flowState := st.EnsureFlowState()
+	if flowState == nil {
+		return compose.END, nil
+	}
 	switch flowState.Phase {
 	case newagentmodel.PhasePlanning:
 		return NodePlan, nil
@@ -201,11 +160,17 @@ func branchAfterChat(_ context.Context, st *newagentmodel.AgentGraphState) (stri
 }
 
 func branchAfterPlan(_ context.Context, st *newagentmodel.AgentGraphState) (string, error) {
+	if st == nil {
+		return NodePlan, nil
+	}
 	if nextNode, interrupted := branchIfInterrupted(st); interrupted {
 		return nextNode, nil
 	}
 
 	flowState := st.EnsureFlowState()
+	if flowState == nil {
+		return NodePlan, nil
+	}
 	if flowState.Phase == newagentmodel.PhaseWaitingConfirm {
 		return NodeConfirm, nil
 	}
@@ -213,11 +178,17 @@ func branchAfterPlan(_ context.Context, st *newagentmodel.AgentGraphState) (stri
 }
 
 func branchAfterConfirm(_ context.Context, st *newagentmodel.AgentGraphState) (string, error) {
+	if st == nil {
+		return NodePlan, nil
+	}
 	if nextNode, interrupted := branchIfInterrupted(st); interrupted {
 		return nextNode, nil
 	}
 
 	flowState := st.EnsureFlowState()
+	if flowState == nil {
+		return NodePlan, nil
+	}
 	switch flowState.Phase {
 	case newagentmodel.PhaseExecuting:
 		return NodeExecute, nil
@@ -231,11 +202,17 @@ func branchAfterConfirm(_ context.Context, st *newagentmodel.AgentGraphState) (s
 }
 
 func branchAfterExecute(_ context.Context, st *newagentmodel.AgentGraphState) (string, error) {
+	if st == nil {
+		return NodeExecute, nil
+	}
 	if nextNode, interrupted := branchIfInterrupted(st); interrupted {
 		return nextNode, nil
 	}
 
 	flowState := st.EnsureFlowState()
+	if flowState == nil {
+		return NodeExecute, nil
+	}
 	if flowState.Phase == newagentmodel.PhaseWaitingConfirm {
 		return NodeConfirm, nil
 	}
