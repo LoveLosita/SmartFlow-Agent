@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
+	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 )
 
 // AgentNodes 是 newAgent 通用图的节点容器。
@@ -144,6 +145,12 @@ func (n *AgentNodes) Execute(ctx context.Context, st *newagentmodel.AgentGraphSt
 		return nil, errors.New("execute node: state is nil")
 	}
 
+	// 按需加载 ScheduleState（首次执行时从 DB 加载，后续复用内存中的 state）。
+	var scheduleState *newagenttools.ScheduleState
+	if ss, _ := st.EnsureScheduleState(ctx); ss != nil {
+		scheduleState = ss
+	}
+
 	if err := RunExecuteNode(
 		ctx,
 		ExecuteNodeInput{
@@ -153,6 +160,8 @@ func (n *AgentNodes) Execute(ctx context.Context, st *newagentmodel.AgentGraphSt
 			Client:              st.Deps.ResolveExecuteClient(),
 			ChunkEmitter:        st.EnsureChunkEmitter(),
 			ResumeNode:          "execute",
+			ToolRegistry:        st.Deps.ToolRegistry,
+			ScheduleState:       scheduleState,
 		},
 	); err != nil {
 		return nil, err

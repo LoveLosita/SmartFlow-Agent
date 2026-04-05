@@ -1,10 +1,12 @@
 package model
 
 import (
+	"context"
 	"strings"
 
 	newagentllm "github.com/LoveLosita/smartflow/backend/newAgent/llm"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
+	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 )
 
 // AgentGraphRequest 描述一次 agent graph 运行的请求级输入。
@@ -34,12 +36,14 @@ func (r *AgentGraphRequest) Normalize() {
 // 2. Chat/Plan/Execute/Deliver 允许分别挂不同 client，但也允许先复用同一个 client；
 // 3. ChunkEmitter 统一承接阶段提示、正文、工具事件、确认请求等 SSE 输出。
 type AgentGraphDeps struct {
-	ChatClient    *newagentllm.Client
-	PlanClient    *newagentllm.Client
-	ExecuteClient *newagentllm.Client
-	DeliverClient *newagentllm.Client
-	ChunkEmitter  *newagentstream.ChunkEmitter
-	StateStore    AgentStateStore
+	ChatClient       *newagentllm.Client
+	PlanClient       *newagentllm.Client
+	ExecuteClient    *newagentllm.Client
+	DeliverClient    *newagentllm.Client
+	ChunkEmitter     *newagentstream.ChunkEmitter
+	StateStore       AgentStateStore
+	ToolRegistry     *newagenttools.ToolRegistry
+	ScheduleProvider ScheduleStateProvider // 按 DAO 注入，Execute 节点按需加载 ScheduleState
 }
 
 // EnsureChunkEmitter 保证 graph 运行时始终有一个可用的 chunk 发射器。
@@ -133,11 +137,25 @@ type AgentGraphRunInput struct {
 // 1. 负责把“流程状态 + 对话上下文 + 请求输入 + 运行依赖”收口到同一个对象；
 // 2. 负责给 graph 分支和 node 提供最小必要的兜底访问方法；
 // 3. 不负责持久化，不负责真正业务执行。
+// ScheduleStateProvider 定义加载 ScheduleState 的接口。
+// 由 DAO 层或 Service 层实现，注入到 AgentGraphDeps 中。
+// 使用接口而非具体 DAO 类型，避免 model → dao 的循环依赖。
+type ScheduleStateProvider interface {
+	LoadScheduleState(ctx context.Context, userID int) (*newagenttools.ScheduleState, error)
+}
+
+// AgentGraphState 是 graph 内部真正流转的运行态容器。
+//
+// 职责边界：
+// 1. 负责把"流程状态 + 对话上下文 + 请求输入 + 运行依赖"收口到同一个对象；
+// 2. 负责给 graph 分支和 node 提供最小必要的兜底访问方法；
+// 3. 不负责持久化，不负责真正业务执行。
 type AgentGraphState struct {
 	RuntimeState        *AgentRuntimeState
 	ConversationContext *ConversationContext
 	Request             AgentGraphRequest
 	Deps                AgentGraphDeps
+	ScheduleState       *newagenttools.ScheduleState // 工具操作的内存数据源，Execute 节点按需加载
 }
 
 // NewAgentGraphState 把入口参数整理成 graph 内部状态。
@@ -193,4 +211,33 @@ func (s *AgentGraphState) EnsureChunkEmitter() *newagentstream.ChunkEmitter {
 		return newagentstream.NewChunkEmitter(newagentstream.NoopPayloadEmitter(), "", "", 0)
 	}
 	return s.Deps.EnsureChunkEmitter()
+}
+
+// ResolveToolRegistry 返回可用的工具注册表。
+func (s *AgentGraphState) ResolveToolRegistry() *newagenttools.ToolRegistry {
+	if s == nil {
+		return nil
+	}
+	return s.Deps.ToolRegistry
+}
+
+// EnsureScheduleState 确保 ScheduleState 已加载。
+// 首次调用时通过 ScheduleProvider 从 DB 加载，后续复用内存中的 state。
+func (s *AgentGraphState) EnsureScheduleState(ctx context.Context) (*newagenttools.ScheduleState, error) {
+	if s == nil {
+		return nil, nil
+	}
+	if s.ScheduleState != nil {
+		return s.ScheduleState, nil
+	}
+	if s.Deps.ScheduleProvider == nil {
+		return nil, nil
+	}
+	userID := s.EnsureFlowState().UserID
+	state, err := s.Deps.ScheduleProvider.LoadScheduleState(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	s.ScheduleState = state
+	return state, nil
 }

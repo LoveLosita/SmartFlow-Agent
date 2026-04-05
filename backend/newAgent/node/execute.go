@@ -11,6 +11,8 @@ import (
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
+	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
+	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 )
 
@@ -27,7 +29,8 @@ const (
 // 1. 只承载"本轮执行"需要的输入，不负责持久化；
 // 2. RuntimeState 提供 plan 步骤与轮次预算；
 // 3. ConversationContext 提供历史对话与置顶上下文；
-// 4. ToolExecutor 后续由业务层注入，当前先留空。
+// 4. ToolRegistry 提供工具注册表；
+// 5. ScheduleState 提供工具操作的内存数据源（可为 nil，由调用方按需加载）。
 type ExecuteNodeInput struct {
 	RuntimeState        *newagentmodel.AgentRuntimeState
 	ConversationContext *newagentmodel.ConversationContext
@@ -35,6 +38,8 @@ type ExecuteNodeInput struct {
 	Client              *newagentllm.Client
 	ChunkEmitter        *newagentstream.ChunkEmitter
 	ResumeNode          string
+	ToolRegistry        *newagenttools.ToolRegistry
+	ScheduleState       *newagenttools.ScheduleState // 工具操作的内存数据源，由调用方从 AgentGraphState 注入
 }
 
 // ExecuteRoundObservation 记录执行阶段每轮的关键观察。
@@ -167,7 +172,7 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		// 继续当前步骤的 ReAct 循环。
 		// 若有工具调用意图，则执行工具并记录证据。
 		if decision.ToolCall != nil {
-			return executeToolCall(ctx, flowState, conversationContext, decision.ToolCall, emitter)
+			return executeToolCall(ctx, flowState, conversationContext, decision.ToolCall, emitter, input.ToolRegistry, input.ScheduleState)
 		}
 		// 无工具调用，仅对话，继续下一轮。
 		return nil
@@ -298,28 +303,18 @@ func handleExecuteActionConfirm(
 // 1. 只负责执行工具调用，记录结果；
 // 2. 不负责判断工具调用是否成功（由 LLM 下一轮判断）；
 // 3. 不负责重试（由外层 Graph 循环控制）。
-//
-// TODO: 当前为骨架实现，后续需要：
-// 1. 接入真实的工具执行器；
-// 2. 把工具调用结果追加到对话历史；
-// 3. 记录 ExecuteEvidenceReceipt。
 func executeToolCall(
 	ctx context.Context,
 	flowState *newagentmodel.CommonState,
 	conversationContext *newagentmodel.ConversationContext,
 	toolCall *newagentmodel.ToolCallIntent,
 	emitter *newagentstream.ChunkEmitter,
+	registry *newagenttools.ToolRegistry,
+	scheduleState *newagenttools.ScheduleState,
 ) error {
 	if toolCall == nil {
 		return nil
 	}
-
-	// 当前为骨架实现，仅记录工具调用意图。
-	// 后续需要：
-	// 1. 根据 toolCall.Name 路由到具体工具执行器；
-	// 2. 执行工具调用，获取结果；
-	// 3. 记录 ExecuteEvidenceReceipt；
-	// 4. 把工具调用结果追加到 conversationContext.History。
 
 	toolName := strings.TrimSpace(toolCall.Name)
 	if toolName == "" {
@@ -337,17 +332,25 @@ func executeToolCall(
 		return fmt.Errorf("工具调用状态推送失败: %w", err)
 	}
 
-	// TODO: 执行真实工具调用，并记录证据。
-	// 伪代码：
-	// result := toolRegistry.Execute(ctx, toolCall.Name, toolCall.Arguments)
-	// evidence := ExecuteEvidenceReceipt{
-	//     StepIndex:       flowState.CurrentStep,
-	//     Source:          ExecuteEvidenceSourceToolObservation,
-	//     Name:            toolCall.Name,
-	//     Success:         result.Success,
-	//     Summary:         result.Summary,
-	// }
-	// flowState.RecordEvidence(evidence)
+	// 1. 校验依赖。
+	if registry == nil {
+		return fmt.Errorf("工具注册表未注入")
+	}
+	if scheduleState == nil {
+		return fmt.Errorf("日程状态未加载，无法执行工具")
+	}
+	if !registry.HasTool(toolName) {
+		return fmt.Errorf("未知工具: %s", toolName)
+	}
+
+	// 2. 执行工具。
+	result := registry.Execute(scheduleState, toolName, toolCall.Arguments)
+
+	// 3. 将工具结果追加到对话历史，让 LLM 下一轮能看到。
+	conversationContext.AppendHistory(&schema.Message{
+		Role:    schema.Tool,
+		Content: result,
+	})
 
 	return nil
 }
