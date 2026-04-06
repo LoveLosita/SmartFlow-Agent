@@ -44,14 +44,18 @@ const (
 // 1. Speak 是本轮先对用户说的话；若 action=ask_user，通常这里会承载要追问的问题；
 // 2. Action 是规划阶段的下一步动作类型；
 // 3. Reason 是给后端和日志看的简短解释；
-// 4. PlanSteps 只在 plan_done 时要求返回，表示本轮最终确认下来的完整自然语言计划。
+// 4. PlanSteps 只在 plan_done 时要求返回，表示本轮最终确认下来的完整自然语言计划；
+// 5. NeedsRoughBuild 为 true 时，Confirm 后自动触发粗排节点，不需要 LLM 在 plan_steps 里手动描述放置步骤；
+// 6. TaskClassIDs 是本次粗排涉及的任务类 ID 列表，与 CommonState.TaskClassIDs 保持一致。
 type PlanDecision struct {
-	Speak        string         `json:"speak,omitempty"`
-	Action       PlanAction     `json:"action"`
-	Reason       string         `json:"reason,omitempty"`
-	Complexity   PlanComplexity `json:"complexity"`
-	NeedThinking bool           `json:"need_thinking"`
-	PlanSteps    []PlanStep     `json:"plan_steps,omitempty"`
+	Speak           string         `json:"speak,omitempty"`
+	Action          PlanAction     `json:"action"`
+	Reason          string         `json:"reason,omitempty"`
+	Complexity      PlanComplexity `json:"complexity"`
+	NeedThinking    bool           `json:"need_thinking"`
+	PlanSteps       []PlanStep     `json:"plan_steps,omitempty"`
+	NeedsRoughBuild bool           `json:"needs_rough_build,omitempty"`
+	TaskClassIDs    []int          `json:"task_class_ids,omitempty"`
 }
 
 // Normalize 统一清洗规划决策中的字符串字段。

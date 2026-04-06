@@ -539,7 +539,7 @@ func (d *CacheDAO) agentStateKey(conversationID string) string {
 //
 // 职责边界：
 // 1. 只负责 JSON 序列化 + Redis SET，不做业务校验；
-// 2. TTL 默认 24h，过期自动清理，避免已完成任务的快照堆积；
+// 2. TTL 默认 2h，过期自动清理，配合 MySQL outbox 异步持久化；
 // 3. snapshot 为 nil 时直接返回，避免写入无效数据。
 func (d *CacheDAO) SaveAgentState(ctx context.Context, conversationID string, snapshot any) error {
 	if d == nil || d.client == nil {
@@ -557,7 +557,7 @@ func (d *CacheDAO) SaveAgentState(ctx context.Context, conversationID string, sn
 	if err != nil {
 		return fmt.Errorf("marshal agent state failed: %w", err)
 	}
-	return d.client.Set(ctx, d.agentStateKey(normalizedID), data, 24*time.Hour).Err()
+	return d.client.Set(ctx, d.agentStateKey(normalizedID), data, 2*time.Hour).Err()
 }
 
 // LoadAgentState 从 Redis 读取并反序列化 agent 运行态快照。

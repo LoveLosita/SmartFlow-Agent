@@ -57,6 +57,8 @@ type AgentStateStore interface {
 // 使用接口而非具体 DAO 类型，避免 model → dao 的循环依赖。
 type ScheduleStateProvider interface {
 	LoadScheduleState(ctx context.Context, userID int) (*newagenttools.ScheduleState, error)
+	// LoadTaskClassMetas 只加载指定任务类的约束元数据，供 Plan 节点提前消费。
+	LoadTaskClassMetas(ctx context.Context, userID int, taskClassIDs []int) ([]newagenttools.TaskClassMeta, error)
 }
 
 // SchedulePersistor 定义持久化 ScheduleState 变更的接口。

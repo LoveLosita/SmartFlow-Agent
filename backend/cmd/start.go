@@ -67,7 +67,7 @@ func Start() {
 	// outbox 通用事件总线接线（第二阶段）：
 	// 1. 读取 Kafka 配置；
 	// 2. 创建 infra 级 EventBus；
-	// 3. 显式注册“聊天持久化”事件处理器；
+	// 3. 显式注册"聊天持久化"事件处理器；
 	// 4. 启动总线后台 dispatch/consume 循环。
 	kafkaCfg := kafkabus.LoadConfig()
 	eventBus, err := outboxinfra.NewEventBus(outboxRepo, kafkaCfg)
@@ -75,9 +75,9 @@ func Start() {
 		log.Fatalf("Failed to initialize outbox event bus: %v", err)
 	}
 	if eventBus != nil {
-		// 3. 在启动前完成“业务事件处理器”注册。
+		// 3. 在启动前完成"业务事件处理器"注册。
 		// 3.1 这里显式调用 service/events，保证 infra 层不承载业务语义。
-		// 3.2 若注册失败直接中止启动，避免“消息已入队但无人消费”的隐性故障。
+		// 3.2 若注册失败直接中止启动，避免"消息已入队但无人消费"的隐性故障。
 		if err = eventsvc.RegisterChatHistoryPersistHandler(eventBus, outboxRepo, manager); err != nil {
 			log.Fatalf("Failed to register chat history event handler: %v", err)
 		}
@@ -86,6 +86,9 @@ func Start() {
 		}
 		if err = eventsvc.RegisterChatTokenUsageAdjustHandler(eventBus, outboxRepo, manager); err != nil {
 			log.Fatalf("Failed to register chat token usage adjust event handler: %v", err)
+		}
+		if err = eventsvc.RegisterAgentStateSnapshotHandler(eventBus, outboxRepo, manager); err != nil {
+			log.Fatalf("Failed to register agent state snapshot event handler: %v", err)
 		}
 		eventBus.Start(context.Background())
 		defer eventBus.Close()

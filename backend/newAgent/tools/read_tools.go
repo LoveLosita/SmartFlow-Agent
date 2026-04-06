@@ -83,7 +83,43 @@ func GetOverview(state *ScheduleState) string {
 		sb.WriteString(strings.Join(pendingParts, " ") + "\n")
 	}
 
+	// 6. 任务类约束（排课策略与限制）。
+	if len(state.TaskClasses) > 0 {
+		sb.WriteString("\n任务类约束（排课时请遵守）：\n")
+		for _, tc := range state.TaskClasses {
+			strategy := formatStrategy(tc.Strategy)
+			allow := "否"
+			if tc.AllowFillerCourse {
+				allow = "是"
+			}
+			line := fmt.Sprintf("  [%s] 策略=%s 总预算=%d节 允许嵌水课=%s", tc.Name, strategy, tc.TotalSlots, allow)
+			if len(tc.ExcludedSlots) > 0 {
+				parts := make([]string, len(tc.ExcludedSlots))
+				for i, s := range tc.ExcludedSlots {
+					parts[i] = fmt.Sprintf("%d", s)
+				}
+				line += fmt.Sprintf(" 排除时段=[%s]", strings.Join(parts, ","))
+			}
+			sb.WriteString(line + "\n")
+		}
+	}
+
 	return sb.String()
+}
+
+// formatStrategy 将 strategy 字段值转为中文描述。
+func formatStrategy(strategy string) string {
+	switch strategy {
+	case "steady":
+		return "均匀分布"
+	case "rapid":
+		return "集中突击"
+	default:
+		if strategy == "" {
+			return "默认"
+		}
+		return strategy
+	}
 }
 
 // QueryRange 查看某天（或某天某段）的细粒度占用详情。

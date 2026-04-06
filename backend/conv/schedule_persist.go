@@ -69,25 +69,28 @@ func applyScheduleChange(ctx context.Context, manager *dao.RepoManager, change S
 
 // applyPlaceChange 应用放置变更。
 func applyPlaceChange(ctx context.Context, manager *dao.RepoManager, change ScheduleChange, userID int) error {
-	// Place：pending → placed，为现有 Event 创建 Schedule
-	// 前提：Event 已经存在（SourceID 是 ScheduleEvent.ID）
-	// NewCoords 包含所有需要放置的位置（可能多天/多节）
-
 	if len(change.NewCoords) == 0 {
 		return fmt.Errorf("place 变更缺少目标位置")
 	}
-
-	if change.Source != "event" || change.SourceID == 0 {
-		return fmt.Errorf("place 变更需要有效的 event source")
+	switch change.Source {
+	case "event":
+		return applyPlaceEventSource(ctx, manager, change, userID)
+	case "task_item":
+		return applyPlaceTaskItem(ctx, manager, change, userID)
+	default:
+		return fmt.Errorf("place 变更不支持的 source: %s", change.Source)
 	}
+}
 
-	// 按周天分组，压缩成 slot ranges
+// applyPlaceEventSource 处理 source=event 的放置（为已有 Event 创建 Schedule 记录）。
+func applyPlaceEventSource(ctx context.Context, manager *dao.RepoManager, change ScheduleChange, userID int) error {
+	if change.SourceID == 0 {
+		return fmt.Errorf("place event 变更需要有效的 source_id")
+	}
 	groups := groupCoordsByWeekDay(change.NewCoords)
 	for week, dayGroups := range groups {
 		for dayOfWeek, coords := range dayGroups {
 			startSection, endSection := minMaxSection(coords)
-
-			// 创建 schedule 记录（event 已存在，只创建 schedule）
 			schedules := make([]model.Schedule, endSection-startSection+1)
 			for sec := startSection; sec <= endSection; sec++ {
 				schedules[sec-startSection] = model.Schedule{
@@ -98,10 +101,7 @@ func applyPlaceChange(ctx context.Context, manager *dao.RepoManager, change Sche
 					EventID:   change.SourceID,
 				}
 			}
-
-			// 批量创建
-			_, err := manager.Schedule.AddSchedules(schedules)
-			if err != nil {
+			if _, err := manager.Schedule.AddSchedules(schedules); err != nil {
 				return fmt.Errorf("创建 schedule 失败: %w", err)
 			}
 		}
@@ -109,29 +109,134 @@ func applyPlaceChange(ctx context.Context, manager *dao.RepoManager, change Sche
 	return nil
 }
 
-// applyMoveChange 应用移动变更。
-func applyMoveChange(ctx context.Context, manager *dao.RepoManager, change ScheduleChange, userID int) error {
-	// Move：已有 schedule，只更新位置
-	// 需要删除旧位置的 schedule，在新位置创建新 schedule
+// applyPlaceTaskItem 处理 source=task_item 的放置。
+//
+// 两条路径：
+// 1. 嵌入水课（HostEventID != 0）：在宿主 Schedule 记录上设置 embedded_task_id。
+// 2. 普通放置（HostEventID == 0）：新建 ScheduleEvent(type=task) + Schedule 记录。
+// 两条路径最终都更新 task_items.embedded_time。
+func applyPlaceTaskItem(ctx context.Context, manager *dao.RepoManager, change ScheduleChange, userID int) error {
+	if change.SourceID == 0 {
+		return fmt.Errorf("place task_item 变更需要有效的 source_id")
+	}
 
-	// 1. 删除旧位置
-	if change.Source == "event" && change.SourceID != 0 {
-		if err := manager.Schedule.DeleteScheduleEventAndSchedule(ctx, change.SourceID, userID); err != nil {
-			return fmt.Errorf("删除旧位置失败: %w", err)
+	// task_item 只占一段连续时段，取第一个 coord 的 week/dayOfWeek
+	first := change.NewCoords[0]
+	week, dayOfWeek := first.Week, first.DayOfWeek
+	startSection, endSection := minMaxSection(change.NewCoords)
+
+	targetTime := &model.TargetTime{
+		Week:        week,
+		DayOfWeek:   dayOfWeek,
+		SectionFrom: startSection,
+		SectionTo:   endSection,
+	}
+
+	if change.HostEventID != 0 {
+		// 嵌入路径：更新宿主 Schedule 记录的 embedded_task_id
+		if err := manager.Schedule.EmbedTaskIntoSchedule(
+			startSection, endSection, dayOfWeek, week, userID, change.SourceID,
+		); err != nil {
+			return fmt.Errorf("嵌入水课失败: %w", err)
+		}
+	} else {
+		// 普通路径：新建 ScheduleEvent + Schedule 记录
+		startTime, endTime, err := RelativeTimeToRealTime(week, dayOfWeek, startSection, endSection)
+		if err != nil {
+			return fmt.Errorf("时间转换失败: %w", err)
+		}
+		relID := change.SourceID
+		event := model.ScheduleEvent{
+			UserID:        userID,
+			Name:          change.Name,
+			Type:          "task",
+			RelID:         &relID,
+			CanBeEmbedded: false,
+			StartTime:     startTime,
+			EndTime:       endTime,
+		}
+		eventID, err := manager.Schedule.AddScheduleEvent(&event)
+		if err != nil {
+			return fmt.Errorf("创建 schedule_event 失败: %w", err)
+		}
+		schedules := make([]model.Schedule, endSection-startSection+1)
+		for i, sec := 0, startSection; sec <= endSection; i, sec = i+1, sec+1 {
+			schedules[i] = model.Schedule{
+				UserID:    userID,
+				Week:      week,
+				DayOfWeek: dayOfWeek,
+				Section:   sec,
+				EventID:   eventID,
+				Status:    "normal",
+			}
+		}
+		if _, err := manager.Schedule.AddSchedules(schedules); err != nil {
+			return fmt.Errorf("创建 schedule 记录失败: %w", err)
 		}
 	}
 
-	// 2. 创建新位置（复用 place 逻辑）
+	if err := manager.TaskClass.UpdateTaskClassItemEmbeddedTime(ctx, change.SourceID, targetTime); err != nil {
+		return fmt.Errorf("更新 task_item embedded_time 失败: %w", err)
+	}
+	return nil
+}
+
+// applyMoveChange 应用移动变更。
+func applyMoveChange(ctx context.Context, manager *dao.RepoManager, change ScheduleChange, userID int) error {
+	switch change.Source {
+	case "event":
+		if change.SourceID != 0 {
+			if err := manager.Schedule.DeleteScheduleEventAndSchedule(ctx, change.SourceID, userID); err != nil {
+				return fmt.Errorf("删除旧位置失败: %w", err)
+			}
+		}
+	case "task_item":
+		// 清理旧位置
+		if change.OldHostEventID != 0 {
+			// 旧位置是嵌入：清空宿主的 embedded_task_id
+			if _, err := manager.Schedule.SetScheduleEmbeddedTaskIDToNull(ctx, change.OldHostEventID); err != nil {
+				return fmt.Errorf("清除旧嵌入关系失败: %w", err)
+			}
+		} else {
+			// 旧位置是普通 task event：按 task_item_id 删除
+			if err := manager.Schedule.DeleteScheduleEventByTaskItemID(ctx, change.SourceID); err != nil {
+				return fmt.Errorf("删除旧 task_item 日程失败: %w", err)
+			}
+		}
+	}
 	return applyPlaceChange(ctx, manager, change, userID)
 }
 
 // applyUnplaceChange 应用移除变更。
 func applyUnplaceChange(ctx context.Context, manager *dao.RepoManager, change ScheduleChange, userID int) error {
-	// Unplace：删除 schedule，任务恢复为 pending
-	if change.Source == "event" && change.SourceID != 0 {
+	switch change.Source {
+	case "event":
+		if change.SourceID == 0 {
+			return fmt.Errorf("unplace event 变更需要有效的 source_id")
+		}
 		return manager.Schedule.DeleteScheduleEventAndSchedule(ctx, change.SourceID, userID)
+	case "task_item":
+		if change.SourceID == 0 {
+			return fmt.Errorf("unplace task_item 变更需要有效的 source_id")
+		}
+		if change.HostEventID != 0 {
+			// 是嵌入：清空宿主 Schedule 的 embedded_task_id
+			if _, err := manager.Schedule.SetScheduleEmbeddedTaskIDToNull(ctx, change.HostEventID); err != nil {
+				return fmt.Errorf("清除嵌入关系失败: %w", err)
+			}
+		} else {
+			// 普通 task event：按 task_item_id 删除
+			if err := manager.Schedule.DeleteScheduleEventByTaskItemID(ctx, change.SourceID); err != nil {
+				return fmt.Errorf("删除 task_item 日程失败: %w", err)
+			}
+		}
+		if err := manager.TaskClass.DeleteTaskClassItemEmbeddedTime(ctx, change.SourceID); err != nil {
+			return fmt.Errorf("清除 task_item embedded_time 失败: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unplace 变更不支持的 source: %s", change.Source)
 	}
-	return fmt.Errorf("unplace 变更的 source 不是 event: %s", change.Source)
 }
 
 // ==================== 辅助函数 ====================

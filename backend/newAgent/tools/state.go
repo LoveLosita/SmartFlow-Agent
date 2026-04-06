@@ -20,6 +20,19 @@ type TaskSlot struct {
 	SlotEnd   int `json:"slot_end"`
 }
 
+// TaskClassMeta 是任务类级别的调度约束，供 LLM 在排课时参考。
+// 只记录影响排课决策的字段，不暴露数据库内部细节。
+type TaskClassMeta struct {
+	ID                int    `json:"id"`
+	Name              string `json:"name"`
+	Strategy          string `json:"strategy"`             // "steady"=均匀分布 | "rapid"=集中突击
+	TotalSlots        int    `json:"total_slots"`          // 该任务类总时段预算
+	AllowFillerCourse bool   `json:"allow_filler_course"`  // 是否允许嵌入水课时段
+	ExcludedSlots     []int  `json:"excluded_slots"`       // 排除的半天时段索引（空=无限制）
+	StartDate         string `json:"start_date,omitempty"` // 排程起始日期（YYYY-MM-DD）
+	EndDate           string `json:"end_date,omitempty"`   // 排程截止日期（YYYY-MM-DD）
+}
+
 // ScheduleTask is a unified task representation in the tool state.
 // It merges existing schedules (from schedule_events) and pending tasks (from task_items)
 // into one flat list that the tool layer operates on.
@@ -36,7 +49,9 @@ type ScheduleTask struct {
 	Slots []TaskSlot `json:"slots,omitempty"`
 	// Pending task: required consecutive slot count.
 	Duration int `json:"duration,omitempty"`
-	// source=task_item only: TaskClass.ID for category lookup.
+	// source=task_item only: TaskClass.ID，用于反查任务类约束。
+	TaskClassID int `json:"task_class_id,omitempty"`
+	// source=task_item only: TaskClass.ID for category lookup (internal alias).
 	CategoryID int `json:"category_id,omitempty"`
 	// source=event only: whether this slot allows embedding other tasks.
 	CanEmbed bool `json:"can_embed,omitempty"`
@@ -51,8 +66,9 @@ type ScheduleTask struct {
 
 // ScheduleState is the full tool operation state.
 type ScheduleState struct {
-	Window ScheduleWindow `json:"window"`
-	Tasks  []ScheduleTask `json:"tasks"`
+	Window      ScheduleWindow  `json:"window"`
+	Tasks       []ScheduleTask  `json:"tasks"`
+	TaskClasses []TaskClassMeta `json:"task_classes,omitempty"` // 任务类约束元数据，供 LLM 排课参考
 }
 
 // DayToWeekDay converts day_index to (week, day_of_week).
@@ -95,9 +111,11 @@ func (s *ScheduleState) Clone() *ScheduleState {
 			TotalDays:  s.Window.TotalDays,
 			DayMapping: make([]DayMapping, len(s.Window.DayMapping)),
 		},
-		Tasks: make([]ScheduleTask, len(s.Tasks)),
+		Tasks:       make([]ScheduleTask, len(s.Tasks)),
+		TaskClasses: make([]TaskClassMeta, len(s.TaskClasses)),
 	}
 	copy(clone.Window.DayMapping, s.Window.DayMapping)
+	copy(clone.TaskClasses, s.TaskClasses)
 	for i, t := range s.Tasks {
 		clone.Tasks[i] = t
 		if t.Slots != nil {

@@ -33,6 +33,20 @@ func (n *AgentNodes) Chat(ctx context.Context, st *newagentmodel.AgentGraphState
 		return nil, errors.New("chat node: state is nil")
 	}
 
+	// 注入工具 schema 到 ConversationContext，让路由决策更智能。
+	if st.Deps.ToolRegistry != nil {
+		schemas := st.Deps.ToolRegistry.Schemas()
+		toolSchemas := make([]newagentmodel.ToolSchemaContext, len(schemas))
+		for i, s := range schemas {
+			toolSchemas[i] = newagentmodel.ToolSchemaContext{
+				Name:       s.Name,
+				Desc:       s.Desc,
+				SchemaText: s.SchemaText,
+			}
+		}
+		st.EnsureConversationContext().SetToolSchemas(toolSchemas)
+	}
+
 	if err := RunChatNode(
 		ctx,
 		ChatNodeInput{
@@ -98,6 +112,25 @@ func (n *AgentNodes) Plan(ctx context.Context, st *newagentmodel.AgentGraphState
 			ResumeNode:          "plan",
 		},
 	); err != nil {
+		return nil, err
+	}
+
+	saveAgentState(ctx, st)
+	return st, nil
+}
+
+// RoughBuild 是粗排阶段的正式节点方法。
+//
+// 职责边界：
+// 1. 调用注入的 RoughBuildFunc 执行粗排算法；
+// 2. 把粗排结果写入 ScheduleState；
+// 3. 完成后保存状态，支持意外断线恢复。
+func (n *AgentNodes) RoughBuild(ctx context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
+	if st == nil {
+		return nil, errors.New("rough_build node: state is nil")
+	}
+
+	if err := RunRoughBuildNode(ctx, st); err != nil {
 		return nil, err
 	}
 
@@ -196,7 +229,7 @@ func (n *AgentNodes) Execute(ctx context.Context, st *newagentmodel.AgentGraphSt
 // 1. 这里只做 graph -> node 的参数转接；
 // 2. 真正的交付逻辑仍由 RunDeliverNode 负责；
 // 3. 调 LLM 生成任务总结，失败时降级到机械格式化。
-// 4. 任务完成后删除 Redis 快照，清理持久化状态。
+// 4. 任务完成后保存最终状态到 Redis（2h TTL），支持断线恢复和 MySQL outbox 异步持久化。
 func (n *AgentNodes) Deliver(ctx context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
 	if st == nil {
 		return nil, errors.New("deliver node: state is nil")
@@ -214,7 +247,7 @@ func (n *AgentNodes) Deliver(ctx context.Context, st *newagentmodel.AgentGraphSt
 		return nil, err
 	}
 
-	deleteAgentState(ctx, st)
+	saveAgentState(ctx, st)
 	return st, nil
 }
 

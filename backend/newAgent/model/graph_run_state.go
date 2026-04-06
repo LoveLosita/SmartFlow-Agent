@@ -29,6 +29,20 @@ func (r *AgentGraphRequest) Normalize() {
 	r.ConfirmAction = strings.TrimSpace(r.ConfirmAction)
 }
 
+// RoughBuildPlacement 是粗排算法返回的单条放置结果。
+// 字段使用 DB 坐标系（week/dayOfWeek/section），由 RoughBuild 节点转换为 ScheduleState 的 day_index。
+type RoughBuildPlacement struct {
+	TaskItemID  int
+	Week        int
+	DayOfWeek   int
+	SectionFrom int
+	SectionTo   int
+}
+
+// RoughBuildFunc 是粗排算法的依赖注入签名。
+// 由 service 层封装 HybridScheduleWithPlanMulti 后注入，newAgent 层不直接依赖外层 model。
+type RoughBuildFunc func(ctx context.Context, userID int, taskClassIDs []int) ([]RoughBuildPlacement, error)
+
 // AgentGraphDeps 描述 graph/node 层运行时真正依赖的可插拔能力。
 //
 // 设计目的：
@@ -45,6 +59,7 @@ type AgentGraphDeps struct {
 	ToolRegistry      *newagenttools.ToolRegistry
 	ScheduleProvider  ScheduleStateProvider // 按 DAO 注入，Execute 节点按需加载 ScheduleState
 	SchedulePersistor SchedulePersistor     // 按 DAO 注入，用于写工具执行后持久化变更
+	RoughBuildFunc    RoughBuildFunc        // 按 Service 注入，粗排算法入口
 }
 
 // EnsureChunkEmitter 保证 graph 运行时始终有一个可用的 chunk 发射器。

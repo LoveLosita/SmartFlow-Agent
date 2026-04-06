@@ -18,6 +18,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/pkg"
+	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 )
 
 // runNewAgentGraph 运行 newAgent 通用 graph，直接替换旧 agent 路由逻辑。
@@ -100,6 +101,21 @@ func (s *AgentService) runNewAgentGraph(
 		conversationContext = s.loadConversationContext(requestCtx, chatID, userMessage)
 	}
 
+	// 5.5 若 extra 携带 task_class_ids，写入 CommonState（仅首轮/尚未设置时生效，跨轮持久化）。
+	if taskClassIDs := readAgentExtraIntSlice(extra, "task_class_ids"); len(taskClassIDs) > 0 {
+		cs := runtimeState.EnsureCommonState()
+		if len(cs.TaskClassIDs) == 0 {
+			cs.TaskClassIDs = taskClassIDs
+			if s.scheduleProvider != nil {
+				if metas, metaErr := s.scheduleProvider.LoadTaskClassMetas(requestCtx, userID, taskClassIDs); metaErr != nil {
+					log.Printf("加载任务类约束元数据失败 chat=%s err=%v", chatID, metaErr)
+				} else {
+					cs.TaskClasses = metas
+				}
+			}
+		}
+	}
+
 	// 6. 构造 AgentGraphRequest。
 	var confirmAction string
 	if len(extra) > 0 {
@@ -132,6 +148,7 @@ func (s *AgentService) runNewAgentGraph(
 		ToolRegistry:      s.toolRegistry,
 		ScheduleProvider:  s.scheduleProvider,
 		SchedulePersistor: s.schedulePersistor,
+		RoughBuildFunc:    s.makeRoughBuildFunc(),
 	}
 
 	// 10. 构造 AgentGraphRunInput 并运行 graph。
@@ -154,6 +171,33 @@ func (s *AgentService) runNewAgentGraph(
 
 	// 11. 持久化聊天历史（用户消息 + 助手回复）。
 	s.persistChatAfterGraph(requestCtx, userID, chatID, userMessage, finalState, retryMeta, requestStart, outChan, errChan)
+	// 11.5. 将最终状态快照异步写入 MySQL（通过 outbox）。
+	// Deliver 节点已将快照保存到 Redis（2h TTL），此处通过 outbox 异步写入 MySQL 做永久存储。
+	if finalState != nil {
+		snapshot := &newagentmodel.AgentStateSnapshot{
+			RuntimeState:        finalState.EnsureRuntimeState(),
+			ConversationContext: finalState.EnsureConversationContext(),
+		}
+		eventsvc.PublishAgentStateSnapshot(requestCtx, s.eventPublisher, snapshot, chatID, userID)
+	}
+
+	// 11.6. 将排程结果写入 Redis 预览缓存，复用旧 agent 的 SchedulePlanPreviewCache 格式。
+	// 前端通过 GET /agent/schedule-preview 获取，无需改动。
+	if finalState != nil && finalState.ScheduleState != nil {
+		flowState := finalState.EnsureFlowState()
+		preview := conv.ScheduleStateToPreview(
+			finalState.ScheduleState,
+			userID,
+			chatID,
+			flowState.TaskClassIDs,
+			"", // summary 由转换函数自动生成
+		)
+		if preview != nil && s.cacheDAO != nil {
+			if err := s.cacheDAO.SetSchedulePlanPreviewToCache(requestCtx, userID, chatID, preview); err != nil {
+				log.Printf("[WARN] 写入排程预览缓存失败 chat=%s: %v", chatID, err)
+			}
+		}
+	}
 
 	// 12. 发送 OpenAI 兼容的流式结束标记，告知客户端 stream 已完成。
 	_ = chunkEmitter.EmitDone()
@@ -203,6 +247,10 @@ func (s *AgentService) loadOrCreateRuntimeState(ctx context.Context, chatID stri
 		cs := snapshot.RuntimeState.EnsureCommonState()
 		cs.UserID = userID
 		cs.ConversationID = chatID
+
+		// 不需要手动重置 Phase：所有请求统一先过 Chat 节点，Chat 会根据路由决策覆盖 Phase。
+		// 保留完整的 RuntimeState（PlanSteps、CurrentStep 等），支持连续对话调整日程。
+
 		return snapshot.RuntimeState, snapshot.ConversationContext
 	}
 	return newRT()
@@ -373,6 +421,35 @@ func (s *AgentService) persistChatAfterGraph(
 				time.Now(),
 			),
 		)
+	}
+}
+
+// makeRoughBuildFunc 把 AgentService 上的 HybridScheduleWithPlanMultiFunc 封装成
+// newAgent 层的 RoughBuildFunc，完成外层 model.TaskClassItem → RoughBuildPlacement 的转换。
+// HybridScheduleWithPlanMultiFunc 未注入时返回 nil，RoughBuild 节点会静默跳过粗排。
+func (s *AgentService) makeRoughBuildFunc() newagentmodel.RoughBuildFunc {
+	if s.HybridScheduleWithPlanMultiFunc == nil {
+		return nil
+	}
+	return func(ctx context.Context, userID int, taskClassIDs []int) ([]newagentmodel.RoughBuildPlacement, error) {
+		_, items, err := s.HybridScheduleWithPlanMultiFunc(ctx, userID, taskClassIDs)
+		if err != nil {
+			return nil, err
+		}
+		placements := make([]newagentmodel.RoughBuildPlacement, 0, len(items))
+		for _, item := range items {
+			if item.EmbeddedTime == nil {
+				continue
+			}
+			placements = append(placements, newagentmodel.RoughBuildPlacement{
+				TaskItemID:  item.ID,
+				Week:        item.EmbeddedTime.Week,
+				DayOfWeek:   item.EmbeddedTime.DayOfWeek,
+				SectionFrom: item.EmbeddedTime.SectionFrom,
+				SectionTo:   item.EmbeddedTime.SectionTo,
+			})
+		}
+		return placements, nil
 	}
 }
 

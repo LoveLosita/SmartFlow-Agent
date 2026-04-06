@@ -22,6 +22,11 @@ const (
 	executeStatusBlockID = "execute.status"
 	executeSpeakBlockID  = "execute.speak"
 	executePinnedKey     = "execution_context"
+
+	// maxConsecutiveCorrections 是 Execute 节点连续修正次数上限。
+	// 超过此阈值后终止执行，防止 LLM 陷入无限修正循环。
+	// 适用场景：JSON 解析失败、决策不合法、goal_check 为空、工具名不存在。
+	maxConsecutiveCorrections = 3
 )
 
 // ExecuteNodeInput 描述执行节点单轮运行所需的最小依赖。
@@ -95,22 +100,31 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		return executePendingTool(ctx, runtimeState, conversationContext, input.ToolRegistry, input.ScheduleState, input.SchedulePersistor, input.OriginalScheduleState, emitter)
 	}
 
-	// 2. 检查是否有可执行的 plan 步骤。
-	if !flowState.HasCurrentPlanStep() {
-		return fmt.Errorf("execute node: 当前无有效 plan 步骤，无法执行")
-	}
-
-	// 3. 推送执行阶段状态，让前端知道当前进度。
-	current, total := flowState.PlanProgress()
-	currentStep, _ := flowState.CurrentPlanStep()
-	if err := emitter.EmitStatus(
-		executeStatusBlockID,
-		executeStageName,
-		"executing",
-		fmt.Sprintf("正在执行第 %d/%d 步：%s", current, total, truncateText(currentStep.Content, 60)),
-		false,
-	); err != nil {
-		return fmt.Errorf("执行阶段状态推送失败: %w", err)
+	// 2. 推送执行阶段状态，让前端知道当前进度。
+	if flowState.HasCurrentPlanStep() {
+		// 有 plan：显示步骤进度。
+		current, total := flowState.PlanProgress()
+		currentStep, _ := flowState.CurrentPlanStep()
+		if err := emitter.EmitStatus(
+			executeStatusBlockID,
+			executeStageName,
+			"executing",
+			fmt.Sprintf("正在执行第 %d/%d 步：%s", current, total, truncateText(currentStep.Content, 60)),
+			false,
+		); err != nil {
+			return fmt.Errorf("执行阶段状态推送失败: %w", err)
+		}
+	} else {
+		// 无 plan：纯 ReAct 模式。
+		if err := emitter.EmitStatus(
+			executeStatusBlockID,
+			executeStageName,
+			"executing",
+			"正在处理你的请求...",
+			false,
+		); err != nil {
+			return fmt.Errorf("执行阶段状态推送失败: %w", err)
+		}
 	}
 
 	// 4. 消耗一轮预算，并检查是否耗尽。
@@ -129,7 +143,7 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		newagentllm.GenerateOptions{
 			Temperature: 0.3,
 			MaxTokens:   1200,
-			Thinking:    newagentllm.ThinkingModeEnabled,
+			Thinking:    newagentllm.ThinkingModeDisabled,
 			Metadata: map[string]any{
 				"stage":      executeStageName,
 				"step_index": flowState.CurrentStep,
@@ -137,8 +151,6 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 			},
 		},
 	)
-	const maxConsecutiveCorrections = 3
-
 	// 提前捕获原始文本，用于日志和 correction。
 	rawText := ""
 	if rawResult != nil {
@@ -162,6 +174,25 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 			)
 			return nil
 		}
+
+		// 模型返回空文本（常见原因：上下文过长、模型异常），走 correction 重试而非直接 fatal。
+		if strings.Contains(err.Error(), "empty text") {
+			log.Printf("[WARN] execute LLM 返回空文本 chat=%s round=%d consecutive=%d/%d",
+				flowState.ConversationID, flowState.RoundUsed,
+				flowState.ConsecutiveCorrections+1, maxConsecutiveCorrections)
+			flowState.ConsecutiveCorrections++
+			if flowState.ConsecutiveCorrections >= maxConsecutiveCorrections {
+				return fmt.Errorf("连续 %d 次模型返回空文本，终止执行", flowState.ConsecutiveCorrections)
+			}
+			AppendLLMCorrectionWithHint(
+				conversationContext,
+				"",
+				"模型没有返回任何内容。",
+				"请重新输出合法 JSON 格式的执行决策。",
+			)
+			return nil
+		}
+
 		return fmt.Errorf("执行阶段模型调用失败: %w", err)
 	}
 
@@ -210,8 +241,10 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		}
 	}
 
-	// 6. 若 LLM 先对用户说话，则伪流式推送并写回历史。
-	if strings.TrimSpace(decision.Speak) != "" {
+	// 6. 若 LLM 先对用户说话，且不是 ask_user / confirm（二者交给下游节点收口），则伪流式推送。
+	if strings.TrimSpace(decision.Speak) != "" &&
+		decision.Action != newagentmodel.ExecuteActionAskUser &&
+		decision.Action != newagentmodel.ExecuteActionConfirm {
 		if err := emitter.EmitPseudoAssistantText(
 			ctx,
 			executeSpeakBlockID,
@@ -399,11 +432,33 @@ func executeToolCall(
 		return fmt.Errorf("日程状态未加载，无法执行工具")
 	}
 	if !registry.HasTool(toolName) {
-		return fmt.Errorf("未知工具: %s", toolName)
+		// LLM 拼错或编造了工具名，走 correction 机制给重试机会，而非直接 fatal。
+		// 与 action 不合法、决策校验失败等路径一致：追加错误反馈 → Graph 循环 → LLM 修正。
+		flowState.ConsecutiveCorrections++
+		if flowState.ConsecutiveCorrections >= maxConsecutiveCorrections {
+			return fmt.Errorf("连续 %d 次调用未知工具，终止执行: %s（可用工具：%s）",
+				flowState.ConsecutiveCorrections, toolName, strings.Join(registry.ToolNames(), "、"))
+		}
+		log.Printf("[WARN] execute 工具名不合法 chat=%s round=%d tool=%s consecutive=%d/%d available=%v",
+			flowState.ConversationID, flowState.RoundUsed, toolName,
+			flowState.ConsecutiveCorrections, maxConsecutiveCorrections, registry.ToolNames())
+		AppendLLMCorrectionWithHint(
+			conversationContext,
+			"",
+			fmt.Sprintf("你调用的工具 \"%s\" 不存在。", toolName),
+			fmt.Sprintf("可用工具：%s。请检查拼写后重新输出。", strings.Join(registry.ToolNames(), "、")),
+		)
+		return nil
 	}
 
 	// 2. 执行工具。
 	result := registry.Execute(scheduleState, toolName, toolCall.Arguments)
+
+	// 2.5 截断过大的工具结果，防止上下文膨胀导致后续 LLM 调用返回空或超限。
+	const maxToolResultLen = 3000
+	if len(result) > maxToolResultLen {
+		result = result[:maxToolResultLen] + fmt.Sprintf("\n...(结果已截断，原始长度 %d 字符)", len(result))
+	}
 
 	// 3. 将工具调用和结果以合法的 assistant+tool 消息对追加到对话历史。
 	//

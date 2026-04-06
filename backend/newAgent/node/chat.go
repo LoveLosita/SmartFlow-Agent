@@ -3,6 +3,7 @@ package newagentnode
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -36,88 +37,221 @@ type ChatNodeInput struct {
 	ChunkEmitter        *newagentstream.ChunkEmitter
 }
 
-// chatIntentDecision 是意图分类的结构化输出。
-type chatIntentDecision struct {
-	Intent string `json:"intent"`
-	Reply  string `json:"reply,omitempty"`
-	Reason string `json:"reason,omitempty"`
-}
-
-// Normalize 清洗意图分类结果中的字符串字段。
-func (d *chatIntentDecision) Normalize() {
-	if d == nil {
-		return
-	}
-	d.Intent = strings.TrimSpace(d.Intent)
-	d.Reply = strings.TrimSpace(d.Reply)
-	d.Reason = strings.TrimSpace(d.Reason)
-}
-
-// Validate 校验意图分类结果的最小合法性。
-func (d *chatIntentDecision) Validate() error {
-	if d == nil {
-		return fmt.Errorf("chat intent decision 不能为空")
-	}
-	d.Normalize()
-	switch d.Intent {
-	case "chat", "task":
-		return nil
-	default:
-		return fmt.Errorf("未知 intent: %s", d.Intent)
-	}
-}
-
 // RunChatNode 执行一轮聊天节点逻辑。
 //
 // 核心职责：
-// 1. 恢复判定：有 pending interaction 则处理恢复，不生成 speak；
-// 2. 意图分流：无 pending 时，调 LLM 分类 chat / task；
-// 3. 闲聊回复：纯 chat 场景直接生成回复并流式推送，phase → chatting → END；
-// 4. 任务路由：task 场景 phase → planning，交给后续 Plan 节点处理。
-//
-// 保守原则：分类失败或意图不明时，一律走 task，不丢失用户意图。
+// 1. 恢复判定：有 pending interaction 则处理恢复；
+// 2. 路由分流：无 pending 时，调 LLM 判断复杂度并路由；
+// 3. direct_reply：简单任务，直接输出回复 → END；
+// 4. execute：中等任务，推 Execute ReAct；
+// 5. deep_answer：复杂问答，原地开 thinking 深度回答 → END；
+// 6. plan：复杂规划，推 Plan 节点。
 func RunChatNode(ctx context.Context, input ChatNodeInput) error {
 	runtimeState, conversationContext, emitter, err := prepareChatNodeInput(input)
 	if err != nil {
 		return err
 	}
 
-	// 1. 有 pending interaction → 纯状态传递，不生成 speak。
+	// 1. 有 pending interaction → 纯状态传递，处理恢复。
 	if runtimeState.HasPendingInteraction() {
 		return handleChatResume(input, runtimeState, conversationContext, emitter)
 	}
 
-	// 2. 无 pending → 调 LLM 做意图分类。
-	messages := newagentprompt.BuildChatIntentMessages(conversationContext, input.UserInput)
-	decision, _, err := newagentllm.GenerateJSON[chatIntentDecision](
+	// 2. 无 pending → 路由决策（一次快速 LLM 调用，不开 thinking）。
+	flowState := runtimeState.EnsureCommonState()
+	messages := newagentprompt.BuildChatRoutingMessages(conversationContext, input.UserInput, flowState)
+
+	decision, rawResult, err := newagentllm.GenerateJSON[newagentmodel.ChatRoutingDecision](
 		ctx,
 		input.Client,
 		messages,
 		newagentllm.GenerateOptions{
 			Temperature: 0.1,
-			MaxTokens:   300,
+			MaxTokens:   500,
 			Thinking:    newagentllm.ThinkingModeDisabled,
+			Metadata: map[string]any{
+				"stage": chatStageName,
+				"phase": "routing",
+			},
 		},
 	)
-	if err != nil || decision.Validate() != nil {
-		// 分类失败 → 保守：走 task。
-		runtimeState.EnsureCommonState().Phase = newagentmodel.PhasePlanning
+
+	rawText := ""
+	if rawResult != nil {
+		rawText = strings.TrimSpace(rawResult.Text)
+	}
+
+	if err != nil {
+		// 路由失败 → 保守：走 plan。
+		log.Printf("[WARN] chat routing LLM failed chat=%s raw=%s err=%v",
+			flowState.ConversationID, rawText, err)
+		flowState.Phase = newagentmodel.PhasePlanning
 		return nil
 	}
 
-	// 3. 按意图分流。
-	flowState := runtimeState.EnsureCommonState()
-	switch decision.Intent {
-	case "task":
+	if validateErr := decision.Validate(); validateErr != nil {
+		log.Printf("[WARN] chat routing decision invalid chat=%s raw=%s err=%v",
+			flowState.ConversationID, rawText, validateErr)
 		flowState.Phase = newagentmodel.PhasePlanning
 		return nil
-	case "chat":
-		return handleChatReply(ctx, decision, conversationContext, emitter, flowState)
+	}
+
+	log.Printf("[DEBUG] chat routing chat=%s route=%s reason=%s",
+		flowState.ConversationID, decision.Route, decision.Reason)
+
+	// 3. 按路由决策推进。
+	switch decision.Route {
+	case newagentmodel.ChatRouteDirectReply:
+		return handleDirectReply(ctx, decision, conversationContext, emitter, flowState)
+
+	case newagentmodel.ChatRouteExecute:
+		return handleRouteExecute(decision, emitter, flowState)
+
+	case newagentmodel.ChatRouteDeepAnswer:
+		return handleDeepAnswer(ctx, input, decision, conversationContext, emitter, flowState)
+
+	case newagentmodel.ChatRoutePlan:
+		return handleRoutePlan(decision, emitter, flowState)
+
 	default:
 		flowState.Phase = newagentmodel.PhasePlanning
 		return nil
 	}
 }
+
+// handleDirectReply 处理简单任务：直接输出回复。
+func handleDirectReply(
+	ctx context.Context,
+	decision *newagentmodel.ChatRoutingDecision,
+	conversationContext *newagentmodel.ConversationContext,
+	emitter *newagentstream.ChunkEmitter,
+	flowState *newagentmodel.CommonState,
+) error {
+	if strings.TrimSpace(decision.Speak) != "" {
+		if err := emitter.EmitPseudoAssistantText(
+			ctx, chatSpeakBlockID, chatStageName,
+			decision.Speak,
+			newagentstream.DefaultPseudoStreamOptions(),
+		); err != nil {
+			return fmt.Errorf("闲聊回复推送失败: %w", err)
+		}
+		conversationContext.AppendHistory(schema.AssistantMessage(decision.Speak, nil))
+	}
+
+	flowState.Phase = newagentmodel.PhaseChatting
+	return nil
+}
+
+// handleRouteExecute 处理中等任务：推送简短确认，设 PhaseExecuting。
+//
+// 不把 speak 写入 history，因为真正的回复由 Execute 节点产出。
+func handleRouteExecute(
+	decision *newagentmodel.ChatRoutingDecision,
+	emitter *newagentstream.ChunkEmitter,
+	flowState *newagentmodel.CommonState,
+) error {
+	speak := strings.TrimSpace(decision.Speak)
+	if speak == "" {
+		speak = "好的，我来处理。"
+	}
+
+	// 推送轻量状态通知，让前端知道请求已接收。
+	_ = emitter.EmitStatus(chatStatusBlockID, chatStageName, "accepted", speak, false)
+
+	flowState.Phase = newagentmodel.PhaseExecuting
+
+	// 安全兜底：只有真正持有 task_class_ids 时才开粗排。
+	if decision.NeedsRoughBuild && len(flowState.TaskClassIDs) > 0 {
+		flowState.NeedsRoughBuild = true
+	}
+
+	return nil
+}
+
+// handleDeepAnswer 处理复杂问答：推送过渡语 → 原地开 thinking 再调一次 LLM → 输出深度回答。
+func handleDeepAnswer(
+	ctx context.Context,
+	input ChatNodeInput,
+	decision *newagentmodel.ChatRoutingDecision,
+	conversationContext *newagentmodel.ConversationContext,
+	emitter *newagentstream.ChunkEmitter,
+	flowState *newagentmodel.CommonState,
+) error {
+	// 1. 推送过渡语。
+	briefSpeak := strings.TrimSpace(decision.Speak)
+	if briefSpeak == "" {
+		briefSpeak = "让我想想。"
+	}
+	if err := emitter.EmitPseudoAssistantText(
+		ctx, chatSpeakBlockID, chatStageName,
+		briefSpeak,
+		newagentstream.DefaultPseudoStreamOptions(),
+	); err != nil {
+		return fmt.Errorf("过渡文案推送失败: %w", err)
+	}
+
+	// 2. 第二次 LLM 调用：开 thinking，深度回答。
+	deepMessages := newagentprompt.BuildDeepAnswerMessages(conversationContext, input.UserInput)
+	deepResult, err := input.Client.GenerateText(ctx, deepMessages, newagentllm.GenerateOptions{
+		Temperature: 0.5,
+		MaxTokens:   2000,
+		Thinking:    newagentllm.ThinkingModeEnabled,
+		Metadata: map[string]any{
+			"stage": chatStageName,
+			"phase": "deep_answer",
+		},
+	})
+
+	if err != nil || deepResult == nil {
+		// 深度回答失败 → 降级，只保留过渡语。
+		log.Printf("[WARN] deep answer LLM failed chat=%s err=%v", flowState.ConversationID, err)
+		conversationContext.AppendHistory(schema.AssistantMessage(briefSpeak, nil))
+		flowState.Phase = newagentmodel.PhaseChatting
+		return nil
+	}
+
+	// 3. 输出深度回答。
+	deepText := strings.TrimSpace(deepResult.Text)
+	if deepText == "" {
+		conversationContext.AppendHistory(schema.AssistantMessage(briefSpeak, nil))
+		flowState.Phase = newagentmodel.PhaseChatting
+		return nil
+	}
+
+	if err := emitter.EmitPseudoAssistantText(
+		ctx, chatSpeakBlockID, chatStageName,
+		deepText,
+		newagentstream.DefaultPseudoStreamOptions(),
+	); err != nil {
+		return fmt.Errorf("深度回答推送失败: %w", err)
+	}
+
+	// 将完整回复（过渡语 + 深度回答）写入 history。
+	fullReply := briefSpeak + "\n\n" + deepText
+	conversationContext.AppendHistory(schema.AssistantMessage(fullReply, nil))
+
+	flowState.Phase = newagentmodel.PhaseChatting
+	return nil
+}
+
+// handleRoutePlan 处理复杂规划：推送确认语，设 PhasePlanning。
+func handleRoutePlan(
+	decision *newagentmodel.ChatRoutingDecision,
+	emitter *newagentstream.ChunkEmitter,
+	flowState *newagentmodel.CommonState,
+) error {
+	speak := strings.TrimSpace(decision.Speak)
+	if speak == "" {
+		speak = "好的，让我来规划一下。"
+	}
+
+	_ = emitter.EmitStatus(chatStatusBlockID, chatStageName, "planning", speak, false)
+
+	flowState.Phase = newagentmodel.PhasePlanning
+	return nil
+}
+
+// ─── 恢复处理（保持原有逻辑不变）───
 
 // handleChatResume 处理 pending interaction 恢复。
 //
@@ -213,31 +347,6 @@ func handleConfirmResume(
 			flowState.RejectPlan()
 		}
 	}
-	return nil
-}
-
-// handleChatReply 处理纯闲聊意图 — 把分类时产出的 reply 流式推给前端。
-func handleChatReply(
-	ctx context.Context,
-	decision *chatIntentDecision,
-	conversationContext *newagentmodel.ConversationContext,
-	emitter *newagentstream.ChunkEmitter,
-	flowState *newagentmodel.CommonState,
-) error {
-	reply := strings.TrimSpace(decision.Reply)
-
-	if reply != "" {
-		if err := emitter.EmitPseudoAssistantText(
-			ctx, chatSpeakBlockID, chatStageName,
-			reply,
-			newagentstream.DefaultPseudoStreamOptions(),
-		); err != nil {
-			return fmt.Errorf("闲聊回复推送失败: %w", err)
-		}
-		conversationContext.AppendHistory(schema.AssistantMessage(reply, nil))
-	}
-
-	flowState.Phase = newagentmodel.PhaseChatting
 	return nil
 }
 

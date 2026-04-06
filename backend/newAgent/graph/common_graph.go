@@ -12,12 +12,13 @@ import (
 const (
 	GraphName = "agent_loop"
 
-	NodeChat      = "chat"
-	NodePlan      = "plan"
-	NodeConfirm   = "confirm"
-	NodeExecute   = "execute"
-	NodeInterrupt = "interrupt"
-	NodeDeliver   = "deliver"
+	NodeChat       = "chat"
+	NodePlan       = "plan"
+	NodeConfirm    = "confirm"
+	NodeRoughBuild = "rough_build"
+	NodeExecute    = "execute"
+	NodeInterrupt  = "interrupt"
+	NodeDeliver    = "deliver"
 )
 
 func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) (*newagentmodel.AgentGraphState, error) {
@@ -44,6 +45,9 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	if err := g.AddLambdaNode(NodeConfirm, compose.InvokableLambda(nodes.Confirm)); err != nil {
 		return nil, err
 	}
+	if err := g.AddLambdaNode(NodeRoughBuild, compose.InvokableLambda(nodes.RoughBuild)); err != nil {
+		return nil, err
+	}
 	if err := g.AddLambdaNode(NodeExecute, compose.InvokableLambda(nodes.Execute)); err != nil {
 		return nil, err
 	}
@@ -60,16 +64,17 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	if err := g.AddEdge(compose.START, NodeChat); err != nil {
 		return nil, err
 	}
-	// Chat -> END(普通聊天) / Plan / Confirm / Execute / Deliver / Interrupt
+	// Chat -> END / Plan / Confirm / RoughBuild / Execute / Deliver / Interrupt
 	if err := g.AddBranch(NodeChat, compose.NewGraphBranch(
 		branchAfterChat,
 		map[string]bool{
-			NodePlan:      true,
-			NodeConfirm:   true,
-			NodeExecute:   true,
-			NodeDeliver:   true,
-			NodeInterrupt: true,
-			compose.END:   true,
+			NodePlan:       true,
+			NodeConfirm:    true,
+			NodeRoughBuild: true,
+			NodeExecute:    true,
+			NodeDeliver:    true,
+			NodeInterrupt:  true,
+			compose.END:    true,
 		},
 	)); err != nil {
 		return nil, err
@@ -85,15 +90,20 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	)); err != nil {
 		return nil, err
 	}
-	// Confirm -> Plan(用户拒绝或重规划) / Execute(确认后继续执行) / Interrupt(产出确认中断并等待外部回调)
+	// Confirm -> Plan(用户拒绝或重规划) / RoughBuild(需粗排) / Execute(直接执行) / Interrupt(等待用户确认)
 	if err := g.AddBranch(NodeConfirm, compose.NewGraphBranch(
 		branchAfterConfirm,
 		map[string]bool{
-			NodePlan:      true,
-			NodeExecute:   true,
-			NodeInterrupt: true,
+			NodePlan:       true,
+			NodeRoughBuild: true,
+			NodeExecute:    true,
+			NodeInterrupt:  true,
 		},
 	)); err != nil {
+		return nil, err
+	}
+	// RoughBuild -> Execute：粗排完成后直接进入执行阶段微调。
+	if err := g.AddEdge(NodeRoughBuild, NodeExecute); err != nil {
 		return nil, err
 	}
 	// Execute -> Execute(继续 ReAct) / Confirm(写操作待确认) / Deliver(完成) / Interrupt(需要追问用户)
@@ -145,16 +155,21 @@ func branchAfterChat(_ context.Context, st *newagentmodel.AgentGraphState) (stri
 		return compose.END, nil
 	}
 	switch flowState.Phase {
+	case newagentmodel.PhaseChatting:
+		// 简单任务直接回复 / 深度回答完成，回复已在 Chat 节点生成。
+		return compose.END, nil
 	case newagentmodel.PhasePlanning:
 		return NodePlan, nil
 	case newagentmodel.PhaseWaitingConfirm:
 		return NodeConfirm, nil
 	case newagentmodel.PhaseExecuting:
+		if flowState.NeedsRoughBuild && st.Deps.RoughBuildFunc != nil {
+			return NodeRoughBuild, nil
+		}
 		return NodeExecute, nil
 	case newagentmodel.PhaseDone:
 		return NodeDeliver, nil
 	default:
-		// 普通聊天场景，回复已在 chatNode 生成，当前请求可直接结束。
 		return compose.END, nil
 	}
 }
@@ -191,10 +206,14 @@ func branchAfterConfirm(_ context.Context, st *newagentmodel.AgentGraphState) (s
 	}
 	switch flowState.Phase {
 	case newagentmodel.PhaseExecuting:
+		// 若 Plan 节点标记了需要粗排且 RoughBuildFunc 已注入，走粗排节点。
+		if flowState.NeedsRoughBuild && st.Deps.RoughBuildFunc != nil {
+			return NodeRoughBuild, nil
+		}
 		return NodeExecute, nil
 	case newagentmodel.PhaseWaitingConfirm:
-		// 1. confirm 节点产出确认请求后，当前连接必须进入 interrupt 收口。
-		// 2. 真正的用户确认结果应由外部回调写回状态，再重新进入 graph。
+		// confirm 节点产出确认请求后，当前连接必须进入 interrupt 收口。
+		// 真正的用户确认结果应由外部回调写回状态，再重新进入 graph。
 		return NodeInterrupt, nil
 	default:
 		return NodePlan, nil

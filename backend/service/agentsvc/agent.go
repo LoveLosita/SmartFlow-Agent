@@ -289,7 +289,30 @@ func readAgentExtraInt(extra map[string]any, key string) int {
 	return value
 }
 
-// parseAgentLooseInt 负责把 extra 中的“弱类型数字”归一成 int。
+// readAgentExtraIntSlice 从 extra 中提取 []int。
+// 支持 JSON 数组格式（[]any，每个元素为 float64/int）。
+func readAgentExtraIntSlice(extra map[string]any, key string) []int {
+	if len(extra) == 0 {
+		return nil
+	}
+	raw, ok := extra[key]
+	if !ok || raw == nil {
+		return nil
+	}
+	arr, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	result := make([]int, 0, len(arr))
+	for _, item := range arr {
+		if v, ok := parseAgentLooseInt(item); ok && v > 0 {
+			result = append(result, v)
+		}
+	}
+	return result
+}
+
+// parseAgentLooseInt 负责把 extra 中的”弱类型数字”归一成 int。
 //
 // 职责边界：
 // 1. 负责兼容前端 JSON 解码后的常见数值类型，以及字符串形式的数字。
@@ -530,7 +553,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 	requestStart := time.Now()
 	traceID := uuid.NewString()
 
-	outChan := make(chan string, 8)
+	outChan := make(chan string, 256)
 	errChan := make(chan error, 1)
 
 	go func() {
@@ -547,7 +570,7 @@ func (s *AgentService) agentChatOld(ctx context.Context, userMessage string, ifT
 	requestStart := time.Now()
 	traceID := uuid.NewString()
 
-	outChan := make(chan string, 8)
+	outChan := make(chan string, 256)
 	errChan := make(chan error, 1)
 
 	// 0. 初始化”请求级 token 统计器”，用于聚合本次请求所有模型开销。

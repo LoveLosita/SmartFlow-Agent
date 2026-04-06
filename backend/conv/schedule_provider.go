@@ -88,6 +88,51 @@ func (p *ScheduleProvider) loadCompleteTaskClasses(ctx context.Context, userID i
 	return complete, nil
 }
 
+// LoadTaskClassMetas 加载指定任务类的约束元数据（不含 Items、不含日程），供 Plan 阶段提前消费。
+func (p *ScheduleProvider) LoadTaskClassMetas(ctx context.Context, userID int, taskClassIDs []int) ([]newagenttools.TaskClassMeta, error) {
+	if len(taskClassIDs) == 0 {
+		return nil, nil
+	}
+	complete, err := p.taskClassDAO.GetCompleteTaskClassesByIDs(ctx, userID, taskClassIDs)
+	if err != nil {
+		return nil, fmt.Errorf("加载任务类元数据失败: %w", err)
+	}
+	metas := make([]newagenttools.TaskClassMeta, 0, len(complete))
+	for _, tc := range complete {
+		meta := newagenttools.TaskClassMeta{
+			ID:   tc.ID,
+			Name: derefString(tc.Name),
+		}
+		if tc.Strategy != nil {
+			meta.Strategy = *tc.Strategy
+		}
+		if tc.TotalSlots != nil {
+			meta.TotalSlots = *tc.TotalSlots
+		}
+		if tc.AllowFillerCourse != nil {
+			meta.AllowFillerCourse = *tc.AllowFillerCourse
+		}
+		if tc.ExcludedSlots != nil {
+			meta.ExcludedSlots = []int(tc.ExcludedSlots)
+		}
+		if tc.StartDate != nil {
+			meta.StartDate = tc.StartDate.Format("2006-01-02")
+		}
+		if tc.EndDate != nil {
+			meta.EndDate = tc.EndDate.Format("2006-01-02")
+		}
+		metas = append(metas, meta)
+	}
+	return metas, nil
+}
+
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 // buildExtraItemCategories 从已有日程中提取不属于给定 taskClasses 的 task event 的 category 映射。
 // 当加载全部 taskClass 时，通常返回空 map。
 func buildExtraItemCategories(schedules []model.Schedule, taskClasses []model.TaskClass) map[int]string {

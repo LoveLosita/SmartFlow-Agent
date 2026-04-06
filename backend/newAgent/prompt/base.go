@@ -70,29 +70,46 @@ func renderStateSummary(state *newagentmodel.CommonState) string {
 
 	if !state.HasPlan() {
 		sb.WriteString("当前完整 plan：暂无。\n")
-		return sb.String()
-	}
-
-	sb.WriteString("当前完整 plan：\n")
-	for i, step := range state.PlanSteps {
-		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, strings.TrimSpace(step.Content)))
-		if strings.TrimSpace(step.DoneWhen) != "" {
-			sb.WriteString(fmt.Sprintf("   完成判定：%s\n", strings.TrimSpace(step.DoneWhen)))
-		}
-	}
-
-	if step, ok := state.CurrentPlanStep(); ok {
-		sb.WriteString(fmt.Sprintf("当前步骤进度：%d/%d\n", current, total))
-		sb.WriteString("当前步骤内容：\n")
-		sb.WriteString(strings.TrimSpace(step.Content))
-		sb.WriteString("\n")
-		if strings.TrimSpace(step.DoneWhen) != "" {
-			sb.WriteString("当前步骤完成判定：\n")
-			sb.WriteString(strings.TrimSpace(step.DoneWhen))
-			sb.WriteString("\n")
-		}
 	} else {
-		sb.WriteString("当前步骤进度：暂时无有效当前步骤。\n")
+		sb.WriteString("当前完整 plan：\n")
+		for i, step := range state.PlanSteps {
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, strings.TrimSpace(step.Content)))
+			if strings.TrimSpace(step.DoneWhen) != "" {
+				sb.WriteString(fmt.Sprintf("   完成判定：%s\n", strings.TrimSpace(step.DoneWhen)))
+			}
+		}
+
+		if step, ok := state.CurrentPlanStep(); ok {
+			sb.WriteString(fmt.Sprintf("当前步骤进度：%d/%d\n", current, total))
+			sb.WriteString("当前步骤内容：\n")
+			sb.WriteString(strings.TrimSpace(step.Content))
+			sb.WriteString("\n")
+			if strings.TrimSpace(step.DoneWhen) != "" {
+				sb.WriteString("当前步骤完成判定：\n")
+				sb.WriteString(strings.TrimSpace(step.DoneWhen))
+				sb.WriteString("\n")
+			}
+		} else {
+			sb.WriteString("当前步骤进度：暂时无有效当前步骤。\n")
+		}
+	}
+
+	// 渲染任务类约束元数据（如有），帮助 LLM 了解排程范围和策略，避免追问已有信息。
+	if len(state.TaskClasses) > 0 {
+		sb.WriteString("\n本次排课涉及的任务类约束：\n")
+		for _, tc := range state.TaskClasses {
+			line := fmt.Sprintf("- [ID=%d] %s：策略=%s，总时段预算=%d", tc.ID, tc.Name, tc.Strategy, tc.TotalSlots)
+			if tc.StartDate != "" || tc.EndDate != "" {
+				line += fmt.Sprintf("，日期范围=%s ~ %s", tc.StartDate, tc.EndDate)
+			}
+			if tc.AllowFillerCourse {
+				line += "，允许嵌入水课"
+			}
+			if len(tc.ExcludedSlots) > 0 {
+				line += fmt.Sprintf("，排除时段=%v", tc.ExcludedSlots)
+			}
+			sb.WriteString(line + "\n")
+		}
 	}
 
 	return sb.String()

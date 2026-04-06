@@ -22,6 +22,7 @@ func autoMigrateModels(db *gorm.DB) error {
 		&model.Schedule{},
 		&model.AgentOutboxMessage{},
 		&model.AgentScheduleState{},
+		&model.AgentStateSnapshotRecord{},
 	}
 
 	for _, m := range models {

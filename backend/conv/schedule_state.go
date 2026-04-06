@@ -178,6 +178,7 @@ func LoadScheduleState(
 		}
 		catID := tc.ID
 
+		pendingCount := 0
 		for _, item := range tc.Items {
 			if item.Status == nil || *item.Status != model.TaskItemStatusUnscheduled {
 				continue
@@ -197,17 +198,46 @@ func LoadScheduleState(
 
 			stateID := nextStateID
 			state.Tasks = append(state.Tasks, newagenttools.ScheduleTask{
-				StateID:    stateID,
-				Source:     "task_item",
-				SourceID:   item.ID,
-				Name:       name,
-				Category:   catName,
-				Status:     "pending",
-				Duration:   duration,
-				CategoryID: catID,
+				StateID:     stateID,
+				Source:      "task_item",
+				SourceID:    item.ID,
+				Name:        name,
+				Category:    catName,
+				Status:      "pending",
+				Duration:    duration,
+				CategoryID:  catID,
+				TaskClassID: tc.ID,
 			})
 			itemStateIDs[item.ID] = stateID
 			nextStateID++
+			pendingCount++
+		}
+
+		// 有待安排 item 的任务类才暴露约束给 LLM。
+		if pendingCount > 0 {
+			meta := newagenttools.TaskClassMeta{
+				ID:   tc.ID,
+				Name: catName,
+			}
+			if tc.Strategy != nil {
+				meta.Strategy = *tc.Strategy
+			}
+			if tc.TotalSlots != nil {
+				meta.TotalSlots = *tc.TotalSlots
+			}
+			if tc.AllowFillerCourse != nil {
+				meta.AllowFillerCourse = *tc.AllowFillerCourse
+			}
+			if tc.ExcludedSlots != nil {
+				meta.ExcludedSlots = []int(tc.ExcludedSlots)
+			}
+			if tc.StartDate != nil {
+				meta.StartDate = tc.StartDate.Format("2006-01-02")
+			}
+			if tc.EndDate != nil {
+				meta.EndDate = tc.EndDate.Format("2006-01-02")
+			}
+			state.TaskClasses = append(state.TaskClasses, meta)
 		}
 	}
 
@@ -286,6 +316,13 @@ type ScheduleChange struct {
 	NewCoords []SlotCoord
 	// For move/unplace: old slot positions
 	OldCoords []SlotCoord
+
+	// HostEventID: source=task_item 嵌入路径时，宿主课程的 schedule_event.id。
+	// Place/Unplace：当前操作位置的宿主 EventID（0 表示非嵌入）。
+	// Move：新位置的宿主 EventID。
+	HostEventID int
+	// OldHostEventID: Move 时旧位置的宿主 EventID（0 表示旧位置非嵌入）。
+	OldHostEventID int
 }
 
 // DiffScheduleState compares original and modified ScheduleState,
@@ -313,40 +350,44 @@ func DiffScheduleState(
 		// Place: pending → has slots
 		case wasPending && hasSlots:
 			changes = append(changes, ScheduleChange{
-				Type:       ChangePlace,
-				StateID:    mod.StateID,
-				Source:     mod.Source,
-				SourceID:   mod.SourceID,
-				EventType:  mod.EventType,
-				CategoryID: mod.CategoryID,
-				Name:       mod.Name,
-				NewCoords:  expandToCoords(mod.Slots, modified),
+				Type:        ChangePlace,
+				StateID:     mod.StateID,
+				Source:      mod.Source,
+				SourceID:    mod.SourceID,
+				EventType:   mod.EventType,
+				CategoryID:  mod.CategoryID,
+				Name:        mod.Name,
+				NewCoords:   expandToCoords(mod.Slots, modified),
+				HostEventID: resolveHostEventID(mod, modified),
 			})
 
 		// Move: had slots → different slots
 		case hadSlots && hasSlots && !slotsEqual(orig.Slots, mod.Slots):
 			changes = append(changes, ScheduleChange{
-				Type:       ChangeMove,
-				StateID:    mod.StateID,
-				Source:     mod.Source,
-				SourceID:   mod.SourceID,
-				EventType:  mod.EventType,
-				CategoryID: mod.CategoryID,
-				Name:       mod.Name,
-				OldCoords:  expandToCoords(orig.Slots, original),
-				NewCoords:  expandToCoords(mod.Slots, modified),
+				Type:           ChangeMove,
+				StateID:        mod.StateID,
+				Source:         mod.Source,
+				SourceID:       mod.SourceID,
+				EventType:      mod.EventType,
+				CategoryID:     mod.CategoryID,
+				Name:           mod.Name,
+				OldCoords:      expandToCoords(orig.Slots, original),
+				NewCoords:      expandToCoords(mod.Slots, modified),
+				HostEventID:    resolveHostEventID(mod, modified),
+				OldHostEventID: resolveHostEventID(orig, original),
 			})
 
 		// Unplace: had slots → no slots
 		case hadSlots && !hasSlots:
 			changes = append(changes, ScheduleChange{
-				Type:      ChangeUnplace,
-				StateID:   mod.StateID,
-				Source:    orig.Source,
-				SourceID:  orig.SourceID,
-				EventType: orig.EventType,
-				Name:      orig.Name,
-				OldCoords: expandToCoords(orig.Slots, original),
+				Type:        ChangeUnplace,
+				StateID:     mod.StateID,
+				Source:      orig.Source,
+				SourceID:    orig.SourceID,
+				EventType:   orig.EventType,
+				Name:        orig.Name,
+				OldCoords:   expandToCoords(orig.Slots, original),
+				HostEventID: resolveHostEventID(orig, original),
 			})
 		}
 	}
@@ -374,6 +415,20 @@ func slotsEqual(a, b []newagenttools.TaskSlot) bool {
 		}
 	}
 	return true
+}
+
+// resolveHostEventID 从任务的 EmbedHost 字段反查宿主的 ScheduleEvent.ID。
+// 用于 DiffScheduleState 在生成 ScheduleChange 时记录嵌入路径的宿主 EventID。
+// 若任务非嵌入（EmbedHost == nil）或宿主不存在，返回 0。
+func resolveHostEventID(task *newagenttools.ScheduleTask, state *newagenttools.ScheduleState) int {
+	if task == nil || task.EmbedHost == nil {
+		return 0
+	}
+	host := state.TaskByStateID(*task.EmbedHost)
+	if host == nil {
+		return 0
+	}
+	return host.SourceID
 }
 
 // expandToCoords converts compressed TaskSlots to individual SlotCoords.

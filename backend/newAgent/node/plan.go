@@ -67,7 +67,7 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 	// 2. 构造本轮规划输入。
 	messages := newagentprompt.BuildPlanMessages(flowState, conversationContext, input.UserInput)
 
-	// 3. Phase 1：快速评估（不开 thinking），让 LLM 同时产出复杂度评估和规划结果。
+	// 3. Phase 1：快速评估（开 thinking），让 LLM 同时产出复杂度评估和规划结果。
 	decision, rawResult, err := newagentllm.GenerateJSON[newagentmodel.PlanDecision](
 		ctx,
 		input.Client,
@@ -75,7 +75,7 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 		newagentllm.GenerateOptions{
 			Temperature: 0.2,
 			MaxTokens:   1600,
-			Thinking:    newagentllm.ThinkingModeDisabled,
+			Thinking:    newagentllm.ThinkingModeEnabled,
 			Metadata: map[string]any{
 				"stage": planStageName,
 				"phase": "assessment",
@@ -128,8 +128,8 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 		// 深度规划失败时静默降级到 Phase 1 结果，不中断流程。
 	}
 
-	// 5. 若模型先对用户说了话，则先以伪流式推送，再写回 history，保证上下文连续。
-	if strings.TrimSpace(decision.Speak) != "" {
+	// 5. 若模型先对用户说了话，且不是 ask_user（ask_user 交给 interrupt 收口），则先以伪流式推送，再写回 history。
+	if strings.TrimSpace(decision.Speak) != "" && decision.Action != newagentmodel.PlanActionAskUser {
 		if err := emitter.EmitPseudoAssistantText(
 			ctx,
 			planSpeakBlockID,
@@ -154,9 +154,18 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 	case newagentmodel.PlanActionDone:
 		// 4.1 直接把结构化 PlanStep 固化到 CommonState，避免 state 层丢失 done_when。
 		// 4.2 再把完整自然语言计划写入 pinned context，保证后续 execute 优先看到。
-		// 4.3 最后进入 waiting_confirm，等待用户确认整体计划。
+		// 4.3 若 LLM 识别到批量排课意图，把 NeedsRoughBuild 标记写入 CommonState，
+		//     Confirm 节点后的路由会据此决定是否跳入 RoughBuild 节点。
+		// 4.4 最后进入 waiting_confirm，等待用户确认整体计划。
 		flowState.FinishPlan(decision.PlanSteps)
 		writePlanPinnedBlocks(conversationContext, decision.PlanSteps)
+		if decision.NeedsRoughBuild {
+			flowState.NeedsRoughBuild = true
+			// 以 LLM 决策中的 task_class_ids 为准（若非空则覆盖前端传入值）。
+			if len(decision.TaskClassIDs) > 0 {
+				flowState.TaskClassIDs = decision.TaskClassIDs
+			}
+		}
 		return nil
 	default:
 		// 1. LLM 输出了不支持的 action，不应直接报错终止，而应给它修正机会。
