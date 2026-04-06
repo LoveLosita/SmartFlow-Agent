@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -30,16 +31,20 @@ const (
 // 2. RuntimeState 提供 plan 步骤与轮次预算；
 // 3. ConversationContext 提供历史对话与置顶上下文；
 // 4. ToolRegistry 提供工具注册表；
-// 5. ScheduleState 提供工具操作的内存数据源（可为 nil，由调用方按需加载）。
+// 5. ScheduleState 提供工具操作的内存数据源（可为 nil，由调用方按需加载）；
+// 6. SchedulePersistor 用于写工具执行后持久化变更；
+// 7. OriginalScheduleState 是首次加载时的原始快照，用于 diff。
 type ExecuteNodeInput struct {
-	RuntimeState        *newagentmodel.AgentRuntimeState
-	ConversationContext *newagentmodel.ConversationContext
-	UserInput           string
-	Client              *newagentllm.Client
-	ChunkEmitter        *newagentstream.ChunkEmitter
-	ResumeNode          string
-	ToolRegistry        *newagenttools.ToolRegistry
-	ScheduleState       *newagenttools.ScheduleState // 工具操作的内存数据源，由调用方从 AgentGraphState 注入
+	RuntimeState          *newagentmodel.AgentRuntimeState
+	ConversationContext   *newagentmodel.ConversationContext
+	UserInput             string
+	Client                *newagentllm.Client
+	ChunkEmitter          *newagentstream.ChunkEmitter
+	ResumeNode            string
+	ToolRegistry          *newagenttools.ToolRegistry
+	ScheduleState         *newagenttools.ScheduleState
+	SchedulePersistor     newagentmodel.SchedulePersistor
+	OriginalScheduleState *newagenttools.ScheduleState
 }
 
 // ExecuteRoundObservation 记录执行阶段每轮的关键观察。
@@ -85,6 +90,11 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 	}
 	flowState := runtimeState.EnsureCommonState()
 
+	// 1.5. 确认执行分支：如果用户已确认写操作，直接执行工具。
+	if runtimeState.PendingConfirmTool != nil {
+		return executePendingTool(ctx, runtimeState, conversationContext, input.ToolRegistry, input.ScheduleState, input.SchedulePersistor, input.OriginalScheduleState, emitter)
+	}
+
 	// 2. 检查是否有可执行的 plan 步骤。
 	if !flowState.HasCurrentPlanStep() {
 		return fmt.Errorf("execute node: 当前无有效 plan 步骤，无法执行")
@@ -127,20 +137,69 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 			},
 		},
 	)
+	const maxConsecutiveCorrections = 3
+
+	// 提前捕获原始文本，用于日志和 correction。
+	rawText := ""
+	if rawResult != nil {
+		rawText = strings.TrimSpace(rawResult.Text)
+	}
+
 	if err != nil {
-		if rawResult != nil && strings.TrimSpace(rawResult.Text) != "" {
-			return fmt.Errorf("执行决策解析失败，原始输出=%s，错误=%w", strings.TrimSpace(rawResult.Text), err)
+		if rawText != "" {
+			log.Printf("[DEBUG] execute LLM 输出解析失败 chat=%s round=%d raw=%s",
+				flowState.ConversationID, flowState.RoundUsed, rawText)
+			flowState.ConsecutiveCorrections++
+			if flowState.ConsecutiveCorrections >= maxConsecutiveCorrections {
+				return fmt.Errorf("连续 %d 次输出非 JSON，终止执行: 原始输出=%s",
+					flowState.ConsecutiveCorrections, rawText)
+			}
+			AppendLLMCorrectionWithHint(
+				conversationContext,
+				rawText,
+				"你的输出不是合法 JSON，无法解析。",
+				"你必须输出严格的 JSON 格式，不要使用 [NEXT_PLAN] 等纯文本标记。合法格式示例：{\"speak\":\"...\",\"action\":\"next_plan\",\"goal_check\":\"...\",\"reason\":\"...\"}",
+			)
+			return nil
 		}
 		return fmt.Errorf("执行阶段模型调用失败: %w", err)
 	}
+
+	// 调试日志：输出 LLM 原始返回和解析后的决策，方便排查。
+	log.Printf("[DEBUG] execute LLM 响应 chat=%s round=%d action=%s speak_len=%d raw_len=%d raw_preview=%.200s",
+		flowState.ConversationID, flowState.RoundUsed,
+		decision.Action, len(decision.Speak), len(rawText), rawText)
+
 	if err := decision.Validate(); err != nil {
-		return fmt.Errorf("执行决策不合法: %w", err)
+		flowState.ConsecutiveCorrections++
+		log.Printf("[WARN] execute 决策不合法 chat=%s round=%d consecutive=%d/%d err=%s",
+			flowState.ConversationID, flowState.RoundUsed,
+			flowState.ConsecutiveCorrections, maxConsecutiveCorrections, err.Error())
+		if flowState.ConsecutiveCorrections >= maxConsecutiveCorrections {
+			return fmt.Errorf("连续 %d 次决策不合法，终止执行: %s (原始输出: %s)",
+				flowState.ConsecutiveCorrections, err.Error(), rawText)
+		}
+		// 给 LLM 修正机会。
+		AppendLLMCorrectionWithHint(
+			conversationContext,
+			rawText,
+			fmt.Sprintf("你的执行决策不合法：%s", err.Error()),
+			"合法的 action 包括：continue（继续当前步骤）、ask_user（追问用户）、confirm（写操作确认）、next_plan（推进到下一步）、done（任务完成）。",
+		)
+		return nil
 	}
+
+	// 决策合法，重置连续修正计数。
+	flowState.ConsecutiveCorrections = 0
 
 	// 自省校验：next_plan / done 必须附带 goal_check，否则不推进，追加修正让 LLM 重试。
 	if decision.Action == newagentmodel.ExecuteActionNextPlan ||
 		decision.Action == newagentmodel.ExecuteActionDone {
 		if strings.TrimSpace(decision.GoalCheck) == "" {
+			flowState.ConsecutiveCorrections++
+			if flowState.ConsecutiveCorrections >= maxConsecutiveCorrections {
+				return fmt.Errorf("连续 %d 次 goal_check 为空，终止执行", flowState.ConsecutiveCorrections)
+			}
 			AppendLLMCorrectionWithHint(
 				conversationContext,
 				decision.Speak,
@@ -346,11 +405,130 @@ func executeToolCall(
 	// 2. 执行工具。
 	result := registry.Execute(scheduleState, toolName, toolCall.Arguments)
 
-	// 3. 将工具结果追加到对话历史，让 LLM 下一轮能看到。
+	// 3. 将工具调用和结果以合法的 assistant+tool 消息对追加到对话历史。
+	//
+	// 修复说明：
+	// 旧实现直接追加裸 Tool 消息（无 ToolCallID、无前置 assistant tool_calls），
+	// 违反 OpenAI 兼容 API 消息格式约束，导致 API 拒绝请求、连接断开。
+	// 正确做法：先追加带 ToolCalls 的 assistant 消息，再追加带匹配 ToolCallID 的 tool 消息。
+	toolCallID := uuid.NewString()
+
+	argsJSON := "{}"
+	if toolCall.Arguments != nil {
+		if raw, err := json.Marshal(toolCall.Arguments); err == nil {
+			argsJSON = string(raw)
+		}
+	}
+
 	conversationContext.AppendHistory(&schema.Message{
-		Role:    schema.Tool,
-		Content: result,
+		Role:    schema.Assistant,
+		Content: "",
+		ToolCalls: []schema.ToolCall{
+			{
+				ID:   toolCallID,
+				Type: "function",
+				Function: schema.FunctionCall{
+					Name:      toolName,
+					Arguments: argsJSON,
+				},
+			},
+		},
 	})
+
+	conversationContext.AppendHistory(&schema.Message{
+		Role:       schema.Tool,
+		Content:    result,
+		ToolCallID: toolCallID,
+		ToolName:   toolName,
+	})
+
+	return nil
+}
+
+// executePendingTool 执行用户已确认的写工具。
+//
+// 职责边界：
+// 1. 从 PendingConfirmTool 读取工具名和参数（已序列化）；
+// 2. 反序列化参数后调用工具执行；
+// 3. 将结果追加到历史，清空 PendingConfirmTool；
+// 4. 执行成功后调用 persistor 持久化变更；
+// 5. 不调用 LLM，直接返回让下一轮继续。
+func executePendingTool(
+	ctx context.Context,
+	runtimeState *newagentmodel.AgentRuntimeState,
+	conversationContext *newagentmodel.ConversationContext,
+	registry *newagenttools.ToolRegistry,
+	scheduleState *newagenttools.ScheduleState,
+	persistor newagentmodel.SchedulePersistor,
+	originalState *newagenttools.ScheduleState,
+	emitter *newagentstream.ChunkEmitter,
+) error {
+	pending := runtimeState.PendingConfirmTool
+	if pending == nil {
+		return nil
+	}
+
+	// 1. 反序列化参数。
+	var args map[string]any
+	if err := json.Unmarshal([]byte(pending.ArgsJSON), &args); err != nil {
+		return fmt.Errorf("解析工具参数失败: %w", err)
+	}
+
+	// 2. 推送状态。
+	if err := emitter.EmitStatus(
+		executeStatusBlockID,
+		executeStageName,
+		"tool_call",
+		fmt.Sprintf("正在执行工具：%s", pending.ToolName),
+		false,
+	); err != nil {
+		return fmt.Errorf("工具调用状态推送失败: %w", err)
+	}
+
+	// 3. 校验依赖：写工具必须持有有效的日程状态。
+	if scheduleState == nil {
+		return fmt.Errorf("日程状态未加载，无法执行已确认的写工具 %s", pending.ToolName)
+	}
+
+	// 4. 执行工具。
+	result := registry.Execute(scheduleState, pending.ToolName, args)
+
+	// 5. 将工具调用和结果以合法的 assistant+tool 消息对追加到历史。
+	//
+	// 修复说明：同 executeToolCall，需要配对的 assistant+tool 消息。
+	toolCallID := uuid.NewString()
+
+	conversationContext.AppendHistory(&schema.Message{
+		Role:    schema.Assistant,
+		Content: "",
+		ToolCalls: []schema.ToolCall{
+			{
+				ID:   toolCallID,
+				Type: "function",
+				Function: schema.FunctionCall{
+					Name:      pending.ToolName,
+					Arguments: pending.ArgsJSON,
+				},
+			},
+		},
+	})
+
+	conversationContext.AppendHistory(&schema.Message{
+		Role:       schema.Tool,
+		Content:    result,
+		ToolCallID: toolCallID,
+		ToolName:   pending.ToolName,
+	})
+
+	// 6. 清空临时邮箱，避免重复执行。
+	runtimeState.PendingConfirmTool = nil
+
+	// 7. 持久化变更（如果有 persistor）。
+	if persistor != nil && originalState != nil {
+		if err := persistor.PersistScheduleChanges(ctx, originalState, scheduleState, runtimeState.UserID); err != nil {
+			return fmt.Errorf("持久化日程变更失败: %w", err)
+		}
+	}
 
 	return nil
 }

@@ -52,6 +52,11 @@ func (api *AgentHandler) ChatAgent(c *gin.Context) {
 	// 3) 规范化会话 ID
 	conversationID := strings.TrimSpace(req.ConversationID)
 	if conversationID == "" {
+		// confirm_action 需要关联已存在的会话状态，缺少 conversation_id 直接报错。
+		if _, ok := req.Extra["confirm_action"]; ok {
+			c.JSON(http.StatusBadRequest, respond.MissingConversationID)
+			return
+		}
 		conversationID = uuid.NewString()
 	}
 	c.Writer.Header().Set("X-Conversation-ID", conversationID)

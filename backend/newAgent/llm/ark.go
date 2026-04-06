@@ -1,3 +1,13 @@
+// 过渡期遗留文件。
+//
+// 这里的 CallArkText / CallArkJSON 是为了让旧 agent 代码（route/quicknote 等）
+// 在迁移到统一 Client 之前能继续直接持有 *ark.ChatModel。
+//
+// 替代路径：
+//   - CallArkText  → WrapArkClient(arkModel) + client.GenerateText(...)
+//   - CallArkJSON  → WrapArkClient(arkModel) + GenerateJSON[T](...)
+//
+// 待旧 agent 代码全部收敛到 Client 接口后，本文件可整体删除。
 package newagentllm
 
 import (

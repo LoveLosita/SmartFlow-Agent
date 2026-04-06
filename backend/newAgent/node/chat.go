@@ -176,7 +176,14 @@ func handleConfirmResume(
 
 	switch action {
 	case "accept":
+		// 恢复前保存待执行工具，Execute 节点需要它。
+		pendingTool := pending.PendingTool
 		runtimeState.ResumeFromPending()
+		// 将待执行工具放回临时邮箱，供 Execute 节点执行。
+		if pendingTool != nil {
+			copied := *pendingTool
+			runtimeState.PendingConfirmTool = &copied
+		}
 		flowState.Phase = newagentmodel.PhaseExecuting
 		_ = emitter.EmitStatus(
 			chatStatusBlockID, chatStageName,

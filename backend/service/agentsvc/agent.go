@@ -16,6 +16,8 @@ import (
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
 	"github.com/LoveLosita/smartflow/backend/inits"
 	"github.com/LoveLosita/smartflow/backend/model"
+	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
+	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/LoveLosita/smartflow/backend/respond"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
@@ -42,12 +44,18 @@ type AgentService struct {
 	// 1. 负责把“多任务类粗排结果 + 既有日程”合并成 HybridEntries；
 	// 2. daily/weekly ReAct 全部基于这个结果继续优化。
 	HybridScheduleWithPlanMultiFunc func(ctx context.Context, userID int, taskClassIDs []int) ([]model.HybridScheduleEntry, []model.TaskClassItem, error)
-	// ResolvePlanningWindowFunc 负责把 task_class_ids 解析成“全局排程窗口”的相对周/天边界。
+	// ResolvePlanningWindowFunc 负责把 task_class_ids 解析成”全局排程窗口”的相对周/天边界。
 	//
 	// 作用：
 	// 1. 给周级 Move 增加硬边界，避免首尾不足一周时移出有效日期范围；
-	// 2. 该函数只做“窗口解析”，不负责粗排与混排计算。
+	// 2. 该函数只做”窗口解析”，不负责粗排与混排计算。
 	ResolvePlanningWindowFunc func(ctx context.Context, userID int, taskClassIDs []int) (startWeek, startDay, endWeek, endDay int, err error)
+
+	// ── newAgent 依赖（由 cmd/start.go 通过 Set* 方法注入）──
+	toolRegistry      *newagenttools.ToolRegistry
+	scheduleProvider  newagentmodel.ScheduleStateProvider
+	schedulePersistor newagentmodel.SchedulePersistor
+	agentStateStore   newagentmodel.AgentStateStore
 }
 
 // NewAgentService 构造 AgentService。
@@ -522,13 +530,27 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 	requestStart := time.Now()
 	traceID := uuid.NewString()
 
-	// 1. 每个请求都返回两个通道：
-	//    - outChan：推送流式输出片段；
-	//    - errChan：推送异步阶段错误（非阻塞上报）。
 	outChan := make(chan string, 8)
 	errChan := make(chan error, 1)
 
-	// 0. 初始化“请求级 token 统计器”，用于聚合本次请求所有模型开销。
+	go func() {
+		defer close(outChan)
+		s.runNewAgentGraph(ctx, userMessage, ifThinking, modelName, userID, chatID, extra, traceID, requestStart, outChan, errChan)
+	}()
+
+	return outChan, errChan
+}
+
+// agentChatOld 是旧路由逻辑的备份，暂时保留供回滚使用。
+// TODO: 新 graph 稳定后删除。
+func (s *AgentService) agentChatOld(ctx context.Context, userMessage string, ifThinking bool, modelName string, userID int, chatID string, extra map[string]any) (<-chan string, <-chan error) {
+	requestStart := time.Now()
+	traceID := uuid.NewString()
+
+	outChan := make(chan string, 8)
+	errChan := make(chan error, 1)
+
+	// 0. 初始化”请求级 token 统计器”，用于聚合本次请求所有模型开销。
 	requestCtx, _ := withRequestTokenMeter(ctx)
 
 	// 1) 规范会话 ID，选择模型。

@@ -334,6 +334,11 @@ var ( //请求相关的响应
 		Info:   "schedule plan preview not found",
 	}
 
+	MissingConversationID = Response{ //确认/恢复请求缺少会话ID
+		Status: "40054",
+		Info:   "conversation_id is required when confirm_action is present",
+	}
+
 	RouteControlInternalError = Response{ //路由控制码内部错误
 		Status: "50001",
 		Info:   "route control failed",

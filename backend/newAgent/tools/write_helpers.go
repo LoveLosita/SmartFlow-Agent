@@ -2,12 +2,11 @@ package newagenttools
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
 // ==================== 写工具专用辅助函数 ====================
-// 复用 read_helpers.go 中的：formatSlotRange, formatTaskLabel, slotOccupiedBy,
-// findFreeRangesOnDay, getTasksOnDay, countDayOccupied, taskOnDay, freeRange
 
 // ==================== 校验函数 ====================
 
@@ -127,6 +126,63 @@ func countPending(state *ScheduleState) int {
 		}
 	}
 	return count
+}
+
+// ==================== 任务时段辅助 ====================
+
+// formatTaskSlotsBrief 将任务的时段列表格式化为简短描述。
+// 如 "第1天(1-2节) 第4天(3-4节)"。
+func formatTaskSlotsBrief(slots []TaskSlot) string {
+	parts := make([]string, 0, len(slots))
+	for _, slot := range slots {
+		parts = append(parts, fmt.Sprintf("第%d天第%s", slot.Day, formatSlotRange(slot.SlotStart, slot.SlotEnd)))
+	}
+	return strings.Join(parts, " ")
+}
+
+// collectAffectedDays 从旧位置和新位置中收集所有涉及的天（去重排序）。
+func collectAffectedDays(oldSlots, newSlots []TaskSlot) []int {
+	days := make(map[int]bool)
+	for _, s := range oldSlots {
+		days[s.Day] = true
+	}
+	for _, s := range newSlots {
+		days[s.Day] = true
+	}
+	return sortedKeys(days)
+}
+
+// collectAffectedDaysFromSlots 从单个 slot 列表中收集涉及的天。
+func collectAffectedDaysFromSlots(slots []TaskSlot) []int {
+	days := make(map[int]bool)
+	for _, s := range slots {
+		days[s.Day] = true
+	}
+	return sortedKeys(days)
+}
+
+// sortedKeys 将 map 的 key 排序后返回。
+func sortedKeys(m map[int]bool) []int {
+	keys := make([]int, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	return keys
+}
+
+// uniqueSorted 对 int 切片去重并排序。
+func uniqueSorted(s []int) []int {
+	seen := make(map[int]bool)
+	result := make([]int, 0, len(s))
+	for _, v := range s {
+		if !seen[v] {
+			seen[v] = true
+			result = append(result, v)
+		}
+	}
+	sort.Ints(result)
+	return result
 }
 
 // ==================== 输出格式化 ====================

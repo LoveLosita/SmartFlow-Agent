@@ -2,7 +2,6 @@ package newagenttools
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -366,14 +365,14 @@ func Unplace(state *ScheduleState, taskID int) string {
 	if task.EmbeddedBy != nil {
 		guest := state.TaskByStateID(*task.EmbeddedBy)
 		if guest != nil {
+			// 先从嵌入时设置的 Slots 推算 Duration，再清空。
+			// Place 嵌入时 guest.Slots 被设置为实际占用范围，这里从中恢复时长。
+			if len(guest.Slots) > 0 {
+				guest.Duration = taskDuration(*guest)
+			}
 			guest.EmbedHost = nil
 			guest.Slots = nil
 			guest.Status = "pending"
-			// 恢复客人的 Duration：从原始数据推断。
-			// 嵌入客人只占一个 slot range，取其长度作为 duration。
-			if len(oldSlots) > 0 {
-				// 客人被嵌入到宿主的 slot 里，客人自己的 slot 在嵌入时被设置了
-			}
 		}
 		task.EmbeddedBy = nil
 	}
@@ -393,61 +392,4 @@ func Unplace(state *ScheduleState, taskID int) string {
 	}
 	sb.WriteString(fmt.Sprintf("待安排任务剩余：%d个。", countPending(state)))
 	return sb.String()
-}
-
-// ==================== 内部辅助函数 ====================
-
-// formatTaskSlotsBrief 将任务的时段列表格式化为简短描述。
-// 如 "第1天(1-2节) 第4天(3-4节)"。
-func formatTaskSlotsBrief(slots []TaskSlot) string {
-	parts := make([]string, 0, len(slots))
-	for _, slot := range slots {
-		parts = append(parts, fmt.Sprintf("第%d天第%s", slot.Day, formatSlotRange(slot.SlotStart, slot.SlotEnd)))
-	}
-	return strings.Join(parts, " ")
-}
-
-// collectAffectedDays 从旧位置和新位置中收集所有涉及的天（去重排序）。
-func collectAffectedDays(oldSlots, newSlots []TaskSlot) []int {
-	days := make(map[int]bool)
-	for _, s := range oldSlots {
-		days[s.Day] = true
-	}
-	for _, s := range newSlots {
-		days[s.Day] = true
-	}
-	return sortedKeys(days)
-}
-
-// collectAffectedDaysFromSlots 从单个 slot 列表中收集涉及的天。
-func collectAffectedDaysFromSlots(slots []TaskSlot) []int {
-	days := make(map[int]bool)
-	for _, s := range slots {
-		days[s.Day] = true
-	}
-	return sortedKeys(days)
-}
-
-// sortedKeys 将 map 的 key 排序后返回。
-func sortedKeys(m map[int]bool) []int {
-	keys := make([]int, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Ints(keys)
-	return keys
-}
-
-// uniqueSorted 对 int 切片去重并排序。
-func uniqueSorted(s []int) []int {
-	seen := make(map[int]bool)
-	result := make([]int, 0, len(s))
-	for _, v := range s {
-		if !seen[v] {
-			seen[v] = true
-			result = append(result, v)
-		}
-	}
-	sort.Ints(result)
-	return result
 }

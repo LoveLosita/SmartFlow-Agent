@@ -32,18 +32,19 @@ func (r *AgentGraphRequest) Normalize() {
 // AgentGraphDeps 描述 graph/node 层运行时真正依赖的可插拔能力。
 //
 // 设计目的：
-// 1. 让 graph 不再只拿到“裸状态”，而是能拿到上下文、模型和输出能力；
+// 1. 让 graph 不再只拿到”裸状态”，而是能拿到上下文、模型和输出能力；
 // 2. Chat/Plan/Execute/Deliver 允许分别挂不同 client，但也允许先复用同一个 client；
 // 3. ChunkEmitter 统一承接阶段提示、正文、工具事件、确认请求等 SSE 输出。
 type AgentGraphDeps struct {
-	ChatClient       *newagentllm.Client
-	PlanClient       *newagentllm.Client
-	ExecuteClient    *newagentllm.Client
-	DeliverClient    *newagentllm.Client
-	ChunkEmitter     *newagentstream.ChunkEmitter
-	StateStore       AgentStateStore
-	ToolRegistry     *newagenttools.ToolRegistry
-	ScheduleProvider ScheduleStateProvider // 按 DAO 注入，Execute 节点按需加载 ScheduleState
+	ChatClient        *newagentllm.Client
+	PlanClient        *newagentllm.Client
+	ExecuteClient     *newagentllm.Client
+	DeliverClient     *newagentllm.Client
+	ChunkEmitter      *newagentstream.ChunkEmitter
+	StateStore        AgentStateStore
+	ToolRegistry      *newagenttools.ToolRegistry
+	ScheduleProvider  ScheduleStateProvider // 按 DAO 注入，Execute 节点按需加载 ScheduleState
+	SchedulePersistor SchedulePersistor     // 按 DAO 注入，用于写工具执行后持久化变更
 }
 
 // EnsureChunkEmitter 保证 graph 运行时始终有一个可用的 chunk 发射器。
@@ -134,28 +135,16 @@ type AgentGraphRunInput struct {
 // AgentGraphState 是 graph 内部真正流转的运行态容器。
 //
 // 职责边界：
-// 1. 负责把“流程状态 + 对话上下文 + 请求输入 + 运行依赖”收口到同一个对象；
-// 2. 负责给 graph 分支和 node 提供最小必要的兜底访问方法；
-// 3. 不负责持久化，不负责真正业务执行。
-// ScheduleStateProvider 定义加载 ScheduleState 的接口。
-// 由 DAO 层或 Service 层实现，注入到 AgentGraphDeps 中。
-// 使用接口而非具体 DAO 类型，避免 model → dao 的循环依赖。
-type ScheduleStateProvider interface {
-	LoadScheduleState(ctx context.Context, userID int) (*newagenttools.ScheduleState, error)
-}
-
-// AgentGraphState 是 graph 内部真正流转的运行态容器。
-//
-// 职责边界：
 // 1. 负责把"流程状态 + 对话上下文 + 请求输入 + 运行依赖"收口到同一个对象；
 // 2. 负责给 graph 分支和 node 提供最小必要的兜底访问方法；
 // 3. 不负责持久化，不负责真正业务执行。
 type AgentGraphState struct {
-	RuntimeState        *AgentRuntimeState
-	ConversationContext *ConversationContext
-	Request             AgentGraphRequest
-	Deps                AgentGraphDeps
-	ScheduleState       *newagenttools.ScheduleState // 工具操作的内存数据源，Execute 节点按需加载
+	RuntimeState          *AgentRuntimeState
+	ConversationContext   *ConversationContext
+	Request               AgentGraphRequest
+	Deps                  AgentGraphDeps
+	ScheduleState         *newagenttools.ScheduleState // 工具操作的内存数据源，Execute 节点按需加载
+	OriginalScheduleState *newagenttools.ScheduleState // 首次加载时的原始快照，供 diff 用
 }
 
 // NewAgentGraphState 把入口参数整理成 graph 内部状态。
@@ -239,5 +228,7 @@ func (s *AgentGraphState) EnsureScheduleState(ctx context.Context) (*newagenttoo
 		return nil, err
 	}
 	s.ScheduleState = state
+	// 保存原始快照，供后续 diff 使用。
+	s.OriginalScheduleState = state.Clone()
 	return state, nil
 }

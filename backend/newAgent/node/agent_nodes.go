@@ -3,6 +3,7 @@ package newagentnode
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
@@ -147,21 +148,39 @@ func (n *AgentNodes) Execute(ctx context.Context, st *newagentmodel.AgentGraphSt
 
 	// 按需加载 ScheduleState（首次执行时从 DB 加载，后续复用内存中的 state）。
 	var scheduleState *newagenttools.ScheduleState
-	if ss, _ := st.EnsureScheduleState(ctx); ss != nil {
+	if ss, loadErr := st.EnsureScheduleState(ctx); loadErr != nil {
+		return nil, fmt.Errorf("execute node: 加载日程状态失败: %w", loadErr)
+	} else if ss != nil {
 		scheduleState = ss
+	}
+
+	// 注入工具 schema 到 ConversationContext，让 LLM 能看到可用工具列表。
+	if st.Deps.ToolRegistry != nil {
+		schemas := st.Deps.ToolRegistry.Schemas()
+		toolSchemas := make([]newagentmodel.ToolSchemaContext, len(schemas))
+		for i, s := range schemas {
+			toolSchemas[i] = newagentmodel.ToolSchemaContext{
+				Name:       s.Name,
+				Desc:       s.Desc,
+				SchemaText: s.SchemaText,
+			}
+		}
+		st.EnsureConversationContext().SetToolSchemas(toolSchemas)
 	}
 
 	if err := RunExecuteNode(
 		ctx,
 		ExecuteNodeInput{
-			RuntimeState:        st.EnsureRuntimeState(),
-			ConversationContext: st.EnsureConversationContext(),
-			UserInput:           st.Request.UserInput,
-			Client:              st.Deps.ResolveExecuteClient(),
-			ChunkEmitter:        st.EnsureChunkEmitter(),
-			ResumeNode:          "execute",
-			ToolRegistry:        st.Deps.ToolRegistry,
-			ScheduleState:       scheduleState,
+			RuntimeState:          st.EnsureRuntimeState(),
+			ConversationContext:   st.EnsureConversationContext(),
+			UserInput:             st.Request.UserInput,
+			Client:                st.Deps.ResolveExecuteClient(),
+			ChunkEmitter:          st.EnsureChunkEmitter(),
+			ResumeNode:            "execute",
+			ToolRegistry:          st.Deps.ToolRegistry,
+			ScheduleState:         scheduleState,
+			SchedulePersistor:     st.Deps.SchedulePersistor,
+			OriginalScheduleState: st.OriginalScheduleState,
 		},
 	); err != nil {
 		return nil, err

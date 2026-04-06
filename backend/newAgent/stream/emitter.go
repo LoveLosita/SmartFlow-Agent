@@ -196,7 +196,7 @@ func (e *ChunkEmitter) EmitStatus(blockID, stage, code, summary string, includeR
 		return nil
 	}
 
-	text := BuildStageReasoningText(stage, summary)
+	text := buildStageReasoningText(stage, summary)
 	payload, err := ToOpenAIReasoningChunkWithExtra(
 		e.RequestID,
 		e.ModelName,
@@ -220,7 +220,7 @@ func (e *ChunkEmitter) EmitToolCallStart(blockID, stage, toolName, summary, argu
 		return nil
 	}
 
-	text := BuildToolCallReasoningText(toolName, summary, argumentsPreview)
+	text := buildToolCallReasoningText(toolName, summary, argumentsPreview)
 	payload, err := ToOpenAIReasoningChunkWithExtra(
 		e.RequestID,
 		e.ModelName,
@@ -244,7 +244,7 @@ func (e *ChunkEmitter) EmitToolCallResult(blockID, stage, toolName, summary, arg
 		return nil
 	}
 
-	text := BuildToolResultReasoningText(toolName, summary)
+	text := buildToolResultReasoningText(toolName, summary)
 	payload, err := ToOpenAIReasoningChunkWithExtra(
 		e.RequestID,
 		e.ModelName,
@@ -273,7 +273,7 @@ func (e *ChunkEmitter) EmitConfirmRequest(ctx context.Context, blockID, stage, i
 		return nil
 	}
 
-	text := BuildConfirmAssistantText(title, summary)
+	text := buildConfirmAssistantText(title, summary)
 	extra := NewConfirmRequestExtra(blockID, stage, interactionID, title, summary)
 	return e.emitPseudoText(
 		ctx,
@@ -310,7 +310,7 @@ func (e *ChunkEmitter) EmitInterruptMessage(ctx context.Context, blockID, stage,
 		return nil
 	}
 
-	text := BuildInterruptAssistantText(interactionType, summary)
+	text := buildInterruptAssistantText(interactionType, summary)
 	extra := NewInterruptExtra(blockID, stage, interactionID, interactionType, summary)
 	return e.emitPseudoText(
 		ctx,
@@ -395,8 +395,7 @@ func EmitDone(emit PayloadEmitter) error {
 	return NewChunkEmitter(emit, "", "", 0).EmitDone()
 }
 
-// BuildStageReasoningText 生成统一阶段提示文本。
-func BuildStageReasoningText(stage, detail string) string {
+func buildStageReasoningText(stage, detail string) string {
 	stage = strings.TrimSpace(stage)
 	detail = strings.TrimSpace(detail)
 
@@ -410,8 +409,7 @@ func BuildStageReasoningText(stage, detail string) string {
 	}
 }
 
-// BuildToolCallReasoningText 生成“工具调用开始”时的可读提示文本。
-func BuildToolCallReasoningText(toolName, summary, argumentsPreview string) string {
+func buildToolCallReasoningText(toolName, summary, argumentsPreview string) string {
 	toolName = strings.TrimSpace(toolName)
 	summary = strings.TrimSpace(summary)
 	argumentsPreview = strings.TrimSpace(argumentsPreview)
@@ -429,8 +427,7 @@ func BuildToolCallReasoningText(toolName, summary, argumentsPreview string) stri
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
-// BuildToolResultReasoningText 生成“工具调用结果”时的可读提示文本。
-func BuildToolResultReasoningText(toolName, summary string) string {
+func buildToolResultReasoningText(toolName, summary string) string {
 	toolName = strings.TrimSpace(toolName)
 	summary = strings.TrimSpace(summary)
 
@@ -444,8 +441,7 @@ func BuildToolResultReasoningText(toolName, summary string) string {
 	}
 }
 
-// BuildConfirmAssistantText 生成给用户看的确认文案。
-func BuildConfirmAssistantText(title, summary string) string {
+func buildConfirmAssistantText(title, summary string) string {
 	title = strings.TrimSpace(title)
 	summary = strings.TrimSpace(summary)
 
@@ -459,8 +455,7 @@ func BuildConfirmAssistantText(title, summary string) string {
 	}
 }
 
-// BuildInterruptAssistantText 生成给用户看的中断文案。
-func BuildInterruptAssistantText(interactionType, summary string) string {
+func buildInterruptAssistantText(interactionType, summary string) string {
 	interactionType = strings.TrimSpace(interactionType)
 	summary = strings.TrimSpace(summary)
 

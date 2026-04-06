@@ -47,9 +47,16 @@ func BuildChatIntentMessages(conversationContext *newagentmodel.ConversationCont
 		}
 	}
 
+	// 只在 history 末尾还没有当前用户消息时才追加，
+	// 避免与 loadConversationContext 的预追加产生重复。
 	trimmedInput := strings.TrimSpace(userInput)
 	if trimmedInput != "" {
-		messages = append(messages, schema.UserMessage(trimmedInput))
+		alreadyLast := len(messages) > 0 &&
+			messages[len(messages)-1].Role == schema.User &&
+			messages[len(messages)-1].Content == trimmedInput
+		if !alreadyLast {
+			messages = append(messages, schema.UserMessage(trimmedInput))
+		}
 	}
 
 	return messages

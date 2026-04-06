@@ -148,6 +148,7 @@ func queryRangeSpecific(state *ScheduleState, day, startSlot, endSlot int) strin
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("第%d天 第%s：\n\n", day, formatSlotRange(startSlot, endSlot)))
 
+	total := endSlot - startSlot + 1
 	freeCount := 0
 	for s := startSlot; s <= endSlot; s++ {
 		occupant := slotOccupiedBy(state, day, s)
@@ -159,21 +160,9 @@ func queryRangeSpecific(state *ScheduleState, day, startSlot, endSlot int) strin
 		}
 	}
 
-	total := endSlot - startSlot + 1
-	sb.WriteString(fmt.Sprintf("\n该范围%d个时段全部空闲。\n", total))
-	if freeCount < total {
-		// 替换"全部空闲"为实际空闲数
-		sb.Reset()
-		// 重新构建（非全部空闲的情况不需要"该范围全部空闲"）
-		sb.WriteString(fmt.Sprintf("第%d天 第%s：\n\n", day, formatSlotRange(startSlot, endSlot)))
-		for s := startSlot; s <= endSlot; s++ {
-			occupant := slotOccupiedBy(state, day, s)
-			if occupant == nil {
-				sb.WriteString(fmt.Sprintf("第%d节：空\n", s))
-			} else {
-				sb.WriteString(fmt.Sprintf("第%d节：[%d]%s\n", s, occupant.StateID, occupant.Name))
-			}
-		}
+	if freeCount == total {
+		sb.WriteString(fmt.Sprintf("\n该范围%d个时段全部空闲。\n", total))
+	} else {
 		sb.WriteString(fmt.Sprintf("\n该范围%d个时段中，%d个空闲，%d个被占用。\n", total, freeCount, total-freeCount))
 	}
 

@@ -36,6 +36,9 @@ type CommonState struct {
 	// 安全边界
 	MaxRounds int `json:"max_rounds"`
 	RoundUsed int `json:"round_used"`
+
+	// 连续修正计数：LLM 连续输出不合法决策的次数，超过阈值后强制终止避免死循环。
+	ConsecutiveCorrections int `json:"consecutive_corrections"`
 }
 
 func NewCommonState(traceID string, userID int, conversationID string) *CommonState {
