@@ -131,8 +131,14 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 
 	// 4. 消耗一轮预算，并检查是否耗尽。
 	if !flowState.NextRound() {
-		// 轮次耗尽，强制进入交付阶段。
-		flowState.Done()
+		// 1. 轮次耗尽属于安全边界触发的被动停止，不应伪装成“正常完成”。
+		// 2. 这里统一写入 exhausted 终止结果，让 deliver 阶段按未完成收口。
+		// 3. 后续 graph 只需围绕 CommonState 的终止结果路由，无需再猜测原因。
+		flowState.Exhaust(
+			executeStageName,
+			"本轮执行已达到安全轮次上限，当前先停止继续操作。如需继续，我可以在你确认后接着处理剩余步骤。",
+			"execute rounds exhausted before task completion",
+		)
 		return nil
 	}
 
@@ -232,7 +238,7 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 			conversationContext,
 			rawText,
 			fmt.Sprintf("你的执行决策不合法：%s", err.Error()),
-			"合法的 action 包括：continue（继续当前步骤）、ask_user（追问用户）、confirm（写操作确认）、next_plan（推进到下一步）、done（任务完成）。",
+			"合法的 action 包括：continue（继续当前步骤）、ask_user（追问用户）、confirm（写操作确认）、next_plan（推进到下一步）、done（任务完成）、abort（正式终止本轮流程）。",
 		)
 		return nil
 	}
@@ -279,8 +285,9 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 	if speakText != "" {
 		isConfirmWithCard := decision.Action == newagentmodel.ExecuteActionConfirm && !input.AlwaysExecute
 		isAskUser := decision.Action == newagentmodel.ExecuteActionAskUser
+		isAbort := decision.Action == newagentmodel.ExecuteActionAbort
 
-		if !isConfirmWithCard && !isAskUser {
+		if !isConfirmWithCard && !isAskUser && !isAbort {
 			// 推流给前端
 			if err := emitter.EmitPseudoAssistantText(
 				ctx,
@@ -292,11 +299,15 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 				return fmt.Errorf("执行文案推送失败: %w", err)
 			}
 		}
-		// 始终写入历史（confirm 卡片场景下也写，保证上下文连续）
-		conversationContext.AppendHistory(&schema.Message{
-			Role:    schema.Assistant,
-			Content: speakText,
-		})
+		// 1. confirm / ask_user 的 speak 仍要写入历史，避免下一轮 LLM 丢失自己的执行上下文。
+		// 2. abort 不在这里写历史，避免先输出中间 speak，再在 deliver 收到第二份终止文案。
+		// 3. ask_user 只是不在这里伪流式推送，真正的对外展示仍由 PendingInteraction.DisplayText 承担。
+		if !isAbort {
+			conversationContext.AppendHistory(&schema.Message{
+				Role:    schema.Assistant,
+				Content: speakText,
+			})
+		}
 	}
 
 	// 7. 按 LLM 决策执行动作，后端信任 LLM 判断，不做语义校验。
@@ -347,6 +358,12 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		flowState.Done()
 		return nil
 
+	case newagentmodel.ExecuteActionAbort:
+		// 1. abort 是 execute 层的正式终止协议。
+		// 2. 这里只负责把终止结果写入 CommonState，真正的用户收口统一交给 deliver。
+		// 3. 这样 rough_build / execute / 后续其他 stop 条件都能走同一套图内收口。
+		return handleExecuteActionAbort(decision, flowState)
+
 	default:
 		// 1. LLM 输出了不支持的 action，不应直接报错终止，而应给它修正机会。
 		// 2. 使用通用修正函数追加错误反馈，让 Graph 继续循环。
@@ -359,7 +376,7 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 			conversationContext,
 			llmOutput,
 			fmt.Sprintf("你输出的 action \"%s\" 不是合法的执行动作。", decision.Action),
-			"合法的 action 包括：continue（继续当前步骤）、ask_user（追问用户）、next_plan（推进到下一步）、done（任务完成）。",
+			"合法的 action 包括：continue（继续当前步骤）、ask_user（追问用户）、confirm（写操作确认）、next_plan（推进到下一步）、done（任务完成）、abort（正式终止本轮流程）。",
 		)
 		return nil
 	}
@@ -438,6 +455,37 @@ func handleExecuteActionConfirm(
 
 	// 设 Phase，让 branchAfterExecute 路由到 confirm 节点。
 	flowState.Phase = newagentmodel.PhaseWaitingConfirm
+	return nil
+}
+
+// handleExecuteActionAbort 处理 execute 阶段声明的正式终止请求。
+//
+// 职责边界：
+// 1. 这里只负责把 abort 协议落到 CommonState；
+// 2. 不直接向用户发最终文案，避免和 deliver 收口重复；
+// 3. 若模型未提供 internal_reason，则回退到 decision.Reason 作为排查信息。
+func handleExecuteActionAbort(
+	decision *newagentmodel.ExecuteDecision,
+	flowState *newagentmodel.CommonState,
+) error {
+	if decision == nil || decision.Abort == nil {
+		return fmt.Errorf("abort 动作缺少终止信息")
+	}
+	if flowState == nil {
+		return fmt.Errorf("abort 动作缺少流程状态")
+	}
+
+	internalReason := strings.TrimSpace(decision.Abort.InternalReason)
+	if internalReason == "" {
+		internalReason = strings.TrimSpace(decision.Reason)
+	}
+
+	flowState.Abort(
+		executeStageName,
+		decision.Abort.Code,
+		decision.Abort.UserMessage,
+		internalReason,
+	)
 	return nil
 }
 
@@ -698,7 +746,7 @@ func summarizeScheduleStateForDebug(state *newagenttools.ScheduleState) string {
 
 	total := len(state.Tasks)
 	pendingNoSlot := 0
-	pendingWithSlot := 0
+	suggestedTotal := 0
 	existingTotal := 0
 	taskItemWithSlot := 0
 	eventWithSlot := 0
@@ -707,14 +755,12 @@ func summarizeScheduleStateForDebug(state *newagenttools.ScheduleState) string {
 		t := &state.Tasks[i]
 		hasSlot := len(t.Slots) > 0
 
-		switch t.Status {
-		case "pending":
-			if hasSlot {
-				pendingWithSlot++
-			} else {
-				pendingNoSlot++
-			}
-		case "existing":
+		switch {
+		case newagenttools.IsPendingTask(*t):
+			pendingNoSlot++
+		case newagenttools.IsSuggestedTask(*t):
+			suggestedTotal++
+		case newagenttools.IsExistingTask(*t):
 			existingTotal++
 		}
 
@@ -729,10 +775,10 @@ func summarizeScheduleStateForDebug(state *newagenttools.ScheduleState) string {
 	}
 
 	return fmt.Sprintf(
-		"tasks=%d pending_no_slot=%d pending_with_slot=%d existing=%d task_item_with_slot=%d event_with_slot=%d",
+		"tasks=%d pending=%d suggested=%d existing=%d task_item_with_slot=%d event_with_slot=%d",
 		total,
 		pendingNoSlot,
-		pendingWithSlot,
+		suggestedTotal,
 		existingTotal,
 		taskItemWithSlot,
 		eventWithSlot,

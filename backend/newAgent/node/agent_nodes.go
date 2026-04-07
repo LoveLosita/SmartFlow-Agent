@@ -257,9 +257,13 @@ func (n *AgentNodes) Deliver(ctx context.Context, st *newagentmodel.AgentGraphSt
 	// 中断（confirm/ask_user）路径不写，避免把中间态暴露给前端。
 	if st.Deps.WriteSchedulePreview != nil && st.ScheduleState != nil {
 		flowState := st.EnsureFlowState()
-		if err := st.Deps.WriteSchedulePreview(ctx, st.ScheduleState, flowState.UserID, flowState.ConversationID, flowState.TaskClassIDs); err != nil {
-			// 写缓存失败不阻断主流程，降级为仅 log。
-			log.Printf("[WARN] deliver: 写入排程预览缓存失败 chat=%s: %v", flowState.ConversationID, err)
+		if flowState != nil && flowState.IsCompleted() {
+			if err := st.Deps.WriteSchedulePreview(ctx, st.ScheduleState, flowState.UserID, flowState.ConversationID, flowState.TaskClassIDs); err != nil {
+				// 写缓存失败不阻断主流程，降级为仅 log。
+				log.Printf("[WARN] deliver: 写入排程预览缓存失败 chat=%s: %v", flowState.ConversationID, err)
+			}
+		} else if flowState != nil {
+			log.Printf("[DEBUG] deliver: skip schedule preview chat=%s terminal_status=%s", flowState.ConversationID, flowState.TerminalStatus())
 		}
 	}
 

@@ -102,8 +102,17 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	)); err != nil {
 		return nil, err
 	}
-	// RoughBuild -> Execute：粗排完成后直接进入执行阶段微调。
-	if err := g.AddEdge(NodeRoughBuild, NodeExecute); err != nil {
+	// RoughBuild -> Execute / Deliver：
+	// 1. 正常粗排完成后进入 execute 微调；
+	// 2. 若粗排阶段已写入正式终止结果（如粗排异常 abort），则直接进入 deliver 收口。
+	if err := g.AddBranch(NodeRoughBuild, compose.NewGraphBranch(
+		branchAfterRoughBuild,
+		map[string]bool{
+			NodeExecute:   true,
+			NodeDeliver:   true,
+			NodeInterrupt: true,
+		},
+	)); err != nil {
 		return nil, err
 	}
 	// Execute -> Execute(继续 ReAct) / Confirm(写操作待确认) / Deliver(完成) / Interrupt(需要追问用户)
@@ -224,9 +233,29 @@ func branchAfterConfirm(_ context.Context, st *newagentmodel.AgentGraphState) (s
 		// confirm 节点产出确认请求后，当前连接必须进入 interrupt 收口。
 		// 真正的用户确认结果应由外部回调写回状态，再重新进入 graph。
 		return NodeInterrupt, nil
+	case newagentmodel.PhaseDone:
+		return NodeDeliver, nil
 	default:
 		return NodePlan, nil
 	}
+}
+
+func branchAfterRoughBuild(_ context.Context, st *newagentmodel.AgentGraphState) (string, error) {
+	if st == nil {
+		return NodeExecute, nil
+	}
+	if nextNode, interrupted := branchIfInterrupted(st); interrupted {
+		return nextNode, nil
+	}
+
+	flowState := st.EnsureFlowState()
+	if flowState == nil {
+		return NodeExecute, nil
+	}
+	if flowState.Phase == newagentmodel.PhaseDone {
+		return NodeDeliver, nil
+	}
+	return NodeExecute, nil
 }
 
 func branchAfterExecute(_ context.Context, st *newagentmodel.AgentGraphState) (string, error) {
@@ -244,7 +273,13 @@ func branchAfterExecute(_ context.Context, st *newagentmodel.AgentGraphState) (s
 	if flowState.Phase == newagentmodel.PhaseWaitingConfirm {
 		return NodeConfirm, nil
 	}
-	if flowState.Phase == newagentmodel.PhaseDone || flowState.Exhausted() {
+	// 1. 这里只围绕“是否已经写入正式终止结果”做路由，避免把“刚好用完最后一轮预算”
+	//    误判成已经 exhausted 收口；
+	// 2. 真正的 exhausted 语义应由下一次 Execute 入口在 NextRound() 失败时统一写入，
+	//    这样 rough_build / execute / deliver 才都围绕同一份 terminal outcome 工作；
+	// 3. 若此处直接按 RoundUsed>=MaxRounds 跳 Deliver，会绕过 Execute 内的 Exhaust 写入，
+	//    导致 deliver 收口和后续预览落盘语义不一致。
+	if flowState.Phase == newagentmodel.PhaseDone {
 		return NodeDeliver, nil
 	}
 	return NodeExecute, nil

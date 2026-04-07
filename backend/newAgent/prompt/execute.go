@@ -167,6 +167,125 @@ func BuildExecuteReActContractText() string {
 	))
 }
 
+// BuildExecuteDecisionContractTextV2 返回第二轮 abort 协议补齐后的执行输出契约。
+func BuildExecuteDecisionContractTextV2() string {
+	return strings.TrimSpace(fmt.Sprintf(`
+输出协议（严格 JSON）：
+- speak：给用户看的话；若 action=%s，通常留空，最终收口交给 deliver
+- action：只能是 %s / %s / %s / %s / %s / %s
+- reason：给后端和日志看的简短说明
+- goal_check：输出 %s 或 %s 时必填，对照 done_when 逐条验证
+- tool_call：输出 %s 时可附带写工具意图（需 confirm），输出 %s 时可附带读工具调用
+- abort：仅在输出 %s 时必填，格式为 {"code":"稳定机器码","user_message":"给用户看的终止说明","internal_reason":"给日志看的原因"}
+- tool_call 与 abort 互斥，禁止同时出现
+
+合法示例：
+{
+  "speak": "我来查一下本周的安排。",
+  "action": "%s",
+  "reason": "需要先调用 get_overview 获取当前数据",
+  "tool_call": {
+    "name": "get_overview",
+    "arguments": {}
+  }
+}
+
+{
+  "speak": "查询完成。",
+  "action": "%s",
+  "reason": "已拿到当前周课程列表",
+  "goal_check": "已通过 get_overview 确认本周课程列表，满足完成条件"
+}
+
+{
+  "speak": "",
+  "action": "%s",
+  "reason": "粗排结果存在业务异常，当前不应继续微调",
+  "abort": {
+    "code": "rough_build_pending_remaining",
+    "user_message": "初始排课方案构建异常：粗排后仍有任务未获得初始落位。本轮先终止，请检查粗排算法或任务数据。",
+    "internal_reason": "pending tasks remain after rough build"
+  }
+}
+`,
+		newagentmodel.ExecuteActionAbort,
+		newagentmodel.ExecuteActionContinue,
+		newagentmodel.ExecuteActionAskUser,
+		newagentmodel.ExecuteActionConfirm,
+		newagentmodel.ExecuteActionNextPlan,
+		newagentmodel.ExecuteActionDone,
+		newagentmodel.ExecuteActionAbort,
+		newagentmodel.ExecuteActionNextPlan,
+		newagentmodel.ExecuteActionDone,
+		newagentmodel.ExecuteActionConfirm,
+		newagentmodel.ExecuteActionContinue,
+		newagentmodel.ExecuteActionAbort,
+		newagentmodel.ExecuteActionContinue,
+		newagentmodel.ExecuteActionNextPlan,
+		newagentmodel.ExecuteActionAbort,
+	))
+}
+
+// BuildExecuteReActContractTextV2 返回第二轮 abort 协议补齐后的 ReAct 输出契约。
+func BuildExecuteReActContractTextV2() string {
+	return strings.TrimSpace(fmt.Sprintf(`
+输出协议（严格 JSON）：
+- speak：给用户看的话（可以是分析结果、中间进展、或最终回复）；若 action=%s，通常留空
+- action：只能是 %s / %s / %s / %s / %s
+- reason：给后端和日志看的简短说明
+- goal_check：输出 %s 时必填，总结任务完成证据
+- tool_call：输出 %s 时可附带写工具意图（需 confirm），输出 %s 时可附带读工具调用
+- abort：仅在输出 %s 时必填，格式为 {"code":"稳定机器码","user_message":"给用户看的终止说明","internal_reason":"给日志看的原因"}
+- tool_call 与 abort 互斥，禁止同时出现
+
+合法示例：
+{
+  "speak": "我来查一下今天的安排。",
+  "action": "%s",
+  "reason": "需要调用 get_overview 查询",
+  "tool_call": {
+    "name": "get_overview",
+    "arguments": {}
+  }
+}
+
+{
+  "speak": "已将概率论移到周三第1-2节。",
+  "action": "%s",
+  "reason": "用户要求移动课程，写操作需确认",
+  "tool_call": {
+    "name": "move",
+    "arguments": {"task_id": 5, "new_day": 3, "new_slot_start": 1}
+  }
+}
+
+{
+  "speak": "",
+  "action": "%s",
+  "reason": "当前流程不应继续执行，需要正式终止",
+  "abort": {
+    "code": "domain_abort",
+    "user_message": "当前流程无法继续执行，本轮先终止。",
+    "internal_reason": "execute declared abort"
+  }
+}
+`,
+		newagentmodel.ExecuteActionAbort,
+		newagentmodel.ExecuteActionContinue,
+		newagentmodel.ExecuteActionAskUser,
+		newagentmodel.ExecuteActionConfirm,
+		newagentmodel.ExecuteActionDone,
+		newagentmodel.ExecuteActionAbort,
+		newagentmodel.ExecuteActionDone,
+		newagentmodel.ExecuteActionConfirm,
+		newagentmodel.ExecuteActionContinue,
+		newagentmodel.ExecuteActionAbort,
+		newagentmodel.ExecuteActionContinue,
+		newagentmodel.ExecuteActionConfirm,
+		newagentmodel.ExecuteActionAbort,
+	))
+}
+
 // BuildExecuteMessages 组装执行阶段的 messages。
 func BuildExecuteMessages(state *newagentmodel.CommonState, ctx *newagentmodel.ConversationContext) []*schema.Message {
 	if state != nil && state.HasPlan() {
@@ -215,9 +334,10 @@ func BuildExecuteUserPrompt(state *newagentmodel.CommonState) string {
 		sb.WriteString("3. 若当前步骤已完成，请输出 action=next_plan，并填写 goal_check 说明完成依据。\n")
 		sb.WriteString("4. 若整个任务已完成，请输出 action=done，并填写 goal_check 总结整体证据。\n")
 		sb.WriteString("5. 若缺少关键用户信息且现有上下文无法补足，请输出 action=ask_user。\n")
-		sb.WriteString("6. 输出 next_plan 或 done 时，goal_check 不能为空，必须对照 done_when 逐条验证。\n")
+		sb.WriteString("6. 若你判断当前流程应正式终止，而不是继续执行、追问或写工具，请输出 action=abort，并附带 abort 字段。\n")
+		sb.WriteString("7. 输出 next_plan 或 done 时，goal_check 不能为空，必须对照 done_when 逐条验证。\n")
 		sb.WriteString("\n")
-		sb.WriteString(BuildExecuteDecisionContractText())
+		sb.WriteString(BuildExecuteDecisionContractTextV2())
 	} else {
 		sb.WriteString("当前 plan 已存在，但当前步骤索引无效；请不要擅自执行其他步骤。\n")
 	}
@@ -248,9 +368,10 @@ func BuildExecuteReActUserPrompt(state *newagentmodel.CommonState) string {
 	sb.WriteString("- 需要查询/读取数据 → action=continue + tool_call（读工具）\n")
 	sb.WriteString("- 需要修改/写入数据 → action=confirm + tool_call（写工具，需用户确认）\n")
 	sb.WriteString("- 缺少关键信息 → action=ask_user\n")
-	sb.WriteString("- 任务完成 → action=done + goal_check\n\n")
+	sb.WriteString("- 任务完成 → action=done + goal_check\n")
+	sb.WriteString("- 当前流程应正式终止 → action=abort + abort\n\n")
 
-	sb.WriteString(BuildExecuteReActContractText())
+	sb.WriteString(BuildExecuteReActContractTextV2())
 
 	return strings.TrimSpace(sb.String())
 }

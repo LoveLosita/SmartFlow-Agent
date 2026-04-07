@@ -28,6 +28,9 @@ const (
 
 	// ExecuteActionDone 表示整个任务已完成，可以进入最终交付。
 	ExecuteActionDone ExecuteAction = "done"
+
+	// ExecuteActionAbort 表示本轮流程应立即终止，并进入 deliver 做正式收口。
+	ExecuteActionAbort ExecuteAction = "abort"
 )
 
 // ExecuteDecision 是 execute prompt 单轮产出的统一决策结构。
@@ -43,6 +46,7 @@ type ExecuteDecision struct {
 	Reason    string          `json:"reason,omitempty"`
 	GoalCheck string          `json:"goal_check,omitempty"`
 	ToolCall  *ToolCallIntent `json:"tool_call,omitempty"`
+	Abort     *AbortIntent    `json:"abort,omitempty"`
 }
 
 // Normalize 统一清洗 execute 决策中的字符串字段。
@@ -56,6 +60,9 @@ func (d *ExecuteDecision) Normalize() {
 	d.GoalCheck = strings.TrimSpace(d.GoalCheck)
 	if d.ToolCall != nil {
 		d.ToolCall.Normalize()
+	}
+	if d.Abort != nil {
+		d.Abort.Normalize()
 	}
 }
 
@@ -77,6 +84,9 @@ func (d *ExecuteDecision) Validate() error {
 
 	switch d.Action {
 	case ExecuteActionContinue:
+		if d.Abort != nil {
+			return fmt.Errorf("continue 动作不应携带 abort")
+		}
 		if d.ToolCall != nil {
 			return d.ToolCall.Validate()
 		}
@@ -85,20 +95,71 @@ func (d *ExecuteDecision) Validate() error {
 		if d.ToolCall != nil {
 			return fmt.Errorf("ask_user 动作不应携带 tool_call")
 		}
+		if d.Abort != nil {
+			return fmt.Errorf("ask_user 动作不应携带 abort")
+		}
 		return nil
 	case ExecuteActionConfirm:
 		if d.ToolCall == nil {
 			return fmt.Errorf("confirm 动作必须携带待确认的 tool_call")
+		}
+		if d.Abort != nil {
+			return fmt.Errorf("confirm 动作不应同时携带 abort")
 		}
 		return d.ToolCall.Validate()
 	case ExecuteActionNextPlan, ExecuteActionDone:
 		if d.ToolCall != nil {
 			return fmt.Errorf("%s 动作不应携带 tool_call", d.Action)
 		}
+		if d.Abort != nil {
+			return fmt.Errorf("%s 动作不应携带 abort", d.Action)
+		}
 		return nil
+	case ExecuteActionAbort:
+		if d.ToolCall != nil {
+			return fmt.Errorf("abort 动作不应携带 tool_call")
+		}
+		if d.Abort == nil {
+			return fmt.Errorf("abort 动作必须携带 abort 字段")
+		}
+		return d.Abort.Validate()
 	default:
 		return fmt.Errorf("未知 execute action: %s", d.Action)
 	}
+}
+
+// AbortIntent 表示 execute 阶段声明的正式终止意图。
+//
+// 说明：
+// 1. code 是稳定机器码，便于后续前端/埋点识别终止类型；
+// 2. user_message 是最终给用户看的收口文案；
+// 3. internal_reason 只用于日志排查，允许更技术化。
+type AbortIntent struct {
+	Code           string `json:"code,omitempty"`
+	UserMessage    string `json:"user_message"`
+	InternalReason string `json:"internal_reason,omitempty"`
+}
+
+// Normalize 清洗终止意图中的稳定字段。
+func (a *AbortIntent) Normalize() {
+	if a == nil {
+		return
+	}
+	a.Code = strings.TrimSpace(a.Code)
+	a.UserMessage = strings.TrimSpace(a.UserMessage)
+	a.InternalReason = strings.TrimSpace(a.InternalReason)
+}
+
+// Validate 校验终止意图的最小可用性。
+func (a *AbortIntent) Validate() error {
+	if a == nil {
+		return fmt.Errorf("abort 不能为空")
+	}
+	a.Normalize()
+	if a.UserMessage == "" {
+		return fmt.Errorf("abort.user_message 不能为空")
+	}
+	return nil
 }
 
 // ToolCallIntent 表示 execute 阶段申报的工具调用意图。

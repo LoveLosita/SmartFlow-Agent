@@ -76,6 +76,18 @@ func renderStateSummary(state *newagentmodel.CommonState) string {
 
 	sb.WriteString(fmt.Sprintf("当前阶段：%s\n", state.Phase))
 	sb.WriteString(fmt.Sprintf("当前轮次：%d/%d\n", state.RoundUsed, state.MaxRounds))
+	if state.HasTerminalOutcome() && state.TerminalOutcome != nil {
+		sb.WriteString(fmt.Sprintf("终止结果：%s\n", state.TerminalOutcome.Status))
+		if strings.TrimSpace(state.TerminalOutcome.Stage) != "" {
+			sb.WriteString(fmt.Sprintf("终止阶段：%s\n", state.TerminalOutcome.Stage))
+		}
+		if strings.TrimSpace(state.TerminalOutcome.Code) != "" {
+			sb.WriteString(fmt.Sprintf("终止代码：%s\n", state.TerminalOutcome.Code))
+		}
+		if strings.TrimSpace(state.TerminalOutcome.UserMessage) != "" {
+			sb.WriteString(fmt.Sprintf("终止说明：%s\n", state.TerminalOutcome.UserMessage))
+		}
+	}
 
 	if !state.HasPlan() {
 		sb.WriteString("当前完整 plan：暂无。\n")

@@ -85,12 +85,10 @@ func RunDeliverNode(ctx context.Context, input DeliverNodeInput) error {
 		deliverStatusBlockID,
 		deliverStageName,
 		"done",
-		"任务已完成。",
+		"本轮流程已结束。",
 		true,
 	)
 
-	// 5. 标记流程结束。
-	flowState.Done()
 	return nil
 }
 
@@ -101,6 +99,15 @@ func generateDeliverSummary(
 	flowState *newagentmodel.CommonState,
 	conversationContext *newagentmodel.ConversationContext,
 ) string {
+	if flowState != nil {
+		switch {
+		case flowState.IsAborted():
+			return normalizeSpeak(buildAbortSummary(flowState))
+		case flowState.IsExhaustedTerminal():
+			return normalizeSpeak(buildExhaustedSummary(flowState))
+		}
+	}
+
 	if client == nil {
 		return buildMechanicalSummary(flowState)
 	}
@@ -125,6 +132,38 @@ func generateDeliverSummary(
 	return normalizeSpeak(result.Text)
 }
 
+// buildAbortSummary 生成“流程已终止”的统一交付文案。
+//
+// 说明：
+// 1. 第二轮开始，abort 的用户可见文案由终止方提前写入 CommonState；
+// 2. deliver 不再重新猜测或改写业务异常，只做最终收口；
+// 3. 若历史快照缺失 user_message，则回退到一份通用说明，避免前端收到空白结果。
+func buildAbortSummary(state *newagentmodel.CommonState) string {
+	if state == nil || state.TerminalOutcome == nil {
+		return "本轮流程已终止。"
+	}
+	if msg := strings.TrimSpace(state.TerminalOutcome.UserMessage); msg != "" {
+		return msg
+	}
+	return "本轮流程已终止，请根据当前提示检查后再继续。"
+}
+
+// buildExhaustedSummary 生成“轮次耗尽”的统一收口文案。
+func buildExhaustedSummary(state *newagentmodel.CommonState) string {
+	if state == nil {
+		return "本轮执行已达到安全轮次上限，当前先停止继续操作。"
+	}
+
+	prefix := "本轮执行已达到安全轮次上限，当前先停止继续操作。"
+	if state.TerminalOutcome != nil && strings.TrimSpace(state.TerminalOutcome.UserMessage) != "" {
+		prefix = strings.TrimSpace(state.TerminalOutcome.UserMessage)
+	}
+	if !state.HasPlan() {
+		return prefix
+	}
+	return prefix + "\n\n" + strings.TrimSpace(buildMechanicalSummary(state))
+}
+
 // buildMechanicalSummary 在 LLM 不可用时，机械拼接一份最小可用总结。
 func buildMechanicalSummary(state *newagentmodel.CommonState) string {
 	if state == nil {
@@ -138,7 +177,7 @@ func buildMechanicalSummary(state *newagentmodel.CommonState) string {
 		return "任务流程已结束。"
 	}
 
-	if state.Exhausted() {
+	if state.IsExhaustedTerminal() {
 		sb.WriteString(fmt.Sprintf("任务因执行轮次耗尽提前结束，已完成 %d/%d 步。\n", current, total))
 	} else {
 		sb.WriteString("所有计划步骤已执行完毕。\n")
@@ -153,7 +192,7 @@ func buildMechanicalSummary(state *newagentmodel.CommonState) string {
 		sb.WriteString(fmt.Sprintf("%s %s\n", marker, strings.TrimSpace(step.Content)))
 	}
 
-	if state.Exhausted() && current < total {
+	if state.IsExhaustedTerminal() && current < total {
 		sb.WriteString("\n如需继续完成剩余步骤，可以告诉我继续。")
 	}
 

@@ -1,6 +1,8 @@
 package model
 
 import (
+	"strings"
+
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 )
 
@@ -13,6 +15,47 @@ const (
 	PhaseExecuting      Phase = "executing"
 	PhaseDone           Phase = "done"
 )
+
+// FlowTerminalStatus 表示本轮流程最终是如何结束的。
+//
+// 说明：
+// 1. completed 表示任务按预期完成，允许走正常交付与预览落盘；
+// 2. aborted 表示业务语义上的主动终止，例如粗排异常、执行期明确中止；
+// 3. exhausted 表示安全边界触发的被动停止，例如执行轮次耗尽。
+type FlowTerminalStatus string
+
+const (
+	FlowTerminalStatusCompleted FlowTerminalStatus = "completed"
+	FlowTerminalStatusAborted   FlowTerminalStatus = "aborted"
+	FlowTerminalStatusExhausted FlowTerminalStatus = "exhausted"
+)
+
+// FlowTerminalOutcome 保存“流程为什么结束”的最终结果快照。
+//
+// 职责边界：
+// 1. Stage 说明终止发生在哪个阶段，便于 graph/deliver/debug 统一收口；
+// 2. Code 作为稳定机器码，便于后续前端或埋点按类型识别；
+// 3. UserMessage 是最终给用户看的收口文案；
+// 4. InternalReason 只用于日志与排查，不直接暴露给用户。
+type FlowTerminalOutcome struct {
+	Status         FlowTerminalStatus `json:"status"`
+	Stage          string             `json:"stage,omitempty"`
+	Code           string             `json:"code,omitempty"`
+	UserMessage    string             `json:"user_message,omitempty"`
+	InternalReason string             `json:"internal_reason,omitempty"`
+}
+
+// Normalize 统一清洗终止结果里的字符串字段。
+func (o *FlowTerminalOutcome) Normalize() {
+	if o == nil {
+		return
+	}
+	o.Status = FlowTerminalStatus(strings.TrimSpace(string(o.Status)))
+	o.Stage = strings.TrimSpace(o.Stage)
+	o.Code = strings.TrimSpace(o.Code)
+	o.UserMessage = strings.TrimSpace(o.UserMessage)
+	o.InternalReason = strings.TrimSpace(o.InternalReason)
+}
 
 const DefaultMaxRounds = 30
 
@@ -54,6 +97,10 @@ type CommonState struct {
 	// NeedsRoughBuild 由 Plan 节点在 plan_done 时写入，标记 Confirm 后是否需要走粗排节点。
 	// 粗排节点执行完毕后会将此字段重置为 false。
 	NeedsRoughBuild bool `json:"needs_rough_build,omitempty"`
+
+	// TerminalOutcome 保存“本轮流程最终如何结束”的统一收口结果。
+	// 第二轮开始，rough_build / execute / deliver 都应围绕这份快照判断收口语义。
+	TerminalOutcome *FlowTerminalOutcome `json:"terminal_outcome,omitempty"`
 }
 
 func NewCommonState(traceID string, userID int, conversationID string) *CommonState {
@@ -87,11 +134,13 @@ func (s *CommonState) FinishPlan(steps []PlanStep) {
 	s.PlanSteps = steps
 	s.CurrentStep = 0
 	s.Phase = PhaseWaitingConfirm
+	s.ClearTerminalOutcome()
 }
 
 // ConfirmPlan 表示用户已确认计划，流程进入执行阶段。
 func (s *CommonState) ConfirmPlan() {
 	s.Phase = PhaseExecuting
+	s.ClearTerminalOutcome()
 }
 
 // StartDirectExecute 进入无 plan 的直接执行（ReAct）模式。
@@ -102,6 +151,7 @@ func (s *CommonState) StartDirectExecute() {
 	s.PlanSteps = nil
 	s.CurrentStep = 0
 	s.Phase = PhaseExecuting
+	s.ClearTerminalOutcome()
 }
 
 // RejectPlan 表示用户拒绝当前计划，清空计划并回退到 planning。
@@ -109,6 +159,7 @@ func (s *CommonState) RejectPlan() {
 	s.PlanSteps = nil
 	s.CurrentStep = 0
 	s.Phase = PhasePlanning
+	s.ClearTerminalOutcome()
 }
 
 // AdvanceStep 推进到下一个计划步骤，并返回是否仍有剩余步骤。
@@ -118,8 +169,86 @@ func (s *CommonState) AdvanceStep() bool {
 }
 
 // Done 标记整个任务流程已经结束。
+//
+// 说明：
+// 1. 若此前已经写入 aborted / exhausted 等终止结果，这里只负责兜底维持 PhaseDone，不覆盖已有语义；
+// 2. 只有在尚未写入任何终止结果时，才默认补成 completed。
 func (s *CommonState) Done() {
 	s.Phase = PhaseDone
+	if s.TerminalOutcome != nil {
+		s.TerminalOutcome.Normalize()
+		return
+	}
+	s.TerminalOutcome = &FlowTerminalOutcome{
+		Status: FlowTerminalStatusCompleted,
+	}
+}
+
+// Abort 将当前流程标记为“业务语义上的主动终止”。
+//
+// 步骤说明：
+// 1. 统一写入 PhaseDone，保证 graph 后续直接进入 deliver 收口；
+// 2. UserMessage 作为最终可见文案，必须尽量完整，避免 deliver 再二次猜测；
+// 3. InternalReason 只用于排查，允许比用户文案更技术化。
+func (s *CommonState) Abort(stage, code, userMessage, internalReason string) {
+	s.Phase = PhaseDone
+	s.TerminalOutcome = &FlowTerminalOutcome{
+		Status:         FlowTerminalStatusAborted,
+		Stage:          stage,
+		Code:           code,
+		UserMessage:    userMessage,
+		InternalReason: internalReason,
+	}
+	s.TerminalOutcome.Normalize()
+}
+
+// Exhaust 将当前流程标记为“安全边界触发的被动停止”。
+func (s *CommonState) Exhaust(stage, userMessage, internalReason string) {
+	s.Phase = PhaseDone
+	s.TerminalOutcome = &FlowTerminalOutcome{
+		Status:         FlowTerminalStatusExhausted,
+		Stage:          stage,
+		Code:           "round_exhausted",
+		UserMessage:    userMessage,
+		InternalReason: internalReason,
+	}
+	s.TerminalOutcome.Normalize()
+}
+
+// ClearTerminalOutcome 清空上一轮遗留的终止结果。
+func (s *CommonState) ClearTerminalOutcome() {
+	if s == nil {
+		return
+	}
+	s.TerminalOutcome = nil
+}
+
+// HasTerminalOutcome 判断当前是否已经写入正式终止结果。
+func (s *CommonState) HasTerminalOutcome() bool {
+	return s != nil && s.TerminalOutcome != nil
+}
+
+// TerminalStatus 返回当前终止结果的状态枚举。
+func (s *CommonState) TerminalStatus() FlowTerminalStatus {
+	if s == nil || s.TerminalOutcome == nil {
+		return ""
+	}
+	return s.TerminalOutcome.Status
+}
+
+// IsCompleted 判断当前是否属于“正常完成”。
+func (s *CommonState) IsCompleted() bool {
+	return s.TerminalStatus() == FlowTerminalStatusCompleted
+}
+
+// IsAborted 判断当前是否属于“主动中止”。
+func (s *CommonState) IsAborted() bool {
+	return s.TerminalStatus() == FlowTerminalStatusAborted
+}
+
+// IsExhaustedTerminal 判断当前是否属于“轮次耗尽收口”。
+func (s *CommonState) IsExhaustedTerminal() bool {
+	return s.TerminalStatus() == FlowTerminalStatusExhausted
 }
 
 // HasPlan 判断当前 state 是否已经持有一份完整计划。
