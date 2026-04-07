@@ -135,8 +135,8 @@ func NewDefaultRegistry() *ToolRegistry {
 	)
 
 	r.Register("list_tasks",
-		"列出任务清单，可按类别和状态过滤。category 选填，status 选填（默认 all）。",
-		`{"name":"list_tasks","parameters":{"category":{"type":"string"},"status":{"type":"string","enum":["all","existing","pending"]}}}`,
+		"列出任务清单，可按类别和状态过滤。category 选填，status 选填（默认 all，支持 existing/suggested/pending）。",
+		`{"name":"list_tasks","parameters":{"category":{"type":"string"},"status":{"type":"string","enum":["all","existing","suggested","pending"]}}}`,
 		func(state *ScheduleState, args map[string]any) string {
 			return ListTasks(state, argsStringPtr(args, "category"), argsStringPtr(args, "status"))
 		},
@@ -156,7 +156,7 @@ func NewDefaultRegistry() *ToolRegistry {
 
 	// --- 写工具 ---
 	r.Register("place",
-		"将一个待安排任务放到指定位置。自动检测可嵌入宿主。task_id/day/slot_start 必填。",
+		"将一个待安排任务预排到指定位置。自动检测可嵌入宿主。task_id/day/slot_start 必填。",
 		`{"name":"place","parameters":{"task_id":{"type":"int","required":true},"day":{"type":"int","required":true},"slot_start":{"type":"int","required":true}}}`,
 		func(state *ScheduleState, args map[string]any) string {
 			taskID, ok := argsInt(args, "task_id")
@@ -176,7 +176,7 @@ func NewDefaultRegistry() *ToolRegistry {
 	)
 
 	r.Register("move",
-		"将一个已安排任务移动到新位置。task_id/new_day/new_slot_start 必填。",
+		"将一个已落位任务（existing 或 suggested）移动到新位置。task_id/new_day/new_slot_start 必填。",
 		`{"name":"move","parameters":{"task_id":{"type":"int","required":true},"new_day":{"type":"int","required":true},"new_slot_start":{"type":"int","required":true}}}`,
 		func(state *ScheduleState, args map[string]any) string {
 			taskID, ok := argsInt(args, "task_id")
@@ -196,7 +196,7 @@ func NewDefaultRegistry() *ToolRegistry {
 	)
 
 	r.Register("swap",
-		"交换两个已安排任务的位置。两个任务必须时长相同。task_a/task_b 必填。",
+		"交换两个已落位任务的位置。两个任务必须时长相同。task_a/task_b 必填。",
 		`{"name":"swap","parameters":{"task_a":{"type":"int","required":true},"task_b":{"type":"int","required":true}}}`,
 		func(state *ScheduleState, args map[string]any) string {
 			taskA, ok := argsInt(args, "task_a")
@@ -224,7 +224,7 @@ func NewDefaultRegistry() *ToolRegistry {
 	)
 
 	r.Register("unplace",
-		"将一个已安排任务移除，恢复为待安排状态。会自动清理嵌入关系。task_id 必填。",
+		"将一个已落位任务移除，恢复为待安排状态。会自动清理嵌入关系。task_id 必填。",
 		`{"name":"unplace","parameters":{"task_id":{"type":"int","required":true}}}`,
 		func(state *ScheduleState, args map[string]any) string {
 			taskID, ok := argsInt(args, "task_id")

@@ -31,17 +31,25 @@ func GetOverview(state *ScheduleState) string {
 	}
 	totalFree := totalSlots - totalOccupied
 
-	// 2. 统计待安排任务数。
+	// 2. 统计任务状态分布。
+	existingCount := 0
+	suggestedCount := 0
 	pendingCount := 0
 	for i := range state.Tasks {
-		if state.Tasks[i].Status == "pending" {
+		task := state.Tasks[i]
+		switch {
+		case IsPendingTask(task):
 			pendingCount++
+		case IsSuggestedTask(task):
+			suggestedCount++
+		case IsExistingTask(task):
+			existingCount++
 		}
 	}
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("规划窗口共%d天，每天12个时段，总计%d个时段。\n", state.Window.TotalDays, totalSlots))
-	sb.WriteString(fmt.Sprintf("当前已占用%d个，空闲%d个。待安排任务%d个。\n", totalOccupied, totalFree, pendingCount))
+	sb.WriteString(fmt.Sprintf("当前已占用%d个，空闲%d个。已确定任务%d个，已预排任务%d个，待安排任务%d个。\n", totalOccupied, totalFree, existingCount, suggestedCount, pendingCount))
 
 	// 3. 逐天概况。
 	sb.WriteString("\n每日概况：\n")
@@ -70,20 +78,33 @@ func GetOverview(state *ScheduleState) string {
 		sb.WriteString(strings.Join(parts, "；") + "\n")
 	}
 
-	// 5. 待安排任务汇总。
+	// 5. 已预排任务汇总。
+	if suggestedCount > 0 {
+		sb.WriteString("已预排：")
+		suggestedParts := make([]string, 0, suggestedCount)
+		for i := range state.Tasks {
+			t := &state.Tasks[i]
+			if IsSuggestedTask(*t) {
+				suggestedParts = append(suggestedParts, fmt.Sprintf("[%d]%s(%s)", t.StateID, t.Name, formatTaskSlotsBrief(t.Slots)))
+			}
+		}
+		sb.WriteString(strings.Join(suggestedParts, " ") + "\n")
+	}
+
+	// 6. 待安排任务汇总。
 	if pendingCount > 0 {
 		sb.WriteString("待安排：")
 		pendingParts := make([]string, 0, pendingCount)
 		for i := range state.Tasks {
 			t := &state.Tasks[i]
-			if t.Status == "pending" {
+			if IsPendingTask(*t) {
 				pendingParts = append(pendingParts, fmt.Sprintf("[%d]%s(需%d时段)", t.StateID, t.Name, t.Duration))
 			}
 		}
 		sb.WriteString(strings.Join(pendingParts, " ") + "\n")
 	}
 
-	// 6. 任务类约束（排课策略与限制）。
+	// 7. 任务类约束（排课策略与限制）。
 	if len(state.TaskClasses) > 0 {
 		sb.WriteString("\n任务类约束（排课时请遵守）：\n")
 		for _, tc := range state.TaskClasses {
@@ -269,7 +290,7 @@ func FindFree(state *ScheduleState, duration int, day *int) string {
 
 // ListTasks 列出任务清单，可按类别和状态过滤。
 // category 选填（nil 不过滤），status 选填（nil 默认 "all"）。
-// 输出按状态分组：已安排在前，待安排在后。组内按 stateID 升序。
+// 输出按状态分组：已安排 -> 已预排 -> 待安排，组内按 stateID 升序。
 func ListTasks(state *ScheduleState, category, status *string) string {
 	// 1. 确定过滤状态。
 	statusFilter := "all"
@@ -278,26 +299,36 @@ func ListTasks(state *ScheduleState, category, status *string) string {
 	}
 
 	// 2. 过滤 + 分组。
-	var existingTasks, pendingTasks []ScheduleTask
+	var existingTasks, suggestedTasks, pendingTasks []ScheduleTask
 	for i := range state.Tasks {
 		t := state.Tasks[i]
 		// 类别过滤。
 		if category != nil && t.Category != *category {
 			continue
 		}
-		// 状态过滤。
-		if statusFilter != "all" && t.Status != statusFilter {
-			continue
-		}
-		if t.Status == "pending" {
+
+		switch {
+		case IsPendingTask(t):
+			if statusFilter != "all" && statusFilter != "pending" {
+				continue
+			}
 			pendingTasks = append(pendingTasks, t)
-		} else {
+		case IsSuggestedTask(t):
+			if statusFilter != "all" && statusFilter != "suggested" {
+				continue
+			}
+			suggestedTasks = append(suggestedTasks, t)
+		default:
+			if statusFilter != "all" && statusFilter != "existing" {
+				continue
+			}
 			existingTasks = append(existingTasks, t)
 		}
 	}
 
 	// 3. 按 stateID 排序。
 	sort.Slice(existingTasks, func(i, j int) bool { return existingTasks[i].StateID < existingTasks[j].StateID })
+	sort.Slice(suggestedTasks, func(i, j int) bool { return suggestedTasks[i].StateID < suggestedTasks[j].StateID })
 	sort.Slice(pendingTasks, func(i, j int) bool { return pendingTasks[i].StateID < pendingTasks[j].StateID })
 
 	// 4. 纯待安排模式：只输出待安排任务。
@@ -305,19 +336,28 @@ func ListTasks(state *ScheduleState, category, status *string) string {
 		return formatPendingList(pendingTasks)
 	}
 
-	// 5. 纯已安排模式：只输出已安排任务。
+	// 5. 纯已预排模式：只输出已预排任务。
+	if statusFilter == "suggested" {
+		return formatSuggestedList(suggestedTasks)
+	}
+
+	// 6. 纯已安排模式：只输出已安排任务。
 	if statusFilter == "existing" {
 		return formatExistingList(existingTasks)
 	}
 
-	// 6. 全部模式：统计 + 分组输出。
-	total := len(existingTasks) + len(pendingTasks)
+	// 7. 全部模式：统计 + 分组输出。
+	total := len(existingTasks) + len(suggestedTasks) + len(pendingTasks)
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("共%d个任务，已安排%d个，待安排%d个。\n", total, len(existingTasks), len(pendingTasks)))
+	sb.WriteString(fmt.Sprintf("共%d个任务，已安排%d个，已预排%d个，待安排%d个。\n", total, len(existingTasks), len(suggestedTasks), len(pendingTasks)))
 
 	if len(existingTasks) > 0 {
 		sb.WriteString("\n已安排：\n")
 		sb.WriteString(formatExistingList(existingTasks))
+	}
+	if len(suggestedTasks) > 0 {
+		sb.WriteString("\n已预排：\n")
+		sb.WriteString(formatSuggestedList(suggestedTasks))
 	}
 	if len(pendingTasks) > 0 {
 		sb.WriteString("\n待安排：\n")
@@ -341,8 +381,10 @@ func GetTaskInfo(state *ScheduleState, taskID int) string {
 
 	// 1. 类别、状态、来源。
 	statusLabel := "已安排"
-	if task.Status == "pending" {
+	if IsPendingTask(*task) {
 		statusLabel = "待安排"
+	} else if IsSuggestedTask(*task) {
+		statusLabel = "已预排"
 	} else if task.Locked {
 		statusLabel = "已安排（固定）"
 	}
@@ -362,9 +404,11 @@ func GetTaskInfo(state *ScheduleState, taskID int) string {
 		}
 	}
 
-	// 4. 待安排任务显示需要时段数。
-	if task.Status == "pending" {
+	// 4. 任务时长信息。
+	if IsPendingTask(*task) {
 		sb.WriteString(fmt.Sprintf("需要时段：%d个连续时段\n", task.Duration))
+	} else if IsSuggestedTask(*task) && task.Duration > 0 {
+		sb.WriteString(fmt.Sprintf("原始需求：%d个连续时段\n", task.Duration))
 	}
 
 	// 5. 嵌入关系信息。
@@ -464,6 +508,19 @@ func formatExistingList(tasks []ScheduleTask) string {
 			slotParts = append(slotParts, fmt.Sprintf("第%d天(%s)", slot.Day, formatSlotRange(slot.SlotStart, slot.SlotEnd)))
 		}
 		sb.WriteString(fmt.Sprintf("  %s — %s\n", label, strings.Join(slotParts, " ")))
+	}
+	return sb.String()
+}
+
+// formatSuggestedList 格式化已预排任务列表。
+// 格式如：[3]复习线代 — 已预排至 第2天第3-4节，类别：学习
+func formatSuggestedList(tasks []ScheduleTask) string {
+	var sb strings.Builder
+	if len(tasks) > 0 {
+		sb.WriteString(fmt.Sprintf("已预排任务共%d个：\n\n", len(tasks)))
+	}
+	for _, t := range tasks {
+		sb.WriteString(fmt.Sprintf("[%d]%s — 已预排至 %s，类别：%s\n", t.StateID, t.Name, formatTaskSlotsBrief(t.Slots), t.Category))
 	}
 	return sb.String()
 }

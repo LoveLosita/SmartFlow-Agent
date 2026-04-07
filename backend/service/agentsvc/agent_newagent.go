@@ -495,19 +495,22 @@ func summarizeScheduleStateForPreviewDebug(state *newagenttools.ScheduleState) s
 	}
 
 	total := len(state.Tasks)
-	pendingNoSlot := 0
-	pendingWithSlot := 0
+	pendingTotal := 0
+	suggestedTotal := 0
+	existingTotal := 0
 	taskItemWithSlot := 0
 	eventWithSlot := 0
 	for i := range state.Tasks {
 		t := &state.Tasks[i]
 		hasSlot := len(t.Slots) > 0
-		if t.Status == "pending" {
-			if hasSlot {
-				pendingWithSlot++
-			} else {
-				pendingNoSlot++
-			}
+
+		switch {
+		case newagenttools.IsPendingTask(*t):
+			pendingTotal++
+		case newagenttools.IsSuggestedTask(*t):
+			suggestedTotal++
+		case newagenttools.IsExistingTask(*t):
+			existingTotal++
 		}
 		if hasSlot {
 			if t.Source == "task_item" {
@@ -519,10 +522,11 @@ func summarizeScheduleStateForPreviewDebug(state *newagenttools.ScheduleState) s
 		}
 	}
 	return fmt.Sprintf(
-		"tasks=%d pending_no_slot=%d pending_with_slot=%d task_item_with_slot=%d event_with_slot=%d",
+		"tasks=%d pending=%d suggested=%d existing=%d task_item_with_slot=%d event_with_slot=%d",
 		total,
-		pendingNoSlot,
-		pendingWithSlot,
+		pendingTotal,
+		suggestedTotal,
+		existingTotal,
 		taskItemWithSlot,
 		eventWithSlot,
 	)

@@ -63,6 +63,16 @@ type ScheduleStateProvider interface {
 	LoadTaskClassMetas(ctx context.Context, userID int, taskClassIDs []int) ([]newagenttools.TaskClassMeta, error)
 }
 
+// ScopedScheduleStateProvider 定义“按本轮任务类范围加载 ScheduleState”的可选增强接口。
+//
+// 设计说明：
+// 1. 负责：在 Execute / RoughBuild 首次加载状态时，把 DayMapping、TaskClasses 与 pending 任务限定在本轮 task_class_ids 相关窗口；
+// 2. 不负责：改变既有 ScheduleStateProvider 的基础能力，老实现仍可只实现 LoadScheduleState；
+// 3. 兜底策略：若调用方拿到的 provider 不实现该接口，则回退到全量 LoadScheduleState，再走工具层 scope 裁剪。
+type ScopedScheduleStateProvider interface {
+	LoadScheduleStateForTaskClasses(ctx context.Context, userID int, taskClassIDs []int) (*newagenttools.ScheduleState, error)
+}
+
 // SchedulePersistor 定义持久化 ScheduleState 变更的接口。
 // 由 Service 层或 DAO 层实现，注入到 AgentGraphDeps 中。
 // 使用接口而非具体 DAO 类型，避免 model → dao 的循环依赖。

@@ -42,12 +42,12 @@ type ScheduleTask struct {
 	SourceID int    `json:"source_id"` // ScheduleEvent.ID or TaskClassItem.ID
 	Name     string `json:"name"`
 	Category string `json:"category"` // e.g. "课程", "学习", "作业"
-	Status   string `json:"status"`   // "existing" | "pending"
+	Status   string `json:"status"`   // "existing" | "suggested" | "pending"
 	Locked   bool   `json:"locked"`
 
-	// Existing task: compressed slot ranges. Pending task: nil until placed.
+	// Existing / suggested task: compressed slot ranges. Pending task: nil until placed.
 	Slots []TaskSlot `json:"slots,omitempty"`
-	// Pending task: required consecutive slot count.
+	// Pending / suggested task: required consecutive slot count.
 	Duration int `json:"duration,omitempty"`
 	// source=task_item only: TaskClass.ID，用于反查任务类约束。
 	TaskClassID int `json:"task_class_id,omitempty"`

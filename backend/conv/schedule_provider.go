@@ -45,22 +45,54 @@ func (p *ScheduleProvider) LoadScheduleState(ctx context.Context, userID int) (*
 		return nil, err
 	}
 
-	// 2. 确定规划窗口：优先使用 task class 日期范围，降级到当前周。
-	windowDays, weeks := buildWindowFromTaskClasses(taskClasses)
-	if len(windowDays) == 0 {
-		now := time.Now()
-		currentWeek, _, err := RealDateToRelativeDate(now.Format(DateFormat))
-		if err != nil {
-			return nil, fmt.Errorf("解析当前日期失败: %w", err)
-		}
-		windowDays = make([]WindowDay, 7)
-		for i := 0; i < 7; i++ {
-			windowDays[i] = WindowDay{Week: currentWeek, DayOfWeek: i + 1}
-		}
-		weeks = []int{currentWeek}
+	return p.loadScheduleStateWithTaskClasses(ctx, userID, taskClasses)
+}
+
+// LoadScheduleStateForTaskClasses 按“本轮请求的任务类范围”加载 ScheduleState。
+//
+// 设计说明：
+// 1. 负责：让粗排 / Execute 首次读取的 DayMapping 与本轮 task_class_ids 保持同一时间窗口；
+// 2. 不负责：裁掉窗口内已有的 existing/suggested 阻塞物，这部分仍由日程加载主流程统一保留；
+// 3. 失败策略：若 task_class_ids 为空，则退回全量加载，避免调用方额外分支。
+func (p *ScheduleProvider) LoadScheduleStateForTaskClasses(
+	ctx context.Context,
+	userID int,
+	taskClassIDs []int,
+) (*newagenttools.ScheduleState, error) {
+	if len(taskClassIDs) == 0 {
+		return p.LoadScheduleState(ctx, userID)
 	}
 
-	// 3. 按周加载日程（含 Event + EmbeddedTask 预加载）。
+	taskClasses, err := p.loadCompleteTaskClassesByIDs(ctx, userID, taskClassIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	return p.loadScheduleStateWithTaskClasses(ctx, userID, taskClasses)
+}
+
+// loadScheduleStateWithTaskClasses 负责把“指定任务类集合”装配成可操作的 ScheduleState。
+//
+// 步骤说明：
+// 1. 先根据传入 taskClasses 计算 DayMapping 窗口，保证粗排坐标能映射回 day_index；
+// 2. 若窗口无法从任务类日期推导，则退回当前周 7 天，兼容普通查询场景；
+// 3. 再按窗口覆盖的周批量拉取 existing schedules，与 taskClasses 一起交给 LoadScheduleState 统一建模。
+func (p *ScheduleProvider) loadScheduleStateWithTaskClasses(
+	ctx context.Context,
+	userID int,
+	taskClasses []model.TaskClass,
+) (*newagenttools.ScheduleState, error) {
+	// 1. 确定规划窗口：优先使用 task class 日期范围，降级到当前周。
+	windowDays, weeks := buildWindowFromTaskClasses(taskClasses)
+	if len(windowDays) == 0 {
+		var err error
+		windowDays, weeks, err = buildCurrentWeekWindow()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// 2. 按周加载日程（含 Event + EmbeddedTask 预加载）。
 	var allSchedules []model.Schedule
 	for _, w := range weeks {
 		weekSchedules, err := p.scheduleDAO.GetUserWeeklySchedule(ctx, userID, w)
@@ -70,10 +102,10 @@ func (p *ScheduleProvider) LoadScheduleState(ctx context.Context, userID int) (*
 		allSchedules = append(allSchedules, weekSchedules...)
 	}
 
-	// 4. 构建额外 item category 映射。
+	// 3. 构建额外 item category 映射。
 	extraItemCategories := buildExtraItemCategories(allSchedules, taskClasses)
 
-	// 5. 调用已有的 LoadScheduleState 构建内存状态。
+	// 4. 调用已有的 LoadScheduleState 构建内存状态。
 	return LoadScheduleState(allSchedules, taskClasses, extraItemCategories, windowDays), nil
 }
 
@@ -84,36 +116,43 @@ func (p *ScheduleProvider) LoadScheduleState(ctx context.Context, userID int) (*
 //   - weeks：窗口覆盖的周号（去重、升序），供按周加载日程使用；
 //   - 若无有效日期信息，返回空切片，调用方应降级到默认窗口。
 func buildWindowFromTaskClasses(taskClasses []model.TaskClass) (windowDays []WindowDay, weeks []int) {
-	var minDate, maxDate *time.Time
-	for _, tc := range taskClasses {
-		if tc.StartDate != nil && (minDate == nil || tc.StartDate.Before(*minDate)) {
-			t := *tc.StartDate
-			minDate = &t
-		}
-		if tc.EndDate != nil && (maxDate == nil || tc.EndDate.After(*maxDate)) {
-			t := *tc.EndDate
-			maxDate = &t
-		}
-	}
-	if minDate == nil || maxDate == nil {
-		return nil, nil
-	}
+	minWeek, minDay := 0, 0
+	maxWeek, maxDay := 0, 0
+	hasWindow := false
 
-	startWeek, startDay, err := RealDateToRelativeDate(minDate.Format(DateFormat))
-	if err != nil {
-		return nil, nil
+	for _, tc := range taskClasses {
+		// 1. 先要求任务类具备完整且合法的起止日期，避免坏数据把整轮窗口拖坏。
+		// 2. 再逐条做绝对日期 -> 相对周/天转换；转换失败的任务类直接忽略，不影响其余合法任务类。
+		// 3. 只有至少一条任务类成功进入窗口后，才返回有效 DayMapping。
+		if tc.StartDate == nil || tc.EndDate == nil || tc.EndDate.Before(*tc.StartDate) {
+			continue
+		}
+		startWeek, startDay, err := RealDateToRelativeDate(tc.StartDate.Format(DateFormat))
+		if err != nil {
+			continue
+		}
+		endWeek, endDay, err := RealDateToRelativeDate(tc.EndDate.Format(DateFormat))
+		if err != nil {
+			continue
+		}
+		if !hasWindow || isRelativeDateBefore(startWeek, startDay, minWeek, minDay) {
+			minWeek, minDay = startWeek, startDay
+		}
+		if !hasWindow || isRelativeDateBefore(maxWeek, maxDay, endWeek, endDay) {
+			maxWeek, maxDay = endWeek, endDay
+		}
+		hasWindow = true
 	}
-	endWeek, endDay, err := RealDateToRelativeDate(maxDate.Format(DateFormat))
-	if err != nil {
+	if !hasWindow {
 		return nil, nil
 	}
 
 	weeksSet := make(map[int]bool)
-	w, d := startWeek, startDay
+	w, d := minWeek, minDay
 	for {
 		windowDays = append(windowDays, WindowDay{Week: w, DayOfWeek: d})
 		weeksSet[w] = true
-		if w == endWeek && d == endDay {
+		if w == maxWeek && d == maxDay {
 			break
 		}
 		d++
@@ -121,7 +160,7 @@ func buildWindowFromTaskClasses(taskClasses []model.TaskClass) (windowDays []Win
 			d = 1
 			w++
 		}
-		if w > endWeek+1 { // 防止因日期转换异常导致无限循环
+		if w > maxWeek+1 { // 防止因日期转换异常导致无限循环
 			break
 		}
 	}
@@ -132,6 +171,28 @@ func buildWindowFromTaskClasses(taskClasses []model.TaskClass) (windowDays []Win
 	}
 	sort.Ints(weeks)
 	return windowDays, weeks
+}
+
+// buildCurrentWeekWindow 构造“当前周 7 天”的兜底窗口。
+func buildCurrentWeekWindow() (windowDays []WindowDay, weeks []int, err error) {
+	now := time.Now()
+	currentWeek, _, err := RealDateToRelativeDate(now.Format(DateFormat))
+	if err != nil {
+		return nil, nil, fmt.Errorf("解析当前日期失败: %w", err)
+	}
+	windowDays = make([]WindowDay, 7)
+	for i := 0; i < 7; i++ {
+		windowDays[i] = WindowDay{Week: currentWeek, DayOfWeek: i + 1}
+	}
+	return windowDays, []int{currentWeek}, nil
+}
+
+// isRelativeDateBefore 比较两个“相对周/天”坐标的先后关系。
+func isRelativeDateBefore(leftWeek, leftDay, rightWeek, rightDay int) bool {
+	if leftWeek != rightWeek {
+		return leftWeek < rightWeek
+	}
+	return leftDay < rightDay
 }
 
 // loadCompleteTaskClasses 批量加载用户所有任务类（含 Items 预加载）。
@@ -152,6 +213,23 @@ func (p *ScheduleProvider) loadCompleteTaskClasses(ctx context.Context, userID i
 	complete, err := p.taskClassDAO.GetCompleteTaskClassesByIDs(ctx, userID, ids)
 	if err != nil {
 		return nil, fmt.Errorf("加载完整任务类失败: %w", err)
+	}
+	return complete, nil
+}
+
+// loadCompleteTaskClassesByIDs 批量加载指定任务类（含 Items 预加载）。
+func (p *ScheduleProvider) loadCompleteTaskClassesByIDs(
+	ctx context.Context,
+	userID int,
+	taskClassIDs []int,
+) ([]model.TaskClass, error) {
+	if len(taskClassIDs) == 0 {
+		return nil, nil
+	}
+
+	complete, err := p.taskClassDAO.GetCompleteTaskClassesByIDs(ctx, userID, taskClassIDs)
+	if err != nil {
+		return nil, fmt.Errorf("加载指定任务类失败: %w", err)
 	}
 	return complete, nil
 }

@@ -20,8 +20,8 @@ type MoveRequest struct {
 
 // ==================== Place ====================
 
-// Place 将一个待安排任务放到指定位置。
-// taskID 必须是 pending 状态的任务。
+// Place 将一个待安排任务预排到指定位置。
+// taskID 必须是真实 pending（无 Slots）状态的任务。
 // 如果目标位置有可嵌入宿主（can_embed=true 且未被嵌入），自动走嵌入逻辑。
 func Place(state *ScheduleState, taskID, day, slotStart int) string {
 	// 1. 查找任务。
@@ -31,7 +31,10 @@ func Place(state *ScheduleState, taskID, day, slotStart int) string {
 	}
 
 	// 2. 校验状态。
-	if task.Status != "pending" {
+	// 2.1 只有“真实 pending”才允许 place；
+	// 2.2 suggested / existing 都说明任务已经有落位，继续 place 会破坏当前方案语义；
+	// 2.3 旧快照里的 pending+Slots 也会被 IsPendingTask 排除，避免重复补排。
+	if !IsPendingTask(*task) {
 		return fmt.Sprintf("放置失败：[%d]%s 不是待安排任务，无法放置。", task.StateID, task.Name)
 	}
 
@@ -63,33 +66,33 @@ func Place(state *ScheduleState, taskID, day, slotStart int) string {
 
 	// 6. 执行变更。
 	if host != nil {
-		// 嵌入路径：设置双向嵌入关系。
+		// 嵌入路径：设置双向嵌入关系，并把任务提升为 suggested。
 		guestID := task.StateID
 		hostID := host.StateID
 		task.EmbedHost = &hostID
 		host.EmbeddedBy = &guestID
 		task.Slots = []TaskSlot{{Day: day, SlotStart: slotStart, SlotEnd: slotEnd}}
-		task.Status = "existing"
+		task.Status = TaskStatusSuggested
 
-		return fmt.Sprintf("已将 [%d]%s 嵌入到第%d天第%s（宿主：[%d]%s）。\n%s\n待安排任务剩余：%d个。",
+		return fmt.Sprintf("已将 [%d]%s 预排并嵌入到第%d天第%s（宿主：[%d]%s）。\n%s\n待安排任务剩余：%d个。",
 			task.StateID, task.Name, day, formatSlotRange(slotStart, slotEnd),
 			host.StateID, host.Name,
 			formatDayOccupancy(state, day), countPending(state))
 	}
 
-	// 普通路径：直接放置。
+	// 普通路径：直接放置，并标记为 suggested。
 	task.Slots = []TaskSlot{{Day: day, SlotStart: slotStart, SlotEnd: slotEnd}}
-	task.Status = "existing"
+	task.Status = TaskStatusSuggested
 
-	return fmt.Sprintf("已将 [%d]%s 放到第%d天第%s。\n%s\n待安排任务剩余：%d个。",
+	return fmt.Sprintf("已将 [%d]%s 预排到第%d天第%s。\n%s\n待安排任务剩余：%d个。",
 		task.StateID, task.Name, day, formatSlotRange(slotStart, slotEnd),
 		formatDayOccupancy(state, day), countPending(state))
 }
 
 // ==================== Move ====================
 
-// Move 将一个已安排任务移动到新位置。
-// taskID 必须是 existing 状态且非锁定。
+// Move 将一个已落位任务移动到新位置。
+// taskID 允许是 suggested / existing，但不能是真实 pending。
 func Move(state *ScheduleState, taskID, newDay, newSlotStart int) string {
 	// 1. 查找任务。
 	task := state.TaskByStateID(taskID)
@@ -98,7 +101,7 @@ func Move(state *ScheduleState, taskID, newDay, newSlotStart int) string {
 	}
 
 	// 2. 校验状态。
-	if task.Status == "pending" {
+	if IsPendingTask(*task) {
 		return fmt.Sprintf("移动失败：[%d]%s 当前为待安排状态，请使用 place 放置。", task.StateID, task.Name)
 	}
 
@@ -148,8 +151,8 @@ func Move(state *ScheduleState, taskID, newDay, newSlotStart int) string {
 
 // ==================== Swap ====================
 
-// Swap 交换两个已安排任务的位置。
-// 两个任务都必须是 existing 状态、非锁定、总时长相同。
+// Swap 交换两个已落位任务的位置。
+// 两个任务都必须是 suggested / existing、非锁定、总时长相同。
 func Swap(state *ScheduleState, taskAID, taskBID int) string {
 	// 1. 查找两个任务。
 	taskA := state.TaskByStateID(taskAID)
@@ -166,11 +169,11 @@ func Swap(state *ScheduleState, taskAID, taskBID int) string {
 	}
 
 	// 2. 校验状态。
-	if taskA.Status != "existing" {
-		return fmt.Sprintf("交换失败：[%d]%s 不是已安排任务。", taskA.StateID, taskA.Name)
+	if !IsPlacedTask(*taskA) {
+		return fmt.Sprintf("交换失败：[%d]%s 不是已落位任务。", taskA.StateID, taskA.Name)
 	}
-	if taskB.Status != "existing" {
-		return fmt.Sprintf("交换失败：[%d]%s 不是已安排任务。", taskB.StateID, taskB.Name)
+	if !IsPlacedTask(*taskB) {
+		return fmt.Sprintf("交换失败：[%d]%s 不是已落位任务。", taskB.StateID, taskB.Name)
 	}
 
 	// 3. 校验锁定。
@@ -257,7 +260,7 @@ func BatchMove(state *ScheduleState, moves []MoveRequest) string {
 		if task == nil {
 			return fmt.Sprintf("批量移动失败，全部回滚，无任何变更。\n任务ID %d 不存在（第%d条移动请求）。", m.TaskID, i+1)
 		}
-		if task.Status == "pending" {
+		if IsPendingTask(*task) {
 			return fmt.Sprintf("批量移动失败，全部回滚，无任何变更。\n[%d]%s 当前为待安排状态，请使用 place（第%d条移动请求）。",
 				task.StateID, task.Name, i+1)
 		}
@@ -327,8 +330,8 @@ func BatchMove(state *ScheduleState, moves []MoveRequest) string {
 
 // ==================== Unplace ====================
 
-// Unplace 将一个已安排任务移除，恢复为待安排状态。
-// taskID 必须是 existing 状态且非锁定。
+// Unplace 将一个已落位任务移除，恢复为待安排状态。
+// taskID 允许是 suggested / existing，但不能是真实 pending。
 // 如果任务有嵌入关系，会自动清理双向指针。
 func Unplace(state *ScheduleState, taskID int) string {
 	// 1. 查找任务。
@@ -338,7 +341,7 @@ func Unplace(state *ScheduleState, taskID int) string {
 	}
 
 	// 2. 校验状态。
-	if task.Status == "pending" {
+	if IsPendingTask(*task) {
 		return fmt.Sprintf("移除失败：[%d]%s 已经是待安排状态。", task.StateID, task.Name)
 	}
 
@@ -372,14 +375,14 @@ func Unplace(state *ScheduleState, taskID int) string {
 			}
 			guest.EmbedHost = nil
 			guest.Slots = nil
-			guest.Status = "pending"
+			guest.Status = TaskStatusPending
 		}
 		task.EmbeddedBy = nil
 	}
 
 	// 6. 执行变更。
 	task.Slots = nil
-	task.Status = "pending"
+	task.Status = TaskStatusPending
 
 	// 7. 收集涉及的天。
 	affectedDays := collectAffectedDaysFromSlots(oldSlots)

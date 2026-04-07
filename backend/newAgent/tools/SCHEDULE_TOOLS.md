@@ -112,10 +112,10 @@ State 是工具层的操作对象，存在于内存中，不直接暴露给 LLM�
 | `source_id` | int | 原表主键（ScheduleEvent.ID 或 TaskClassItem.ID），写库时用于反查 |
 | `name` | string | 任务名称，来自 ScheduleEvent.Name 或 TaskClassItem.Content |
 | `category` | string | 类别名，来自 TaskClass.Name（如"课程"、"学习"、"作业"） |
-| `status` | string | `"existing"`（已安排）| `"pending"`（待安排）|
+| `status` | string | `"existing"`（已安排/已确定）| `"suggested"`（已预排/可优化）| `"pending"`（待安排）|
 | `locked` | bool | 是否锁定。推导规则：ScheduleEvent.Type="course" 且 CanBeEmbed=false 时为 true |
 | `slots` | array | 已安排任务的时段列表，每项含 day/slot_start/slot_end |
-| `duration` | int | 待安排任务需要的连续时段数（仅 pending 任务） |
+| `duration` | int | 待安排/已预排任务需要的连续时段数（pending / suggested 任务常见） |
 | `category_id` | int | 所属 TaskClass 的 ID（仅 source=task_item 时有值） |
 
 **嵌入任务相关字段（仅 can_embed=true 的任务）：**
@@ -291,7 +291,7 @@ DB 记录：
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | category | string | 否 | 过滤类别（对应 TaskClass.Name，如"课程"、"学习"） |
-| status | string | 否 | existing / pending / all，默认 all |
+| status | string | 否 | existing / suggested / pending / all，默认 all |
 
 **返回示例（待安排）：**
 
@@ -365,7 +365,7 @@ DB 记录：
 
 ### 5.1 place
 
-将待安排任务放置到指定位置。
+将待安排任务预排到指定位置。
 
 **入参：**
 
@@ -408,7 +408,7 @@ DB 记录：
 
 ### 5.2 move
 
-移动已有任务到新位置。
+移动已落位任务到新位置。
 
 **入参：**
 
@@ -449,7 +449,7 @@ DB 记录：
 
 ### 5.3 swap
 
-交换两个已安排任务的位置。
+交换两个已落位任务的位置。
 
 **入参：**
 
@@ -515,7 +515,7 @@ DB 记录：
 
 ### 5.5 unplace
 
-将已安排任务恢复为待安排状态。
+将已落位任务恢复为待安排状态。
 
 **入参：**
 
@@ -551,7 +551,8 @@ DB 记录：
 - place 新任务到锁定时段同样拒绝
 
 ### 状态约束
-- pending 任务只能 place，不能 move / swap
+- pending 任务只能 place，不能 move / swap / unplace
+- suggested 任务可以 move / swap / unplace
 - existing 任务可以 move / swap / unplace
 - 状态不符时返回明确错误信息
 
@@ -574,7 +575,7 @@ DB 记录：
 - 嵌入任务的 locked 继承宿主：宿主不可移动时，嵌入任务也不可单独移动
 
 ### 数据库交互
-- State 初始化：从 Schedule + ScheduleEvent 加载 existing 任务，从 TaskClassItem 加载 pending 任务
+- State 初始化：从 Schedule + ScheduleEvent 加载 existing 任务，从 TaskClassItem 加载 pending 任务；粗排或工具预排成功后，任务转为 suggested
 - State 落库：Confirm 节点统一处理，将 state 变更转换为 Schedule/ScheduleEvent/TaskClassItem 的增删改
 - 落库时使用 source + source_id 定位原记录，使用 day_mapping 将 day_index 转回 (week, day_of_week)
 - 落库时将 (slot_start, slot_end) 展开为逐条 Schedule 记录

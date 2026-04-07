@@ -54,14 +54,18 @@ func formatTaskLabelWithCategory(task ScheduleTask) string {
 
 // ==================== 占用计算辅助函数 ====================
 
-// getTasksOnDay 获取某天所有已安排任务的时段占用列表。
+// getTasksOnDay 获取某天所有“当前有落位”的任务占用列表。
+//
+// 说明：
+// 1. existing 与 suggested 都属于“有落位”；
+// 2. 旧快照里若残留 pending+Slots，也会通过 Slots 被兼容识别；
+// 3. 嵌入任务（有 EmbedHost 的）也会被返回，因为它们实际共享了该时段。
 // 返回值按 slotStart 升序排列。
-// 注意：嵌入任务（有 EmbedHost 的）也会被返回，因为它们实际占用了时段。
 func getTasksOnDay(state *ScheduleState, day int) []taskOnDay {
 	var result []taskOnDay
 	for i := range state.Tasks {
 		t := &state.Tasks[i]
-		if t.Status != "existing" && !hasSlotOnDay(t, day) {
+		if !hasSlotOnDay(t, day) {
 			continue
 		}
 		for _, slot := range t.Slots {

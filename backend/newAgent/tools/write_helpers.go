@@ -117,11 +117,15 @@ func taskDuration(task ScheduleTask) int {
 	return total
 }
 
-// countPending 统计当前 state 中待安排任务数量。
+// countPending 统计当前 state 中“真实待安排”任务数量。
+//
+// 说明：
+// 1. 这里只统计 pending 且无 Slots 的任务；
+// 2. 旧快照里 pending+Slots 会被 suggested 兼容层吸收，不再算入待安排。
 func countPending(state *ScheduleState) int {
 	count := 0
 	for i := range state.Tasks {
-		if state.Tasks[i].Status == "pending" {
+		if IsPendingTask(state.Tasks[i]) {
 			count++
 		}
 	}

@@ -241,6 +241,7 @@ func (s *AgentGraphState) EnsureScheduleState(ctx context.Context) (*newagenttoo
 	if s == nil {
 		return nil, nil
 	}
+	flowState := s.EnsureFlowState()
 	if s.ScheduleState != nil {
 		if s.OriginalScheduleState == nil {
 			// 1. 兼容老快照：历史 Redis 快照里可能还没带 original_state。
@@ -248,18 +249,33 @@ func (s *AgentGraphState) EnsureScheduleState(ctx context.Context) (*newagenttoo
 			// 3. 因此这里在“已恢复出 ScheduleState、但缺 original”时补一份克隆兜底。
 			s.OriginalScheduleState = s.ScheduleState.Clone()
 		}
+		newagenttools.FilterScheduleStateForTaskClassScope(s.ScheduleState, flowState.TaskClassIDs)
+		newagenttools.FilterScheduleStateForTaskClassScope(s.OriginalScheduleState, flowState.TaskClassIDs)
 		return s.ScheduleState, nil
 	}
 	if s.Deps.ScheduleProvider == nil {
 		return nil, nil
 	}
-	userID := s.EnsureFlowState().UserID
-	state, err := s.Deps.ScheduleProvider.LoadScheduleState(ctx, userID)
+	userID := flowState.UserID
+	var (
+		state *newagenttools.ScheduleState
+		err   error
+	)
+	// 1. 若 provider 支持按 task_class_ids 精确加载，则优先走 scoped 入口。
+	// 2. 这样可以让 DayMapping 与粗排算法使用同一批任务类窗口，避免“全量任务类脏日期污染本轮窗口”。
+	// 3. 若当前实现尚未支持 scoped 加载，则回退到旧入口，并继续复用后面的 scope 裁剪。
+	if scopedProvider, ok := s.Deps.ScheduleProvider.(ScopedScheduleStateProvider); ok && len(flowState.TaskClassIDs) > 0 {
+		state, err = scopedProvider.LoadScheduleStateForTaskClasses(ctx, userID, flowState.TaskClassIDs)
+	} else {
+		state, err = s.Deps.ScheduleProvider.LoadScheduleState(ctx, userID)
+	}
 	if err != nil {
 		return nil, err
 	}
 	s.ScheduleState = state
 	// 保存原始快照，供后续 diff 使用。
 	s.OriginalScheduleState = state.Clone()
+	newagenttools.FilterScheduleStateForTaskClassScope(s.ScheduleState, flowState.TaskClassIDs)
+	newagenttools.FilterScheduleStateForTaskClassScope(s.OriginalScheduleState, flowState.TaskClassIDs)
 	return state, nil
 }

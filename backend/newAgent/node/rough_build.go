@@ -3,6 +3,7 @@ package newagentnode
 import (
 	"context"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
@@ -13,7 +14,16 @@ import (
 const (
 	roughBuildStageName   = "rough_build"
 	roughBuildStatusBlock = "rough_build.status"
+	roughBuildSampleLimit = 3
 )
+
+type roughBuildApplyStats struct {
+	AppliedCount             int
+	DayMappingMissCount      int
+	TaskItemMatchMissCount   int
+	DayMappingMissSamples    []string
+	TaskItemMatchMissSamples []string
+}
 
 // RunRoughBuildNode 执行粗排节点逻辑。
 //
@@ -22,8 +32,9 @@ const (
 //  2. 从 CommonState 读取 TaskClassIDs，确认有需要排课的任务类；
 //  3. 加载 ScheduleState（含 DayMapping）；
 //  4. 调用 RoughBuildFunc 拿到粗排结果（[]RoughBuildPlacement）；
-//  5. 把粗排结果写入 ScheduleState 的对应 task.Slots（pending 任务预填位置）；
-//  6. 推送"粗排完成"状态，清除 NeedsRoughBuild 标记，进入执行阶段。
+//  5. 把粗排结果写入 ScheduleState，把已落位任务标记为 suggested；
+//  6. 若粗排后仍存在真实 pending，则写入正式 abort 结果并结束本轮；
+//  7. 否则推送"粗排完成"状态，清除 NeedsRoughBuild 标记，进入执行阶段。
 func RunRoughBuildNode(ctx context.Context, st *newagentmodel.AgentGraphState) error {
 	if st == nil {
 		return fmt.Errorf("rough build node: state is nil")
@@ -71,9 +82,58 @@ func RunRoughBuildNode(ctx context.Context, st *newagentmodel.AgentGraphState) e
 	}
 
 	// 6. 把粗排结果写入 ScheduleState。
-	applyRoughBuildPlacements(scheduleState, placements)
+	applyStats := applyRoughBuildPlacements(scheduleState, placements)
 
-	// 7. 推送完成状态。
+	// 7. 先校验粗排后是否仍有真实 pending。
+	stillPending := countPendingTasks(scheduleState, taskClassIDs)
+	log.Printf(
+		"[DEBUG] rough_build scope_task_classes=%v placements=%d applied=%d day_mapping_miss=%d task_item_match_miss=%d pending_in_scope=%d total_tasks=%d window_days=%d",
+		taskClassIDs,
+		len(placements),
+		applyStats.AppliedCount,
+		applyStats.DayMappingMissCount,
+		applyStats.TaskItemMatchMissCount,
+		stillPending,
+		len(scheduleState.Tasks),
+		len(scheduleState.Window.DayMapping),
+	)
+	if applyStats.DayMappingMissCount > 0 {
+		log.Printf(
+			"[DEBUG] rough_build day_mapping_miss_samples=%v window=%s",
+			applyStats.DayMappingMissSamples,
+			summarizeRoughBuildWindow(scheduleState),
+		)
+	}
+	if applyStats.TaskItemMatchMissCount > 0 {
+		log.Printf(
+			"[DEBUG] rough_build task_item_match_miss_samples=%v scoped_task_samples=%v",
+			applyStats.TaskItemMatchMissSamples,
+			collectScopedTaskSamples(scheduleState, taskClassIDs),
+		)
+	}
+	if stillPending > 0 {
+		failureMessage := fmt.Sprintf(
+			"初始排课方案构建异常：粗排后仍有 %d 个任务未获得初始落位。按当前规则，本轮不进入微调，请检查粗排算法或任务数据。",
+			stillPending,
+		)
+		_ = emitter.EmitStatus(
+			roughBuildStatusBlock,
+			roughBuildStageName,
+			"rough_build_failed",
+			failureMessage,
+			true,
+		)
+		flowState.NeedsRoughBuild = false
+		flowState.Abort(
+			roughBuildStageName,
+			"rough_build_pending_remaining",
+			failureMessage,
+			fmt.Sprintf("rough build finished with %d real pending tasks remaining", stillPending),
+		)
+		return nil
+	}
+
+	// 8. 推送完成状态。
 	_ = emitter.EmitStatus(
 		roughBuildStatusBlock,
 		roughBuildStageName,
@@ -82,8 +142,7 @@ func RunRoughBuildNode(ctx context.Context, st *newagentmodel.AgentGraphState) e
 		false,
 	)
 
-	// 8. 把粗排完成信息写入 pinned context，让 Execute 阶段的 LLM 直接进入验证和微调。
-	stillPending := countPendingTasks(scheduleState)
+	// 9. 把粗排完成信息写入 pinned context，让 Execute 阶段的 LLM 直接进入查看和微调。
 
 	// 构造任务类 ID 字符串，供 pinned block 明确标注，避免 Execute LLM 因找不到 task_class_id 来源而 ask_user。
 	idParts := make([]string, len(taskClassIDs))
@@ -92,34 +151,20 @@ func RunRoughBuildNode(ctx context.Context, st *newagentmodel.AgentGraphState) e
 	}
 	idStr := strings.Join(idParts, ", ")
 
-	var pinnedContent string
-	if stillPending > 0 {
-		pinnedContent = fmt.Sprintf(
-			"后端已自动运行粗排算法（任务类 ID：[%s]），初始排课方案已写入日程状态（共 %d 个任务已预排）。\n"+
-				"注意：仍有 %d 个任务未被粗排覆盖，处于待安排（pending）状态，必须在微调阶段手动安排完毕。\n\n"+
-				"处理 pending 任务的正确操作顺序：\n"+
-				"1. 调用 get_overview 或 find_free 确认可用空位（不要反复调用 list_tasks，list_tasks 只能看任务列表，看不出空位）\n"+
-				"2. 调用 place 将 pending 任务放入空位\n"+
-				"3. 重复上述步骤，直到 get_overview 显示待安排任务剩余为 0\n\n"+
-				"微调完成的判定标准：所有 pending 任务均已 place（待安排任务剩余=0），且现有排课无明显失衡。\n"+
-				"无需再次触发粗排。",
-			idStr, len(placements), stillPending,
-		)
-	} else {
-		pinnedContent = fmt.Sprintf(
-			"后端已自动运行粗排算法（任务类 ID：[%s]），初始排课方案已写入日程状态（共 %d 个任务已预排，无待安排任务）。\n"+
-				"请直接调用 get_overview 查看预排结果，然后用 move/swap 微调不合理的位置。\n"+
-				"无需再次触发粗排。",
-			idStr, len(placements),
-		)
-	}
+	pinnedContent := fmt.Sprintf(
+		"后端已自动运行粗排算法（任务类 ID：[%s]），初始排课方案已写入日程状态（共 %d 个任务已预排）。\n"+
+			"这些预排任务已标记为 suggested，表示“可继续优化的建议落位”，不是待补排任务。\n"+
+			"请先调用 get_overview 查看整体分布，再使用 move / swap / unplace 微调不合理的位置。\n"+
+			"本轮不需要再调用 place，也无需再次触发粗排。",
+		idStr, len(placements),
+	)
 	st.EnsureConversationContext().UpsertPinnedBlock(newagentmodel.ContextBlock{
 		Key:     "rough_build_done",
 		Title:   "粗排已完成",
 		Content: pinnedContent,
 	})
 
-	// 9. 清除标记，进入执行阶段。
+	// 10. 清除标记，进入执行阶段。
 	flowState.NeedsRoughBuild = false
 	flowState.Phase = newagentmodel.PhaseExecuting
 	return nil
@@ -127,16 +172,24 @@ func RunRoughBuildNode(ctx context.Context, st *newagentmodel.AgentGraphState) e
 
 // countPendingTasks 统计粗排后仍无位置的待安排任务数。
 //
-// 粗排只设 Slots，不改 Status（仍为 "pending"），
-// 所以"真正未覆盖"= pending 且 Slots 为空，需要手动 place。
-func countPendingTasks(state *newagenttools.ScheduleState) int {
+// 说明：
+// 1. 第一轮修复后，粗排成功会把任务直接标记为 suggested；
+// 2. 为兼容旧快照，仍按“pending 且 Slots 为空”认定真正未覆盖；
+// 3. 只要这里仍大于 0，就应视为粗排异常，而不是交给 LLM 补排。
+func countPendingTasks(state *newagenttools.ScheduleState, taskClassIDs []int) int {
 	if state == nil {
 		return 0
 	}
 	count := 0
 	for i := range state.Tasks {
-		t := &state.Tasks[i]
-		if t.Status == "pending" && len(t.Slots) == 0 {
+		task := state.Tasks[i]
+		if !newagenttools.IsPendingTask(task) {
+			continue
+		}
+		if len(taskClassIDs) > 0 && !newagenttools.IsTaskInRequestedClassScope(task, taskClassIDs) {
+			continue
+		}
+		if newagenttools.IsPendingTask(task) {
 			count++
 		}
 	}
@@ -148,27 +201,110 @@ func countPendingTasks(state *newagenttools.ScheduleState) int {
 // 设计说明：
 //  1. 通过 task_item_id（SourceID）定位任务；
 //  2. 用 DayMapping 把 (week, dayOfWeek) 转为 day_index；
-//  3. task.Status 保持 "pending"，让 LLM 在 Execute 阶段看到"有建议位置的待安排任务"，
-//     可用 move/swap 微调，也可用 unplace 推翻粗排结果；
-//  4. 转换失败的条目静默跳过，不中断整体流程。
-func applyRoughBuildPlacements(state *newagenttools.ScheduleState, placements []newagentmodel.RoughBuildPlacement) {
+//  3. 对成功落位的任务写入 Slots，并显式标记为 suggested；
+//  4. suggested 表示“粗排建议位”，后续可用 move/swap/unplace 微调；
+//  5. 转换失败的条目静默跳过，不中断整体流程。
+func applyRoughBuildPlacements(
+	state *newagenttools.ScheduleState,
+	placements []newagentmodel.RoughBuildPlacement,
+) roughBuildApplyStats {
+	stats := roughBuildApplyStats{}
 	if state == nil {
-		return
+		return stats
 	}
+
+	taskIndexByItemID := make(map[int][]int)
+	for i := range state.Tasks {
+		task := state.Tasks[i]
+		if task.Source != "task_item" {
+			continue
+		}
+		taskIndexByItemID[task.SourceID] = append(taskIndexByItemID[task.SourceID], i)
+	}
+
 	for _, p := range placements {
 		day, ok := state.WeekDayToDay(p.Week, p.DayOfWeek)
 		if !ok {
+			stats.DayMappingMissCount++
+			stats.DayMappingMissSamples = appendPlacementSample(stats.DayMappingMissSamples, p)
 			continue // DayMapping 里没有对应 day，跳过
 		}
-		for i := range state.Tasks {
-			t := &state.Tasks[i]
-			if t.Source != "task_item" || t.SourceID != p.TaskItemID {
-				continue
-			}
+
+		matched := false
+		for _, index := range taskIndexByItemID[p.TaskItemID] {
+			t := &state.Tasks[index]
 			t.Slots = []newagenttools.TaskSlot{
 				{Day: day, SlotStart: p.SectionFrom, SlotEnd: p.SectionTo},
 			}
+			t.Status = newagenttools.TaskStatusSuggested
+			stats.AppliedCount++
+			matched = true
+			break
+		}
+		if !matched {
+			stats.TaskItemMatchMissCount++
+			stats.TaskItemMatchMissSamples = appendPlacementSample(stats.TaskItemMatchMissSamples, p)
+		}
+	}
+	return stats
+}
+
+// appendPlacementSample 记录有限数量的 miss 样本，避免 debug 日志爆量。
+func appendPlacementSample(samples []string, placement newagentmodel.RoughBuildPlacement) []string {
+	if len(samples) >= roughBuildSampleLimit {
+		return samples
+	}
+	return append(samples, fmt.Sprintf(
+		"task_item_id=%d week=%d day=%d sections=%d-%d",
+		placement.TaskItemID,
+		placement.Week,
+		placement.DayOfWeek,
+		placement.SectionFrom,
+		placement.SectionTo,
+	))
+}
+
+// summarizeRoughBuildWindow 提供 DayMapping 的紧凑摘要，便于判断窗口是否退化到错误周。
+func summarizeRoughBuildWindow(state *newagenttools.ScheduleState) string {
+	if state == nil || len(state.Window.DayMapping) == 0 {
+		return "empty"
+	}
+	first := state.Window.DayMapping[0]
+	last := state.Window.DayMapping[len(state.Window.DayMapping)-1]
+	return fmt.Sprintf(
+		"days=%d first=W%dD%d last=W%dD%d",
+		len(state.Window.DayMapping),
+		first.Week,
+		first.DayOfWeek,
+		last.Week,
+		last.DayOfWeek,
+	)
+}
+
+// collectScopedTaskSamples 提供当前 state 中可用于匹配的 task_item 样本，便于排查 ID 对不上。
+func collectScopedTaskSamples(state *newagenttools.ScheduleState, taskClassIDs []int) []string {
+	if state == nil {
+		return nil
+	}
+	samples := make([]string, 0, roughBuildSampleLimit)
+	for i := range state.Tasks {
+		task := state.Tasks[i]
+		if task.Source != "task_item" {
+			continue
+		}
+		if len(taskClassIDs) > 0 && !newagenttools.IsTaskInRequestedClassScope(task, taskClassIDs) {
+			continue
+		}
+		samples = append(samples, fmt.Sprintf(
+			"source_id=%d task_class_id=%d status=%s name=%q",
+			task.SourceID,
+			task.TaskClassID,
+			task.Status,
+			task.Name,
+		))
+		if len(samples) >= roughBuildSampleLimit {
 			break
 		}
 	}
+	return samples
 }
