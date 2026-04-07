@@ -54,7 +54,7 @@ func RunChatNode(ctx context.Context, input ChatNodeInput) error {
 
 	// 1. 有 pending interaction → 纯状态传递，处理恢复。
 	if runtimeState.HasPendingInteraction() {
-		return handleChatResume(input, runtimeState, conversationContext, emitter)
+		return handleChatResume(input, runtimeState, emitter)
 	}
 
 	// 2. 无 pending → 路由决策（一次快速 LLM 调用，不开 thinking）。
@@ -263,16 +263,13 @@ func handleRoutePlan(
 func handleChatResume(
 	input ChatNodeInput,
 	runtimeState *newagentmodel.AgentRuntimeState,
-	conversationContext *newagentmodel.ConversationContext,
 	emitter *newagentstream.ChunkEmitter,
 ) error {
 	pending := runtimeState.PendingInteraction
 	flowState := runtimeState.EnsureCommonState()
 
-	// 把用户本轮输入写回历史（ask_user 回复、confirm 附言等）。
-	if strings.TrimSpace(input.UserInput) != "" {
-		conversationContext.AppendHistory(schema.UserMessage(input.UserInput))
-	}
+	// 用户输入在 service 层进入 graph 前已经统一追加到 ConversationContext。
+	// 这里不再二次写入，避免 pending 恢复路径把同一轮 user message 追加两次。
 
 	switch pending.Type {
 	case newagentmodel.PendingInteractionTypeAskUser:

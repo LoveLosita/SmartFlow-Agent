@@ -60,7 +60,7 @@ func ScheduleStateToPreview(
 			}
 
 			// Status 映射：existing 不变，pending（有位置）= suggested。
-			if t.Status == "pending" {
+			if shouldMarkSuggestedInPreview(*t) {
 				entry.Status = "suggested"
 			} else {
 				entry.Status = "existing"
@@ -108,4 +108,20 @@ func ScheduleStateToPreview(
 		TaskClassIDs:   taskClassIDs,
 		GeneratedAt:    time.Now(),
 	}
+}
+
+// shouldMarkSuggestedInPreview 判断某条 ScheduleTask 在预览层是否应标记为 suggested。
+//
+// 规则说明：
+//  1. pending 任务在预览语义中属于“建议态”；
+//  2. source=task_item 且 Duration>0 的任务来自待排任务池，
+//     即使工具层在 place 后把它改成 existing，预览层也要继续按 suggested 输出。
+func shouldMarkSuggestedInPreview(t newagenttools.ScheduleTask) bool {
+	if t.Status == "pending" {
+		return true
+	}
+	if t.Source == "task_item" && t.Duration > 0 {
+		return true
+	}
+	return false
 }

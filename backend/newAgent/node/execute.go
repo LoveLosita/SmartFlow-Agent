@@ -38,8 +38,8 @@ const (
 // 3. ConversationContext 提供历史对话与置顶上下文；
 // 4. ToolRegistry 提供工具注册表；
 // 5. ScheduleState 提供工具操作的内存数据源（可为 nil，由调用方按需加载）；
-// 6. SchedulePersistor 用于写工具执行后持久化变更；
-// 7. OriginalScheduleState 是首次加载时的原始快照，用于 diff。
+// 6. SchedulePersistor 仍保留注入位，但当前阶段不调用，避免写库；
+// 7. OriginalScheduleState 继续保留，供 Redis 快照恢复时维持“当前态/原始态”成对语义。
 type ExecuteNodeInput struct {
 	RuntimeState          *newagentmodel.AgentRuntimeState
 	ConversationContext   *newagentmodel.ConversationContext
@@ -138,6 +138,15 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 
 	// 5. 构造本轮执行输入，请求 LLM 输出 ExecuteDecision。
 	messages := newagentprompt.BuildExecuteMessages(flowState, conversationContext)
+	log.Printf(
+		"[DEBUG] execute LLM context begin chat=%s round=%d message_count=%d\n%s\n[DEBUG] execute LLM context end chat=%s round=%d",
+		flowState.ConversationID,
+		flowState.RoundUsed,
+		len(messages),
+		formatExecuteLLMMessagesForDebug(messages),
+		flowState.ConversationID,
+		flowState.RoundUsed,
+	)
 	decision, rawResult, err := newagentllm.GenerateJSON[newagentmodel.ExecuteDecision](
 		ctx,
 		input.Client,
@@ -316,18 +325,9 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		return nil
 
 	case newagentmodel.ExecuteActionConfirm:
-		// AlwaysExecute=true：跳过确认闸门，直接执行写工具并持久化，不走 confirm 节点。
+		// AlwaysExecute=true：跳过确认闸门，直接执行内存写工具，不走 confirm 节点。
 		if input.AlwaysExecute && decision.ToolCall != nil {
-			if err := executeToolCall(ctx, flowState, conversationContext, decision.ToolCall, emitter, input.ToolRegistry, input.ScheduleState); err != nil {
-				return err
-			}
-			if input.SchedulePersistor != nil && input.OriginalScheduleState != nil {
-				cs := runtimeState.EnsureCommonState()
-				if persistErr := input.SchedulePersistor.PersistScheduleChanges(ctx, input.OriginalScheduleState, input.ScheduleState, cs.UserID); persistErr != nil {
-					log.Printf("[WARN] execute always-execute 持久化失败: %v", persistErr)
-				}
-			}
-			return nil
+			return executeToolCall(ctx, flowState, conversationContext, decision.ToolCall, emitter, input.ToolRegistry, input.ScheduleState)
 		}
 		// AlwaysExecute=false（默认）：暂存工具意图，设 Phase → 下游 confirm 节点接管。
 		return handleExecuteActionConfirm(decision, runtimeState, flowState)
@@ -504,7 +504,19 @@ func executeToolCall(
 	}
 
 	// 2. 执行工具。
+	beforeDigest := summarizeScheduleStateForDebug(scheduleState)
 	result := registry.Execute(scheduleState, toolName, toolCall.Arguments)
+	afterDigest := summarizeScheduleStateForDebug(scheduleState)
+	log.Printf(
+		"[DEBUG] execute tool chat=%s round=%d tool=%s args=%s before=%s after=%s result_preview=%.200s",
+		flowState.ConversationID,
+		flowState.RoundUsed,
+		toolName,
+		marshalArgsForDebug(toolCall.Arguments),
+		beforeDigest,
+		afterDigest,
+		flattenForLog(result),
+	)
 
 	// 2.5 截断过大的工具结果，防止上下文膨胀导致后续 LLM 调用返回空或超限。
 	const maxToolResultLen = 3000
@@ -558,7 +570,7 @@ func executeToolCall(
 // 1. 从 PendingConfirmTool 读取工具名和参数（已序列化）；
 // 2. 反序列化参数后调用工具执行；
 // 3. 将结果追加到历史，清空 PendingConfirmTool；
-// 4. 执行成功后调用 persistor 持久化变更；
+// 4. 当前阶段只保留内存修改，不在这里落库；
 // 5. 不调用 LLM，直接返回让下一轮继续。
 func executePendingTool(
 	ctx context.Context,
@@ -598,7 +610,20 @@ func executePendingTool(
 	}
 
 	// 4. 执行工具。
+	beforeDigest := summarizeScheduleStateForDebug(scheduleState)
 	result := registry.Execute(scheduleState, pending.ToolName, args)
+	afterDigest := summarizeScheduleStateForDebug(scheduleState)
+	flowState := runtimeState.EnsureCommonState()
+	log.Printf(
+		"[DEBUG] execute pending tool chat=%s round=%d tool=%s args=%s before=%s after=%s result_preview=%.200s",
+		flowState.ConversationID,
+		flowState.RoundUsed,
+		pending.ToolName,
+		marshalArgsForDebug(args),
+		beforeDigest,
+		afterDigest,
+		flattenForLog(result),
+	)
 
 	// 5. 将工具调用和结果以合法的 assistant+tool 消息对追加到历史。
 	//
@@ -629,13 +654,6 @@ func executePendingTool(
 
 	// 6. 清空临时邮箱，避免重复执行。
 	runtimeState.PendingConfirmTool = nil
-
-	// 7. 持久化变更（如果有 persistor）。
-	if persistor != nil && originalState != nil {
-		if err := persistor.PersistScheduleChanges(ctx, originalState, scheduleState, runtimeState.UserID); err != nil {
-			return fmt.Errorf("持久化日程变更失败: %w", err)
-		}
-	}
 
 	return nil
 }
@@ -670,4 +688,148 @@ func truncateText(text string, maxLen int) string {
 		return text[:maxLen]
 	}
 	return text[:maxLen-3] + "..."
+}
+
+// summarizeScheduleStateForDebug 返回内存日程状态的关键计数，用于判断工具是否真的修改了 state。
+func summarizeScheduleStateForDebug(state *newagenttools.ScheduleState) string {
+	if state == nil {
+		return "state=nil"
+	}
+
+	total := len(state.Tasks)
+	pendingNoSlot := 0
+	pendingWithSlot := 0
+	existingTotal := 0
+	taskItemWithSlot := 0
+	eventWithSlot := 0
+
+	for i := range state.Tasks {
+		t := &state.Tasks[i]
+		hasSlot := len(t.Slots) > 0
+
+		switch t.Status {
+		case "pending":
+			if hasSlot {
+				pendingWithSlot++
+			} else {
+				pendingNoSlot++
+			}
+		case "existing":
+			existingTotal++
+		}
+
+		if hasSlot {
+			if t.Source == "task_item" {
+				taskItemWithSlot++
+			}
+			if t.Source == "event" {
+				eventWithSlot++
+			}
+		}
+	}
+
+	return fmt.Sprintf(
+		"tasks=%d pending_no_slot=%d pending_with_slot=%d existing=%d task_item_with_slot=%d event_with_slot=%d",
+		total,
+		pendingNoSlot,
+		pendingWithSlot,
+		existingTotal,
+		taskItemWithSlot,
+		eventWithSlot,
+	)
+}
+
+// marshalArgsForDebug 将工具参数序列化为日志可读的短文本。
+func marshalArgsForDebug(args map[string]any) string {
+	if len(args) == 0 {
+		return "{}"
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return "<marshal_error>"
+	}
+	return string(raw)
+}
+
+// flattenForLog 将多行文本压成单行，避免日志换行影响排查。
+func flattenForLog(text string) string {
+	text = strings.ReplaceAll(text, "\n", " ")
+	text = strings.ReplaceAll(text, "\r", " ")
+	return strings.TrimSpace(text)
+}
+
+// formatExecuteLLMMessagesForDebug 将本轮送入 LLM 的完整消息上下文展开成可读多行日志。
+//
+// 说明：
+// 1. 按消息索引逐条输出，便于和上游上下文构造步骤逐项对齐；
+// 2. 完整输出 content / reasoning_content / tool_calls / extra，不做截断；
+// 3. 仅用于调试打点，不参与业务决策。
+func formatExecuteLLMMessagesForDebug(messages []*schema.Message) string {
+	if len(messages) == 0 {
+		return "(empty messages)"
+	}
+
+	var sb strings.Builder
+	for i, msg := range messages {
+		sb.WriteString(fmt.Sprintf("----- message[%d] -----\n", i))
+		if msg == nil {
+			sb.WriteString("role: <nil>\n\n")
+			continue
+		}
+
+		sb.WriteString(fmt.Sprintf("role: %s\n", msg.Role))
+
+		if strings.TrimSpace(msg.ToolCallID) != "" {
+			sb.WriteString(fmt.Sprintf("tool_call_id: %s\n", msg.ToolCallID))
+		}
+		if strings.TrimSpace(msg.ToolName) != "" {
+			sb.WriteString(fmt.Sprintf("tool_name: %s\n", msg.ToolName))
+		}
+
+		if len(msg.ToolCalls) > 0 {
+			sb.WriteString("tool_calls:\n")
+			for j, call := range msg.ToolCalls {
+				sb.WriteString(fmt.Sprintf("  - [%d] id=%s type=%s function=%s\n", j, call.ID, call.Type, call.Function.Name))
+				sb.WriteString("    arguments:\n")
+				sb.WriteString(indentMultilineForDebug(call.Function.Arguments, "      "))
+				sb.WriteString("\n")
+			}
+		}
+
+		if strings.TrimSpace(msg.ReasoningContent) != "" {
+			sb.WriteString("reasoning_content:\n")
+			sb.WriteString(indentMultilineForDebug(msg.ReasoningContent, "  "))
+			sb.WriteString("\n")
+		}
+
+		sb.WriteString("content:\n")
+		sb.WriteString(indentMultilineForDebug(msg.Content, "  "))
+		sb.WriteString("\n")
+
+		if len(msg.Extra) > 0 {
+			sb.WriteString("extra:\n")
+			raw, err := json.MarshalIndent(msg.Extra, "", "  ")
+			if err != nil {
+				sb.WriteString(indentMultilineForDebug("<marshal_error>", "  "))
+			} else {
+				sb.WriteString(indentMultilineForDebug(string(raw), "  "))
+			}
+			sb.WriteString("\n")
+		}
+
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// indentMultilineForDebug 为多行文本统一添加前缀缩进，避免日志折行后难以阅读。
+func indentMultilineForDebug(text, prefix string) string {
+	if text == "" {
+		return prefix + "<empty>"
+	}
+	lines := strings.Split(text, "\n")
+	for i := range lines {
+		lines[i] = prefix + lines[i]
+	}
+	return strings.Join(lines, "\n")
 }

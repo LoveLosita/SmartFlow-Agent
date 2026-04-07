@@ -139,8 +139,8 @@ func (e *ChunkEmitter) EmitAssistantText(blockID, stage, text string, includeRol
 	if e == nil || e.emit == nil {
 		return nil
 	}
-
-	text = strings.TrimSpace(text)
+	//这里如果不删掉，换行符会被吞了，导致文字黏连
+	/*	text = strings.TrimSpace(text)*/
 	if text == "" {
 		return nil
 	}
@@ -509,9 +509,7 @@ func SplitPseudoStreamText(text string, options PseudoStreamOptions) []string {
 	options = normalizePseudoStreamOptions(options)
 	runes := []rune(text)
 	if len(runes) <= options.MaxChunkRunes {
-		if hasTrailingNewline {
-			return []string{text + "\n"}
-		}
+		// text 经 TrimRight(" \t\r") 已保留结尾 \n，直接返回，不再追加。
 		return []string{text}
 	}
 
@@ -532,7 +530,9 @@ func SplitPseudoStreamText(text string, options PseudoStreamOptions) []string {
 			continue
 		}
 
-		chunk := strings.TrimSpace(string(runes[start : i+1]))
+		// 用 Trim(" \t\r") 代替 TrimSpace：保留 chunk 内的 \n（段落分隔符）。
+		// TrimSpace 会把 flush 在 \n 边界时结尾的 \n、以及下一段开头的 \n 全部删掉，导致黏连。
+		chunk := strings.Trim(string(runes[start:i+1]), " \t\r")
 		if chunk != "" {
 			chunks = append(chunks, chunk)
 		}
@@ -541,19 +541,17 @@ func SplitPseudoStreamText(text string, options PseudoStreamOptions) []string {
 	}
 
 	if start < len(runes) {
-		chunk := strings.TrimSpace(string(runes[start:]))
+		chunk := strings.Trim(string(runes[start:]), " \t\r")
 		if chunk != "" {
 			chunks = append(chunks, chunk)
 		}
 	}
 
 	if len(chunks) == 0 {
-		if hasTrailingNewline {
-			return []string{text + "\n"}
-		}
 		return []string{text}
 	}
-	if hasTrailingNewline {
+	// 仅当最后一个 chunk 尚未以 \n 结尾时才追加，避免 Trim 修复后出现双换行。
+	if hasTrailingNewline && !strings.HasSuffix(chunks[len(chunks)-1], "\n") {
 		chunks[len(chunks)-1] += "\n"
 	}
 	return chunks

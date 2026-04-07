@@ -2,6 +2,7 @@ package newagentprompt
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
@@ -191,6 +192,17 @@ func BuildExecuteUserPrompt(state *newagentmodel.CommonState) string {
 	sb.WriteString(renderStateSummary(state))
 	sb.WriteString("\n")
 
+	// 明确列出任务类 IDs，与 Plan 阶段保持信息对称，避免 LLM 因 plan 步骤中引用了 ID
+	// 而在 Execute 阶段找不到显式来源，误触 rule 5（缺少关键上下文）→ ask_user。
+	if state != nil && len(state.TaskClassIDs) > 0 {
+		parts := make([]string, len(state.TaskClassIDs))
+		for i, id := range state.TaskClassIDs {
+			parts[i] = strconv.Itoa(id)
+		}
+		sb.WriteString(fmt.Sprintf("本次排课请求涉及的任务类 ID：[%s]（上下文已完整，无需向用户追问）\n", strings.Join(parts, ", ")))
+		sb.WriteString("\n")
+	}
+
 	if state == nil || !state.HasPlan() {
 		sb.WriteString("当前没有可执行的完整 plan，请不要盲目进入执行；如有需要请回退到规划阶段。\n")
 		return strings.TrimSpace(sb.String())
@@ -221,7 +233,16 @@ func BuildExecuteReActUserPrompt(state *newagentmodel.CommonState) string {
 	sb.WriteString("请根据用户意图直接使用工具完成请求。\n\n")
 
 	sb.WriteString(renderStateSummary(state))
-	sb.WriteString("\n\n")
+	sb.WriteString("\n")
+
+	if state != nil && len(state.TaskClassIDs) > 0 {
+		parts := make([]string, len(state.TaskClassIDs))
+		for i, id := range state.TaskClassIDs {
+			parts[i] = strconv.Itoa(id)
+		}
+		sb.WriteString(fmt.Sprintf("本次排课请求涉及的任务类 ID：[%s]（上下文已完整，无需向用户追问）\n", strings.Join(parts, ", ")))
+	}
+	sb.WriteString("\n")
 
 	sb.WriteString("判断规则：\n")
 	sb.WriteString("- 需要查询/读取数据 → action=continue + tool_call（读工具）\n")

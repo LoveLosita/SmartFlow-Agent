@@ -147,10 +147,12 @@ func (d *AgentGraphDeps) ResolveDeliverClient() *newagentllm.Client {
 // 3. Request：当前这次请求的轻量输入；
 // 4. Deps：graph/node 层真正依赖的可插拔能力。
 type AgentGraphRunInput struct {
-	RuntimeState        *AgentRuntimeState
-	ConversationContext *ConversationContext
-	Request             AgentGraphRequest
-	Deps                AgentGraphDeps
+	RuntimeState          *AgentRuntimeState
+	ConversationContext   *ConversationContext
+	ScheduleState         *newagenttools.ScheduleState
+	OriginalScheduleState *newagenttools.ScheduleState
+	Request               AgentGraphRequest
+	Deps                  AgentGraphDeps
 }
 
 // AgentGraphState 是 graph 内部真正流转的运行态容器。
@@ -171,10 +173,12 @@ type AgentGraphState struct {
 // NewAgentGraphState 把入口参数整理成 graph 内部状态。
 func NewAgentGraphState(input AgentGraphRunInput) *AgentGraphState {
 	st := &AgentGraphState{
-		RuntimeState:        input.RuntimeState,
-		ConversationContext: input.ConversationContext,
-		Request:             input.Request,
-		Deps:                input.Deps,
+		RuntimeState:          input.RuntimeState,
+		ConversationContext:   input.ConversationContext,
+		Request:               input.Request,
+		Deps:                  input.Deps,
+		ScheduleState:         input.ScheduleState,
+		OriginalScheduleState: input.OriginalScheduleState,
 	}
 	st.Request.Normalize()
 	st.EnsureRuntimeState()
@@ -238,6 +242,12 @@ func (s *AgentGraphState) EnsureScheduleState(ctx context.Context) (*newagenttoo
 		return nil, nil
 	}
 	if s.ScheduleState != nil {
+		if s.OriginalScheduleState == nil {
+			// 1. 兼容老快照：历史 Redis 快照里可能还没带 original_state。
+			// 2. 当前阶段虽然已经不落库，但后续若重新接回 diff 链，仍需要稳定的原始快照。
+			// 3. 因此这里在“已恢复出 ScheduleState、但缺 original”时补一份克隆兜底。
+			s.OriginalScheduleState = s.ScheduleState.Clone()
+		}
 		return s.ScheduleState, nil
 	}
 	if s.Deps.ScheduleProvider == nil {

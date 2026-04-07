@@ -189,6 +189,15 @@ func branchAfterPlan(_ context.Context, st *newagentmodel.AgentGraphState) (stri
 	if flowState.Phase == newagentmodel.PhaseWaitingConfirm {
 		return NodeConfirm, nil
 	}
+	if flowState.Phase == newagentmodel.PhaseExecuting {
+		if flowState.NeedsRoughBuild && st.Deps.RoughBuildFunc != nil {
+			return NodeRoughBuild, nil
+		}
+		return NodeExecute, nil
+	}
+	if flowState.Phase == newagentmodel.PhaseDone {
+		return NodeDeliver, nil
+	}
 	return NodePlan, nil
 }
 

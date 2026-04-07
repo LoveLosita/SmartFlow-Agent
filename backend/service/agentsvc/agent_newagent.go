@@ -86,7 +86,7 @@ func (s *AgentService) runNewAgentGraph(
 	// 4. 从 StateStore 加载或创建 RuntimeState。
 	//    恢复场景（confirm/ask_user）同时拿到快照中保存的 ConversationContext，
 	//    其中包含工具调用/结果等中间消息，保证后续 LLM 调用的消息链完整。
-	runtimeState, savedConversationContext := s.loadOrCreateRuntimeState(requestCtx, chatID, userID)
+	runtimeState, savedConversationContext, savedScheduleState, savedOriginalScheduleState := s.loadOrCreateRuntimeState(requestCtx, chatID, userID)
 
 	// 5. 构造 ConversationContext。
 	//    优先使用快照中恢复的 ConversationContext（含工具调用/结果），
@@ -161,10 +161,12 @@ func (s *AgentService) runNewAgentGraph(
 
 	// 10. 构造 AgentGraphRunInput 并运行 graph。
 	runInput := newagentmodel.AgentGraphRunInput{
-		RuntimeState:        runtimeState,
-		ConversationContext: conversationContext,
-		Request:             graphRequest,
-		Deps:                deps,
+		RuntimeState:          runtimeState,
+		ConversationContext:   conversationContext,
+		ScheduleState:         savedScheduleState,
+		OriginalScheduleState: savedOriginalScheduleState,
+		Request:               graphRequest,
+		Deps:                  deps,
 	}
 
 	finalState, graphErr := newagentgraph.RunAgentGraph(requestCtx, runInput)
@@ -211,13 +213,13 @@ func (s *AgentService) runNewAgentGraph(
 //     这些消息不会出现在 Redis LLM 历史缓存中；
 //  2. 恢复场景（confirm/ask_user）必须使用快照中的 ConversationContext，否则工具结果丢失，
 //     导致后续 LLM 调用收到非法的裸 Tool 消息，API 拒绝请求、连接断开。
-func (s *AgentService) loadOrCreateRuntimeState(ctx context.Context, chatID string, userID int) (*newagentmodel.AgentRuntimeState, *newagentmodel.ConversationContext) {
-	newRT := func() (*newagentmodel.AgentRuntimeState, *newagentmodel.ConversationContext) {
+func (s *AgentService) loadOrCreateRuntimeState(ctx context.Context, chatID string, userID int) (*newagentmodel.AgentRuntimeState, *newagentmodel.ConversationContext, *newagenttools.ScheduleState, *newagenttools.ScheduleState) {
+	newRT := func() (*newagentmodel.AgentRuntimeState, *newagentmodel.ConversationContext, *newagenttools.ScheduleState, *newagenttools.ScheduleState) {
 		rt := newagentmodel.NewAgentRuntimeState(nil)
 		cs := rt.EnsureCommonState()
 		cs.UserID = userID
 		cs.ConversationID = chatID // saveAgentState 依赖此字段决定是否持久化
-		return rt, nil
+		return rt, nil, nil, nil
 	}
 
 	if s.agentStateStore == nil {
@@ -225,11 +227,13 @@ func (s *AgentService) loadOrCreateRuntimeState(ctx context.Context, chatID stri
 	}
 
 	snapshot, ok, err := s.agentStateStore.Load(ctx, chatID)
-	log.Printf("[DEBUG] loadOrCreateRuntimeState chatID=%s ok=%v err=%v hasRuntime=%v hasPending=%v hasCtx=%v",
+	log.Printf("[DEBUG] loadOrCreateRuntimeState chatID=%s ok=%v err=%v hasRuntime=%v hasPending=%v hasCtx=%v hasSchedule=%v hasOriginal=%v",
 		chatID, ok, err,
 		snapshot != nil && snapshot.RuntimeState != nil,
 		snapshot != nil && snapshot.RuntimeState != nil && snapshot.RuntimeState.HasPendingInteraction(),
 		snapshot != nil && snapshot.ConversationContext != nil,
+		snapshot != nil && snapshot.ScheduleState != nil,
+		snapshot != nil && snapshot.OriginalScheduleState != nil,
 	)
 	if err != nil {
 		log.Printf("加载 agent 状态失败 chat=%s: %v", chatID, err)
@@ -244,7 +248,14 @@ func (s *AgentService) loadOrCreateRuntimeState(ctx context.Context, chatID stri
 		// 不需要手动重置 Phase：所有请求统一先过 Chat 节点，Chat 会根据路由决策覆盖 Phase。
 		// 保留完整的 RuntimeState（PlanSteps、CurrentStep 等），支持连续对话调整日程。
 
-		return snapshot.RuntimeState, snapshot.ConversationContext
+		originalScheduleState := snapshot.OriginalScheduleState
+		if snapshot.ScheduleState != nil && originalScheduleState == nil {
+			// 1. 兼容老快照：历史会话可能只存了 ScheduleState，没有 original 副本。
+			// 2. 这里补一份克隆，保证后续节点拿到的仍是“恢复态 + 原始态”成对数据。
+			// 3. 即便当前阶段不落库，这里也保留一致性，避免下一轮再出现语义漂移。
+			originalScheduleState = snapshot.ScheduleState.Clone()
+		}
+		return snapshot.RuntimeState, snapshot.ConversationContext, snapshot.ScheduleState, originalScheduleState
 	}
 	return newRT()
 }
@@ -458,12 +469,92 @@ func (s *AgentService) makeWriteSchedulePreviewFunc() newagentmodel.WriteSchedul
 		return nil
 	}
 	return func(ctx context.Context, state *newagenttools.ScheduleState, userID int, conversationID string, taskClassIDs []int) error {
+		stateDigest := summarizeScheduleStateForPreviewDebug(state)
 		preview := conv.ScheduleStateToPreview(state, userID, conversationID, taskClassIDs, "")
 		if preview == nil {
+			log.Printf("[WARN] deliver preview skipped chat=%s user=%d state=%s", conversationID, userID, stateDigest)
 			return nil
 		}
+		previewDigest := summarizeHybridEntriesForPreviewDebug(preview.HybridEntries)
+		log.Printf(
+			"[DEBUG] deliver preview write chat=%s user=%d state=%s preview=%s generated_at=%s",
+			conversationID,
+			userID,
+			stateDigest,
+			previewDigest,
+			preview.GeneratedAt.Format(time.RFC3339),
+		)
 		return s.cacheDAO.SetSchedulePlanPreviewToCache(ctx, userID, conversationID, preview)
 	}
+}
+
+// summarizeScheduleStateForPreviewDebug 统计 Deliver 写预览前的内存日程摘要。
+func summarizeScheduleStateForPreviewDebug(state *newagenttools.ScheduleState) string {
+	if state == nil {
+		return "state=nil"
+	}
+
+	total := len(state.Tasks)
+	pendingNoSlot := 0
+	pendingWithSlot := 0
+	taskItemWithSlot := 0
+	eventWithSlot := 0
+	for i := range state.Tasks {
+		t := &state.Tasks[i]
+		hasSlot := len(t.Slots) > 0
+		if t.Status == "pending" {
+			if hasSlot {
+				pendingWithSlot++
+			} else {
+				pendingNoSlot++
+			}
+		}
+		if hasSlot {
+			if t.Source == "task_item" {
+				taskItemWithSlot++
+			}
+			if t.Source == "event" {
+				eventWithSlot++
+			}
+		}
+	}
+	return fmt.Sprintf(
+		"tasks=%d pending_no_slot=%d pending_with_slot=%d task_item_with_slot=%d event_with_slot=%d",
+		total,
+		pendingNoSlot,
+		pendingWithSlot,
+		taskItemWithSlot,
+		eventWithSlot,
+	)
+}
+
+// summarizeHybridEntriesForPreviewDebug 统计预览转换后的 HybridEntries 摘要。
+func summarizeHybridEntriesForPreviewDebug(entries []model.HybridScheduleEntry) string {
+	existing := 0
+	suggested := 0
+	taskType := 0
+	courseType := 0
+	for _, e := range entries {
+		if e.Status == "suggested" {
+			suggested++
+		} else {
+			existing++
+		}
+		if e.Type == "task" {
+			taskType++
+		}
+		if e.Type == "course" {
+			courseType++
+		}
+	}
+	return fmt.Sprintf(
+		"entries=%d existing=%d suggested=%d task_type=%d course_type=%d",
+		len(entries),
+		existing,
+		suggested,
+		taskType,
+		courseType,
+	)
 }
 
 // --- 依赖注入字段 ---

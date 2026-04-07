@@ -14,8 +14,10 @@ import (
 // 3. 不保存 Deps（依赖注入，每次由 Service 层重建）；
 // 4. 不保存 ToolSchemas（每次请求由 Service 层重新注入）。
 type AgentStateSnapshot struct {
-	RuntimeState        *AgentRuntimeState   `json:"runtime_state"`
-	ConversationContext *ConversationContext `json:"conversation_context"`
+	RuntimeState          *AgentRuntimeState           `json:"runtime_state"`
+	ConversationContext   *ConversationContext         `json:"conversation_context"`
+	ScheduleState         *newagenttools.ScheduleState `json:"schedule_state,omitempty"`
+	OriginalScheduleState *newagenttools.ScheduleState `json:"original_schedule_state,omitempty"`
 }
 
 // AgentStateStore 定义 agent 状态持久化的最小接口。

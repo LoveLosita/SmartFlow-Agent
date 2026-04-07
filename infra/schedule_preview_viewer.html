@@ -19,9 +19,7 @@
       --embedded: #1f8f4f;
     }
 
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
 
     body {
       margin: 0;
@@ -47,10 +45,7 @@
       overflow: hidden;
     }
 
-    .left {
-      display: flex;
-      flex-direction: column;
-    }
+    .left { display: flex; flex-direction: column; }
 
     .panel-header {
       padding: 12px 14px;
@@ -58,18 +53,8 @@
       background: linear-gradient(180deg, #f8faff 0%, #f5f8ff 100%);
     }
 
-    .panel-header h1 {
-      margin: 0;
-      font-size: 16px;
-      font-weight: 700;
-    }
-
-    .panel-header p {
-      margin: 6px 0 0;
-      color: var(--sub);
-      font-size: 12px;
-      line-height: 1.45;
-    }
+    .panel-header h1 { margin: 0; font-size: 16px; font-weight: 700; }
+    .panel-header p { margin: 6px 0 0; color: var(--sub); font-size: 12px; line-height: 1.45; }
 
     .input-wrap {
       display: flex;
@@ -94,11 +79,7 @@
       background: #fbfcff;
     }
 
-    .btn-row {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
+    .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
 
     button {
       border: 1px solid var(--line);
@@ -116,17 +97,9 @@
       border-color: var(--accent);
     }
 
-    .error {
-      color: #c62828;
-      font-size: 12px;
-      min-height: 16px;
-    }
+    .error { color: #c62828; font-size: 12px; min-height: 16px; }
 
-    .right {
-      display: flex;
-      flex-direction: column;
-      min-height: 0;
-    }
+    .right { display: flex; flex-direction: column; min-height: 0; }
 
     .meta {
       padding: 12px 14px;
@@ -144,10 +117,49 @@
       font-size: 12px;
     }
 
-    .meta label {
-      font-weight: 600;
-      color: var(--text);
+    .meta label { font-weight: 600; color: var(--text); }
+
+    /* ── Tab bar ── */
+    .tab-bar {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--line);
+      background: #f9faff;
     }
+
+    .tab {
+      padding: 8px 18px;
+      font-size: 13px;
+      font-weight: 500;
+      border: none;
+      border-bottom: 2px solid transparent;
+      border-radius: 0;
+      background: transparent;
+      color: var(--sub);
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+    }
+
+    .tab:hover { color: var(--accent); }
+
+    .tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+      background: transparent;
+    }
+
+    .tab-count {
+      display: inline-block;
+      background: #e8eeff;
+      color: var(--accent);
+      border-radius: 10px;
+      padding: 1px 6px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-left: 4px;
+    }
+
+    .tab.active .tab-count { background: #d0dcff; }
 
     select {
       border: 1px solid var(--line);
@@ -168,12 +180,26 @@
       white-space: pre-wrap;
     }
 
-    .grid-wrap {
-      overflow: auto;
-      padding: 12px;
-      flex: 1;
-      min-height: 0;
+    .legend {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      font-size: 12px;
+      color: var(--sub);
     }
+
+    .legend.hidden { display: none; }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 4px;
+    }
+
+    .grid-wrap { overflow: auto; padding: 12px; flex: 1; min-height: 0; }
 
     .week-grid {
       min-width: 980px;
@@ -214,9 +240,7 @@
       color: #56607b;
     }
 
-    .slot {
-      background: #fcfdff;
-    }
+    .slot { background: #fcfdff; }
 
     .event {
       margin: 2px;
@@ -246,21 +270,10 @@
       border-color: #177a42;
     }
 
-    .event .title {
-      font-weight: 700;
-      margin-bottom: 3px;
-      word-break: break-all;
-    }
+    .event .title { font-weight: 700; margin-bottom: 3px; word-break: break-all; }
+    .event .meta-text { opacity: 0.95; }
 
-    .event .meta-text {
-      opacity: 0.95;
-    }
-
-    .embedded-list {
-      margin-top: 4px;
-      display: grid;
-      gap: 3px;
-    }
+    .embedded-list { margin-top: 4px; display: grid; gap: 3px; }
 
     .embedded-item {
       background: rgba(255, 255, 255, 0.17);
@@ -270,21 +283,26 @@
       font-size: 10px;
     }
 
-    .legend {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-      flex-wrap: wrap;
-      font-size: 12px;
-      color: var(--sub);
+    /* ── Hybrid-mode badges ── */
+    .badge-row { margin-top: 3px; display: flex; gap: 4px; flex-wrap: wrap; }
+
+    .ctx-tag {
+      display: inline-block;
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 10px;
+      background: rgba(255, 255, 255, 0.2);
+      border: 1px solid rgba(255, 255, 255, 0.38);
     }
 
-    .dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
+    .embed-badge {
       display: inline-block;
-      margin-right: 4px;
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 10px;
+      background: rgba(255, 255, 255, 0.15);
+      border: 1px solid rgba(255, 230, 100, 0.5);
+      color: #ffe97a;
     }
 
     .unplaced {
@@ -297,29 +315,21 @@
       background: #fcfdff;
     }
 
-    .empty {
-      padding: 18px;
-      text-align: center;
-      color: #7a849a;
-      font-size: 13px;
-    }
+    .empty { padding: 18px; text-align: center; color: #7a849a; font-size: 13px; }
 
     @media (max-width: 960px) {
-      .page {
-        grid-template-columns: 1fr;
-      }
-      textarea {
-        min-height: 280px;
-      }
+      .page { grid-template-columns: 1fr; }
+      textarea { min-height: 280px; }
     }
   </style>
 </head>
 <body>
   <div class="page">
+    <!-- ── Left: JSON input ── -->
     <div class="panel left">
       <div class="panel-header">
         <h1>排程预览 JSON 输入</h1>
-        <p>粘贴 <code>/api/v1/agent/schedule-preview</code> 响应，点击“解析并渲染”。</p>
+        <p>粘贴 <code>/api/v1/agent/schedule-preview</code> 响应，点击"解析并渲染"。<br>同时支持 <code>candidate_plans</code>（时间表视图）与 <code>hybrid_entries</code>（节次混合视图）。</p>
       </div>
       <div class="input-wrap">
         <textarea id="jsonInput" spellcheck="false"></textarea>
@@ -332,6 +342,7 @@
       </div>
     </div>
 
+    <!-- ── Right: preview ── -->
     <div class="panel right">
       <div class="meta">
         <div class="meta-row">
@@ -341,14 +352,36 @@
           <span id="traceMeta">trace_id: -</span>
           <span id="timeMeta">generated_at: -</span>
         </div>
+
+        <!-- Tab bar -->
+        <div class="tab-bar">
+          <button class="tab active" id="tabCandidate">
+            候选方案 <span class="tab-count" id="cntCandidate">0周</span>
+          </button>
+          <button class="tab" id="tabHybrid">
+            混合视图 <span class="tab-count" id="cntHybrid">0条</span>
+          </button>
+        </div>
+
         <div class="summary" id="summaryText">这里会显示排程摘要。</div>
-        <div class="legend">
-          <span><i class="dot" style="background:#2f63de"></i>existing（课程/已存在安排）</span>
+
+        <!-- Legend: candidate mode -->
+        <div class="legend" id="legendCandidate">
+          <span><i class="dot" style="background:#2f63de"></i>existing（课程/已有安排）</span>
           <span><i class="dot" style="background:#f27d07"></i>suggested（建议任务）</span>
           <span><i class="dot" style="background:#1d924f"></i>task（普通任务）</span>
           <span><i class="dot" style="background:#1f8f4f"></i>嵌入任务（显示在课程块内）</span>
         </div>
+
+        <!-- Legend: hybrid mode -->
+        <div class="legend hidden" id="legendHybrid">
+          <span><i class="dot" style="background:#2f63de"></i>existing（已有课程）</span>
+          <span><i class="dot" style="background:#f27d07"></i>suggested（建议任务）</span>
+          <span style="border:1px solid #ffe97a;border-radius:4px;padding:1px 6px;font-size:11px;color:#b08000;">可嵌入</span> 课程可接收嵌入任务
+          <span style="background:#e8eeff;border-radius:4px;padding:1px 6px;font-size:11px;color:#446;">High-Logic / Memory / Review / General</span> 认知类型标签
+        </div>
       </div>
+
       <div class="grid-wrap" id="gridWrap">
         <div class="empty">先粘贴 JSON 再渲染课表。</div>
       </div>
@@ -358,15 +391,15 @@
   <script>
     const DAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
     const SECTION_TIME = {
-      1: ["08:00", "08:45"],
-      2: ["08:55", "09:40"],
-      3: ["10:15", "11:00"],
-      4: ["11:10", "11:55"],
-      5: ["14:00", "14:45"],
-      6: ["14:55", "15:40"],
-      7: ["16:15", "17:00"],
-      8: ["17:10", "17:55"],
-      9: ["19:00", "19:45"],
+      1:  ["08:00", "08:45"],
+      2:  ["08:55", "09:40"],
+      3:  ["10:15", "11:00"],
+      4:  ["11:10", "11:55"],
+      5:  ["14:00", "14:45"],
+      6:  ["14:55", "15:40"],
+      7:  ["16:15", "17:00"],
+      8:  ["17:10", "17:55"],
+      9:  ["19:00", "19:45"],
       10: ["19:55", "20:40"],
       11: ["20:50", "21:35"],
       12: ["21:45", "22:30"]
@@ -375,40 +408,46 @@
       Object.entries(SECTION_TIME).map(([s, [start]]) => [start, Number(s)])
     );
 
+    // ── state ──
     const state = {
       raw: null,
-      weekMap: new Map()
+      mode: "candidate",       // "candidate" | "hybrid"
+      weekMap: new Map(),      // candidate_plans → week → events[]
+      hybridWeekMap: new Map() // hybrid_entries  → week → entries[]
     };
 
-    const jsonInput = document.getElementById("jsonInput");
-    const renderBtn = document.getElementById("renderBtn");
-    const exampleBtn = document.getElementById("exampleBtn");
-    const clearBtn = document.getElementById("clearBtn");
-    const errorText = document.getElementById("errorText");
-    const weekSelect = document.getElementById("weekSelect");
-    const summaryText = document.getElementById("summaryText");
+    // ── DOM refs ──
+    const jsonInput       = document.getElementById("jsonInput");
+    const renderBtn       = document.getElementById("renderBtn");
+    const exampleBtn      = document.getElementById("exampleBtn");
+    const clearBtn        = document.getElementById("clearBtn");
+    const errorText       = document.getElementById("errorText");
+    const weekSelect      = document.getElementById("weekSelect");
+    const summaryText     = document.getElementById("summaryText");
     const conversationMeta = document.getElementById("conversationMeta");
-    const traceMeta = document.getElementById("traceMeta");
-    const timeMeta = document.getElementById("timeMeta");
-    const gridWrap = document.getElementById("gridWrap");
+    const traceMeta       = document.getElementById("traceMeta");
+    const timeMeta        = document.getElementById("timeMeta");
+    const gridWrap        = document.getElementById("gridWrap");
+    const tabCandidate    = document.getElementById("tabCandidate");
+    const tabHybrid       = document.getElementById("tabHybrid");
+    const cntCandidate    = document.getElementById("cntCandidate");
+    const cntHybrid       = document.getElementById("cntHybrid");
+    const legendCandidate = document.getElementById("legendCandidate");
+    const legendHybrid    = document.getElementById("legendHybrid");
 
-    function setError(message) {
-      errorText.textContent = message || "";
-    }
+    // ── helpers ──
+    function setError(msg) { errorText.textContent = msg || ""; }
+    function isObject(v)   { return v && typeof v === "object" && !Array.isArray(v); }
 
-    function isObject(v) {
-      return v && typeof v === "object" && !Array.isArray(v);
-    }
-
+    // ── candidate_plans normalizer ──
     function normalizeEvent(raw, index) {
       const e = isObject(raw) ? raw : {};
       const day = Number(e.day_of_week);
       const span = Math.max(1, Number(e.span) || 1);
       const guessedFrom = START_TIME_TO_SECTION[String(e.start_time || "").trim()];
       const sectionFrom = Number.isFinite(guessedFrom) ? guessedFrom : null;
-      const sectionTo = sectionFrom !== null ? sectionFrom + span - 1 : null;
-      const embedded = isObject(e.embedded_task_info) ? e.embedded_task_info : null;
-
+      const sectionTo   = sectionFrom !== null ? sectionFrom + span - 1 : null;
+      const embedded    = isObject(e.embedded_task_info) ? e.embedded_task_info : null;
       return {
         __index: index,
         id: e.id,
@@ -416,42 +455,74 @@
         dayOfWeek: Number.isFinite(day) ? day : null,
         name: String(e.name || "未命名"),
         startTime: String(e.start_time || ""),
-        endTime: String(e.end_time || ""),
-        type: String(e.type || ""),
+        endTime:   String(e.end_time   || ""),
+        type:   String(e.type   || ""),
         status: String(e.status || ""),
         span,
         sectionFrom,
         sectionTo,
         embeddedTaskInfo: embedded,
-        embeddedTasks: []
+        embeddedTasks: [],
+        // hybrid fields not used in this path
+        contextTag: "",
+        canBeEmbedded: false
       };
     }
 
+    // ── hybrid_entries normalizer ──
+    function normalizeHybridEntry(raw, index) {
+      const e = isObject(raw) ? raw : {};
+      const day = Number(e.day_of_week);
+      const sf  = Number(e.section_from);
+      const st  = Number(e.section_to);
+      const validSf = Number.isFinite(sf) && sf >= 1 && sf <= 12;
+      const validSt = Number.isFinite(st) && st >= 1 && st <= 12;
+      return {
+        __index: index,
+        id: e.event_id || e.task_item_id || null,
+        order: 0,
+        dayOfWeek: Number.isFinite(day) && day >= 1 && day <= 7 ? day : null,
+        name: String(e.name || "未命名"),
+        startTime: (validSf && SECTION_TIME[sf]) ? SECTION_TIME[sf][0] : "",
+        endTime:   (validSt && SECTION_TIME[st]) ? SECTION_TIME[st][1] : "",
+        type:   String(e.type   || ""),
+        status: String(e.status || ""),
+        span: (validSf && validSt) ? st - sf + 1 : 1,
+        sectionFrom: validSf ? sf : null,
+        sectionTo:   validSt ? st : null,
+        embeddedTaskInfo: null,
+        embeddedTasks: [],
+        // hybrid-specific
+        contextTag:       String(e.context_tag || ""),
+        canBeEmbedded:    Boolean(e.can_be_embedded),
+        blockForSuggested: Boolean(e.block_for_suggested),
+        taskItemId: e.task_item_id || null,
+        eventId:    e.event_id    || null
+      };
+    }
+
+    // ── parse API response ──
     function parseInput(text) {
       const root = JSON.parse(text);
-      if (!isObject(root)) {
-        throw new Error("根对象必须是 JSON Object。");
-      }
-
-      // 1. 兼容两种结构：
-      // 1.1 新结构：{ status, info, data: { ...真正字段... } }
-      // 1.2 旧结构：{ conversation_id, summary, candidate_plans, ... }
-      // 2. 若 data 存在则优先使用 data，避免误读外层字段。
+      if (!isObject(root)) throw new Error("根对象必须是 JSON Object。");
       const payload = isObject(root.data) ? root.data : root;
 
-      const candidatePlans = Array.isArray(payload.candidate_plans) ? payload.candidate_plans : [];
-      if (!Array.isArray(payload.candidate_plans)) {
-        throw new Error("缺少 data.candidate_plans 数组。");
+      const hasCandidates = Array.isArray(payload.candidate_plans);
+      const hasHybrid     = Array.isArray(payload.hybrid_entries);
+      if (!hasCandidates && !hasHybrid) {
+        throw new Error("缺少 candidate_plans 或 hybrid_entries 数组。");
       }
       return {
         conversationId: String(payload.conversation_id || ""),
-        traceId: String(payload.trace_id || ""),
-        generatedAt: String(payload.generated_at || ""),
-        summary: String(payload.summary || ""),
-        candidatePlans
+        traceId:        String(payload.trace_id       || ""),
+        generatedAt:    String(payload.generated_at   || ""),
+        summary:        String(payload.summary        || ""),
+        candidatePlans: hasCandidates ? payload.candidate_plans : [],
+        hybridEntries:  hasHybrid     ? payload.hybrid_entries  : []
       };
     }
 
+    // ── build week maps ──
     function buildWeekMap(candidatePlans) {
       const map = new Map();
       for (const plan of candidatePlans) {
@@ -460,57 +531,53 @@
         const events = Array.isArray(plan?.events) ? plan.events : [];
         map.set(
           weekNo,
-          events.map((e, i) => normalizeEvent(e, i)).filter((e) => Number.isFinite(e.dayOfWeek) && e.dayOfWeek >= 1 && e.dayOfWeek <= 7)
+          events
+            .map((e, i) => normalizeEvent(e, i))
+            .filter((e) => Number.isFinite(e.dayOfWeek) && e.dayOfWeek >= 1 && e.dayOfWeek <= 7)
         );
       }
       return map;
     }
 
+    function buildHybridWeekMap(hybridEntries) {
+      const map = new Map();
+      for (const raw of hybridEntries) {
+        const weekNo = Number(raw?.week);
+        if (!Number.isFinite(weekNo)) continue;
+        const entry = normalizeHybridEntry(raw, 0);
+        if (!Number.isFinite(entry.dayOfWeek)) continue;
+        if (!map.has(weekNo)) map.set(weekNo, []);
+        map.get(weekNo).push(entry);
+      }
+      return map;
+    }
+
+    // ── merge overlapping events (candidate mode) ──
     function mergeEmbeddedEvents(events) {
-      // 1. 先按“同一天 + 同时间段”聚合，识别课程与任务重叠场景。
-      // 2. 如果同槽位同时出现 existing 课程 + 任务，则把任务并入课程卡片中显示。
-      // 3. 兜底：不满足合并条件的事件保持原样，避免误吞数据。
       const slotMap = new Map();
       for (const e of events) {
         const key = `${e.dayOfWeek}_${e.sectionFrom}_${e.sectionTo}`;
         if (!slotMap.has(key)) slotMap.set(key, []);
         slotMap.get(key).push(e);
       }
-
       const merged = [];
       for (const list of slotMap.values()) {
         const course = list.find((e) => e.type === "course" || e.status === "existing");
-        const tasks = list.filter((e) => !course || e !== course);
+        const tasks  = list.filter((e) => !course || e !== course);
         if (course && tasks.length > 0) {
           const taskLines = [];
           if (course.embeddedTaskInfo?.name) {
-            taskLines.push({
-              id: course.embeddedTaskInfo.id,
-              name: course.embeddedTaskInfo.name,
-              type: course.embeddedTaskInfo.type || "task",
-              from: "embedded_task_info"
-            });
+            taskLines.push({ id: course.embeddedTaskInfo.id, name: course.embeddedTaskInfo.name, type: course.embeddedTaskInfo.type || "task", from: "embedded_task_info" });
           }
           for (const t of tasks) {
-            taskLines.push({
-              id: t.id,
-              name: t.name,
-              type: t.type || "task",
-              status: t.status || "",
-              from: "overlap_event"
-            });
+            taskLines.push({ id: t.id, name: t.name, type: t.type || "task", status: t.status || "", from: "overlap_event" });
           }
           course.embeddedTasks = taskLines;
           merged.push(course);
           continue;
         }
         if (course && course.embeddedTaskInfo?.name) {
-          course.embeddedTasks = [{
-            id: course.embeddedTaskInfo.id,
-            name: course.embeddedTaskInfo.name,
-            type: course.embeddedTaskInfo.type || "task",
-            from: "embedded_task_info"
-          }];
+          course.embeddedTasks = [{ id: course.embeddedTaskInfo.id, name: course.embeddedTaskInfo.name, type: course.embeddedTaskInfo.type || "task", from: "embedded_task_info" }];
           merged.push(course);
           continue;
         }
@@ -519,35 +586,55 @@
       return merged;
     }
 
+    // ── merge overlapping entries (hybrid mode) ──
+    // existing 课程 canBeEmbedded=true 且同槽有 suggested 任务 → 嵌入显示
+    function mergeHybridEntries(entries) {
+      const slotMap = new Map();
+      for (const e of entries) {
+        const key = `${e.dayOfWeek}_${e.sectionFrom}_${e.sectionTo}`;
+        if (!slotMap.has(key)) slotMap.set(key, []);
+        slotMap.get(key).push(e);
+      }
+      const merged = [];
+      for (const list of slotMap.values()) {
+        const course = list.find((e) => e.type === "course" && e.status === "existing" && e.canBeEmbedded);
+        const others = list.filter((e) => e !== course);
+        if (course && others.length > 0) {
+          course.embeddedTasks = others.map((t) => ({
+            id:         t.taskItemId,
+            name:       t.name,
+            type:       t.type || "task",
+            status:     t.status || "",
+            contextTag: t.contextTag
+          }));
+          merged.push(course);
+        } else {
+          merged.push(...list);
+        }
+      }
+      return merged;
+    }
+
+    // ── lane assignment (shared) ──
     function assignLanesByDay(events) {
-      // 1. 按“每天”独立分配 lane，避免跨天互相影响宽度。
-      // 2. 用贪心法给重叠区间分轨：能复用轨道就复用，否则开新轨道。
-      // 3. 最后给每个事件附上 dayLaneCount，渲染时按轨道等分宽度。
       const byDay = new Map();
       for (const e of events) {
         if (!byDay.has(e.dayOfWeek)) byDay.set(e.dayOfWeek, []);
         byDay.get(e.dayOfWeek).push(e);
       }
-
       for (const [, dayEvents] of byDay) {
         dayEvents.sort((a, b) => {
           if (a.sectionFrom !== b.sectionFrom) return a.sectionFrom - b.sectionFrom;
-          if (a.sectionTo !== b.sectionTo) return a.sectionTo - b.sectionTo;
+          if (a.sectionTo   !== b.sectionTo)   return a.sectionTo   - b.sectionTo;
           return a.order - b.order;
         });
         const laneEnds = [];
         for (const e of dayEvents) {
           let lane = -1;
           for (let i = 0; i < laneEnds.length; i += 1) {
-            if (e.sectionFrom > laneEnds[i]) {
-              lane = i;
-              break;
-            }
+            if (e.sectionFrom > laneEnds[i]) { lane = i; break; }
           }
-          if (lane === -1) {
-            lane = laneEnds.length;
-            laneEnds.push(0);
-          }
+          if (lane === -1) { lane = laneEnds.length; laneEnds.push(0); }
           laneEnds[lane] = e.sectionTo;
           e.__lane = lane;
         }
@@ -556,15 +643,16 @@
       }
     }
 
-    function buildWeekGrid(events) {
+    // ── build grid DOM ──
+    function buildWeekGrid(events, mode) {
       const weekGrid = document.createElement("div");
       weekGrid.className = "week-grid";
 
+      // header row
       const topLeft = document.createElement("div");
       topLeft.className = "cell head";
       topLeft.textContent = "节次";
       weekGrid.appendChild(topLeft);
-
       for (let i = 0; i < 7; i += 1) {
         const head = document.createElement("div");
         head.className = "cell head";
@@ -574,70 +662,96 @@
         weekGrid.appendChild(head);
       }
 
+      // section rows + blank slots
       for (let section = 1; section <= 12; section += 1) {
         const [start, end] = SECTION_TIME[section];
         const label = document.createElement("div");
         label.className = "cell section";
         label.style.gridColumn = "1";
         label.style.gridRow = String(section + 1);
-        label.innerHTML = `<div>${section}</div><div>${start}-${end}</div>`;
+        label.innerHTML = `<div>${section}</div><div>${start}–${end}</div>`;
         weekGrid.appendChild(label);
-
         for (let day = 1; day <= 7; day += 1) {
           const slot = document.createElement("div");
           slot.className = "cell slot";
           slot.style.gridColumn = String(day + 1);
-          slot.style.gridRow = String(section + 1);
+          slot.style.gridRow    = String(section + 1);
           weekGrid.appendChild(slot);
         }
       }
 
+      // event cards
       const unplaced = [];
       for (const e of events) {
         if (!Number.isFinite(e.sectionFrom) || !Number.isFinite(e.sectionTo)) {
           unplaced.push(e);
           continue;
         }
-        const rowStart = e.sectionFrom + 1;
-        const rowEnd = e.sectionTo + 2;
-        const col = e.dayOfWeek + 1;
+        const rowStart  = e.sectionFrom + 1;
+        const rowEnd    = e.sectionTo   + 2;
+        const col       = e.dayOfWeek   + 1;
         const laneCount = e.__laneCount || 1;
-        const lane = e.__lane || 0;
-        const gap = 4;
-        const width = `calc((100% - ${(laneCount - 1) * gap}px) / ${laneCount})`;
-        const left = `calc(${lane} * (${width} + ${gap}px))`;
+        const lane      = e.__lane      || 0;
+        const gap       = 4;
+        const width  = `calc((100% - ${(laneCount - 1) * gap}px) / ${laneCount})`;
+        const left   = `calc(${lane} * (${width} + ${gap}px))`;
 
         const card = document.createElement("div");
         card.className = "event";
-        if (e.status === "existing" || e.type === "course") {
-          card.classList.add("existing");
-        } else if (e.status === "suggested") {
-          card.classList.add("suggested");
-        } else {
-          card.classList.add("task");
-        }
+        if      (e.status === "existing" || e.type === "course") card.classList.add("existing");
+        else if (e.status === "suggested")                        card.classList.add("suggested");
+        else                                                      card.classList.add("task");
+
         card.style.gridColumn = String(col);
-        card.style.gridRow = `${rowStart}/${rowEnd}`;
-        card.style.width = width;
+        card.style.gridRow    = `${rowStart}/${rowEnd}`;
+        card.style.width      = width;
         card.style.marginLeft = left;
 
+        // title
         const header = document.createElement("div");
         header.className = "title";
         header.textContent = e.name;
         card.appendChild(header);
 
+        // detail line
         const detail = document.createElement("div");
         detail.className = "meta-text";
-        detail.textContent = `${e.startTime || "-"} - ${e.endTime || "-"} ｜ ${e.type || "-"} ｜ ${e.status || "-"}`;
+        if (mode === "hybrid") {
+          detail.textContent = `第 ${e.sectionFrom}–${e.sectionTo} 节 ｜ ${e.type || "-"} ｜ ${e.status || "-"}`;
+        } else {
+          detail.textContent = `${e.startTime || "-"} – ${e.endTime || "-"} ｜ ${e.type || "-"} ｜ ${e.status || "-"}`;
+        }
         card.appendChild(detail);
 
+        // hybrid badges (context_tag / can_be_embedded)
+        if (mode === "hybrid" && (e.contextTag || e.canBeEmbedded)) {
+          const badgeRow = document.createElement("div");
+          badgeRow.className = "badge-row";
+          if (e.contextTag) {
+            const ct = document.createElement("span");
+            ct.className = "ctx-tag";
+            ct.textContent = e.contextTag;
+            badgeRow.appendChild(ct);
+          }
+          if (e.canBeEmbedded) {
+            const eb = document.createElement("span");
+            eb.className = "embed-badge";
+            eb.textContent = "可嵌入";
+            badgeRow.appendChild(eb);
+          }
+          card.appendChild(badgeRow);
+        }
+
+        // embedded tasks
         if (Array.isArray(e.embeddedTasks) && e.embeddedTasks.length > 0) {
           const list = document.createElement("div");
           list.className = "embedded-list";
           for (const task of e.embeddedTasks) {
             const item = document.createElement("div");
             item.className = "embedded-item";
-            item.textContent = `嵌入：${task.name}${task.status ? `（${task.status}）` : ""}`;
+            const ctPart   = task.contextTag ? ` [${task.contextTag}]` : "";
+            const statPart = task.status     ? `（${task.status}）`    : "";
+            item.textContent = `嵌入：${task.name}${ctPart}${statPart}`;
             list.appendChild(item);
           }
           card.appendChild(list);
@@ -652,15 +766,26 @@
       if (unplaced.length > 0) {
         const box = document.createElement("div");
         box.className = "unplaced";
-        box.innerHTML = `<strong>未定位到节次的事件（无法映射 start_time）</strong><br>${unplaced.map((e) => `- D${e.dayOfWeek} ${e.name} (${e.startTime || "?"} - ${e.endTime || "?"})`).join("<br>")}`;
+        const rows = unplaced.map((e) => {
+          const coord = mode === "hybrid"
+            ? `节次=${e.sectionFrom ?? "?"}–${e.sectionTo ?? "?"}`
+            : `${e.startTime || "?"}–${e.endTime || "?"}`;
+          return `- D${e.dayOfWeek} ${e.name} (${coord})`;
+        });
+        box.innerHTML = `<strong>未定位到节次的条目（坐标无效）</strong><br>${rows.join("<br>")}`;
         container.appendChild(box);
       }
       return container;
     }
 
+    // ── render week ──
     function renderWeek(weekNo) {
-      const weekEvents = state.weekMap.get(weekNo) || [];
-      const merged = mergeEmbeddedEvents(weekEvents.map((e) => ({ ...e })));
+      const map    = state.mode === "hybrid" ? state.hybridWeekMap : state.weekMap;
+      const raw    = (map.get(weekNo) || []).map((e) => ({ ...e }));
+      const merged = state.mode === "hybrid"
+        ? mergeHybridEntries(raw)
+        : mergeEmbeddedEvents(raw);
+
       assignLanesByDay(merged.filter((e) => Number.isFinite(e.sectionFrom) && Number.isFinite(e.sectionTo)));
 
       gridWrap.innerHTML = "";
@@ -668,18 +793,12 @@
         gridWrap.innerHTML = `<div class="empty">第 ${weekNo} 周没有可显示的事件。</div>`;
         return;
       }
-      gridWrap.appendChild(buildWeekGrid(merged));
+      gridWrap.appendChild(buildWeekGrid(merged, state.mode));
     }
 
-    function fillMeta(parsed) {
-      conversationMeta.textContent = `conversation_id: ${parsed.conversationId || "-"}`;
-      traceMeta.textContent = `trace_id: ${parsed.traceId || "-"}`;
-      timeMeta.textContent = `generated_at: ${parsed.generatedAt || "-"}`;
-      summaryText.textContent = parsed.summary || "（无摘要）";
-    }
-
-    function fillWeekSelector() {
-      const weeks = Array.from(state.weekMap.keys()).sort((a, b) => a - b);
+    // ── populate week selector ──
+    function fillWeekSelector(weeks) {
+      const currentWeek = Number(weekSelect.value);
       weekSelect.innerHTML = "";
       for (const week of weeks) {
         const op = document.createElement("option");
@@ -687,28 +806,72 @@
         op.textContent = `第 ${week} 周`;
         weekSelect.appendChild(op);
       }
-      if (weeks.length > 0) renderWeek(weeks[0]);
+      // keep current week if available in new map
+      if (weeks.includes(currentWeek)) weekSelect.value = String(currentWeek);
+      if (weeks.length > 0) renderWeek(Number(weekSelect.value));
     }
 
+    // ── switch tab mode ──
+    function switchMode(newMode) {
+      state.mode = newMode;
+      tabCandidate.classList.toggle("active", newMode === "candidate");
+      tabHybrid.classList.toggle("active",    newMode === "hybrid");
+      legendCandidate.classList.toggle("hidden", newMode !== "candidate");
+      legendHybrid.classList.toggle("hidden",    newMode !== "hybrid");
+
+      const map = newMode === "hybrid" ? state.hybridWeekMap : state.weekMap;
+      if (map.size === 0) {
+        weekSelect.innerHTML = "";
+        const label = newMode === "hybrid" ? "hybrid_entries" : "candidate_plans";
+        gridWrap.innerHTML = `<div class="empty">${label} 为空，当前没有可渲染的周课表。</div>`;
+        return;
+      }
+      const weeks = Array.from(map.keys()).sort((a, b) => a - b);
+      fillWeekSelector(weeks);
+    }
+
+    // ── fill meta header ──
+    function fillMeta(parsed) {
+      conversationMeta.textContent = `conversation_id: ${parsed.conversationId || "-"}`;
+      traceMeta.textContent        = `trace_id: ${parsed.traceId || "-"}`;
+      timeMeta.textContent         = `generated_at: ${parsed.generatedAt || "-"}`;
+      summaryText.textContent      = parsed.summary || "（无摘要）";
+    }
+
+    // ── update tab count badges ──
+    function updateTabCounts(weekMap, hybridWeekMap, hybridTotal) {
+      cntCandidate.textContent = `${weekMap.size} 周`;
+      cntHybrid.textContent    = `${hybridWeekMap.size} 周 · ${hybridTotal} 条`;
+    }
+
+    // ── main render entry ──
     function renderFromInput() {
       setError("");
       try {
-        const parsed = parseInput(jsonInput.value.trim());
-        const map = buildWeekMap(parsed.candidatePlans);
-        state.raw = parsed;
-        state.weekMap = map;
+        const parsed        = parseInput(jsonInput.value.trim());
+        const weekMap       = buildWeekMap(parsed.candidatePlans);
+        const hybridWeekMap = buildHybridWeekMap(parsed.hybridEntries);
+
+        state.raw           = parsed;
+        state.weekMap       = weekMap;
+        state.hybridWeekMap = hybridWeekMap;
+
         fillMeta(parsed);
-        if (map.size === 0) {
-          weekSelect.innerHTML = "";
-          gridWrap.innerHTML = `<div class="empty">candidate_plans 为空，当前没有可渲染的周课表。</div>`;
-        } else {
-          fillWeekSelector();
+        updateTabCounts(weekMap, hybridWeekMap, parsed.hybridEntries.length);
+
+        // auto-select tab: prefer current mode if it has data, else pick whichever has data
+        let targetMode = state.mode;
+        const currentHasData = targetMode === "hybrid" ? hybridWeekMap.size > 0 : weekMap.size > 0;
+        if (!currentHasData) {
+          targetMode = weekMap.size > 0 ? "candidate" : (hybridWeekMap.size > 0 ? "hybrid" : state.mode);
         }
+        switchMode(targetMode);
       } catch (err) {
         setError(`解析失败：${err.message || err}`);
       }
     }
 
+    // ── example data ──
     function setExample() {
       jsonInput.value = JSON.stringify({
         status: "10000",
@@ -717,7 +880,8 @@
           conversation_id: "demo-conv-001",
           trace_id: "demo-trace-001",
           summary: "本周建议将高强度任务集中在上午，课程空档用于轻量复习。",
-          generated_at: "2026-03-22T15:12:00+08:00",
+          generated_at: "2026-04-07T15:12:00+08:00",
+
           candidate_plans: [
             {
               week: 13,
@@ -727,41 +891,51 @@
                 { day_of_week: 1, name: "数据结构复习", start_time: "10:15", end_time: "11:55", type: "task", span: 2, status: "suggested" },
                 { day_of_week: 2, name: "英语阅读", start_time: "19:00", end_time: "20:40", type: "task", span: 2, status: "suggested" },
                 {
-                  day_of_week: 3,
-                  name: "离散数学",
-                  start_time: "14:00",
-                  end_time: "15:40",
-                  type: "course",
-                  span: 2,
-                  status: "existing",
+                  day_of_week: 3, name: "离散数学", start_time: "14:00", end_time: "15:40",
+                  type: "course", span: 2, status: "existing",
                   embedded_task_info: { id: 99, name: "离散小测回顾", type: "task" }
                 }
               ]
             }
+          ],
+
+          hybrid_entries: [
+            { week: 13, day_of_week: 1, section_from: 1, section_to: 2, name: "高等数学",       type: "course", status: "existing",  event_id: 101, can_be_embedded: false, block_for_suggested: true  },
+            { week: 13, day_of_week: 1, section_from: 1, section_to: 2, name: "数电错题整理",   type: "task",   status: "suggested", task_item_id: 201, context_tag: "Review",     block_for_suggested: true  },
+            { week: 13, day_of_week: 1, section_from: 3, section_to: 4, name: "数据结构复习",   type: "task",   status: "suggested", task_item_id: 202, context_tag: "High-Logic", block_for_suggested: true  },
+            { week: 13, day_of_week: 2, section_from: 9, section_to: 10, name: "英语阅读",      type: "task",   status: "suggested", task_item_id: 203, context_tag: "Memory",     block_for_suggested: true  },
+            { week: 13, day_of_week: 3, section_from: 5, section_to: 6,  name: "离散数学",      type: "course", status: "existing",  event_id: 102, can_be_embedded: true,  block_for_suggested: false },
+            { week: 13, day_of_week: 3, section_from: 5, section_to: 6,  name: "离散小测回顾",  type: "task",   status: "suggested", task_item_id: 204, context_tag: "Review",     block_for_suggested: false },
+            { week: 13, day_of_week: 4, section_from: 7, section_to: 8,  name: "操作系统",      type: "course", status: "existing",  event_id: 103, can_be_embedded: false, block_for_suggested: true  },
+            { week: 13, day_of_week: 5, section_from: 3, section_to: 4,  name: "概率论刷题",    type: "task",   status: "suggested", task_item_id: 205, context_tag: "High-Logic", block_for_suggested: true  }
           ]
         }
       }, null, 2);
     }
 
+    // ── event listeners ──
     renderBtn.addEventListener("click", renderFromInput);
     weekSelect.addEventListener("change", () => renderWeek(Number(weekSelect.value)));
-    exampleBtn.addEventListener("click", () => {
-      setExample();
-      renderFromInput();
-    });
+    tabCandidate.addEventListener("click", () => { if (state.mode !== "candidate") switchMode("candidate"); });
+    tabHybrid.addEventListener("click",    () => { if (state.mode !== "hybrid")    switchMode("hybrid");    });
+    exampleBtn.addEventListener("click", () => { setExample(); renderFromInput(); });
     clearBtn.addEventListener("click", () => {
       jsonInput.value = "";
       setError("");
-      state.raw = null;
-      state.weekMap = new Map();
-      summaryText.textContent = "这里会显示排程摘要。";
+      state.raw           = null;
+      state.weekMap       = new Map();
+      state.hybridWeekMap = new Map();
+      summaryText.textContent      = "这里会显示排程摘要。";
       conversationMeta.textContent = "conversation_id: -";
-      traceMeta.textContent = "trace_id: -";
-      timeMeta.textContent = "generated_at: -";
+      traceMeta.textContent        = "trace_id: -";
+      timeMeta.textContent         = "generated_at: -";
+      cntCandidate.textContent     = "0周";
+      cntHybrid.textContent        = "0条";
       weekSelect.innerHTML = "";
-      gridWrap.innerHTML = `<div class="empty">先粘贴 JSON 再渲染课表。</div>`;
+      gridWrap.innerHTML   = `<div class="empty">先粘贴 JSON 再渲染课表。</div>`;
     });
 
+    // init with example
     setExample();
   </script>
 </body>

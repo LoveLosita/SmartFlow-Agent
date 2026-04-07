@@ -85,6 +85,9 @@ func (n *AgentNodes) Confirm(ctx context.Context, st *newagentmodel.AgentGraphSt
 		},
 	); err != nil {
 		return nil, err
+	} else if st.Deps.WriteSchedulePreview != nil && st.ScheduleState == nil {
+		flowState := st.EnsureFlowState()
+		log.Printf("[WARN] deliver: schedule state is nil, skip preview write chat=%s", flowState.ConversationID)
 	}
 
 	saveAgentState(ctx, st)
@@ -111,6 +114,7 @@ func (n *AgentNodes) Plan(ctx context.Context, st *newagentmodel.AgentGraphState
 			Client:              st.Deps.ResolvePlanClient(),
 			ChunkEmitter:        st.EnsureChunkEmitter(),
 			ResumeNode:          "plan",
+			AlwaysExecute:       st.Request.AlwaysExecute,
 		},
 	); err != nil {
 		return nil, err
@@ -293,8 +297,10 @@ func saveAgentState(ctx context.Context, st *newagentmodel.AgentGraphState) {
 	}
 
 	snapshot := &newagentmodel.AgentStateSnapshot{
-		RuntimeState:        runtimeState,
-		ConversationContext: st.EnsureConversationContext(),
+		RuntimeState:          runtimeState,
+		ConversationContext:   st.EnsureConversationContext(),
+		ScheduleState:         st.ScheduleState.Clone(),
+		OriginalScheduleState: st.OriginalScheduleState.Clone(),
 	}
 
 	_ = store.Save(ctx, flowState.ConversationID, snapshot)

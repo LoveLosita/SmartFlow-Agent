@@ -3,6 +3,8 @@ package newagentnode
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
@@ -82,10 +84,18 @@ func RunRoughBuildNode(ctx context.Context, st *newagentmodel.AgentGraphState) e
 
 	// 8. 把粗排完成信息写入 pinned context，让 Execute 阶段的 LLM 直接进入验证和微调。
 	stillPending := countPendingTasks(scheduleState)
+
+	// 构造任务类 ID 字符串，供 pinned block 明确标注，避免 Execute LLM 因找不到 task_class_id 来源而 ask_user。
+	idParts := make([]string, len(taskClassIDs))
+	for i, id := range taskClassIDs {
+		idParts[i] = strconv.Itoa(id)
+	}
+	idStr := strings.Join(idParts, ", ")
+
 	var pinnedContent string
 	if stillPending > 0 {
 		pinnedContent = fmt.Sprintf(
-			"后端已自动运行粗排算法，初始排课方案已写入日程状态（共 %d 个任务已预排）。\n"+
+			"后端已自动运行粗排算法（任务类 ID：[%s]），初始排课方案已写入日程状态（共 %d 个任务已预排）。\n"+
 				"注意：仍有 %d 个任务未被粗排覆盖，处于待安排（pending）状态，必须在微调阶段手动安排完毕。\n\n"+
 				"处理 pending 任务的正确操作顺序：\n"+
 				"1. 调用 get_overview 或 find_free 确认可用空位（不要反复调用 list_tasks，list_tasks 只能看任务列表，看不出空位）\n"+
@@ -93,14 +103,14 @@ func RunRoughBuildNode(ctx context.Context, st *newagentmodel.AgentGraphState) e
 				"3. 重复上述步骤，直到 get_overview 显示待安排任务剩余为 0\n\n"+
 				"微调完成的判定标准：所有 pending 任务均已 place（待安排任务剩余=0），且现有排课无明显失衡。\n"+
 				"无需再次触发粗排。",
-			len(placements), stillPending,
+			idStr, len(placements), stillPending,
 		)
 	} else {
 		pinnedContent = fmt.Sprintf(
-			"后端已自动运行粗排算法，初始排课方案已写入日程状态（共 %d 个任务已预排，无待安排任务）。\n"+
+			"后端已自动运行粗排算法（任务类 ID：[%s]），初始排课方案已写入日程状态（共 %d 个任务已预排，无待安排任务）。\n"+
 				"请直接调用 get_overview 查看预排结果，然后用 move/swap 微调不合理的位置。\n"+
 				"无需再次触发粗排。",
-			len(placements),
+			idStr, len(placements),
 		)
 	}
 	st.EnsureConversationContext().UpsertPinnedBlock(newagentmodel.ContextBlock{

@@ -33,6 +33,7 @@ type PlanNodeInput struct {
 	Client              *newagentllm.Client
 	ChunkEmitter        *newagentstream.ChunkEmitter
 	ResumeNode          string
+	AlwaysExecute       bool // true 时计划生成后自动确认，不进入 confirm 节点
 }
 
 // RunPlanNode 执行一轮规划节点逻辑。
@@ -165,6 +166,18 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 			if len(decision.TaskClassIDs) > 0 {
 				flowState.TaskClassIDs = decision.TaskClassIDs
 			}
+		}
+		// always_execute 开启时，计划层跳过确认闸门，直接进入执行阶段。
+		// 这样可以与 Execute 节点的“写工具跳过确认”语义保持一致。
+		if input.AlwaysExecute {
+			flowState.ConfirmPlan()
+			_ = emitter.EmitStatus(
+				planStatusBlockID,
+				planStageName,
+				"plan_auto_confirmed",
+				"计划已自动确认，开始执行。",
+				false,
+			)
 		}
 		return nil
 	default:
