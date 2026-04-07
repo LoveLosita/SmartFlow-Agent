@@ -289,6 +289,25 @@ func readAgentExtraInt(extra map[string]any, key string) int {
 	return value
 }
 
+func readAgentExtraBool(extra map[string]any, key string) bool {
+	if len(extra) == 0 {
+		return false
+	}
+	raw, ok := extra[key]
+	if !ok {
+		return false
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v
+	case float64:
+		return v != 0
+	case string:
+		return strings.ToLower(strings.TrimSpace(v)) == "true"
+	}
+	return false
+}
+
 // readAgentExtraIntSlice 从 extra 中提取 []int。
 // 支持 JSON 数组格式（[]any，每个元素为 float64/int）。
 func readAgentExtraIntSlice(extra map[string]any, key string) []int {

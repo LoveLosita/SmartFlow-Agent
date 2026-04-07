@@ -158,7 +158,8 @@ func handleRouteExecute(
 	// 推送轻量状态通知，让前端知道请求已接收。
 	_ = emitter.EmitStatus(chatStatusBlockID, chatStageName, "accepted", speak, false)
 
-	flowState.Phase = newagentmodel.PhaseExecuting
+	// 清空旧 PlanSteps 并设 PhaseExecuting，避免上一次任务残留的步骤被 HasPlan() 误判。
+	flowState.StartDirectExecute()
 
 	// 安全兜底：只有真正持有 task_class_ids 时才开粗排。
 	if decision.NeedsRoughBuild && len(flowState.TaskClassIDs) > 0 {

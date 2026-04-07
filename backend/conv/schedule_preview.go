@@ -2,6 +2,7 @@ package conv
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/LoveLosita/smartflow/backend/model"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
@@ -105,5 +106,6 @@ func ScheduleStateToPreview(
 		Summary:        summary,
 		HybridEntries:  entries,
 		TaskClassIDs:   taskClassIDs,
+		GeneratedAt:    time.Now(),
 	}
 }

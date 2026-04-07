@@ -50,24 +50,36 @@ func WrapArkClient(arkChatModel *ark.ChatModel) *Client {
 
 // buildArkStreamOptions 将 newAgent 的 GenerateOptions 转换为 ark 的流式调用选项。
 func buildArkStreamOptions(options GenerateOptions) []einoModel.Option {
+	thinkingEnabled := options.Thinking == ThinkingModeEnabled
+
 	// Thinking
 	thinkingType := arkModel.ThinkingTypeDisabled
-	if options.Thinking == ThinkingModeEnabled {
+	if thinkingEnabled {
 		thinkingType = arkModel.ThinkingTypeEnabled
 	}
-
 	opts := []einoModel.Option{
 		ark.WithThinking(&arkModel.Thinking{Type: thinkingType}),
 	}
 
-	// Temperature
-	if options.Temperature > 0 {
+	// Temperature：thinking 模型强制要求 temperature=1，否则 API 静默忽略 thinking。
+	if thinkingEnabled {
+		opts = append(opts, einoModel.WithTemperature(1.0))
+	} else if options.Temperature > 0 {
 		opts = append(opts, einoModel.WithTemperature(float32(options.Temperature)))
 	}
 
-	// MaxTokens
-	if options.MaxTokens > 0 {
-		opts = append(opts, einoModel.WithMaxTokens(options.MaxTokens))
+	// MaxTokens：thinking 模式下 thinking token 占用 max_tokens 预算，
+	// 调用方设定的值仅代表"期望输出长度"，实际预算需留出思考空间。
+	// 最低保障 16000，避免思考链被截断导致输出为空或非 JSON。
+	maxTokens := options.MaxTokens
+	if thinkingEnabled {
+		const minThinkingBudget = 16000
+		if maxTokens < minThinkingBudget {
+			maxTokens = minThinkingBudget
+		}
+	}
+	if maxTokens > 0 {
+		opts = append(opts, einoModel.WithMaxTokens(maxTokens))
 	}
 
 	return opts

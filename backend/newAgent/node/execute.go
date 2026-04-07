@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -50,6 +51,7 @@ type ExecuteNodeInput struct {
 	ScheduleState         *newagenttools.ScheduleState
 	SchedulePersistor     newagentmodel.SchedulePersistor
 	OriginalScheduleState *newagenttools.ScheduleState
+	AlwaysExecute         bool // true 时写工具跳过确认闸门直接执行
 }
 
 // ExecuteRoundObservation 记录执行阶段每轮的关键观察。
@@ -141,9 +143,9 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		input.Client,
 		messages,
 		newagentllm.GenerateOptions{
-			Temperature: 0.3,
-			MaxTokens:   1200,
-			Thinking:    newagentllm.ThinkingModeDisabled,
+			Temperature: 1.0,   // thinking 模式强制要求 temperature=1
+			MaxTokens:   16000, // 需为 thinking chain 留出足够预算
+			Thinking:    newagentllm.ThinkingModeEnabled,
 			Metadata: map[string]any{
 				"stage":      executeStageName,
 				"step_index": flowState.CurrentStep,
@@ -166,12 +168,18 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 				return fmt.Errorf("连续 %d 次输出非 JSON，终止执行: 原始输出=%s",
 					flowState.ConsecutiveCorrections, rawText)
 			}
-			AppendLLMCorrectionWithHint(
-				conversationContext,
-				rawText,
-				"你的输出不是合法 JSON，无法解析。",
-				"你必须输出严格的 JSON 格式，不要使用 [NEXT_PLAN] 等纯文本标记。合法格式示例：{\"speak\":\"...\",\"action\":\"next_plan\",\"goal_check\":\"...\",\"reason\":\"...\"}",
-			)
+			// 区分两种常见失败：
+			// 1. tool_call 是数组（LLM 想批量调工具）→ 告知只能单次调用，保留已有上下文；
+			// 2. 真正的 JSON 格式损坏 → 要求重新输出合法 JSON。
+			var errorDesc, optionHint string
+			if strings.Contains(rawText, `"tool_call": [`) || strings.Contains(rawText, `"tool_call":[`) {
+				errorDesc = "你在 tool_call 字段传入了数组，但每轮只能调用一个工具，不支持批量格式。"
+				optionHint = "请把多个工具调用拆开，每轮只调一个，拿到结果后再继续下一步。示例：{\"speak\":\"...\",\"action\":\"continue\",\"reason\":\"...\",\"tool_call\":{\"name\":\"get_task_info\",\"arguments\":{\"task_id\":1}}}"
+			} else {
+				errorDesc = "你的输出不是合法 JSON，无法解析。"
+				optionHint = "你必须输出严格的 JSON 格式。合法格式示例：{\"speak\":\"...\",\"action\":\"continue\",\"reason\":\"...\",\"tool_call\":{\"name\":\"工具名\",\"arguments\":{}}}"
+			}
+			AppendLLMCorrectionWithHint(conversationContext, rawText, errorDesc, optionHint)
 			return nil
 		}
 
@@ -223,6 +231,9 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 	// 决策合法，重置连续修正计数。
 	flowState.ConsecutiveCorrections = 0
 
+	// speak 后处理：补列表序号换行 + 末尾加 \n 防止连续 speak 在前端粘连。
+	decision.Speak = normalizeSpeak(decision.Speak) // 末尾已含 \n
+
 	// 自省校验：next_plan / done 必须附带 goal_check，否则不推进，追加修正让 LLM 重试。
 	if decision.Action == newagentmodel.ExecuteActionNextPlan ||
 		decision.Action == newagentmodel.ExecuteActionDone {
@@ -231,31 +242,52 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 			if flowState.ConsecutiveCorrections >= maxConsecutiveCorrections {
 				return fmt.Errorf("连续 %d 次 goal_check 为空，终止执行", flowState.ConsecutiveCorrections)
 			}
+			// hint 区分有 plan / ReAct 两种模式：
+			// - 有 plan：要求对照 done_when 逐条验证；
+			// - ReAct：没有 done_when，只要求总结完成事实。
+			var goalCheckHint string
+			if flowState.HasPlan() {
+				goalCheckHint = fmt.Sprintf("输出 %s 时，必须在 goal_check 中对照 done_when 逐条说明完成依据。", decision.Action)
+			} else {
+				goalCheckHint = fmt.Sprintf("输出 %s 时，必须在 goal_check 中总结任务已完成的事实证据（调用了哪些工具、得到了什么结果）。", decision.Action)
+			}
 			AppendLLMCorrectionWithHint(
 				conversationContext,
 				decision.Speak,
 				fmt.Sprintf("你输出了 action=%s，但 goal_check 为空。", decision.Action),
-				fmt.Sprintf("输出 %s 时，必须在 goal_check 中对照 done_when 逐条说明完成依据。", decision.Action),
+				goalCheckHint,
 			)
 			return nil
 		}
 	}
 
-	// 6. 若 LLM 先对用户说话，且不是 ask_user / confirm（二者交给下游节点收口），则伪流式推送。
-	if strings.TrimSpace(decision.Speak) != "" &&
-		decision.Action != newagentmodel.ExecuteActionAskUser &&
-		decision.Action != newagentmodel.ExecuteActionConfirm {
-		if err := emitter.EmitPseudoAssistantText(
-			ctx,
-			executeSpeakBlockID,
-			executeStageName,
-			decision.Speak,
-			newagentstream.DefaultPseudoStreamOptions(),
-		); err != nil {
-			return fmt.Errorf("执行文案推送失败: %w", err)
+	// 6. speak 推流与历史写入。
+	//
+	// AlwaysExecute=true 时，confirm 动作不走确认卡片，speak 和 continue 一样直接推流；
+	// AlwaysExecute=false 时，confirm 的 speak 不推流（由确认卡片展示），但仍写入历史，
+	// 防止 LLM 下一轮忘记自己的计划，形成重复确认循环。
+	speakText := decision.Speak // 已由 normalizeSpeak 处理，末尾含 \n
+	if speakText != "" {
+		isConfirmWithCard := decision.Action == newagentmodel.ExecuteActionConfirm && !input.AlwaysExecute
+		isAskUser := decision.Action == newagentmodel.ExecuteActionAskUser
+
+		if !isConfirmWithCard && !isAskUser {
+			// 推流给前端
+			if err := emitter.EmitPseudoAssistantText(
+				ctx,
+				executeSpeakBlockID,
+				executeStageName,
+				speakText,
+				newagentstream.DefaultPseudoStreamOptions(),
+			); err != nil {
+				return fmt.Errorf("执行文案推送失败: %w", err)
+			}
 		}
-		// 将 LLM 的话追加到对话历史，保证下一轮上下文连续。
-		// TODO: 后续需要把工具调用结果也追加到历史，这里先留占位。
+		// 始终写入历史（confirm 卡片场景下也写，保证上下文连续）
+		conversationContext.AppendHistory(&schema.Message{
+			Role:    schema.Assistant,
+			Content: speakText,
+		})
 	}
 
 	// 7. 按 LLM 决策执行动作，后端信任 LLM 判断，不做语义校验。
@@ -266,7 +298,15 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		if decision.ToolCall != nil {
 			return executeToolCall(ctx, flowState, conversationContext, decision.ToolCall, emitter, input.ToolRegistry, input.ScheduleState)
 		}
-		// 无工具调用，仅对话，继续下一轮。
+		// 无工具调用且 speak 为空（speak 非空时已在步骤 6 写入历史）。
+		// 若 history 本轮完全没有更新，下一轮 LLM 会收到完全相同的上下文，容易死循环。
+		// 把 reason 写入历史，保证上下文向前推进。
+		if strings.TrimSpace(decision.Speak) == "" && strings.TrimSpace(decision.Reason) != "" {
+			conversationContext.AppendHistory(&schema.Message{
+				Role:    schema.Assistant,
+				Content: decision.Reason,
+			})
+		}
 		return nil
 
 	case newagentmodel.ExecuteActionAskUser:
@@ -276,8 +316,20 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		return nil
 
 	case newagentmodel.ExecuteActionConfirm:
-		// LLM 申报了写操作意图，需要用户确认后才能真正执行。
-		// 步骤：1) 把 ToolCallIntent 转成快照暂存；2) 设 Phase → 下游 confirm 节点接管。
+		// AlwaysExecute=true：跳过确认闸门，直接执行写工具并持久化，不走 confirm 节点。
+		if input.AlwaysExecute && decision.ToolCall != nil {
+			if err := executeToolCall(ctx, flowState, conversationContext, decision.ToolCall, emitter, input.ToolRegistry, input.ScheduleState); err != nil {
+				return err
+			}
+			if input.SchedulePersistor != nil && input.OriginalScheduleState != nil {
+				cs := runtimeState.EnsureCommonState()
+				if persistErr := input.SchedulePersistor.PersistScheduleChanges(ctx, input.OriginalScheduleState, input.ScheduleState, cs.UserID); persistErr != nil {
+					log.Printf("[WARN] execute always-execute 持久化失败: %v", persistErr)
+				}
+			}
+			return nil
+		}
+		// AlwaysExecute=false（默认）：暂存工具意图，设 Phase → 下游 confirm 节点接管。
 		return handleExecuteActionConfirm(decision, runtimeState, flowState)
 
 	case newagentmodel.ExecuteActionNextPlan:
@@ -586,6 +638,24 @@ func executePendingTool(
 	}
 
 	return nil
+}
+
+// listItemRe 匹配被粘连在一起的列表序号（如 "）2. " "水课3. "），用于自动补换行。
+// 规则：非换行字符后紧跟 2-9 的序号（"2. " "3、" 等），说明 LLM 漏写了换行。
+var listItemRe = regexp.MustCompile(`([^\n])([2-9][\.、]\s)`)
+
+// normalizeSpeak 对 LLM 输出的 speak 做后处理：
+// 1. 在列表序号（2. 3. …）前补 \n，防止列表项粘连；
+// 2. 统一补尾部 \n，防止多轮 speak 推流时文字头尾粘连。
+func normalizeSpeak(speak string) string {
+	speak = strings.TrimSpace(speak)
+	if speak == "" {
+		return speak
+	}
+	if !strings.Contains(speak, "\n") {
+		speak = listItemRe.ReplaceAllString(speak, "$1\n$2")
+	}
+	return speak + "\n"
 }
 
 // truncateText 截断文本到指定长度。

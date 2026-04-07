@@ -122,7 +122,7 @@ func generateDeliverSummary(
 		return buildMechanicalSummary(flowState)
 	}
 
-	return strings.TrimSpace(result.Text)
+	return normalizeSpeak(result.Text)
 }
 
 // buildMechanicalSummary 在 LLM 不可用时，机械拼接一份最小可用总结。

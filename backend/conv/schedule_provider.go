@@ -3,6 +3,7 @@ package conv
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/dao"
@@ -31,39 +32,106 @@ func NewScheduleProvider(scheduleDAO *dao.ScheduleDAO, taskClassDAO *dao.TaskCla
 }
 
 // LoadScheduleState 实现 model.ScheduleStateProvider 接口。
-// 加载用户当前周的日程和所有待安排任务，构建 ScheduleState。
+//
+// 窗口策略：
+// 1. 优先从 task class 的 StartDate/EndDate 推算规划窗口，覆盖粗排所需的完整日期范围；
+// 2. task class 无日期信息时，降级到当前周 7 天（兼容普通查询场景）。
+//
+// 日程加载策略：对窗口内每周分别调用 GetUserWeeklySchedule 并合并结果。
 func (p *ScheduleProvider) LoadScheduleState(ctx context.Context, userID int) (*newagenttools.ScheduleState, error) {
-	// 1. 确定当前周。
-	now := time.Now()
-	week, _, err := RealDateToRelativeDate(now.Format(DateFormat))
-	if err != nil {
-		return nil, fmt.Errorf("解析当前日期失败: %w", err)
-	}
-
-	// 2. 加载当前周的所有日程（含 Event + EmbeddedTask 预加载）。
-	schedules, err := p.scheduleDAO.GetUserWeeklySchedule(ctx, userID, week)
-	if err != nil {
-		return nil, fmt.Errorf("加载用户周日程失败: %w", err)
-	}
-
-	// 3. 加载用户所有任务类（含 Items 预加载）。
-	// 两步：先拿 ID 列表，再批量获取完整数据（含 Items）。
+	// 1. 加载用户所有任务类（含 Items 预加载）。
 	taskClasses, err := p.loadCompleteTaskClasses(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
 
-	// 4. 构建 WindowDay 列表（当前周 7 天）。
-	windowDays := make([]WindowDay, 7)
-	for i := 0; i < 7; i++ {
-		windowDays[i] = WindowDay{Week: week, DayOfWeek: i + 1}
+	// 2. 确定规划窗口：优先使用 task class 日期范围，降级到当前周。
+	windowDays, weeks := buildWindowFromTaskClasses(taskClasses)
+	if len(windowDays) == 0 {
+		now := time.Now()
+		currentWeek, _, err := RealDateToRelativeDate(now.Format(DateFormat))
+		if err != nil {
+			return nil, fmt.Errorf("解析当前日期失败: %w", err)
+		}
+		windowDays = make([]WindowDay, 7)
+		for i := 0; i < 7; i++ {
+			windowDays[i] = WindowDay{Week: currentWeek, DayOfWeek: i + 1}
+		}
+		weeks = []int{currentWeek}
 	}
 
-	// 5. 构建额外 item category 映射（已加载全部 taskClass，通常为空）。
-	extraItemCategories := buildExtraItemCategories(schedules, taskClasses)
+	// 3. 按周加载日程（含 Event + EmbeddedTask 预加载）。
+	var allSchedules []model.Schedule
+	for _, w := range weeks {
+		weekSchedules, err := p.scheduleDAO.GetUserWeeklySchedule(ctx, userID, w)
+		if err != nil {
+			return nil, fmt.Errorf("加载用户周日程失败 week=%d: %w", w, err)
+		}
+		allSchedules = append(allSchedules, weekSchedules...)
+	}
 
-	// 6. 调用已有的 LoadScheduleState 构建内存状态。
-	return LoadScheduleState(schedules, taskClasses, extraItemCategories, windowDays), nil
+	// 4. 构建额外 item category 映射。
+	extraItemCategories := buildExtraItemCategories(allSchedules, taskClasses)
+
+	// 5. 调用已有的 LoadScheduleState 构建内存状态。
+	return LoadScheduleState(allSchedules, taskClasses, extraItemCategories, windowDays), nil
+}
+
+// buildWindowFromTaskClasses 从 task class 的 StartDate/EndDate 推算规划窗口。
+//
+// 返回值：
+//   - windowDays：窗口内每天的 (week, dayOfWeek) 有序列表；
+//   - weeks：窗口覆盖的周号（去重、升序），供按周加载日程使用；
+//   - 若无有效日期信息，返回空切片，调用方应降级到默认窗口。
+func buildWindowFromTaskClasses(taskClasses []model.TaskClass) (windowDays []WindowDay, weeks []int) {
+	var minDate, maxDate *time.Time
+	for _, tc := range taskClasses {
+		if tc.StartDate != nil && (minDate == nil || tc.StartDate.Before(*minDate)) {
+			t := *tc.StartDate
+			minDate = &t
+		}
+		if tc.EndDate != nil && (maxDate == nil || tc.EndDate.After(*maxDate)) {
+			t := *tc.EndDate
+			maxDate = &t
+		}
+	}
+	if minDate == nil || maxDate == nil {
+		return nil, nil
+	}
+
+	startWeek, startDay, err := RealDateToRelativeDate(minDate.Format(DateFormat))
+	if err != nil {
+		return nil, nil
+	}
+	endWeek, endDay, err := RealDateToRelativeDate(maxDate.Format(DateFormat))
+	if err != nil {
+		return nil, nil
+	}
+
+	weeksSet := make(map[int]bool)
+	w, d := startWeek, startDay
+	for {
+		windowDays = append(windowDays, WindowDay{Week: w, DayOfWeek: d})
+		weeksSet[w] = true
+		if w == endWeek && d == endDay {
+			break
+		}
+		d++
+		if d > 7 {
+			d = 1
+			w++
+		}
+		if w > endWeek+1 { // 防止因日期转换异常导致无限循环
+			break
+		}
+	}
+
+	weeks = make([]int, 0, len(weeksSet))
+	for wk := range weeksSet {
+		weeks = append(weeks, wk)
+	}
+	sort.Ints(weeks)
+	return windowDays, weeks
 }
 
 // loadCompleteTaskClasses 批量加载用户所有任务类（含 Items 预加载）。

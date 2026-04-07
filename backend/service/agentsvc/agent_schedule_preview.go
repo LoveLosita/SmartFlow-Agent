@@ -101,6 +101,7 @@ func (s *AgentService) GetSchedulePlanPreview(ctx context.Context, userID int, c
 				TraceID:        strings.TrimSpace(preview.TraceID),
 				Summary:        strings.TrimSpace(preview.Summary),
 				CandidatePlans: plans,
+				HybridEntries:  cloneHybridEntries(preview.HybridEntries),
 				GeneratedAt:    preview.GeneratedAt,
 			}, nil
 		}
@@ -212,6 +213,7 @@ func snapshotToSchedulePlanPreviewResponse(snapshot *model.SchedulePlanStateSnap
 		TraceID:        strings.TrimSpace(snapshot.TraceID),
 		Summary:        schedulePlanSummaryOrFallback(strings.TrimSpace(snapshot.FinalSummary)),
 		CandidatePlans: plans,
+		HybridEntries:  cloneHybridEntries(snapshot.HybridEntries),
 		GeneratedAt:    generatedAt,
 	}
 }

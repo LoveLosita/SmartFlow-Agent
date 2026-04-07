@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
@@ -214,6 +215,7 @@ func (n *AgentNodes) Execute(ctx context.Context, st *newagentmodel.AgentGraphSt
 			ScheduleState:         scheduleState,
 			SchedulePersistor:     st.Deps.SchedulePersistor,
 			OriginalScheduleState: st.OriginalScheduleState,
+			AlwaysExecute:         st.Request.AlwaysExecute,
 		},
 	); err != nil {
 		return nil, err
@@ -245,6 +247,16 @@ func (n *AgentNodes) Deliver(ctx context.Context, st *newagentmodel.AgentGraphSt
 		},
 	); err != nil {
 		return nil, err
+	}
+
+	// 任务完成后写排程预览缓存：只有走到 Deliver 才代表排程结果已稳定，
+	// 中断（confirm/ask_user）路径不写，避免把中间态暴露给前端。
+	if st.Deps.WriteSchedulePreview != nil && st.ScheduleState != nil {
+		flowState := st.EnsureFlowState()
+		if err := st.Deps.WriteSchedulePreview(ctx, st.ScheduleState, flowState.UserID, flowState.ConversationID, flowState.TaskClassIDs); err != nil {
+			// 写缓存失败不阻断主流程，降级为仅 log。
+			log.Printf("[WARN] deliver: 写入排程预览缓存失败 chat=%s: %v", flowState.ConversationID, err)
+		}
 	}
 
 	saveAgentState(ctx, st)

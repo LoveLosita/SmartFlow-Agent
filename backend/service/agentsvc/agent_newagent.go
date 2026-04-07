@@ -18,6 +18,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/pkg"
+	"github.com/LoveLosita/smartflow/backend/respond"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 )
 
@@ -101,18 +102,23 @@ func (s *AgentService) runNewAgentGraph(
 		conversationContext = s.loadConversationContext(requestCtx, chatID, userMessage)
 	}
 
-	// 5.5 若 extra 携带 task_class_ids，写入 CommonState（仅首轮/尚未设置时生效，跨轮持久化）。
+	// 5.5 若 extra 携带 task_class_ids，校验后写入 CommonState（仅首轮/尚未设置时生效，跨轮持久化）。
+	//    校验：通过 LoadTaskClassMetas → GetCompleteTaskClassesByIDs 检查所有 ID 是否存在且属于当前用户；
+	//    校验失败时向 errChan 推送 WrongTaskClassID（code=40040），前端收到 SSE 错误事件。
 	if taskClassIDs := readAgentExtraIntSlice(extra, "task_class_ids"); len(taskClassIDs) > 0 {
 		cs := runtimeState.EnsureCommonState()
 		if len(cs.TaskClassIDs) == 0 {
-			cs.TaskClassIDs = taskClassIDs
-			if s.scheduleProvider != nil {
-				if metas, metaErr := s.scheduleProvider.LoadTaskClassMetas(requestCtx, userID, taskClassIDs); metaErr != nil {
-					log.Printf("加载任务类约束元数据失败 chat=%s err=%v", chatID, metaErr)
-				} else {
-					cs.TaskClasses = metas
-				}
+			if s.scheduleProvider == nil {
+				pushErrNonBlocking(errChan, respond.WrongTaskClassID)
+				return
 			}
+			metas, metaErr := s.scheduleProvider.LoadTaskClassMetas(requestCtx, userID, taskClassIDs)
+			if metaErr != nil {
+				pushErrNonBlocking(errChan, respond.WrongTaskClassID)
+				return
+			}
+			cs.TaskClassIDs = taskClassIDs
+			cs.TaskClasses = metas
 		}
 	}
 
@@ -124,6 +130,7 @@ func (s *AgentService) runNewAgentGraph(
 	graphRequest := newagentmodel.AgentGraphRequest{
 		UserInput:     userMessage,
 		ConfirmAction: confirmAction,
+		AlwaysExecute: readAgentExtraBool(extra, "always_execute"),
 	}
 	graphRequest.Normalize()
 
@@ -139,16 +146,17 @@ func (s *AgentService) runNewAgentGraph(
 
 	// 9. 构造 AgentGraphDeps（由 cmd/start.go 注入的依赖）。
 	deps := newagentmodel.AgentGraphDeps{
-		ChatClient:        chatClient,
-		PlanClient:        planClient,
-		ExecuteClient:     executeClient,
-		DeliverClient:     deliverClient,
-		ChunkEmitter:      chunkEmitter,
-		StateStore:        s.agentStateStore,
-		ToolRegistry:      s.toolRegistry,
-		ScheduleProvider:  s.scheduleProvider,
-		SchedulePersistor: s.schedulePersistor,
-		RoughBuildFunc:    s.makeRoughBuildFunc(),
+		ChatClient:           chatClient,
+		PlanClient:           planClient,
+		ExecuteClient:        executeClient,
+		DeliverClient:        deliverClient,
+		ChunkEmitter:         chunkEmitter,
+		StateStore:           s.agentStateStore,
+		ToolRegistry:         s.toolRegistry,
+		ScheduleProvider:     s.scheduleProvider,
+		SchedulePersistor:    s.schedulePersistor,
+		RoughBuildFunc:       s.makeRoughBuildFunc(),
+		WriteSchedulePreview: s.makeWriteSchedulePreviewFunc(),
 	}
 
 	// 10. 构造 AgentGraphRunInput 并运行 graph。
@@ -181,23 +189,8 @@ func (s *AgentService) runNewAgentGraph(
 		eventsvc.PublishAgentStateSnapshot(requestCtx, s.eventPublisher, snapshot, chatID, userID)
 	}
 
-	// 11.6. 将排程结果写入 Redis 预览缓存，复用旧 agent 的 SchedulePlanPreviewCache 格式。
-	// 前端通过 GET /agent/schedule-preview 获取，无需改动。
-	if finalState != nil && finalState.ScheduleState != nil {
-		flowState := finalState.EnsureFlowState()
-		preview := conv.ScheduleStateToPreview(
-			finalState.ScheduleState,
-			userID,
-			chatID,
-			flowState.TaskClassIDs,
-			"", // summary 由转换函数自动生成
-		)
-		if preview != nil && s.cacheDAO != nil {
-			if err := s.cacheDAO.SetSchedulePlanPreviewToCache(requestCtx, userID, chatID, preview); err != nil {
-				log.Printf("[WARN] 写入排程预览缓存失败 chat=%s: %v", chatID, err)
-			}
-		}
-	}
+	// 排程预览缓存由 Deliver 节点负责写入（通过注入的 WriteSchedulePreview func），
+	// 保证只有任务真正完成时才写，中断路径不写中间态。
 
 	// 12. 发送 OpenAI 兼容的流式结束标记，告知客户端 stream 已完成。
 	_ = chunkEmitter.EmitDone()
@@ -425,31 +418,51 @@ func (s *AgentService) persistChatAfterGraph(
 }
 
 // makeRoughBuildFunc 把 AgentService 上的 HybridScheduleWithPlanMultiFunc 封装成
-// newAgent 层的 RoughBuildFunc，完成外层 model.TaskClassItem → RoughBuildPlacement 的转换。
+// newAgent 层的 RoughBuildFunc，将 HybridScheduleWithPlanMultiFunc 的结果转换为 RoughBuildPlacement。
 // HybridScheduleWithPlanMultiFunc 未注入时返回 nil，RoughBuild 节点会静默跳过粗排。
+//
+// 修复说明：
+// 旧实现使用第二个返回值 []TaskClassItem，只有 EmbeddedTime != nil 的条目（嵌入水课）才生成
+// placement，普通时段放置的任务全部被丢弃。
+// 正确做法：使用第一个返回值 []HybridScheduleEntry，过滤 Status="suggested" 且 TaskItemID>0 的条目，
+// 这样嵌入和非嵌入的粗排结果都能正确写入 ScheduleState。
 func (s *AgentService) makeRoughBuildFunc() newagentmodel.RoughBuildFunc {
 	if s.HybridScheduleWithPlanMultiFunc == nil {
 		return nil
 	}
 	return func(ctx context.Context, userID int, taskClassIDs []int) ([]newagentmodel.RoughBuildPlacement, error) {
-		_, items, err := s.HybridScheduleWithPlanMultiFunc(ctx, userID, taskClassIDs)
+		entries, _, err := s.HybridScheduleWithPlanMultiFunc(ctx, userID, taskClassIDs)
 		if err != nil {
 			return nil, err
 		}
-		placements := make([]newagentmodel.RoughBuildPlacement, 0, len(items))
-		for _, item := range items {
-			if item.EmbeddedTime == nil {
+		placements := make([]newagentmodel.RoughBuildPlacement, 0, len(entries))
+		for _, entry := range entries {
+			if entry.Status != "suggested" || entry.TaskItemID == 0 {
 				continue
 			}
 			placements = append(placements, newagentmodel.RoughBuildPlacement{
-				TaskItemID:  item.ID,
-				Week:        item.EmbeddedTime.Week,
-				DayOfWeek:   item.EmbeddedTime.DayOfWeek,
-				SectionFrom: item.EmbeddedTime.SectionFrom,
-				SectionTo:   item.EmbeddedTime.SectionTo,
+				TaskItemID:  entry.TaskItemID,
+				Week:        entry.Week,
+				DayOfWeek:   entry.DayOfWeek,
+				SectionFrom: entry.SectionFrom,
+				SectionTo:   entry.SectionTo,
 			})
 		}
 		return placements, nil
+	}
+}
+
+// makeWriteSchedulePreviewFunc 封装 cacheDAO 写排程预览缓存的操作，供 Deliver 节点注入。
+func (s *AgentService) makeWriteSchedulePreviewFunc() newagentmodel.WriteSchedulePreviewFunc {
+	if s.cacheDAO == nil {
+		return nil
+	}
+	return func(ctx context.Context, state *newagenttools.ScheduleState, userID int, conversationID string, taskClassIDs []int) error {
+		preview := conv.ScheduleStateToPreview(state, userID, conversationID, taskClassIDs, "")
+		if preview == nil {
+			return nil
+		}
+		return s.cacheDAO.SetSchedulePlanPreviewToCache(ctx, userID, conversationID, preview)
 	}
 }
 

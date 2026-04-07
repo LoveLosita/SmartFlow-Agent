@@ -80,23 +80,57 @@ func RunRoughBuildNode(ctx context.Context, st *newagentmodel.AgentGraphState) e
 		false,
 	)
 
-	// 8. 把粗排完成信息写入 pinned context，让 Execute 阶段的 LLM 直接跳过"触发粗排"，
-	//    进入验证和微调，避免 LLM 误以为需要自己运行算法而浪费一轮工具调用。
-	st.EnsureConversationContext().UpsertPinnedBlock(newagentmodel.ContextBlock{
-		Key:   "rough_build_done",
-		Title: "粗排已完成",
-		Content: fmt.Sprintf(
+	// 8. 把粗排完成信息写入 pinned context，让 Execute 阶段的 LLM 直接进入验证和微调。
+	stillPending := countPendingTasks(scheduleState)
+	var pinnedContent string
+	if stillPending > 0 {
+		pinnedContent = fmt.Sprintf(
 			"后端已自动运行粗排算法，初始排课方案已写入日程状态（共 %d 个任务已预排）。\n"+
+				"注意：仍有 %d 个任务未被粗排覆盖，处于待安排（pending）状态，必须在微调阶段手动安排完毕。\n\n"+
+				"处理 pending 任务的正确操作顺序：\n"+
+				"1. 调用 get_overview 或 find_free 确认可用空位（不要反复调用 list_tasks，list_tasks 只能看任务列表，看不出空位）\n"+
+				"2. 调用 place 将 pending 任务放入空位\n"+
+				"3. 重复上述步骤，直到 get_overview 显示待安排任务剩余为 0\n\n"+
+				"微调完成的判定标准：所有 pending 任务均已 place（待安排任务剩余=0），且现有排课无明显失衡。\n"+
+				"无需再次触发粗排。",
+			len(placements), stillPending,
+		)
+	} else {
+		pinnedContent = fmt.Sprintf(
+			"后端已自动运行粗排算法，初始排课方案已写入日程状态（共 %d 个任务已预排，无待安排任务）。\n"+
 				"请直接调用 get_overview 查看预排结果，然后用 move/swap 微调不合理的位置。\n"+
-				"无需再次触发粗排，也不要在 plan_steps 里描述触发粗排相关的操作。",
+				"无需再次触发粗排。",
 			len(placements),
-		),
+		)
+	}
+	st.EnsureConversationContext().UpsertPinnedBlock(newagentmodel.ContextBlock{
+		Key:     "rough_build_done",
+		Title:   "粗排已完成",
+		Content: pinnedContent,
 	})
 
 	// 9. 清除标记，进入执行阶段。
 	flowState.NeedsRoughBuild = false
 	flowState.Phase = newagentmodel.PhaseExecuting
 	return nil
+}
+
+// countPendingTasks 统计粗排后仍无位置的待安排任务数。
+//
+// 粗排只设 Slots，不改 Status（仍为 "pending"），
+// 所以"真正未覆盖"= pending 且 Slots 为空，需要手动 place。
+func countPendingTasks(state *newagenttools.ScheduleState) int {
+	if state == nil {
+		return 0
+	}
+	count := 0
+	for i := range state.Tasks {
+		t := &state.Tasks[i]
+		if t.Status == "pending" && len(t.Slots) == 0 {
+			count++
+		}
+	}
+	return count
 }
 
 // applyRoughBuildPlacements 把粗排结果写入 ScheduleState 对应任务的 Slots。

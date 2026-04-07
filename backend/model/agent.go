@@ -249,11 +249,12 @@ type SchedulePlanPreviewCache struct {
 }
 
 type GetSchedulePlanPreviewResponse struct {
-	ConversationID string             `json:"conversation_id"`
-	TraceID        string             `json:"trace_id,omitempty"`
-	Summary        string             `json:"summary"`
-	CandidatePlans []UserWeekSchedule `json:"candidate_plans"`
-	GeneratedAt    time.Time          `json:"generated_at"`
+	ConversationID string                `json:"conversation_id"`
+	TraceID        string                `json:"trace_id,omitempty"`
+	Summary        string                `json:"summary"`
+	CandidatePlans []UserWeekSchedule    `json:"candidate_plans"`
+	HybridEntries  []HybridScheduleEntry `json:"hybrid_entries,omitempty"`
+	GeneratedAt    time.Time             `json:"generated_at"`
 }
 
 type SSEResponse struct {

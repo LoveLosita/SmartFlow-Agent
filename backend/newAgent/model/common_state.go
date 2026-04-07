@@ -94,6 +94,16 @@ func (s *CommonState) ConfirmPlan() {
 	s.Phase = PhaseExecuting
 }
 
+// StartDirectExecute 进入无 plan 的直接执行（ReAct）模式。
+// Chat 节点路由到 execute 时必须调用此方法，而非直接赋值 Phase，
+// 否则上一次任务残留的 PlanSteps 会被 HasPlan() 误判为仍有计划，
+// 导致 Execute 节点用旧步骤跑 plan 模式而非 ReAct 模式。
+func (s *CommonState) StartDirectExecute() {
+	s.PlanSteps = nil
+	s.CurrentStep = 0
+	s.Phase = PhaseExecuting
+}
+
 // RejectPlan 表示用户拒绝当前计划，清空计划并回退到 planning。
 func (s *CommonState) RejectPlan() {
 	s.PlanSteps = nil

@@ -18,6 +18,7 @@ import (
 type AgentGraphRequest struct {
 	UserInput     string
 	ConfirmAction string // "accept" / "reject" / ""，仅 confirm 恢复场景由前端传入
+	AlwaysExecute bool   // true 时写工具跳过确认闸门直接执行，适合前端已展示预览、用户无需逐步确认的场景
 }
 
 // Normalize 统一清洗请求级输入中的字符串字段。
@@ -43,6 +44,10 @@ type RoughBuildPlacement struct {
 // 由 service 层封装 HybridScheduleWithPlanMulti 后注入，newAgent 层不直接依赖外层 model。
 type RoughBuildFunc func(ctx context.Context, userID int, taskClassIDs []int) ([]RoughBuildPlacement, error)
 
+// WriteSchedulePreviewFunc 是排程预览写入的依赖注入签名。
+// 由 service 层封装 cacheDAO 后注入，deliver 节点在任务完成时调用，保证只有真正完成的结果才写入缓存。
+type WriteSchedulePreviewFunc func(ctx context.Context, state *newagenttools.ScheduleState, userID int, conversationID string, taskClassIDs []int) error
+
 // AgentGraphDeps 描述 graph/node 层运行时真正依赖的可插拔能力。
 //
 // 设计目的：
@@ -50,16 +55,17 @@ type RoughBuildFunc func(ctx context.Context, userID int, taskClassIDs []int) ([
 // 2. Chat/Plan/Execute/Deliver 允许分别挂不同 client，但也允许先复用同一个 client；
 // 3. ChunkEmitter 统一承接阶段提示、正文、工具事件、确认请求等 SSE 输出。
 type AgentGraphDeps struct {
-	ChatClient        *newagentllm.Client
-	PlanClient        *newagentllm.Client
-	ExecuteClient     *newagentllm.Client
-	DeliverClient     *newagentllm.Client
-	ChunkEmitter      *newagentstream.ChunkEmitter
-	StateStore        AgentStateStore
-	ToolRegistry      *newagenttools.ToolRegistry
-	ScheduleProvider  ScheduleStateProvider // 按 DAO 注入，Execute 节点按需加载 ScheduleState
-	SchedulePersistor SchedulePersistor     // 按 DAO 注入，用于写工具执行后持久化变更
-	RoughBuildFunc    RoughBuildFunc        // 按 Service 注入，粗排算法入口
+	ChatClient           *newagentllm.Client
+	PlanClient           *newagentllm.Client
+	ExecuteClient        *newagentllm.Client
+	DeliverClient        *newagentllm.Client
+	ChunkEmitter         *newagentstream.ChunkEmitter
+	StateStore           AgentStateStore
+	ToolRegistry         *newagenttools.ToolRegistry
+	ScheduleProvider     ScheduleStateProvider    // 按 DAO 注入，Execute 节点按需加载 ScheduleState
+	SchedulePersistor    SchedulePersistor        // 按 DAO 注入，用于写工具执行后持久化变更
+	RoughBuildFunc       RoughBuildFunc           // 按 Service 注入，粗排算法入口
+	WriteSchedulePreview WriteSchedulePreviewFunc // 按 Service 注入，排程预览写入入口
 }
 
 // EnsureChunkEmitter 保证 graph 运行时始终有一个可用的 chunk 发射器。

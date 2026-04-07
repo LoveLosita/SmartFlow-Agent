@@ -10,26 +10,28 @@ import (
 
 // buildStageMessages 组装某个阶段通用的 messages。
 //
-// 步骤说明：
-// 1. 先合并 context 自带 system prompt 与阶段 prompt，保证通用约束和阶段约束都生效；
-// 2. 再把置顶上下文块和工具摘要补成 system message，尽量顶在 history 前面；
-// 3. 最后追加历史消息与本轮 user prompt，保持"新约束在前、历史在后"的稳定顺序。
+// 消息排列策略（利用 LLM 近因效应）：
+//  1. system prompt（角色 + 阶段规则）— 始终最顶部，定义基本身份；
+//  2. tool schemas（能力边界）— 稳定参考信息，放在 history 前即可；
+//  3. history（对话历史、工具调用、修正反馈）— 按时间顺序排列；
+//  4. pinned blocks（当前计划、当前步骤、粗排结果等最新约束）— 紧贴 user prompt，
+//     利用近因效应让 LLM 优先关注本轮最相关的约束，而非被历史消息分散注意力；
+//  5. user prompt（阶段性指令）— 始终在末尾，是本轮回答的核心触发。
 func buildStageMessages(stageSystemPrompt string, ctx *newagentmodel.ConversationContext, runtimeUserPrompt string) []*schema.Message {
 	messages := make([]*schema.Message, 0, 4)
 
+	// 1. 合并 system prompt：基础角色约束 + 阶段规则，始终在最顶部。
 	mergedSystemPrompt := mergeSystemPrompts(ctx, stageSystemPrompt)
 	if mergedSystemPrompt != "" {
 		messages = append(messages, schema.SystemMessage(mergedSystemPrompt))
 	}
 
-	if pinnedText := renderPinnedBlocks(ctx); pinnedText != "" {
-		messages = append(messages, schema.SystemMessage(pinnedText))
-	}
-
+	// 2. 工具摘要：稳定参考信息，放在 history 前即可。
 	if toolText := renderToolSchemas(ctx); toolText != "" {
 		messages = append(messages, schema.SystemMessage(toolText))
 	}
 
+	// 3. 对话历史：按时间顺序，包含工具调用结果和修正反馈。
 	if ctx != nil {
 		history := ctx.HistorySnapshot()
 		if len(history) > 0 {
@@ -48,6 +50,13 @@ func buildStageMessages(stageSystemPrompt string, ctx *newagentmodel.Conversatio
 		}
 	}
 
+	// 4. 置顶上下文块：当前计划、当前步骤、粗排结果等最新约束。
+	//    放在 history 之后、user prompt 之前，利用 LLM 近因效应提升对最新约束的注意力。
+	if pinnedText := renderPinnedBlocks(ctx); pinnedText != "" {
+		messages = append(messages, schema.SystemMessage(pinnedText))
+	}
+
+	// 5. 阶段性用户提示词：始终在末尾，是本轮回答的核心触发。
 	runtimeUserPrompt = strings.TrimSpace(runtimeUserPrompt)
 	if runtimeUserPrompt != "" {
 		messages = append(messages, schema.UserMessage(runtimeUserPrompt))

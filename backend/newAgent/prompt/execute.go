@@ -196,9 +196,9 @@ func BuildExecuteUserPrompt(state *newagentmodel.CommonState) string {
 		return strings.TrimSpace(sb.String())
 	}
 
-	if currentStep, ok := state.CurrentPlanStep(); ok {
+	if _, ok := state.CurrentPlanStep(); ok {
 		sb.WriteString("执行要求：\n")
-		sb.WriteString("1. 始终围绕下面这个当前步骤行动。\n")
+		sb.WriteString("1. 始终围绕上方「当前步骤内容」行动。\n")
 		sb.WriteString("2. 若当前步骤未完成，请继续思考-执行-观察循环。\n")
 		sb.WriteString("3. 若当前步骤已完成，请输出 action=next_plan，并填写 goal_check 说明完成依据。\n")
 		sb.WriteString("4. 若整个任务已完成，请输出 action=done，并填写 goal_check 总结整体证据。\n")
@@ -206,14 +206,6 @@ func BuildExecuteUserPrompt(state *newagentmodel.CommonState) string {
 		sb.WriteString("6. 输出 next_plan 或 done 时，goal_check 不能为空，必须对照 done_when 逐条验证。\n")
 		sb.WriteString("\n")
 		sb.WriteString(BuildExecuteDecisionContractText())
-		sb.WriteString("\n当前步骤正文：\n")
-		sb.WriteString(strings.TrimSpace(currentStep.Content))
-		sb.WriteString("\n")
-		if strings.TrimSpace(currentStep.DoneWhen) != "" {
-			sb.WriteString("\n当前步骤完成判定：\n")
-			sb.WriteString(strings.TrimSpace(currentStep.DoneWhen))
-			sb.WriteString("\n")
-		}
 	} else {
 		sb.WriteString("当前 plan 已存在，但当前步骤索引无效；请不要擅自执行其他步骤。\n")
 	}

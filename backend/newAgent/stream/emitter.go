@@ -473,7 +473,8 @@ func (e *ChunkEmitter) emitPseudoText(ctx context.Context, text string, options 
 	if emitChunk == nil {
 		return nil
 	}
-	text = strings.TrimSpace(text)
+	// 只剥首尾空格和制表符，保留结尾 \n，让上层加的段落分隔符能作为内容的一部分推出。
+	text = strings.TrimRight(strings.TrimLeft(text, " \t\r\n"), " \t\r")
 	if text == "" {
 		return nil
 	}
@@ -499,7 +500,8 @@ func (e *ChunkEmitter) emitPseudoText(ctx context.Context, text string, options 
 // 2. 若长时间遇不到合适边界，则在 MaxChunkRunes 处强制切块，避免整段卡太久；
 // 3. 对中文文本优先按 rune 长度处理，避免多字节字符被截断。
 func SplitPseudoStreamText(text string, options PseudoStreamOptions) []string {
-	text = strings.TrimSpace(text)
+	hasTrailingNewline := strings.HasSuffix(strings.TrimRight(text, " \t"), "\n")
+	text = strings.TrimRight(strings.TrimLeft(text, " \t\r\n"), " \t\r")
 	if text == "" {
 		return nil
 	}
@@ -507,6 +509,9 @@ func SplitPseudoStreamText(text string, options PseudoStreamOptions) []string {
 	options = normalizePseudoStreamOptions(options)
 	runes := []rune(text)
 	if len(runes) <= options.MaxChunkRunes {
+		if hasTrailingNewline {
+			return []string{text + "\n"}
+		}
 		return []string{text}
 	}
 
@@ -543,7 +548,13 @@ func SplitPseudoStreamText(text string, options PseudoStreamOptions) []string {
 	}
 
 	if len(chunks) == 0 {
+		if hasTrailingNewline {
+			return []string{text + "\n"}
+		}
 		return []string{text}
+	}
+	if hasTrailingNewline {
+		chunks[len(chunks)-1] += "\n"
 	}
 	return chunks
 }
