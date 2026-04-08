@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -47,6 +48,47 @@ type ExecuteDecision struct {
 	GoalCheck string          `json:"goal_check,omitempty"`
 	ToolCall  *ToolCallIntent `json:"tool_call,omitempty"`
 	Abort     *AbortIntent    `json:"abort,omitempty"`
+}
+
+// UnmarshalJSON 兼容执行决策里几种模型高频跑偏但语义可恢复的写法。
+//
+// 职责边界：
+// 1. 负责把“空字符串占位字段”归一化成未填写，避免 json 反序列化阶段直接失败；
+// 2. 负责把 tool_call / abort 交给各自的兼容解析逻辑，尽量保留可恢复的信息；
+// 3. 不负责业务合法性校验；action 与字段互斥关系仍交给 Validate 判定。
+func (d *ExecuteDecision) UnmarshalJSON(data []byte) error {
+	type rawExecuteDecision struct {
+		Speak     string          `json:"speak,omitempty"`
+		Action    ExecuteAction   `json:"action"`
+		Reason    string          `json:"reason,omitempty"`
+		GoalCheck string          `json:"goal_check,omitempty"`
+		ToolCall  json.RawMessage `json:"tool_call,omitempty"`
+		Abort     json.RawMessage `json:"abort,omitempty"`
+	}
+
+	var raw rawExecuteDecision
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	d.Speak = raw.Speak
+	d.Action = raw.Action
+	d.Reason = raw.Reason
+	d.GoalCheck = raw.GoalCheck
+
+	toolCall, err := decodeOptionalJSONObject[ToolCallIntent](raw.ToolCall)
+	if err != nil {
+		return fmt.Errorf("tool_call 解析失败: %w", err)
+	}
+	d.ToolCall = toolCall
+
+	abortIntent, err := decodeOptionalJSONObject[AbortIntent](raw.Abort)
+	if err != nil {
+		return fmt.Errorf("abort 解析失败: %w", err)
+	}
+	d.Abort = abortIntent
+
+	return nil
 }
 
 // Normalize 统一清洗 execute 决策中的字符串字段。
@@ -173,6 +215,32 @@ type ToolCallIntent struct {
 	Arguments map[string]any `json:"arguments,omitempty"`
 }
 
+// UnmarshalJSON 兼容 tool_call 里“arguments / parameters”两种高频字段名。
+//
+// 职责边界：
+// 1. 优先使用标准字段 arguments，保持当前正式协议不变；
+// 2. 仅当 arguments 缺失时，回退复用 parameters，兼容模型历史习惯；
+// 3. 不负责校验参数是否满足具体工具 schema，后续仍由工具层负责。
+func (t *ToolCallIntent) UnmarshalJSON(data []byte) error {
+	type rawToolCallIntent struct {
+		Name       string         `json:"name"`
+		Arguments  map[string]any `json:"arguments,omitempty"`
+		Parameters map[string]any `json:"parameters,omitempty"`
+	}
+
+	var raw rawToolCallIntent
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	t.Name = raw.Name
+	t.Arguments = raw.Arguments
+	if len(t.Arguments) == 0 && len(raw.Parameters) > 0 {
+		t.Arguments = raw.Parameters
+	}
+	return nil
+}
+
 // Normalize 清洗工具调用意图中的稳定字段。
 func (t *ToolCallIntent) Normalize() {
 	if t == nil {
@@ -191,6 +259,36 @@ func (t *ToolCallIntent) Validate() error {
 		return fmt.Errorf("tool_call.name 不能为空")
 	}
 	return nil
+}
+
+// decodeOptionalJSONObject 统一兼容“可选对象字段被模型写成空字符串”的情况。
+//
+// 步骤说明：
+// 1. 字段缺失、null、空字符串都视为“未填写”，返回 nil；
+// 2. 只有在确实出现对象内容时，才继续反序列化为目标结构；
+// 3. 若模型传入了非空字符串等不可恢复内容，显式报错，避免把脏数据静默吞掉。
+func decodeOptionalJSONObject[T any](raw json.RawMessage) (*T, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil, nil
+	}
+
+	if strings.HasPrefix(trimmed, "\"") {
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(text) == "" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("期望对象，实际收到非空字符串")
+	}
+
+	var out T
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // ExecuteEvidenceSource 表示“当前步骤完成证明”来自哪里。

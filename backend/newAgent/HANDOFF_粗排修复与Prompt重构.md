@@ -2,24 +2,27 @@
 
 以下内容可直接交给下一位助理继续做。
 
-本文档更新时间：2026-04-07
+本文档更新时间：2026-04-08
 
 ## 0. 当前结论先说清
 
-当前可以明确分成两段看：
+当前可以明确分成三段看：
 
-1. 第 1-2 阶段已经基本完成  
-   粗排链路已经打通，且“粗排异常 -> 正式 abort -> deliver 收口”这条后端协议已经补齐。
+1. 第 1-2 阶段已完成  
+   粗排链路和 `abort -> deliver` 正式终止协议已打通，真实链路已验证可跑。
 
-2. 第 3-4 阶段还没有做  
-   下游 `execute` 整体效果目前仍然很差，核心原因不是粗排本身，而是上下文过胖、提示词结构仍然混乱。  
-   所以现在**不能**用“整体排程效果”去评价第 1-2 阶段是否成功；必须先做第 3 阶段上下文瘦身，再看整体效果。
+2. 第 3 阶段第一版已落地  
+   `execute` 上下文已改成固定 4 消息结构，并接入当轮 ReAct 窗口压缩（按工具去重保留最新 observation）；  
+   工具结果在执行链路中已改为不截断，prompt 也已加硬约束（JSON、参数名、读写动作、重复读约束等）。
+
+3. 当前主矛盾已转移到“工具收敛能力”  
+   最新日志显示：不是上下文失控，而是工具输出对“何时停止微调”支持不足，导致模型持续 `list_tasks/find_first_free/move` 小步循环。
 
 一句话总结：
 
-- 现在粗排已经能跑通；
-- 但下游本来就基本跑不通；
-- 下一步应该直接做“上下文瘦身 + prompt 结构重构”，不要再继续围绕粗排补边角。
+- 粗排和执行框架已经能跑；
+- 上下文瘦身第一版已经到位；
+- 下一棒应优先改工具层的“冲突表达 + 候选位质量 + 结束判据”，而不是再回头补粗排。
 
 ---
 
@@ -628,3 +631,97 @@ go test ./conv ./newAgent/node ./newAgent/model ./newAgent/graph ./newAgent/tool
 ## 11. 一句话交给下一位助理
 
 第 1-2 阶段已经把“粗排接入”和“正式 abort 收口”打通了，粗排真实链路也已经跑通；现在不要再围绕粗排打补丁，直接进入第 3 阶段做 execute 上下文瘦身，再做第 4 阶段 prompt 三层重构，完成后再评估整体链路效果。
+
+---
+
+## 12. 2026-04-08 最新增量交接（以本节为准）
+
+> 本节优先级高于前文历史描述。接手时请先读本节，再看上文细节。
+
+### 12.1 本轮已完成的落地项
+
+1. execute 上下文结构已固定为 4 条消息：
+   - `message[0]`：固定 prompt（规则 + JSON 约束 + 工具简表）
+   - `message[1]`：历史上下文短摘要（聊天摘要 + 早期 ReAct 摘要）
+   - `message[2]`：当轮 ReAct Loop 窗口（thought/reason + tool_call + observation 绑定）
+   - `message[3]`：当前执行状态（初始目标、结束判断、非目标）
+
+2. 当轮 ReAct 压缩已接入：
+   - 窗口内同工具只保留最新 observation 原文；
+   - 被压缩旧结果替换为“当前工具调用结果过于久远，已经被删除。”
+
+3. execute 输出稳态增强：
+   - `continue / ask_user / confirm` 缺 `speak` 时会兜底回退 `reason`；
+   - 工具结果写入 history 前的截断已删除（不再自动裁到 3000 字符）。
+
+4. 工具能力已升级：
+   - `get_overview` 改为任务视角全量输出（课程仅占位统计，不展开课程明细）；
+   - 新增 `find_first_free`，`find_free` 保留兼容别名；
+   - `move / batch_move` 限定仅允许 `suggested`；
+   - `list_tasks` 增加输入约束（`status` 单值、`category` 不接受 task_class_ids 列表）。
+
+5. prompt 与文档同步：
+   - execute prompt 已切换到 `find_first_free` 表达；
+   - `SCHEDULE_TOOLS.md` 已同步 `get_overview / find_first_free / move/batch_move` 新语义；
+   - plan prompt 中读工具示例也已从 `find_free` 更新为 `find_first_free`。
+
+### 12.2 最新日志结论（关键）
+
+本轮问题已不是“上下文塞不下”，而是“工具不利于收敛”：
+
+1. `find_first_free` 当前策略过于贪心  
+   只返回最早可用位，模型会持续把任务向前挪，容易出现“局部改善但全局不收口”的微调循环。
+
+2. `query_range` 把“可嵌入共存”和“硬冲突”混合输出  
+   模型会把可嵌入并存也当成冲突，导致不必要移动。
+
+3. 缺少“完成判据工具”  
+   当前只有读写事实工具，没有明确“是否可结束”的评估口径，模型自然倾向继续优化。
+
+4. 写工具冲突口径存在潜在不一致  
+   `findConflict` 对 `CanEmbed` 的处理与 `findEmbedHost` 的可嵌入约束并非同一套判据，后续应统一。
+
+### 12.3 下一棒建议优先级（按顺序做）
+
+#### P0（必须先做）
+
+1. 新增评估类只读工具（建议名：`evaluate_balance`）  
+   返回最少三项：
+   - `hard_conflict_count`
+   - `load_variance`（或等价离散指标）
+   - `done_suggestion`（可结束/建议继续 + 原因）
+
+2. 改 `find_first_free` 为“候选集”而非单点  
+   建议支持 `top_k`（默认 3）并返回每个候选的：
+   - 位置
+   - 目标日负载变化
+   - 是否涉及可嵌入
+
+3. 改 `query_range` 输出结构  
+   必须区分：
+   - `hard_conflict`
+   - `embeddable_overlap`
+   避免模型把可嵌入并存误判为硬冲突。
+
+#### P1（P0 后做）
+
+4. prompt 增加收敛指引  
+   明确要求模型在每次写操作后优先调用 `evaluate_balance`，满足条件就 `done`，避免“无限微调”。
+
+### 12.4 接手后的最小验证清单
+
+1. 跑一轮真实 execute，确认不会长时间卡在 `list_tasks/find_first_free/move` 循环。
+2. 确认 `query_range` 可区分硬冲突与可嵌入并存。
+3. 确认 `evaluate_balance` 能触发 `done` 收口。
+4. 每次 `go test` 后清理项目根目录 `.gocache`。
+
+### 12.5 关键文件（本轮增量相关）
+
+- `backend/newAgent/prompt/execute_context.go`
+- `backend/newAgent/prompt/execute.go`
+- `backend/newAgent/prompt/plan.go`
+- `backend/newAgent/node/execute.go`
+- `backend/newAgent/tools/read_tools.go`
+- `backend/newAgent/tools/write_tools.go`
+- `backend/newAgent/tools/registry.go`
+- `backend/newAgent/tools/SCHEDULE_TOOLS.md`

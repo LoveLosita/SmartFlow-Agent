@@ -246,6 +246,10 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 	// 决策合法，重置连续修正计数。
 	flowState.ConsecutiveCorrections = 0
 
+	// speak 兜底：continue / ask_user / confirm 三类动作对前端可读文案是强依赖。
+	// 若模型漏填 speak，这里回退到 reason 或默认短句，避免前端出现“静默一轮”。
+	decision.Speak = buildExecuteSpeakWithFallback(decision)
+
 	// speak 后处理：补列表序号换行 + 末尾加 \n 防止连续 speak 在前端粘连。
 	decision.Speak = normalizeSpeak(decision.Speak) // 末尾已含 \n
 
@@ -425,6 +429,42 @@ func resolveExecuteAskUserText(decision *newagentmodel.ExecuteDecision) string {
 	return "执行过程中遇到不确定的情况，需要向你确认。"
 }
 
+// buildExecuteSpeakWithFallback 统一为需要面向用户展示的动作补齐 speak 文案。
+//
+// 规则：
+// 1. continue / ask_user / confirm 缺 speak 时，优先回退到 reason；
+// 2. 若 reason 也为空，再按动作使用最短默认文案；
+// 3. next_plan / done / abort 不强制补 speak，避免影响终止与收口语义。
+func buildExecuteSpeakWithFallback(decision *newagentmodel.ExecuteDecision) string {
+	if decision == nil {
+		return ""
+	}
+
+	speak := strings.TrimSpace(decision.Speak)
+	if speak != "" {
+		return speak
+	}
+
+	switch decision.Action {
+	case newagentmodel.ExecuteActionContinue,
+		newagentmodel.ExecuteActionAskUser,
+		newagentmodel.ExecuteActionConfirm:
+		if reason := strings.TrimSpace(decision.Reason); reason != "" {
+			return reason
+		}
+		switch decision.Action {
+		case newagentmodel.ExecuteActionAskUser:
+			return "我还缺少一条关键信息，想先向你确认。"
+		case newagentmodel.ExecuteActionConfirm:
+			return "我先整理好这一步操作，等待你的确认。"
+		default:
+			return "我先继续这一步处理，马上给你结果。"
+		}
+	default:
+		return speak
+	}
+}
+
 // handleExecuteActionConfirm 处理 LLM 申报的写操作确认请求。
 //
 // 步骤：
@@ -565,12 +605,6 @@ func executeToolCall(
 		afterDigest,
 		flattenForLog(result),
 	)
-
-	// 2.5 截断过大的工具结果，防止上下文膨胀导致后续 LLM 调用返回空或超限。
-	const maxToolResultLen = 3000
-	if len(result) > maxToolResultLen {
-		result = result[:maxToolResultLen] + fmt.Sprintf("\n...(结果已截断，原始长度 %d 字符)", len(result))
-	}
 
 	// 3. 将工具调用和结果以合法的 assistant+tool 消息对追加到对话历史。
 	//

@@ -92,7 +92,7 @@ func Place(state *ScheduleState, taskID, day, slotStart int) string {
 // ==================== Move ====================
 
 // Move 将一个已落位任务移动到新位置。
-// taskID 允许是 suggested / existing，但不能是真实 pending。
+// taskID 仅允许 suggested；existing/pending 都不允许移动。
 func Move(state *ScheduleState, taskID, newDay, newSlotStart int) string {
 	// 1. 查找任务。
 	task := state.TaskByStateID(taskID)
@@ -101,8 +101,14 @@ func Move(state *ScheduleState, taskID, newDay, newSlotStart int) string {
 	}
 
 	// 2. 校验状态。
-	if IsPendingTask(*task) {
-		return fmt.Sprintf("移动失败：[%d]%s 当前为待安排状态，请使用 place 放置。", task.StateID, task.Name)
+	if !IsSuggestedTask(*task) {
+		// 2.1 pending 任务尚未落位，应通过 place 安排；
+		// 2.2 existing 任务属于已安排事实层，不允许在 execute 微调里直接 move；
+		// 2.3 仅 suggested 属于“本轮可微调建议落位”。
+		if IsPendingTask(*task) {
+			return fmt.Sprintf("移动失败：[%d]%s 当前为待安排状态，请使用 place 放置。", task.StateID, task.Name)
+		}
+		return fmt.Sprintf("移动失败：[%d]%s 当前为已安排（existing）任务，不允许 move；仅 suggested 任务可移动。", task.StateID, task.Name)
 	}
 
 	// 3. 校验锁定。
@@ -248,6 +254,7 @@ func Swap(state *ScheduleState, taskAID, taskBID int) string {
 // ==================== BatchMove ====================
 
 // BatchMove 原子性地批量移动多个任务。
+// moves 中每个 task_id 都必须是 suggested；existing/pending 任一命中都会整批失败。
 // 全部成功才生效，任一失败则完全回滚。
 func BatchMove(state *ScheduleState, moves []MoveRequest) string {
 	if len(moves) == 0 {
@@ -260,8 +267,14 @@ func BatchMove(state *ScheduleState, moves []MoveRequest) string {
 		if task == nil {
 			return fmt.Sprintf("批量移动失败，全部回滚，无任何变更。\n任务ID %d 不存在（第%d条移动请求）。", m.TaskID, i+1)
 		}
-		if IsPendingTask(*task) {
-			return fmt.Sprintf("批量移动失败，全部回滚，无任何变更。\n[%d]%s 当前为待安排状态，请使用 place（第%d条移动请求）。",
+		if !IsSuggestedTask(*task) {
+			// 1.1 保持与 Move 一致：批量移动仅允许 suggested；
+			// 1.2 pending / existing 任一命中都应整批失败并回滚。
+			if IsPendingTask(*task) {
+				return fmt.Sprintf("批量移动失败，全部回滚，无任何变更。\n[%d]%s 当前为待安排状态，请使用 place（第%d条移动请求）。",
+					task.StateID, task.Name, i+1)
+			}
+			return fmt.Sprintf("批量移动失败，全部回滚，无任何变更。\n[%d]%s 当前为已安排（existing）任务，不允许 move；仅 suggested 任务可移动（第%d条移动请求）。",
 				task.StateID, task.Name, i+1)
 		}
 		if err := checkLocked(*task); err != nil {

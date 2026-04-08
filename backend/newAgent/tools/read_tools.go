@@ -13,12 +13,16 @@ import (
 //   - 只报当前真实状态，不做建议/推荐/假设
 //   - 不暴露 source、source_id、event_type 内部字段
 
-// GetOverview 获取规划窗口的粗粒度总览，用于建立全局感知。
-// 无参数，返回整个窗口的占用统计 + 每日概况 + 可嵌入时段 + 待安排任务。
+// GetOverview 获取规划窗口总览（任务视角，全量）。
+//
+// 设计约束：
+// 1. 日内“总占用”保留课程占位影响，避免 LLM 误判可用空间；
+// 2. 明细层不展开课程列表，只展开任务（非课程）清单；
+// 3. 当前按“窗口不超过 30 天”场景直接全量返回，不做结果截断。
 func GetOverview(state *ScheduleState) string {
 	totalSlots := state.Window.TotalDays * 12
 
-	// 1. 统计总占用时段数（排除嵌入任务，嵌入与宿主共享时段）。
+	// 1. 统计总占用（含课程占位）与空闲。
 	totalOccupied := 0
 	for i := range state.Tasks {
 		t := &state.Tasks[i]
@@ -31,80 +35,47 @@ func GetOverview(state *ScheduleState) string {
 	}
 	totalFree := totalSlots - totalOccupied
 
-	// 2. 统计任务状态分布。
-	existingCount := 0
-	suggestedCount := 0
-	pendingCount := 0
+	// 2. 统计“任务视角”状态分布，并单独统计课程条目数。
+	taskExistingCount := 0
+	taskSuggestedCount := 0
+	taskPendingCount := 0
+	courseExistingCount := 0
 	for i := range state.Tasks {
 		task := state.Tasks[i]
+		if isCourseScheduleTask(task) {
+			if IsExistingTask(task) {
+				courseExistingCount++
+			}
+			continue
+		}
 		switch {
 		case IsPendingTask(task):
-			pendingCount++
+			taskPendingCount++
 		case IsSuggestedTask(task):
-			suggestedCount++
+			taskSuggestedCount++
 		case IsExistingTask(task):
-			existingCount++
+			taskExistingCount++
 		}
 	}
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("规划窗口共%d天，每天12个时段，总计%d个时段。\n", state.Window.TotalDays, totalSlots))
-	sb.WriteString(fmt.Sprintf("当前已占用%d个，空闲%d个。已确定任务%d个，已预排任务%d个，待安排任务%d个。\n", totalOccupied, totalFree, existingCount, suggestedCount, pendingCount))
+	sb.WriteString(fmt.Sprintf(
+		"当前已占用%d个，空闲%d个。课程占位条目%d个（仅用于占位统计）；任务条目：已安排(existing)%d个、已预排(suggested)%d个、待安排(pending)%d个。\n",
+		totalOccupied, totalFree, courseExistingCount, taskExistingCount, taskSuggestedCount, taskPendingCount,
+	))
 
-	// 3. 逐天概况。
+	// 3. 逐天总览：保留课程占位计数，但只展示任务明细。
 	sb.WriteString("\n每日概况：\n")
 	for day := 1; day <= state.Window.TotalDays; day++ {
-		sb.WriteString(buildOverviewDayLine(state, day) + "\n")
+		sb.WriteString(buildTaskOnlyOverviewDayLine(state, day) + "\n")
 	}
 
-	// 4. 可嵌入时段汇总（单独列出，方便 LLM 快速定位）。
-	embeddable := getEmbeddableTasks(state)
-	if len(embeddable) > 0 {
-		sb.WriteString("\n可嵌入时段：")
-		parts := make([]string, 0, len(embeddable))
-		for _, t := range embeddable {
-			for _, slot := range t.Slots {
-				label := formatTaskLabel(*t)
-				embedStatus := "当前无嵌入任务"
-				if t.EmbeddedBy != nil {
-					guest := state.TaskByStateID(*t.EmbeddedBy)
-					if guest != nil {
-						embedStatus = fmt.Sprintf("已嵌入[%d]%s", guest.StateID, guest.Name)
-					}
-				}
-				parts = append(parts, fmt.Sprintf("第%d天 %s(%s)", slot.Day, label, embedStatus))
-			}
-		}
-		sb.WriteString(strings.Join(parts, "；") + "\n")
-	}
+	// 4. 任务清单全量展开（不截断）。
+	sb.WriteString("\n任务清单（全量，已过滤课程）：\n")
+	sb.WriteString(buildTaskOnlyOverviewList(state))
 
-	// 5. 已预排任务汇总。
-	if suggestedCount > 0 {
-		sb.WriteString("已预排：")
-		suggestedParts := make([]string, 0, suggestedCount)
-		for i := range state.Tasks {
-			t := &state.Tasks[i]
-			if IsSuggestedTask(*t) {
-				suggestedParts = append(suggestedParts, fmt.Sprintf("[%d]%s(%s)", t.StateID, t.Name, formatTaskSlotsBrief(t.Slots)))
-			}
-		}
-		sb.WriteString(strings.Join(suggestedParts, " ") + "\n")
-	}
-
-	// 6. 待安排任务汇总。
-	if pendingCount > 0 {
-		sb.WriteString("待安排：")
-		pendingParts := make([]string, 0, pendingCount)
-		for i := range state.Tasks {
-			t := &state.Tasks[i]
-			if IsPendingTask(*t) {
-				pendingParts = append(pendingParts, fmt.Sprintf("[%d]%s(需%d时段)", t.StateID, t.Name, t.Duration))
-			}
-		}
-		sb.WriteString(strings.Join(pendingParts, " ") + "\n")
-	}
-
-	// 7. 任务类约束（排课策略与限制）。
+	// 5. 任务类约束（排课策略与限制）。
 	if len(state.TaskClasses) > 0 {
 		sb.WriteString("\n任务类约束（排课时请遵守）：\n")
 		for _, tc := range state.TaskClasses {
@@ -226,12 +197,16 @@ func queryRangeSpecific(state *ScheduleState, day, startSlot, endSlot int) strin
 	return sb.String()
 }
 
-// FindFree 查找满足指定连续时段长度的空闲位置。
-// duration 必填，day 选填（nil 表示搜索全部天）。
-// 返回所有 >= duration 的空闲连续区间 + 可嵌入位置。
-func FindFree(state *ScheduleState, duration int, day *int) string {
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("满足%d个连续空闲时段的位置：\n\n", duration))
+// FindFirstFree 查找首个可用空位，并返回该日详细信息。
+//
+// 说明：
+// 1. 参数与旧 find_free 保持一致（duration/day）；
+// 2. 返回“首个命中候选位 + 当日负载明细”，供 LLM 直接决策；
+// 3. 当前阶段按用户要求全量返回，不做文本截断。
+func FindFirstFree(state *ScheduleState, duration int, day *int) string {
+	if duration <= 0 {
+		return "查询失败：duration 必须大于 0。"
+	}
 
 	// 1. 确定搜索范围。
 	days := make([]int, 0)
@@ -246,46 +221,260 @@ func FindFree(state *ScheduleState, duration int, day *int) string {
 		}
 	}
 
-	// 2. 逐天查找满足条件的空闲区间。
-	found := 0
+	// 2. 按天从前往后寻找“首个可直接放置”的空位。
 	for _, d := range days {
 		freeRanges := findFreeRangesOnDay(state, d)
 		for _, r := range freeRanges {
 			rDur := r.slotEnd - r.slotStart + 1
-			if rDur >= duration {
-				sb.WriteString(fmt.Sprintf("第%d天 第%s（%d时段连续空闲）\n", d, formatSlotRange(r.slotStart, r.slotEnd), rDur))
-				found++
+			if rDur < duration {
+				continue
 			}
+			slotStart := r.slotStart
+			slotEnd := r.slotStart + duration - 1
+			return buildFindFirstFreeReport(state, d, duration, slotStart, slotEnd, false, nil)
 		}
 	}
 
-	if found == 0 {
-		sb.WriteString("未找到满足条件的空闲时段。\n")
-	}
-
-	// 3. 可嵌入位置单独列出（水课时段，可叠加任务）。
-	embeddable := getEmbeddableTasks(state)
-	if len(embeddable) > 0 {
-		sb.WriteString("\n可嵌入位置（水课时段，可叠加任务）：\n")
-		for _, t := range embeddable {
-			for _, slot := range t.Slots {
-				// 检查是否在搜索范围内。
-				if day != nil && slot.Day != *day {
-					continue
-				}
-				embedStatus := "当前无嵌入任务"
-				if t.EmbeddedBy != nil {
-					guest := state.TaskByStateID(*t.EmbeddedBy)
-					if guest != nil {
-						embedStatus = fmt.Sprintf("已嵌入[%d]%s", guest.StateID, guest.Name)
-					}
-				}
-				sb.WriteString(fmt.Sprintf("第%d天 第%s（[%d]%s，%s）\n", slot.Day, formatSlotRange(slot.SlotStart, slot.SlotEnd), t.StateID, t.Name, embedStatus))
-			}
+	// 3. 若没有纯空位，再尝试首个可嵌入宿主时段。
+	for _, d := range days {
+		host, slotStart, slotEnd := findFirstEmbeddablePosition(state, d, duration)
+		if host != nil {
+			return buildFindFirstFreeReport(state, d, duration, slotStart, slotEnd, true, host)
 		}
 	}
 
+	// 4. 无可用位置时返回摘要，辅助 LLM 判断是否需要换天或降时长。
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("未找到满足%d个连续时段的可用位置。\n", duration))
+	sb.WriteString("各天最大连续空闲区（前10天）：\n")
+	limit := 10
+	if len(days) < limit {
+		limit = len(days)
+	}
+	for i := 0; i < limit; i++ {
+		d := days[i]
+		freeRanges := findFreeRangesOnDay(state, d)
+		maxDur := 0
+		for _, r := range freeRanges {
+			dur := r.slotEnd - r.slotStart + 1
+			if dur > maxDur {
+				maxDur = dur
+			}
+		}
+		sb.WriteString(fmt.Sprintf("第%d天：最大连续空闲%d节\n", d, maxDur))
+	}
 	return sb.String()
+}
+
+// FindFree 是 find_first_free 的兼容别名。
+// 保留该入口可避免旧提示词和历史轨迹中的工具名失效。
+func FindFree(state *ScheduleState, duration int, day *int) string {
+	return FindFirstFree(state, duration, day)
+}
+
+// buildFindFirstFreeReport 构造首个可用位的详细报告。
+func buildFindFirstFreeReport(
+	state *ScheduleState,
+	day int,
+	duration int,
+	slotStart int,
+	slotEnd int,
+	isEmbedded bool,
+	host *ScheduleTask,
+) string {
+	var sb strings.Builder
+	if isEmbedded && host != nil {
+		sb.WriteString(fmt.Sprintf("首个可用位置：第%d天第%s（可嵌入宿主 [%d]%s）。\n",
+			day, formatSlotRange(slotStart, slotEnd), host.StateID, host.Name))
+	} else {
+		sb.WriteString(fmt.Sprintf("首个可用位置：第%d天第%s（可直接放置）。\n", day, formatSlotRange(slotStart, slotEnd)))
+	}
+	sb.WriteString(fmt.Sprintf("匹配条件：需要%d个连续时段。\n", duration))
+
+	dayTotalOccupied := countDayOccupied(state, day)
+	dayTaskOccupied := countDayTaskOccupied(state, day)
+	dayCourseOccupied := dayTotalOccupied - dayTaskOccupied
+	sb.WriteString(fmt.Sprintf("当日负载：总占%d/12（课程占%d/12，任务占%d/12）。\n", dayTotalOccupied, dayCourseOccupied, dayTaskOccupied))
+
+	sb.WriteString("当日任务明细（全量，已过滤课程）：\n")
+	taskEntries := collectTaskEntriesOnDay(state, day)
+	if len(taskEntries) == 0 {
+		sb.WriteString("  无任务明细。\n")
+	} else {
+		for _, td := range taskEntries {
+			sb.WriteString(fmt.Sprintf("  - [%d]%s | 状态:%s | 类别:%s | 时段:%s\n",
+				td.task.StateID, td.task.Name, taskStatusLabel(*td.task), td.task.Category, formatSlotRange(td.slotStart, td.slotEnd)))
+		}
+	}
+
+	sb.WriteString("当日连续空闲区：\n")
+	freeRanges := findFreeRangesOnDay(state, day)
+	if len(freeRanges) == 0 {
+		sb.WriteString("  无连续空闲区。\n")
+	} else {
+		for _, r := range freeRanges {
+			sb.WriteString("  - " + buildFreeRangeLine(r) + "\n")
+		}
+	}
+	return sb.String()
+}
+
+// isCourseScheduleTask 判断任务是否属于“课程占位”。
+// 用于 get_overview 的任务视角过滤：课程只参与占位统计，不参与任务明细展开。
+func isCourseScheduleTask(task ScheduleTask) bool {
+	if task.Source != "event" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(task.EventType), "course") {
+		return true
+	}
+	return strings.TrimSpace(task.Category) == "课程"
+}
+
+// taskStatusLabel 返回任务状态标签（existing/suggested/pending）。
+func taskStatusLabel(task ScheduleTask) string {
+	switch {
+	case IsPendingTask(task):
+		return "pending"
+	case IsSuggestedTask(task):
+		return "suggested"
+	default:
+		return "existing"
+	}
+}
+
+// collectTaskEntriesOnDay 收集某天的“任务视角”明细（过滤课程）。
+func collectTaskEntriesOnDay(state *ScheduleState, day int) []taskOnDay {
+	all := getTasksOnDay(state, day)
+	result := make([]taskOnDay, 0, len(all))
+	for _, item := range all {
+		if item.task == nil {
+			continue
+		}
+		if isCourseScheduleTask(*item.task) {
+			continue
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+// countDayTaskOccupied 统计某天任务（过滤课程）的占用时段数。
+func countDayTaskOccupied(state *ScheduleState, day int) int {
+	occupied := 0
+	for i := range state.Tasks {
+		t := state.Tasks[i]
+		if isCourseScheduleTask(t) {
+			continue
+		}
+		if t.EmbedHost != nil {
+			continue // 嵌入任务不重复计占用
+		}
+		for _, slot := range t.Slots {
+			if slot.Day == day {
+				occupied += slot.SlotEnd - slot.SlotStart + 1
+			}
+		}
+	}
+	return occupied
+}
+
+// buildTaskOnlyOverviewDayLine 生成某天“课程占位 + 任务明细”的摘要行。
+func buildTaskOnlyOverviewDayLine(state *ScheduleState, day int) string {
+	totalOccupied := countDayOccupied(state, day)
+	taskOccupied := countDayTaskOccupied(state, day)
+	courseOccupied := totalOccupied - taskOccupied
+	taskEntries := collectTaskEntriesOnDay(state, day)
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("第%d天：总占%d/12（课程占%d/12，任务占%d/12）", day, totalOccupied, courseOccupied, taskOccupied))
+	if len(taskEntries) == 0 {
+		sb.WriteString(" — 任务：无")
+		return sb.String()
+	}
+
+	sb.WriteString(" — 任务：")
+	for i, item := range taskEntries {
+		if i > 0 {
+			sb.WriteString(" ")
+		}
+		sb.WriteString(fmt.Sprintf("[%d]%s(%s,%s)",
+			item.task.StateID,
+			item.task.Name,
+			taskStatusLabel(*item.task),
+			formatSlotRange(item.slotStart, item.slotEnd),
+		))
+	}
+	return sb.String()
+}
+
+// buildTaskOnlyOverviewList 输出“全量任务清单”（过滤课程）。
+func buildTaskOnlyOverviewList(state *ScheduleState) string {
+	tasks := make([]ScheduleTask, 0, len(state.Tasks))
+	for i := range state.Tasks {
+		task := state.Tasks[i]
+		if isCourseScheduleTask(task) {
+			continue
+		}
+		tasks = append(tasks, task)
+	}
+	if len(tasks) == 0 {
+		return "无任务条目。\n"
+	}
+	sort.Slice(tasks, func(i, j int) bool { return tasks[i].StateID < tasks[j].StateID })
+
+	var sb strings.Builder
+	for _, t := range tasks {
+		classID := ""
+		if t.TaskClassID > 0 {
+			classID = fmt.Sprintf(" | task_class_id:%d", t.TaskClassID)
+		}
+		if IsPendingTask(t) {
+			sb.WriteString(fmt.Sprintf("[%d]%s | 状态:%s | 类别:%s%s | 需%d个连续时段\n",
+				t.StateID, t.Name, taskStatusLabel(t), t.Category, classID, t.Duration))
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("[%d]%s | 状态:%s | 类别:%s%s | 时段:%s\n",
+			t.StateID, t.Name, taskStatusLabel(t), t.Category, classID, formatTaskSlotsBrief(t.Slots)))
+	}
+	return sb.String()
+}
+
+// findFirstEmbeddablePosition 查找某天首个可嵌入位置。
+func findFirstEmbeddablePosition(state *ScheduleState, day, duration int) (*ScheduleTask, int, int) {
+	type candidate struct {
+		task      *ScheduleTask
+		slotStart int
+		slotEnd   int
+	}
+	candidates := make([]candidate, 0)
+
+	for _, host := range getEmbeddableTasks(state) {
+		if host == nil || host.EmbeddedBy != nil {
+			continue
+		}
+		for _, slot := range host.Slots {
+			if slot.Day != day {
+				continue
+			}
+			span := slot.SlotEnd - slot.SlotStart + 1
+			if span < duration {
+				continue
+			}
+			candidates = append(candidates, candidate{
+				task:      host,
+				slotStart: slot.SlotStart,
+				slotEnd:   slot.SlotStart + duration - 1,
+			})
+		}
+	}
+
+	if len(candidates) == 0 {
+		return nil, 0, 0
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].slotStart < candidates[j].slotStart })
+	best := candidates[0]
+	return best.task, best.slotStart, best.slotEnd
 }
 
 // ListTasks 列出任务清单，可按类别和状态过滤。
@@ -297,13 +486,25 @@ func ListTasks(state *ScheduleState, category, status *string) string {
 	if status != nil {
 		statusFilter = *status
 	}
+	statusFilter = strings.ToLower(strings.TrimSpace(statusFilter))
+	if statusFilter == "" {
+		statusFilter = "all"
+	}
+	if err := validateListTasksStatus(statusFilter); err != nil {
+		return fmt.Sprintf("查询失败：%s", err.Error())
+	}
+	categoryFilter := ""
+	if category != nil {
+		categoryFilter = strings.TrimSpace(*category)
+	}
+	hasCategoryFilter := categoryFilter != ""
 
 	// 2. 过滤 + 分组。
 	var existingTasks, suggestedTasks, pendingTasks []ScheduleTask
 	for i := range state.Tasks {
 		t := state.Tasks[i]
 		// 类别过滤。
-		if category != nil && t.Category != *category {
+		if hasCategoryFilter && t.Category != categoryFilter {
 			continue
 		}
 
@@ -333,38 +534,117 @@ func ListTasks(state *ScheduleState, category, status *string) string {
 
 	// 4. 纯待安排模式：只输出待安排任务。
 	if statusFilter == "pending" {
+		if len(pendingTasks) == 0 {
+			return formatListTasksEmptyResult(statusFilter, categoryFilter)
+		}
 		return formatPendingList(pendingTasks)
 	}
 
 	// 5. 纯已预排模式：只输出已预排任务。
 	if statusFilter == "suggested" {
+		if len(suggestedTasks) == 0 {
+			return formatListTasksEmptyResult(statusFilter, categoryFilter)
+		}
 		return formatSuggestedList(suggestedTasks)
 	}
 
 	// 6. 纯已安排模式：只输出已安排任务。
 	if statusFilter == "existing" {
+		if len(existingTasks) == 0 {
+			return formatListTasksEmptyResult(statusFilter, categoryFilter)
+		}
 		return formatExistingList(existingTasks)
 	}
 
 	// 7. 全部模式：统计 + 分组输出。
 	total := len(existingTasks) + len(suggestedTasks) + len(pendingTasks)
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("共%d个任务，已安排%d个，已预排%d个，待安排%d个。\n", total, len(existingTasks), len(suggestedTasks), len(pendingTasks)))
+	sb.WriteString(fmt.Sprintf("共%d个任务，已安排(existing)%d个，已预排(suggested)%d个，待安排(pending)%d个。\n", total, len(existingTasks), len(suggestedTasks), len(pendingTasks)))
 
 	if len(existingTasks) > 0 {
-		sb.WriteString("\n已安排：\n")
+		sb.WriteString("\n已安排(existing)：\n")
 		sb.WriteString(formatExistingList(existingTasks))
 	}
 	if len(suggestedTasks) > 0 {
-		sb.WriteString("\n已预排：\n")
+		sb.WriteString("\n已预排(suggested)：\n")
 		sb.WriteString(formatSuggestedList(suggestedTasks))
 	}
 	if len(pendingTasks) > 0 {
-		sb.WriteString("\n待安排：\n")
+		sb.WriteString("\n待安排(pending)：\n")
 		sb.WriteString(formatPendingList(pendingTasks))
 	}
 
 	return sb.String()
+}
+
+// formatListTasksEmptyResult 统一构造 list_tasks 空结果文案。
+//
+// 设计意图：
+// 1. 明确告诉模型“为什么为空”，避免把空字符串误解为工具异常或上下文缺失；
+// 2. 对常见误用 category=ID 列表给出直接纠偏提示，减少死循环重试。
+func formatListTasksEmptyResult(statusFilter, categoryFilter string) string {
+	statusLabel := map[string]string{
+		"all":       "任意状态",
+		"existing":  "已安排(existing)",
+		"suggested": "已预排(suggested)",
+		"pending":   "待安排(pending)",
+	}
+	target := statusLabel[statusFilter]
+	if target == "" {
+		target = statusFilter
+	}
+
+	if strings.TrimSpace(categoryFilter) == "" {
+		return fmt.Sprintf("查询结果为空：当前没有%s任务。", target)
+	}
+	if looksLikeTaskClassIDList(categoryFilter) {
+		return fmt.Sprintf("查询结果为空：category=%q 未匹配到任务。category 参数按任务类名称匹配，不支持 task_class_ids 列表。", categoryFilter)
+	}
+	return fmt.Sprintf("查询结果为空：category=%q 下没有%s任务。", categoryFilter, target)
+}
+
+// looksLikeTaskClassIDList 判断 category 文本是否像“逗号分隔的数字 ID 列表”。
+func looksLikeTaskClassIDList(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	parts := strings.Split(value, ",")
+	if len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// validateListTasksStatus 校验 list_tasks.status 的输入值。
+//
+// 职责边界：
+// 1. 负责拦截非法 status，避免“静默返回 0 条”误导模型；
+// 2. 不负责自动拆分或容错纠偏（如 existing,suggested），统一要求调用方改成合法单值。
+func validateListTasksStatus(status string) error {
+	// 1. status 已在调用方归一化为小写并去空格。
+	// 2. 合法值仅允许 all / existing / suggested / pending。
+	switch status {
+	case "all", "existing", "suggested", "pending":
+		return nil
+	}
+
+	// 3. 对最常见误用给出明确修复建议，避免模型继续循环错误调用。
+	if strings.Contains(status, ",") {
+		return fmt.Errorf("status 只支持单值 all/existing/suggested/pending，不支持 \"%s\"。如需同时查看 existing+suggested，请使用 all", status)
+	}
+	return fmt.Errorf("status=%q 非法，仅支持 all/existing/suggested/pending", status)
 }
 
 // GetTaskInfo 查询单个任务的详细信息。
@@ -380,13 +660,13 @@ func GetTaskInfo(state *ScheduleState, taskID int) string {
 	sb.WriteString(fmt.Sprintf("[%d]%s\n", task.StateID, task.Name))
 
 	// 1. 类别、状态、来源。
-	statusLabel := "已安排"
+	statusLabel := "已安排(existing)"
 	if IsPendingTask(*task) {
-		statusLabel = "待安排"
+		statusLabel = "待安排(pending)"
 	} else if IsSuggestedTask(*task) {
-		statusLabel = "已预排"
+		statusLabel = "已预排(suggested)"
 	} else if task.Locked {
-		statusLabel = "已安排（固定）"
+		statusLabel = "已安排(existing,固定)"
 	}
 	sb.WriteString(fmt.Sprintf("类别：%s | 状态：%s\n", task.Category, statusLabel))
 	sb.WriteString(fmt.Sprintf("来源：%s\n", formatSourceName(task.Source)))

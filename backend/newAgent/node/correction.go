@@ -8,6 +8,11 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+const (
+	correctionHistoryKindKey            = "newagent_history_kind"
+	correctionHistoryKindCorrectionUser = "llm_correction_prompt"
+)
+
 // AppendLLMCorrection 追加 LLM 修正提示到对话历史。
 //
 // 设计目的：
@@ -56,6 +61,9 @@ func AppendLLMCorrection(
 	conversationContext.AppendHistory(&schema.Message{
 		Role:    schema.User,
 		Content: correctionContent,
+		Extra: map[string]any{
+			correctionHistoryKindKey: correctionHistoryKindCorrectionUser,
+		},
 	})
 }
 
@@ -96,5 +104,8 @@ func AppendLLMCorrectionWithHint(
 	conversationContext.AppendHistory(&schema.Message{
 		Role:    schema.User,
 		Content: correctionContent,
+		Extra: map[string]any{
+			correctionHistoryKindKey: correctionHistoryKindCorrectionUser,
+		},
 	})
 }

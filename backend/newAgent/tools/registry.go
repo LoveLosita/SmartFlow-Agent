@@ -97,13 +97,13 @@ var writeTools = map[string]bool{
 
 // ==================== 默认注册表 ====================
 
-// NewDefaultRegistry 创建包含全部 10 个日程工具的注册表。
+// NewDefaultRegistry 创建默认日程工具注册表。
 func NewDefaultRegistry() *ToolRegistry {
 	r := NewToolRegistry()
 
 	// --- 读工具 ---
 	r.Register("get_overview",
-		"获取规划窗口的粗粒度总览，包括每日占用、可嵌入时段和待安排任务。",
+		"获取规划窗口总览（任务视角，全量返回）：保留课程占位统计，展开任务清单（过滤课程明细）。",
 		`{"name":"get_overview","parameters":{}}`,
 		func(state *ScheduleState, args map[string]any) string {
 			return GetOverview(state)
@@ -122,20 +122,33 @@ func NewDefaultRegistry() *ToolRegistry {
 		},
 	)
 
+	r.Register("find_first_free",
+		"查找首个满足时长条件的可用位置，并返回该日详细负载信息。duration 必填，day 选填（不填按天顺序搜索）。",
+		`{"name":"find_first_free","parameters":{"duration":{"type":"int","required":true},"day":{"type":"int"}}}`,
+		func(state *ScheduleState, args map[string]any) string {
+			duration, ok := argsInt(args, "duration")
+			if !ok {
+				return "查询失败：缺少必填参数 duration。"
+			}
+			return FindFirstFree(state, duration, argsIntPtr(args, "day"))
+		},
+	)
+
+	// 兼容别名：保留 find_free，避免旧历史轨迹中的工具调用失效。
 	r.Register("find_free",
-		"查找满足指定连续时段长度的空闲位置。duration 必填，day 选填（不填搜全部天）。",
+		"兼容别名，行为同 find_first_free。",
 		`{"name":"find_free","parameters":{"duration":{"type":"int","required":true},"day":{"type":"int"}}}`,
 		func(state *ScheduleState, args map[string]any) string {
 			duration, ok := argsInt(args, "duration")
 			if !ok {
 				return "查询失败：缺少必填参数 duration。"
 			}
-			return FindFree(state, duration, argsIntPtr(args, "day"))
+			return FindFirstFree(state, duration, argsIntPtr(args, "day"))
 		},
 	)
 
 	r.Register("list_tasks",
-		"列出任务清单，可按类别和状态过滤。category 选填，status 选填（默认 all，支持 existing/suggested/pending）。",
+		"列出任务清单，可按类别和状态过滤。category 传任务类名称（非 ID 列表）可选，status 选填（默认 all，仅支持单值 all/existing/suggested/pending）。",
 		`{"name":"list_tasks","parameters":{"category":{"type":"string"},"status":{"type":"string","enum":["all","existing","suggested","pending"]}}}`,
 		func(state *ScheduleState, args map[string]any) string {
 			return ListTasks(state, argsStringPtr(args, "category"), argsStringPtr(args, "status"))
@@ -176,7 +189,7 @@ func NewDefaultRegistry() *ToolRegistry {
 	)
 
 	r.Register("move",
-		"将一个已落位任务（existing 或 suggested）移动到新位置。task_id/new_day/new_slot_start 必填。",
+		"将一个已预排任务（仅 suggested）移动到新位置。existing 属于已安排事实层，不参与 move。task_id/new_day/new_slot_start 必填。",
 		`{"name":"move","parameters":{"task_id":{"type":"int","required":true},"new_day":{"type":"int","required":true},"new_slot_start":{"type":"int","required":true}}}`,
 		func(state *ScheduleState, args map[string]any) string {
 			taskID, ok := argsInt(args, "task_id")
@@ -212,7 +225,7 @@ func NewDefaultRegistry() *ToolRegistry {
 	)
 
 	r.Register("batch_move",
-		"原子性批量移动多个任务，全部成功才生效。moves 数组必填。",
+		"原子性批量移动多个任务（仅 suggested），全部成功才生效。若含 existing/pending 将整批失败回滚。moves 数组必填。",
 		`{"name":"batch_move","parameters":{"moves":{"type":"array","required":true,"items":{"task_id":"int","new_day":"int","new_slot_start":"int"}}}}`,
 		func(state *ScheduleState, args map[string]any) string {
 			moves, err := argsMoveList(args)
