@@ -29,17 +29,29 @@ const chatRoutingSystemPrompt = `
 - plan：用户明确要求先制定计划，或涉及多阶段复杂规划。speak 写确认语。
 
 粗排判断：当用户意图包含"批量安排/排课/把任务类排进日程"，且上下文中有任务类 ID 时，设置 needs_rough_build=true。
+粗排后微调判断：
+- 仅当 needs_rough_build=true 时才判断 needs_refine_after_rough_build。
+- 若用户明确提出优化目标/偏好（如"尽量均衡""周三别太满""某门课往后挪"），设 needs_refine_after_rough_build=true。
+- 若用户只要求"先排进去/给初稿"，未提出微调目标，设 needs_refine_after_rough_build=false。
+顺序授权判断：
+- allow_reorder 仅在用户明确说明“允许打乱顺序/顺序不重要”时才为 true。
+- 用户明确要求“保持顺序/不要打乱”时必须为 false。
+- 若用户未明确提及顺序，一律为 false。
 
 输出协议（严格 JSON）：
-{"route":"direct_reply / execute / deep_answer / plan","speak":"给用户看的话","needs_rough_build":false,"reason":"简短判断依据"}
+{"route":"direct_reply / execute / deep_answer / plan","speak":"给用户看的话","needs_rough_build":false,"needs_refine_after_rough_build":false,"allow_reorder":false,"reason":"简短判断依据"}
 
 合法示例：
 
 {"route":"direct_reply","speak":"你好！我是 SmartFlow 助手，有什么可以帮你的？","reason":"用户打招呼"}
 
-{"route":"execute","speak":"好的，我来帮你看看今天的安排。","reason":"需要调用工具查询日程","needs_rough_build":false}
+{"route":"execute","speak":"好的，我来帮你看看今天的安排。","reason":"需要调用工具查询日程","needs_rough_build":false,"needs_refine_after_rough_build":false,"allow_reorder":false}
 
-{"route":"execute","speak":"好的，我来帮你排课。","reason":"批量排课需求，有任务类 ID","needs_rough_build":true}
+{"route":"execute","speak":"好的，我来帮你排课。","reason":"批量排课需求，有任务类 ID，未给微调偏好","needs_rough_build":true,"needs_refine_after_rough_build":false,"allow_reorder":false}
+
+{"route":"execute","speak":"好的，我来帮你排课并按你的偏好做微调。","reason":"批量排课需求，有任务类 ID，且给出明确微调偏好","needs_rough_build":true,"needs_refine_after_rough_build":true,"allow_reorder":false}
+
+{"route":"execute","speak":"好的，我按你的要求重排。","reason":"用户明确允许打乱顺序","needs_rough_build":false,"needs_refine_after_rough_build":false,"allow_reorder":true}
 
 {"route":"deep_answer","speak":"这是个好问题，让我仔细想想。","reason":"需要深度分析但不需要工具"}
 
@@ -65,6 +77,9 @@ func BuildChatRoutingUserPrompt(ctx *newagentmodel.ConversationContext, userInpu
 	var sb strings.Builder
 
 	sb.WriteString("请判断用户本轮意图的复杂度，并选择最合适的路由。\n")
+	sb.WriteString("若 route=execute 且 needs_rough_build=true，请同时判断 needs_refine_after_rough_build：")
+	sb.WriteString("只有用户明确提出微调目标时才为 true。\n")
+	sb.WriteString("请同时输出 allow_reorder：只有用户明确授权打乱顺序时才为 true，默认 false。\n")
 
 	// 注入任务类上下文（供粗排判断参考）。
 	if state != nil && len(state.TaskClassIDs) > 0 {

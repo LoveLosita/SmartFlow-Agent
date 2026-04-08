@@ -97,6 +97,19 @@ type CommonState struct {
 	// NeedsRoughBuild 由 Plan 节点在 plan_done 时写入，标记 Confirm 后是否需要走粗排节点。
 	// 粗排节点执行完毕后会将此字段重置为 false。
 	NeedsRoughBuild bool `json:"needs_rough_build,omitempty"`
+	// NeedsRefineAfterRoughBuild 表示“粗排完成后是否需要立即进入微调”。
+	//
+	// 说明：
+	// 1. 该标记主要用于 chat->execute 的直执行链路；
+	// 2. true 表示用户已明确提出优化偏好，粗排后继续进 execute 微调；
+	// 3. false 表示用户仅要求完成排入，粗排成功后可直接收口，等待后续再优化。
+	NeedsRefineAfterRoughBuild bool `json:"needs_refine_after_rough_build,omitempty"`
+	// AllowReorder 表示本轮是否允许打乱 suggested 任务的相对顺序。
+	// 默认 false，只有用户明确说明“可以打乱顺序/顺序不重要”才会为 true。
+	AllowReorder bool `json:"allow_reorder,omitempty"`
+	// SuggestedOrderBaseline 保存“本轮 execute 启动前”的 suggested 任务相对顺序基线。
+	// OrderGuard 节点会基于该基线判断微调是否破坏顺序约束。
+	SuggestedOrderBaseline []int `json:"suggested_order_baseline,omitempty"`
 
 	// TerminalOutcome 保存“本轮流程最终如何结束”的统一收口结果。
 	// 第二轮开始，rough_build / execute / deliver 都应围绕这份快照判断收口语义。
@@ -134,12 +147,16 @@ func (s *CommonState) FinishPlan(steps []PlanStep) {
 	s.PlanSteps = steps
 	s.CurrentStep = 0
 	s.Phase = PhaseWaitingConfirm
+	s.NeedsRefineAfterRoughBuild = false
+	s.SuggestedOrderBaseline = nil
 	s.ClearTerminalOutcome()
 }
 
 // ConfirmPlan 表示用户已确认计划，流程进入执行阶段。
 func (s *CommonState) ConfirmPlan() {
 	s.Phase = PhaseExecuting
+	s.NeedsRefineAfterRoughBuild = false
+	s.SuggestedOrderBaseline = nil
 	s.ClearTerminalOutcome()
 }
 
@@ -151,6 +168,9 @@ func (s *CommonState) StartDirectExecute() {
 	s.PlanSteps = nil
 	s.CurrentStep = 0
 	s.Phase = PhaseExecuting
+	s.NeedsRoughBuild = false
+	s.NeedsRefineAfterRoughBuild = false
+	s.SuggestedOrderBaseline = nil
 	s.ClearTerminalOutcome()
 }
 
@@ -159,6 +179,8 @@ func (s *CommonState) RejectPlan() {
 	s.PlanSteps = nil
 	s.CurrentStep = 0
 	s.Phase = PhasePlanning
+	s.NeedsRefineAfterRoughBuild = false
+	s.SuggestedOrderBaseline = nil
 	s.ClearTerminalOutcome()
 }
 

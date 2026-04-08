@@ -1,4 +1,4 @@
-# Handoff
+# Handoff（工具研究与运行态重置）
 
 以下内容可直接交给下一位助理继续做。
 
@@ -723,5 +723,92 @@ go test ./conv ./newAgent/node ./newAgent/model ./newAgent/graph ./newAgent/tool
 - `backend/newAgent/node/execute.go`
 - `backend/newAgent/tools/read_tools.go`
 - `backend/newAgent/tools/write_tools.go`
+- `backend/newAgent/tools/registry.go`
+- `backend/newAgent/tools/SCHEDULE_TOOLS.md`
+
+---
+
+## 13. 2026-04-08 下班前交接（本节优先级最高）
+
+> 下一棒主线已经明确：先研究工具收敛能力，再修“新一轮执行前必要参数重置”。
+
+### 13.1 本轮新增落地（已完成）
+
+1. 顺序约束链路已落地：
+   - 新增 `order_guard` 节点，并接入 graph 分支；
+   - 默认 `AllowReorder=false` 时，`PhaseDone(completed)` 会先走 `order_guard` 再 `deliver`；
+   - 用户明确允许打乱顺序时才放行。
+
+2. `min_context_switch` 工具已接入：
+   - 新增工具实现与注册；
+   - execute 层已加护栏：未授权打乱顺序时拒绝执行并返回明确 observation；
+   - prompt / 工具文档已同步“仅用户明确授权才可用”。
+
+3. `execute.go` 乱码坏块已修复：
+   - 清理了污染字符串、重复 if、结构异常；
+   - 该段目前为单一、可读、可编译分支。
+
+4. 当前分支编译验证通过：
+   - `go test ./newAgent/... ./logic/...` 已通过；
+   - 测试后已清理项目根目录 `.gocache`。
+
+### 13.2 已确认的两个“未完成关键点”
+
+#### A. msg2/msg3 语义尚未改到目标形态
+
+现状：
+- execute 仍是固定 4 消息骨架（`msg2=当轮 ReAct 窗口`，`msg3=执行状态锚点`）；
+- “当轮 ReAct 结束后降级为普通历史并走统一 token 裁剪”还没真正落地；
+- `ConversationContext.AppendHistory` 本身不做裁剪，统一裁剪链路也尚未接入。
+
+相关文件：
+- `backend/newAgent/prompt/execute_context.go`
+- `backend/newAgent/prompt/base.go`
+- `backend/newAgent/model/conversation_context.go`
+
+#### B. round 未在“新一轮开始”自动重置
+
+现状：
+- `RoundUsed` 只在 `NextRound()` 累加；
+- `StartDirectExecute()` 不会重置 `RoundUsed`；
+- 快照恢复会带回旧 `RoundUsed`，所以“对话已结束但 round 没清零”可复现。
+
+相关文件：
+- `backend/newAgent/model/common_state.go`
+- `backend/service/agentsvc/agent_newagent.go`
+
+### 13.3 下一步实施建议（按此顺序）
+
+#### P0：运行态重置（必须先做）
+
+目标：不丢运行态，不破坏连续对话；只重置执行期临时字段。
+
+1. 在 `CommonState` 新增 `ResetForNextRun()`（统一重置入口）：
+   - 需要重置：`RoundUsed`、`ConsecutiveCorrections`、`PlanSteps/CurrentStep`、`NeedsRoughBuild`、`NeedsRefineAfterRoughBuild`、`AllowReorder`、`SuggestedOrderBaseline`、`TerminalOutcome`。
+   - 不重置：`ConversationID`、`UserID`、历史对话、ScheduleState。
+
+2. 在 `Chat` 节点入口做主路径重置：
+   - 条件：`!HasPendingInteraction()` 且上一轮 `PhaseDone`；
+   - 目的：用户发起新轮请求时自动清执行期脏状态。
+
+3. 在冷加载恢复处做同样重置兜底：
+   - 位置：`loadOrCreateRuntimeState()`；
+   - 条件同上；
+   - 目的：覆盖断联恢复场景，避免旧 round 污染新轮。
+
+#### P1：工具收敛能力研究与改造
+
+延续 12.x 的结论，优先做：
+1. `evaluate_balance`（完成判据工具）
+2. `find_first_free` 从单点升级为候选集（`top_k`）
+3. `query_range` 明确区分 `hard_conflict` 与 `embeddable_overlap`
+
+### 13.4 本节涉及的关键文件
+
+- `backend/newAgent/model/common_state.go`
+- `backend/newAgent/node/chat.go`
+- `backend/service/agentsvc/agent_newagent.go`
+- `backend/newAgent/prompt/execute_context.go`
+- `backend/newAgent/tools/read_tools.go`
 - `backend/newAgent/tools/registry.go`
 - `backend/newAgent/tools/SCHEDULE_TOOLS.md`

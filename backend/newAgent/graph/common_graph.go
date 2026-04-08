@@ -17,6 +17,7 @@ const (
 	NodeConfirm    = "confirm"
 	NodeRoughBuild = "rough_build"
 	NodeExecute    = "execute"
+	NodeOrderGuard = "order_guard"
 	NodeInterrupt  = "interrupt"
 	NodeDeliver    = "deliver"
 )
@@ -49,6 +50,9 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 		return nil, err
 	}
 	if err := g.AddLambdaNode(NodeExecute, compose.InvokableLambda(nodes.Execute)); err != nil {
+		return nil, err
+	}
+	if err := g.AddLambdaNode(NodeOrderGuard, compose.InvokableLambda(nodes.OrderGuard)); err != nil {
 		return nil, err
 	}
 	if err := g.AddLambdaNode(NodeInterrupt, compose.InvokableLambda(nodes.Interrupt)); err != nil {
@@ -102,29 +106,36 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	)); err != nil {
 		return nil, err
 	}
-	// RoughBuild -> Execute / Deliver：
+	// RoughBuild -> Execute / OrderGuard / Deliver：
 	// 1. 正常粗排完成后进入 execute 微调；
-	// 2. 若粗排阶段已写入正式终止结果（如粗排异常 abort），则直接进入 deliver 收口。
+	// 2. 若粗排阶段 completed 且默认保持顺序，先走 order_guard 再交付；
+	// 3. 若粗排阶段已写入正式终止结果（如粗排异常 abort），则直接进入 deliver 收口。
 	if err := g.AddBranch(NodeRoughBuild, compose.NewGraphBranch(
 		branchAfterRoughBuild,
 		map[string]bool{
-			NodeExecute:   true,
-			NodeDeliver:   true,
-			NodeInterrupt: true,
+			NodeExecute:    true,
+			NodeOrderGuard: true,
+			NodeDeliver:    true,
+			NodeInterrupt:  true,
 		},
 	)); err != nil {
 		return nil, err
 	}
-	// Execute -> Execute(继续 ReAct) / Confirm(写操作待确认) / Deliver(完成) / Interrupt(需要追问用户)
+	// Execute -> Execute(继续 ReAct) / Confirm(写操作待确认) / OrderGuard(顺序守卫) / Deliver(完成) / Interrupt(需要追问用户)
 	if err := g.AddBranch(NodeExecute, compose.NewGraphBranch(
 		branchAfterExecute,
 		map[string]bool{
-			NodeExecute:   true,
-			NodeConfirm:   true,
-			NodeDeliver:   true,
-			NodeInterrupt: true,
+			NodeExecute:    true,
+			NodeConfirm:    true,
+			NodeOrderGuard: true,
+			NodeDeliver:    true,
+			NodeInterrupt:  true,
 		},
 	)); err != nil {
+		return nil, err
+	}
+	// OrderGuard -> Deliver：顺序守卫只做校验，最终都由 Deliver 统一收口。
+	if err := g.AddEdge(NodeOrderGuard, NodeDeliver); err != nil {
 		return nil, err
 	}
 	// Interrupt -> END：当前连接必须在这里收口，等待用户输入或确认回调恢复。
@@ -253,6 +264,9 @@ func branchAfterRoughBuild(_ context.Context, st *newagentmodel.AgentGraphState)
 		return NodeExecute, nil
 	}
 	if flowState.Phase == newagentmodel.PhaseDone {
+		if flowState.TerminalStatus() == newagentmodel.FlowTerminalStatusCompleted && !flowState.AllowReorder {
+			return NodeOrderGuard, nil
+		}
 		return NodeDeliver, nil
 	}
 	return NodeExecute, nil
@@ -280,6 +294,9 @@ func branchAfterExecute(_ context.Context, st *newagentmodel.AgentGraphState) (s
 	// 3. 若此处直接按 RoundUsed>=MaxRounds 跳 Deliver，会绕过 Execute 内的 Exhaust 写入，
 	//    导致 deliver 收口和后续预览落盘语义不一致。
 	if flowState.Phase == newagentmodel.PhaseDone {
+		if flowState.TerminalStatus() == newagentmodel.FlowTerminalStatusCompleted && !flowState.AllowReorder {
+			return NodeOrderGuard, nil
+		}
 		return NodeDeliver, nil
 	}
 	return NodeExecute, nil

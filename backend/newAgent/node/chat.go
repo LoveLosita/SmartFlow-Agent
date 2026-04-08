@@ -21,6 +21,14 @@ const (
 	chatSpeakBlockID  = "chat.speak"
 )
 
+type reorderPreference int
+
+const (
+	reorderUnknown reorderPreference = iota
+	reorderAllow
+	reorderDisallow
+)
+
 // ChatNodeInput 描述聊天节点单轮运行所需的最小依赖。
 //
 // 职责边界：
@@ -98,6 +106,7 @@ func RunChatNode(ctx context.Context, input ChatNodeInput) error {
 
 	log.Printf("[DEBUG] chat routing chat=%s route=%s reason=%s",
 		flowState.ConversationID, decision.Route, decision.Reason)
+	flowState.AllowReorder = resolveAllowReorder(input.UserInput, decision.AllowReorder)
 
 	// 3. 按路由决策推进。
 	switch decision.Route {
@@ -161,12 +170,87 @@ func handleRouteExecute(
 	// 清空旧 PlanSteps 并设 PhaseExecuting，避免上一次任务残留的步骤被 HasPlan() 误判。
 	flowState.StartDirectExecute()
 
-	// 安全兜底：只有真正持有 task_class_ids 时才开粗排。
+	// 1. 默认不走粗排与粗排后微调，避免沿用上轮遗留标记。
+	// 2. 只有 route 判定为“需要粗排”且确实有 task_class_ids 时，才打开粗排开关。
+	// 3. 粗排后是否立即进入微调，完全由路由决策显式标记控制。
+	flowState.NeedsRoughBuild = false
+	flowState.NeedsRefineAfterRoughBuild = false
 	if decision.NeedsRoughBuild && len(flowState.TaskClassIDs) > 0 {
 		flowState.NeedsRoughBuild = true
+		flowState.NeedsRefineAfterRoughBuild = decision.NeedsRefineAfterRoughBuild
 	}
 
 	return nil
+}
+
+// resolveAllowReorder 统一计算“本轮是否允许打乱顺序”。
+//
+// 步骤化说明：
+// 1. 后端先做显式语义判定：用户明确允许/明确禁止时，直接以后端判定为准；
+// 2. 若后端未识别到显式语义，再回退到路由模型的 allow_reorder 字段；
+// 3. 默认返回 false，确保“保持顺序”是系统默认行为。
+func resolveAllowReorder(userInput string, modelAllowReorder bool) bool {
+	switch detectReorderPreference(userInput) {
+	case reorderAllow:
+		return true
+	case reorderDisallow:
+		return false
+	default:
+		return modelAllowReorder
+	}
+}
+
+// detectReorderPreference 识别用户是否“明确授权打乱顺序”。
+//
+// 职责边界：
+// 1. 只负责关键词级别的显式意图识别，不做复杂语义推理；
+// 2. 若同时命中“允许”与“禁止”，优先按“禁止”处理，避免误放开顺序约束；
+// 3. 未命中显式表达时返回 unknown，交给上层兜底策略。
+func detectReorderPreference(userInput string) reorderPreference {
+	text := strings.ToLower(strings.TrimSpace(userInput))
+	if text == "" {
+		return reorderUnknown
+	}
+
+	disallowPhrases := []string{
+		"不要打乱顺序",
+		"不允许打乱顺序",
+		"保持顺序",
+		"顺序不变",
+		"按原顺序",
+		"不要乱序",
+		"别打乱",
+	}
+	if containsAnyPhrase(text, disallowPhrases) {
+		return reorderDisallow
+	}
+
+	allowPhrases := []string{
+		"可以打乱顺序",
+		"允许打乱顺序",
+		"顺序不重要",
+		"顺序无所谓",
+		"顺序不限",
+		"允许乱序",
+		"可以乱序",
+		"允许重排顺序",
+		"reorder is fine",
+		"any order",
+	}
+	if containsAnyPhrase(text, allowPhrases) {
+		return reorderAllow
+	}
+
+	return reorderUnknown
+}
+
+func containsAnyPhrase(text string, phrases []string) bool {
+	for _, phrase := range phrases {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // handleDeepAnswer 处理复杂问答：推送过渡语 → 原地开 thinking 再调一次 LLM → 输出深度回答。

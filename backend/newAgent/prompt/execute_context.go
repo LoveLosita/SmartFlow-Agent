@@ -174,6 +174,13 @@ func buildExecuteMessage3(state *newagentmodel.CommonState, ctx *newagentmodel.C
 	if hasExecuteRoughBuildDone(ctx) {
 		lines = append(lines, "- 阶段约束：粗排已完成，本轮只微调 suggested；existing 仅作已安排事实参考，不做 move/batch_move。")
 	}
+	if state != nil {
+		if state.AllowReorder {
+			lines = append(lines, "- 顺序策略：用户已明确允许打乱顺序，可在必要时使用 min_context_switch。")
+		} else {
+			lines = append(lines, "- 顺序策略：默认保持 suggested 相对顺序，禁止调用 min_context_switch。")
+		}
+	}
 
 	// 兼容上层传入的执行指令；若为空则使用固定收口指令。
 	instruction := strings.TrimSpace(runtimeUserPrompt)
@@ -236,8 +243,6 @@ func renderExecuteToolReturnHint(toolName string) (returnType string, sample str
 		return returnType, "[35]第一章随机事件与概率 | 状态：已预排(suggested) | 占用时段：第3天第5-6节"
 	case "find_first_free":
 		return returnType, "首个可用位置：第5天第1-2节（可直接放置）| 当日负载：总占6/12..."
-	case "find_free":
-		return returnType, "兼容别名，返回同 find_first_free。"
 	case "query_range":
 		return returnType, "第5天第3-6节：第3节空、第4节空..."
 	case "place":
@@ -248,6 +253,8 @@ func renderExecuteToolReturnHint(toolName string) (returnType string, sample str
 		return returnType, "交换完成：[35]... ↔ [36]..."
 	case "batch_move":
 		return returnType, "批量移动完成，2个任务全部成功。"
+	case "min_context_switch":
+		return returnType, "最少上下文切换重排完成：共处理 6 个任务，上下文切换次数 5 -> 2。"
 	case "unplace":
 		return returnType, "已将 [35]... 移除，恢复为待安排状态。"
 	default:

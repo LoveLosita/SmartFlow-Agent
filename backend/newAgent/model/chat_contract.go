@@ -28,12 +28,16 @@ const (
 // 1. Route 决定后续处理路径；
 // 2. Speak 始终填写：给用户看的话；
 // 3. NeedsRoughBuild 仅在 route=execute 且满足粗排条件时为 true；
-// 4. Reason 给后端和日志看。
+// 4. NeedsRefineAfterRoughBuild 仅在 needs_rough_build=true 时有效；
+// 5. AllowReorder 表示是否允许打乱 suggested 任务顺序，仅用户明确授权时应为 true；
+// 6. Reason 给后端和日志看。
 type ChatRoutingDecision struct {
-	Route           ChatRoute `json:"route"`
-	Speak           string    `json:"speak,omitempty"`
-	NeedsRoughBuild bool      `json:"needs_rough_build,omitempty"`
-	Reason          string    `json:"reason,omitempty"`
+	Route                      ChatRoute `json:"route"`
+	Speak                      string    `json:"speak,omitempty"`
+	NeedsRoughBuild            bool      `json:"needs_rough_build,omitempty"`
+	NeedsRefineAfterRoughBuild bool      `json:"needs_refine_after_rough_build,omitempty"`
+	AllowReorder               bool      `json:"allow_reorder,omitempty"`
+	Reason                     string    `json:"reason,omitempty"`
 }
 
 // Normalize 统一清洗路由决策中的字符串字段。
@@ -66,6 +70,17 @@ func (d *ChatRoutingDecision) Validate() error {
 	// direct_reply 必须有 speak。
 	if d.Route == ChatRouteDirectReply && d.Speak == "" {
 		return fmt.Errorf("direct_reply 必须携带 speak")
+	}
+
+	// 非 execute 路由不应携带粗排和粗排后微调标记，统一归一化为 false。
+	if d.Route != ChatRouteExecute {
+		d.NeedsRoughBuild = false
+		d.NeedsRefineAfterRoughBuild = false
+		d.AllowReorder = false
+	}
+	// 只有 needs_rough_build=true 时，needs_refine_after_rough_build 才有语义。
+	if !d.NeedsRoughBuild {
+		d.NeedsRefineAfterRoughBuild = false
 	}
 
 	return nil

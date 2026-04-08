@@ -229,6 +229,25 @@ func (n *AgentNodes) Execute(ctx context.Context, st *newagentmodel.AgentGraphSt
 	return st, nil
 }
 
+// OrderGuard 是顺序守卫阶段的正式节点方法。
+//
+// 职责边界：
+// 1. 只负责调用 RunOrderGuardNode 做 suggested 相对顺序校验；
+// 2. 不负责交付文案生成，校验结果统一交给 Deliver 节点收口；
+// 3. 节点执行后保存状态，保证异常中断后仍可复盘守卫结果。
+func (n *AgentNodes) OrderGuard(ctx context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
+	if st == nil {
+		return nil, errors.New("order_guard node: state is nil")
+	}
+
+	if err := RunOrderGuardNode(ctx, st); err != nil {
+		return nil, err
+	}
+
+	saveAgentState(ctx, st)
+	return st, nil
+}
+
 // Deliver 是交付阶段的正式节点方法。
 //
 // 职责边界：

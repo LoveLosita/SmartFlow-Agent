@@ -135,7 +135,7 @@ func QueryRange(state *ScheduleState, day int, slotStart, slotEnd *int) string {
 // 输出格式对齐 SCHEDULE_TOOLS.md 4.2 节示例。
 func queryRangeFullDay(state *ScheduleState, day int) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("第%d天 全天：\n\n", day))
+	sb.WriteString(fmt.Sprintf("%s 全天：\n\n", formatDayLabel(state, day)))
 
 	// 1. 按 6 个标准段输出（1-2, 3-4, 5-6, 7-8, 9-10, 11-12）。
 	for start := 1; start <= 11; start += 2 {
@@ -174,7 +174,7 @@ func queryRangeFullDay(state *ScheduleState, day int) string {
 // queryRangeSpecific 指定范围查询模式：逐节输出。
 func queryRangeSpecific(state *ScheduleState, day, startSlot, endSlot int) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("第%d天 第%s：\n\n", day, formatSlotRange(startSlot, endSlot)))
+	sb.WriteString(fmt.Sprintf("%s第%s：\n\n", formatDayLabel(state, day), formatSlotRange(startSlot, endSlot)))
 
 	total := endSlot - startSlot + 1
 	freeCount := 0
@@ -199,16 +199,26 @@ func queryRangeSpecific(state *ScheduleState, day, startSlot, endSlot int) strin
 
 // FindFirstFree 查找首个可用空位，并返回该日详细信息。
 //
+// 参数说明：
+// 1. duration 必填，表示需要的连续时段数；
+// 2. day 选填，指定单天搜索；
+// 3. dayStart/dayEnd 选填，指定按天范围搜索（闭区间）；
+// 4. day 与 dayStart/dayEnd 互斥，避免语义冲突。
+//
 // 说明：
-// 1. 参数与旧 find_free 保持一致（duration/day）；
-// 2. 返回“首个命中候选位 + 当日负载明细”，供 LLM 直接决策；
-// 3. 当前阶段按用户要求全量返回，不做文本截断。
-func FindFirstFree(state *ScheduleState, duration int, day *int) string {
+// 1. 返回“首个命中候选位 + 当日负载明细”，供 LLM 直接决策；
+// 2. 当前阶段按用户要求全量返回，不做文本截断。
+func FindFirstFree(state *ScheduleState, duration int, day, dayStart, dayEnd *int) string {
 	if duration <= 0 {
 		return "查询失败：duration 必须大于 0。"
 	}
 
-	// 1. 确定搜索范围。
+	// 1. 参数互斥校验：单天搜索与范围搜索只能二选一。
+	if day != nil && (dayStart != nil || dayEnd != nil) {
+		return "查询失败：day 与 day_start/day_end 不能同时传入。"
+	}
+
+	// 2. 确定搜索范围。
 	days := make([]int, 0)
 	if day != nil {
 		if *day < 1 || *day > state.Window.TotalDays {
@@ -216,12 +226,30 @@ func FindFirstFree(state *ScheduleState, duration int, day *int) string {
 		}
 		days = append(days, *day)
 	} else {
-		for d := 1; d <= state.Window.TotalDays; d++ {
+		startDay := 1
+		endDay := state.Window.TotalDays
+		if dayStart != nil {
+			startDay = *dayStart
+		}
+		if dayEnd != nil {
+			endDay = *dayEnd
+		}
+		if startDay < 1 || startDay > state.Window.TotalDays {
+			return fmt.Sprintf("查询失败：day_start=%d 不在规划窗口范围内（1-%d）。", startDay, state.Window.TotalDays)
+		}
+		if endDay < 1 || endDay > state.Window.TotalDays {
+			return fmt.Sprintf("查询失败：day_end=%d 不在规划窗口范围内（1-%d）。", endDay, state.Window.TotalDays)
+		}
+		if startDay > endDay {
+			return fmt.Sprintf("查询失败：day_start=%d 不能大于 day_end=%d。", startDay, endDay)
+		}
+
+		for d := startDay; d <= endDay; d++ {
 			days = append(days, d)
 		}
 	}
 
-	// 2. 按天从前往后寻找“首个可直接放置”的空位。
+	// 3. 按天从前往后寻找“首个可直接放置”的空位。
 	for _, d := range days {
 		freeRanges := findFreeRangesOnDay(state, d)
 		for _, r := range freeRanges {
@@ -235,7 +263,7 @@ func FindFirstFree(state *ScheduleState, duration int, day *int) string {
 		}
 	}
 
-	// 3. 若没有纯空位，再尝试首个可嵌入宿主时段。
+	// 4. 若没有纯空位，再尝试首个可嵌入宿主时段。
 	for _, d := range days {
 		host, slotStart, slotEnd := findFirstEmbeddablePosition(state, d, duration)
 		if host != nil {
@@ -243,7 +271,7 @@ func FindFirstFree(state *ScheduleState, duration int, day *int) string {
 		}
 	}
 
-	// 4. 无可用位置时返回摘要，辅助 LLM 判断是否需要换天或降时长。
+	// 5. 无可用位置时返回摘要，辅助 LLM 判断是否需要换天或降时长。
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("未找到满足%d个连续时段的可用位置。\n", duration))
 	sb.WriteString("各天最大连续空闲区（前10天）：\n")
@@ -261,15 +289,9 @@ func FindFirstFree(state *ScheduleState, duration int, day *int) string {
 				maxDur = dur
 			}
 		}
-		sb.WriteString(fmt.Sprintf("第%d天：最大连续空闲%d节\n", d, maxDur))
+		sb.WriteString(fmt.Sprintf("%s：最大连续空闲%d节\n", formatDayLabel(state, d), maxDur))
 	}
 	return sb.String()
-}
-
-// FindFree 是 find_first_free 的兼容别名。
-// 保留该入口可避免旧提示词和历史轨迹中的工具名失效。
-func FindFree(state *ScheduleState, duration int, day *int) string {
-	return FindFirstFree(state, duration, day)
 }
 
 // buildFindFirstFreeReport 构造首个可用位的详细报告。
@@ -284,10 +306,10 @@ func buildFindFirstFreeReport(
 ) string {
 	var sb strings.Builder
 	if isEmbedded && host != nil {
-		sb.WriteString(fmt.Sprintf("首个可用位置：第%d天第%s（可嵌入宿主 [%d]%s）。\n",
-			day, formatSlotRange(slotStart, slotEnd), host.StateID, host.Name))
+		sb.WriteString(fmt.Sprintf("首个可用位置：%s（可嵌入宿主 [%d]%s）。\n",
+			formatDaySlotLabel(state, day, slotStart, slotEnd), host.StateID, host.Name))
 	} else {
-		sb.WriteString(fmt.Sprintf("首个可用位置：第%d天第%s（可直接放置）。\n", day, formatSlotRange(slotStart, slotEnd)))
+		sb.WriteString(fmt.Sprintf("首个可用位置：%s（可直接放置）。\n", formatDaySlotLabel(state, day, slotStart, slotEnd)))
 	}
 	sb.WriteString(fmt.Sprintf("匹配条件：需要%d个连续时段。\n", duration))
 
@@ -313,7 +335,7 @@ func buildFindFirstFreeReport(
 		sb.WriteString("  无连续空闲区。\n")
 	} else {
 		for _, r := range freeRanges {
-			sb.WriteString("  - " + buildFreeRangeLine(r) + "\n")
+			sb.WriteString("  - " + buildFreeRangeLine(state, r) + "\n")
 		}
 	}
 	return sb.String()
@@ -385,9 +407,10 @@ func buildTaskOnlyOverviewDayLine(state *ScheduleState, day int) string {
 	taskOccupied := countDayTaskOccupied(state, day)
 	courseOccupied := totalOccupied - taskOccupied
 	taskEntries := collectTaskEntriesOnDay(state, day)
+	dayLabel := formatDayLabel(state, day)
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("第%d天：总占%d/12（课程占%d/12，任务占%d/12）", day, totalOccupied, courseOccupied, taskOccupied))
+	sb.WriteString(fmt.Sprintf("%s：总占%d/12（课程占%d/12，任务占%d/12）", dayLabel, totalOccupied, courseOccupied, taskOccupied))
 	if len(taskEntries) == 0 {
 		sb.WriteString(" — 任务：无")
 		return sb.String()
@@ -435,7 +458,7 @@ func buildTaskOnlyOverviewList(state *ScheduleState) string {
 			continue
 		}
 		sb.WriteString(fmt.Sprintf("[%d]%s | 状态:%s | 类别:%s%s | 时段:%s\n",
-			t.StateID, t.Name, taskStatusLabel(t), t.Category, classID, formatTaskSlotsBrief(t.Slots)))
+			t.StateID, t.Name, taskStatusLabel(t), t.Category, classID, formatTaskSlotsBriefWithState(state, t.Slots)))
 	}
 	return sb.String()
 }
@@ -545,7 +568,7 @@ func ListTasks(state *ScheduleState, category, status *string) string {
 		if len(suggestedTasks) == 0 {
 			return formatListTasksEmptyResult(statusFilter, categoryFilter)
 		}
-		return formatSuggestedList(suggestedTasks)
+		return formatSuggestedList(state, suggestedTasks)
 	}
 
 	// 6. 纯已安排模式：只输出已安排任务。
@@ -553,7 +576,7 @@ func ListTasks(state *ScheduleState, category, status *string) string {
 		if len(existingTasks) == 0 {
 			return formatListTasksEmptyResult(statusFilter, categoryFilter)
 		}
-		return formatExistingList(existingTasks)
+		return formatExistingList(state, existingTasks)
 	}
 
 	// 7. 全部模式：统计 + 分组输出。
@@ -563,11 +586,11 @@ func ListTasks(state *ScheduleState, category, status *string) string {
 
 	if len(existingTasks) > 0 {
 		sb.WriteString("\n已安排(existing)：\n")
-		sb.WriteString(formatExistingList(existingTasks))
+		sb.WriteString(formatExistingList(state, existingTasks))
 	}
 	if len(suggestedTasks) > 0 {
 		sb.WriteString("\n已预排(suggested)：\n")
-		sb.WriteString(formatSuggestedList(suggestedTasks))
+		sb.WriteString(formatSuggestedList(state, suggestedTasks))
 	}
 	if len(pendingTasks) > 0 {
 		sb.WriteString("\n待安排(pending)：\n")
@@ -680,7 +703,7 @@ func GetTaskInfo(state *ScheduleState, taskID int) string {
 	if len(task.Slots) > 0 {
 		sb.WriteString("占用时段：\n")
 		for _, slot := range task.Slots {
-			sb.WriteString(fmt.Sprintf("  第%d天 第%s\n", slot.Day, formatSlotRange(slot.SlotStart, slot.SlotEnd)))
+			sb.WriteString(fmt.Sprintf("  %s\n", formatDaySlotLabel(state, slot.Day, slot.SlotStart, slot.SlotEnd)))
 		}
 	}
 
@@ -778,14 +801,14 @@ func formatEmbedInfoForDay(state *ScheduleState, day int) string {
 
 // formatExistingList 格式化已安排任务列表。
 // 格式如：  [1]高等数学(课程,固定) — 第1天(1-2节) 第4天(1-2节)
-func formatExistingList(tasks []ScheduleTask) string {
+func formatExistingList(state *ScheduleState, tasks []ScheduleTask) string {
 	var sb strings.Builder
 	for _, t := range tasks {
 		label := formatTaskLabelWithCategory(t)
 		// 格式化所有时段位置。
 		slotParts := make([]string, 0, len(t.Slots))
 		for _, slot := range t.Slots {
-			slotParts = append(slotParts, fmt.Sprintf("第%d天(%s)", slot.Day, formatSlotRange(slot.SlotStart, slot.SlotEnd)))
+			slotParts = append(slotParts, fmt.Sprintf("%s(%s)", formatDayLabel(state, slot.Day), formatSlotRange(slot.SlotStart, slot.SlotEnd)))
 		}
 		sb.WriteString(fmt.Sprintf("  %s — %s\n", label, strings.Join(slotParts, " ")))
 	}
@@ -794,13 +817,13 @@ func formatExistingList(tasks []ScheduleTask) string {
 
 // formatSuggestedList 格式化已预排任务列表。
 // 格式如：[3]复习线代 — 已预排至 第2天第3-4节，类别：学习
-func formatSuggestedList(tasks []ScheduleTask) string {
+func formatSuggestedList(state *ScheduleState, tasks []ScheduleTask) string {
 	var sb strings.Builder
 	if len(tasks) > 0 {
 		sb.WriteString(fmt.Sprintf("已预排任务共%d个：\n\n", len(tasks)))
 	}
 	for _, t := range tasks {
-		sb.WriteString(fmt.Sprintf("[%d]%s — 已预排至 %s，类别：%s\n", t.StateID, t.Name, formatTaskSlotsBrief(t.Slots), t.Category))
+		sb.WriteString(fmt.Sprintf("[%d]%s — 已预排至 %s，类别：%s\n", t.StateID, t.Name, formatTaskSlotsBriefWithState(state, t.Slots), t.Category))
 	}
 	return sb.String()
 }

@@ -23,6 +23,7 @@ const (
 	executeStatusBlockID = "execute.status"
 	executeSpeakBlockID  = "execute.speak"
 	executePinnedKey     = "execution_context"
+	toolMinContextSwitch = "min_context_switch"
 
 	// maxConsecutiveCorrections 是 Execute 节点连续修正次数上限。
 	// 超过此阈值后终止执行，防止 LLM 陷入无限修正循环。
@@ -100,6 +101,14 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 	// 1.5. 确认执行分支：如果用户已确认写操作，直接执行工具。
 	if runtimeState.PendingConfirmTool != nil {
 		return executePendingTool(ctx, runtimeState, conversationContext, input.ToolRegistry, input.ScheduleState, input.SchedulePersistor, input.OriginalScheduleState, emitter)
+	}
+
+	// 1.6. 顺序守卫基线初始化：
+	// 1) 仅在未授权打乱顺序时记录 suggested 顺序基线；
+	// 2) 只在基线为空时初始化，避免执行循环中反复覆盖；
+	// 3) 后续由 order_guard 节点基于该基线做相对顺序校验。
+	if !flowState.AllowReorder && len(flowState.SuggestedOrderBaseline) == 0 {
+		flowState.SuggestedOrderBaseline = buildSuggestedOrderSnapshot(input.ScheduleState)
 	}
 
 	// 2. 推送执行阶段状态，让前端知道当前进度。
@@ -592,6 +601,54 @@ func executeToolCall(
 	}
 
 	// 2. 执行工具。
+	// 顺序护栏：未授权打乱顺序时，拒绝执行 min_context_switch，并写回工具观察结果。
+	if shouldBlockMinContextSwitch(flowState, toolName) {
+		blockedResult := "已拒绝执行 min_context_switch：当前未授权打乱顺序。如需使用该工具，请先由用户明确说明“允许打乱顺序”。"
+		log.Printf(
+			"[WARN] execute tool blocked chat=%s round=%d tool=%s allow_reorder=%v",
+			flowState.ConversationID,
+			flowState.RoundUsed,
+			toolName,
+			flowState.AllowReorder,
+		)
+		_ = emitter.EmitStatus(
+			executeStatusBlockID,
+			executeStageName,
+			"tool_blocked",
+			blockedResult,
+			false,
+		)
+
+		toolCallID := uuid.NewString()
+		argsJSON := "{}"
+		if toolCall.Arguments != nil {
+			if raw, marshalErr := json.Marshal(toolCall.Arguments); marshalErr == nil {
+				argsJSON = string(raw)
+			}
+		}
+		conversationContext.AppendHistory(&schema.Message{
+			Role:    schema.Assistant,
+			Content: "",
+			ToolCalls: []schema.ToolCall{
+				{
+					ID:   toolCallID,
+					Type: "function",
+					Function: schema.FunctionCall{
+						Name:      toolName,
+						Arguments: argsJSON,
+					},
+				},
+			},
+		})
+		conversationContext.AppendHistory(&schema.Message{
+			Role:       schema.Tool,
+			Content:    blockedResult,
+			ToolCallID: toolCallID,
+			ToolName:   toolName,
+		})
+		return nil
+	}
+
 	beforeDigest := summarizeScheduleStateForDebug(scheduleState)
 	result := registry.Execute(scheduleState, toolName, toolCall.Arguments)
 	afterDigest := summarizeScheduleStateForDebug(scheduleState)
@@ -644,6 +701,19 @@ func executeToolCall(
 	})
 
 	return nil
+}
+
+// shouldBlockMinContextSwitch 判断是否要拦截 min_context_switch 工具。
+//
+// 说明：
+// 1. 仅当工具名为 min_context_switch 且未授权打乱顺序时返回 true；
+// 2. 其余场景统一放行；
+// 3. nil flowState 视为未命中拦截条件，避免因状态缺失导致误阻断。
+func shouldBlockMinContextSwitch(flowState *newagentmodel.CommonState, toolName string) bool {
+	if flowState == nil {
+		return false
+	}
+	return !flowState.AllowReorder && strings.EqualFold(strings.TrimSpace(toolName), toolMinContextSwitch)
 }
 
 // executePendingTool 执行用户已确认的写工具。

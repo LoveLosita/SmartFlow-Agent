@@ -184,7 +184,7 @@ func findFreeRangesOnDay(state *ScheduleState, day int) []freeRange {
 }
 
 // getEmbeddableTasks 获取所有可嵌入时段的任务列表。
-// 条件：CanEmbed == true，用于 find_free 和 get_overview 输出可嵌入位置。
+// 条件：CanEmbed == true，用于 find_first_free 和 get_overview 输出可嵌入位置。
 func getEmbeddableTasks(state *ScheduleState) []*ScheduleTask {
 	var result []*ScheduleTask
 	for i := range state.Tasks {
@@ -204,9 +204,10 @@ func getEmbeddableTasks(state *ScheduleState) []*ScheduleTask {
 func buildOverviewDayLine(state *ScheduleState, day int) string {
 	occupied := countDayOccupied(state, day)
 	tasks := getTasksOnDay(state, day)
+	dayLabel := formatDayLabel(state, day)
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("第%d天：占%d/12", day, occupied))
+	sb.WriteString(fmt.Sprintf("%s：占%d/12", dayLabel, occupied))
 
 	if len(tasks) > 0 {
 		sb.WriteString(" — ")
@@ -228,9 +229,9 @@ func buildOverviewDayLine(state *ScheduleState, day int) string {
 
 // buildFreeRangeLine 格式化空闲区间行。
 // 格式如：第3天 第1-6节（6时段连续空闲）
-func buildFreeRangeLine(r freeRange) string {
+func buildFreeRangeLine(state *ScheduleState, r freeRange) string {
 	dur := r.slotEnd - r.slotStart + 1
-	return fmt.Sprintf("第%d天 第%s（%d时段连续空闲）", r.day, formatSlotRange(r.slotStart, r.slotEnd), dur)
+	return fmt.Sprintf("%s第%s（%d时段连续空闲）", formatDayLabel(state, r.day), formatSlotRange(r.slotStart, r.slotEnd), dur)
 }
 
 // formatSourceName 将 source 字段转为用户可读的来源名称。

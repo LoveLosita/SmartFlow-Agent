@@ -49,6 +49,44 @@ func argsStringPtr(args map[string]any, key string) *string {
 	return &v
 }
 
+// argsIntSlice 从 map 中提取 int 数组，支持 []any / []int / []float64。
+func argsIntSlice(args map[string]any, key string) ([]int, bool) {
+	v, ok := args[key]
+	if !ok {
+		return nil, false
+	}
+	switch arr := v.(type) {
+	case []int:
+		if len(arr) == 0 {
+			return []int{}, true
+		}
+		result := make([]int, len(arr))
+		copy(result, arr)
+		return result, true
+	case []float64:
+		result := make([]int, 0, len(arr))
+		for _, item := range arr {
+			result = append(result, int(item))
+		}
+		return result, true
+	case []any:
+		result := make([]int, 0, len(arr))
+		for _, item := range arr {
+			switch n := item.(type) {
+			case float64:
+				result = append(result, int(n))
+			case int:
+				result = append(result, n)
+			default:
+				return nil, false
+			}
+		}
+		return result, true
+	default:
+		return nil, false
+	}
+}
+
 // argsMoveList 从 map 中提取 batch_move 的 moves 数组。
 func argsMoveList(args map[string]any) ([]MoveRequest, error) {
 	v, ok := args["moves"]

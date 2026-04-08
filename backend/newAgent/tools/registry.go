@@ -88,11 +88,12 @@ func (r *ToolRegistry) IsWriteTool(name string) bool {
 // ==================== 写工具名集合 ====================
 
 var writeTools = map[string]bool{
-	"place":      true,
-	"move":       true,
-	"swap":       true,
-	"batch_move": true,
-	"unplace":    true,
+	"place":              true,
+	"move":               true,
+	"swap":               true,
+	"batch_move":         true,
+	"min_context_switch": true,
+	"unplace":            true,
 }
 
 // ==================== 默认注册表 ====================
@@ -123,27 +124,14 @@ func NewDefaultRegistry() *ToolRegistry {
 	)
 
 	r.Register("find_first_free",
-		"查找首个满足时长条件的可用位置，并返回该日详细负载信息。duration 必填，day 选填（不填按天顺序搜索）。",
-		`{"name":"find_first_free","parameters":{"duration":{"type":"int","required":true},"day":{"type":"int"}}}`,
+		"查找首个满足时长条件的可用位置，并返回该日详细负载信息。duration 必填；可用 day 指定单天，或用 day_start/day_end 指定搜索范围（互斥）。",
+		`{"name":"find_first_free","parameters":{"duration":{"type":"int","required":true},"day":{"type":"int"},"day_start":{"type":"int"},"day_end":{"type":"int"}}}`,
 		func(state *ScheduleState, args map[string]any) string {
 			duration, ok := argsInt(args, "duration")
 			if !ok {
 				return "查询失败：缺少必填参数 duration。"
 			}
-			return FindFirstFree(state, duration, argsIntPtr(args, "day"))
-		},
-	)
-
-	// 兼容别名：保留 find_free，避免旧历史轨迹中的工具调用失效。
-	r.Register("find_free",
-		"兼容别名，行为同 find_first_free。",
-		`{"name":"find_free","parameters":{"duration":{"type":"int","required":true},"day":{"type":"int"}}}`,
-		func(state *ScheduleState, args map[string]any) string {
-			duration, ok := argsInt(args, "duration")
-			if !ok {
-				return "查询失败：缺少必填参数 duration。"
-			}
-			return FindFirstFree(state, duration, argsIntPtr(args, "day"))
+			return FindFirstFree(state, duration, argsIntPtr(args, "day"), argsIntPtr(args, "day_start"), argsIntPtr(args, "day_end"))
 		},
 	)
 
@@ -233,6 +221,18 @@ func NewDefaultRegistry() *ToolRegistry {
 				return fmt.Sprintf("批量移动失败：%s", err.Error())
 			}
 			return BatchMove(state, moves)
+		},
+	)
+
+	r.Register("min_context_switch",
+		"在指定任务集合内重排 suggested 任务，尽量让同类任务连续以减少上下文切换。仅在用户明确允许打乱顺序时使用。task_ids 必填（兼容 task_id）。",
+		`{"name":"min_context_switch","parameters":{"task_ids":{"type":"array","required":true,"items":{"type":"int"}},"task_id":{"type":"int"}}}`,
+		func(state *ScheduleState, args map[string]any) string {
+			taskIDs, err := parseMinContextSwitchTaskIDs(args)
+			if err != nil {
+				return fmt.Sprintf("减少上下文切换失败：%s。", err.Error())
+			}
+			return MinContextSwitch(state, taskIDs)
 		},
 	)
 

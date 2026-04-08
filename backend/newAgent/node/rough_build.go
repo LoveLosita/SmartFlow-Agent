@@ -34,7 +34,9 @@ type roughBuildApplyStats struct {
 //  4. 调用 RoughBuildFunc 拿到粗排结果（[]RoughBuildPlacement）；
 //  5. 把粗排结果写入 ScheduleState，把已落位任务标记为 suggested；
 //  6. 若粗排后仍存在真实 pending，则写入正式 abort 结果并结束本轮；
-//  7. 否则推送"粗排完成"状态，清除 NeedsRoughBuild 标记，进入执行阶段。
+//  7. 否则按“是否需要粗排后立即微调”分流：
+//     - 无明确微调诉求：直接 Done -> Deliver；
+//     - 有明确微调诉求：进入 Execute。
 func RunRoughBuildNode(ctx context.Context, st *newagentmodel.AgentGraphState) error {
 	if st == nil {
 		return fmt.Errorf("rough build node: state is nil")
@@ -63,6 +65,7 @@ func RunRoughBuildNode(ctx context.Context, st *newagentmodel.AgentGraphState) e
 		// 没有任务类 ID 时静默跳过粗排，直接进入执行阶段。
 		flowState.Phase = newagentmodel.PhaseExecuting
 		flowState.NeedsRoughBuild = false
+		flowState.NeedsRefineAfterRoughBuild = false
 		return nil
 	}
 
@@ -133,16 +136,29 @@ func RunRoughBuildNode(ctx context.Context, st *newagentmodel.AgentGraphState) e
 		return nil
 	}
 
-	// 8. 推送完成状态。
+	// 8. 计算是否需要“粗排后立即微调”。
+	//
+	// 1. 只在“无计划直执行”链路下应用该止血分流；
+	// 2. 有计划链路依旧进入 execute，避免改变既有 plan->execute 语义；
+	// 3. chat 路由明确标记 needs_refine_after_rough_build=true 时才进微调。
+	shouldRefineAfterRoughBuild := flowState.HasPlan() || flowState.NeedsRefineAfterRoughBuild
+
+	// 9. 推送完成状态（区分“继续微调”与“直接收口”两种路径）。
+	doneStatus := "rough_build_done"
+	doneMessage := fmt.Sprintf("初始排课方案已生成，共 %d 个任务已预排，进入微调阶段。", len(placements))
+	if !shouldRefineAfterRoughBuild {
+		doneStatus = "rough_build_done_no_refine"
+		doneMessage = fmt.Sprintf("初始排课方案已生成，共 %d 个任务已预排。本轮按默认策略先结束；如需优化，请继续告诉我你的偏好。", len(placements))
+	}
 	_ = emitter.EmitStatus(
 		roughBuildStatusBlock,
 		roughBuildStageName,
-		"rough_build_done",
-		fmt.Sprintf("初始排课方案已生成，共 %d 个任务已预排，进入微调阶段。", len(placements)),
+		doneStatus,
+		doneMessage,
 		false,
 	)
 
-	// 9. 把粗排完成信息写入 pinned context，让 Execute 阶段的 LLM 直接进入查看和微调。
+	// 10. 把粗排完成信息写入 pinned context，让后续节点能拿到一致事实。
 
 	// 构造任务类 ID 字符串，供 pinned block 明确标注，避免 Execute LLM 因找不到 task_class_id 来源而 ask_user。
 	idParts := make([]string, len(taskClassIDs))
@@ -154,18 +170,31 @@ func RunRoughBuildNode(ctx context.Context, st *newagentmodel.AgentGraphState) e
 	pinnedContent := fmt.Sprintf(
 		"后端已自动运行粗排算法（任务类 ID：[%s]），初始排课方案已写入日程状态（共 %d 个任务已预排）。\n"+
 			"这些预排任务已标记为 suggested，表示“可继续优化的建议落位”，不是待补排任务。\n"+
-			"请先调用 get_overview 查看整体分布，再使用 move / swap / unplace 微调不合理的位置。\n"+
 			"本轮不需要再调用 place，也无需再次触发粗排。",
 		idStr, len(placements),
 	)
+	if shouldRefineAfterRoughBuild {
+		pinnedContent += "\n请先调用 get_overview 查看整体分布，再使用 move / swap / unplace 微调不合理的位置。"
+	} else {
+		pinnedContent += "\n当前未收到明确微调偏好，流程将先收口；如需进一步优化，请基于本次结果提出调整要求。"
+	}
 	st.EnsureConversationContext().UpsertPinnedBlock(newagentmodel.ContextBlock{
 		Key:     "rough_build_done",
 		Title:   "粗排已完成",
 		Content: pinnedContent,
 	})
 
-	// 10. 清除标记，进入执行阶段。
+	// 11. 清除粗排标记，并按分流结果进入执行或直接收口。
+	//
+	// 1. 无明确微调诉求：直接标记 completed，graph 会路由到 deliver；
+	// 2. 有明确微调诉求：进入 execute 节点继续工具微调；
+	// 3. 无论哪条路径，都要重置粗排相关标记，避免污染后续轮次。
 	flowState.NeedsRoughBuild = false
+	flowState.NeedsRefineAfterRoughBuild = false
+	if !shouldRefineAfterRoughBuild {
+		flowState.Done()
+		return nil
+	}
 	flowState.Phase = newagentmodel.PhaseExecuting
 	return nil
 }

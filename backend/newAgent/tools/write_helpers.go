@@ -134,12 +134,40 @@ func countPending(state *ScheduleState) int {
 
 // ==================== 任务时段辅助 ====================
 
+// formatDayLabel 将 day_index 格式化为“第N天(星期X)”。
+//
+// 说明：
+// 1. 这是工具层统一的“星期数展示口径”，避免各工具各自拼接导致输出不一致；
+// 2. 当 DayMapping 可用时，追加 weekday 数字（1~7）；
+// 3. 若 DayMapping 缺失或异常，退回原始“第N天”，保证工具输出稳定。
+func formatDayLabel(state *ScheduleState, day int) string {
+	base := fmt.Sprintf("第%d天", day)
+	if state == nil {
+		return base
+	}
+	_, dayOfWeek, ok := state.DayToWeekDay(day)
+	if !ok || dayOfWeek < 1 || dayOfWeek > 7 {
+		return base
+	}
+	return fmt.Sprintf("%s(星期%d)", base, dayOfWeek)
+}
+
+// formatDaySlotLabel 将“天 + 时段”拼成统一格式。
+func formatDaySlotLabel(state *ScheduleState, day, slotStart, slotEnd int) string {
+	return fmt.Sprintf("%s第%s", formatDayLabel(state, day), formatSlotRange(slotStart, slotEnd))
+}
+
 // formatTaskSlotsBrief 将任务的时段列表格式化为简短描述。
 // 如 "第1天(1-2节) 第4天(3-4节)"。
 func formatTaskSlotsBrief(slots []TaskSlot) string {
+	return formatTaskSlotsBriefWithState(nil, slots)
+}
+
+// formatTaskSlotsBriefWithState 在时段描述里补齐星期数。
+func formatTaskSlotsBriefWithState(state *ScheduleState, slots []TaskSlot) string {
 	parts := make([]string, 0, len(slots))
 	for _, slot := range slots {
-		parts = append(parts, fmt.Sprintf("第%d天第%s", slot.Day, formatSlotRange(slot.SlotStart, slot.SlotEnd)))
+		parts = append(parts, formatDaySlotLabel(state, slot.Day, slot.SlotStart, slot.SlotEnd))
 	}
 	return strings.Join(parts, " ")
 }
@@ -197,9 +225,10 @@ func uniqueSorted(s []int) []int {
 func formatDayOccupancy(state *ScheduleState, day int) string {
 	tasks := getTasksOnDay(state, day)
 	occupied := countDayOccupied(state, day)
+	dayLabel := formatDayLabel(state, day)
 
 	if len(tasks) == 0 {
-		return fmt.Sprintf("第%d天当前占用：0/12。", day)
+		return fmt.Sprintf("%s当前占用：0/12。", dayLabel)
 	}
 
 	parts := make([]string, 0, len(tasks))
@@ -208,7 +237,7 @@ func formatDayOccupancy(state *ScheduleState, day int) string {
 		parts = append(parts, fmt.Sprintf("%s(%s)", label, formatSlotRange(td.slotStart, td.slotEnd)))
 	}
 
-	return fmt.Sprintf("第%d天当前占用：%s，占用%d/12。", day, strings.Join(parts, " "), occupied)
+	return fmt.Sprintf("%s当前占用：%s，占用%d/12。", dayLabel, strings.Join(parts, " "), occupied)
 }
 
 // formatFreeHint 格式化某天的空闲时段提示。

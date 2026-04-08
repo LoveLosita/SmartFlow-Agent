@@ -52,12 +52,12 @@ func Place(state *ScheduleState, taskID, day, slotStart int) string {
 	if conflict != nil {
 		// 锁定任务的冲突给出特殊提示。
 		if conflict.Locked {
-			return fmt.Sprintf("放置失败：第%d天第%s已被 [%d]%s（固定）占用。\n%s\n%s",
-				day, formatSlotRange(slotStart, slotEnd), conflict.StateID, conflict.Name,
+			return fmt.Sprintf("放置失败：%s已被 [%d]%s（固定）占用。\n%s\n%s",
+				formatDaySlotLabel(state, day, slotStart, slotEnd), conflict.StateID, conflict.Name,
 				formatDayOccupancy(state, day), formatFreeHint(state, day))
 		}
-		return fmt.Sprintf("放置失败：第%d天第%s已被 [%d]%s 占用。\n%s\n%s",
-			day, formatSlotRange(slotStart, slotEnd), conflict.StateID, conflict.Name,
+		return fmt.Sprintf("放置失败：%s已被 [%d]%s 占用。\n%s\n%s",
+			formatDaySlotLabel(state, day, slotStart, slotEnd), conflict.StateID, conflict.Name,
 			formatDayOccupancy(state, day), formatFreeHint(state, day))
 	}
 
@@ -74,8 +74,8 @@ func Place(state *ScheduleState, taskID, day, slotStart int) string {
 		task.Slots = []TaskSlot{{Day: day, SlotStart: slotStart, SlotEnd: slotEnd}}
 		task.Status = TaskStatusSuggested
 
-		return fmt.Sprintf("已将 [%d]%s 预排并嵌入到第%d天第%s（宿主：[%d]%s）。\n%s\n待安排任务剩余：%d个。",
-			task.StateID, task.Name, day, formatSlotRange(slotStart, slotEnd),
+		return fmt.Sprintf("已将 [%d]%s 预排并嵌入到%s（宿主：[%d]%s）。\n%s\n待安排任务剩余：%d个。",
+			task.StateID, task.Name, formatDaySlotLabel(state, day, slotStart, slotEnd),
 			host.StateID, host.Name,
 			formatDayOccupancy(state, day), countPending(state))
 	}
@@ -84,8 +84,8 @@ func Place(state *ScheduleState, taskID, day, slotStart int) string {
 	task.Slots = []TaskSlot{{Day: day, SlotStart: slotStart, SlotEnd: slotEnd}}
 	task.Status = TaskStatusSuggested
 
-	return fmt.Sprintf("已将 [%d]%s 预排到第%d天第%s。\n%s\n待安排任务剩余：%d个。",
-		task.StateID, task.Name, day, formatSlotRange(slotStart, slotEnd),
+	return fmt.Sprintf("已将 [%d]%s 预排到%s。\n%s\n待安排任务剩余：%d个。",
+		task.StateID, task.Name, formatDaySlotLabel(state, day, slotStart, slotEnd),
 		formatDayOccupancy(state, day), countPending(state))
 }
 
@@ -130,15 +130,15 @@ func Move(state *ScheduleState, taskID, newDay, newSlotStart int) string {
 	// 5. 冲突检测（排除自身）。
 	conflict := findConflict(state, newDay, newSlotStart, newSlotEnd, taskID)
 	if conflict != nil {
-		return fmt.Sprintf("移动失败：第%d天第%s已被 [%d]%s 占用。\n%s\n%s",
-			newDay, formatSlotRange(newSlotStart, newSlotEnd), conflict.StateID, conflict.Name,
+		return fmt.Sprintf("移动失败：%s已被 [%d]%s 占用。\n%s\n%s",
+			formatDaySlotLabel(state, newDay, newSlotStart, newSlotEnd), conflict.StateID, conflict.Name,
 			formatDayOccupancy(state, newDay), formatFreeHint(state, newDay))
 	}
 
 	// 6. 记录旧位置。
 	oldSlots := make([]TaskSlot, len(task.Slots))
 	copy(oldSlots, task.Slots)
-	oldDesc := formatTaskSlotsBrief(oldSlots)
+	oldDesc := formatTaskSlotsBriefWithState(state, oldSlots)
 
 	// 7. 执行变更。
 	task.Slots = []TaskSlot{{Day: newDay, SlotStart: newSlotStart, SlotEnd: newSlotEnd}}
@@ -147,8 +147,8 @@ func Move(state *ScheduleState, taskID, newDay, newSlotStart int) string {
 	affectedDays := collectAffectedDays(oldSlots, task.Slots)
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("已将 [%d]%s 从%s移至第%d天第%s。\n",
-		task.StateID, task.Name, oldDesc, newDay, formatSlotRange(newSlotStart, newSlotEnd)))
+	sb.WriteString(fmt.Sprintf("已将 [%d]%s 从%s移至%s。\n",
+		task.StateID, task.Name, oldDesc, formatDaySlotLabel(state, newDay, newSlotStart, newSlotEnd)))
 	for _, d := range affectedDays {
 		sb.WriteString(formatDayOccupancy(state, d) + "\n")
 	}
@@ -215,8 +215,8 @@ func Swap(state *ScheduleState, taskAID, taskBID int) string {
 			// 回滚
 			taskA.Slots = oldSlotsA
 			taskB.Slots = oldSlotsB
-			return fmt.Sprintf("交换失败：[%d]%s 的新位置第%d天第%s与 [%d]%s 冲突。",
-				taskA.StateID, taskA.Name, slot.Day, formatSlotRange(slot.SlotStart, slot.SlotEnd),
+			return fmt.Sprintf("交换失败：[%d]%s 的新位置%s与 [%d]%s 冲突。",
+				taskA.StateID, taskA.Name, formatDaySlotLabel(state, slot.Day, slot.SlotStart, slot.SlotEnd),
 				conflict.StateID, conflict.Name)
 		}
 	}
@@ -226,8 +226,8 @@ func Swap(state *ScheduleState, taskAID, taskBID int) string {
 			// 回滚
 			taskA.Slots = oldSlotsA
 			taskB.Slots = oldSlotsB
-			return fmt.Sprintf("交换失败：[%d]%s 的新位置第%d天第%s与 [%d]%s 冲突。",
-				taskB.StateID, taskB.Name, slot.Day, formatSlotRange(slot.SlotStart, slot.SlotEnd),
+			return fmt.Sprintf("交换失败：[%d]%s 的新位置%s与 [%d]%s 冲突。",
+				taskB.StateID, taskB.Name, formatDaySlotLabel(state, slot.Day, slot.SlotStart, slot.SlotEnd),
 				conflict.StateID, conflict.Name)
 		}
 	}
@@ -241,10 +241,10 @@ func Swap(state *ScheduleState, taskAID, taskBID int) string {
 	sb.WriteString("交换完成：\n")
 	sb.WriteString(fmt.Sprintf("  [%d]%s：%s → %s\n",
 		taskA.StateID, taskA.Name,
-		formatTaskSlotsBrief(oldSlotsA), formatTaskSlotsBrief(taskA.Slots)))
+		formatTaskSlotsBriefWithState(state, oldSlotsA), formatTaskSlotsBriefWithState(state, taskA.Slots)))
 	sb.WriteString(fmt.Sprintf("  [%d]%s：%s → %s\n",
 		taskB.StateID, taskB.Name,
-		formatTaskSlotsBrief(oldSlotsB), formatTaskSlotsBrief(taskB.Slots)))
+		formatTaskSlotsBriefWithState(state, oldSlotsB), formatTaskSlotsBriefWithState(state, taskB.Slots)))
 	for _, d := range affectedDays {
 		sb.WriteString(formatDayOccupancy(state, d) + "\n")
 	}
@@ -311,8 +311,8 @@ func BatchMove(state *ScheduleState, moves []MoveRequest) string {
 		// 冲突检测（在 clone 的中间状态上，排除自身）。
 		conflict := findConflict(clone, m.NewDay, m.NewSlotStart, newSlotEnd, m.TaskID)
 		if conflict != nil {
-			return fmt.Sprintf("批量移动失败，全部回滚，无任何变更。\n冲突：[%d]%s → 第%d天第%s，该位置已被 [%d]%s 占用。",
-				task.StateID, task.Name, m.NewDay, formatSlotRange(m.NewSlotStart, newSlotEnd),
+			return fmt.Sprintf("批量移动失败，全部回滚，无任何变更。\n冲突：[%d]%s → %s，该位置已被 [%d]%s 占用。",
+				task.StateID, task.Name, formatDaySlotLabel(state, m.NewDay, m.NewSlotStart, newSlotEnd),
 				conflict.StateID, conflict.Name)
 		}
 
@@ -331,9 +331,9 @@ func BatchMove(state *ScheduleState, moves []MoveRequest) string {
 	for _, m := range moves {
 		task := state.TaskByStateID(m.TaskID)
 		duration := taskDuration(*task)
-		sb.WriteString(fmt.Sprintf("  [%d]%s → 第%d天第%s\n",
-			task.StateID, task.Name, m.NewDay,
-			formatSlotRange(m.NewSlotStart, m.NewSlotStart+duration-1)))
+		sb.WriteString(fmt.Sprintf("  [%d]%s → %s\n",
+			task.StateID, task.Name,
+			formatDaySlotLabel(state, m.NewDay, m.NewSlotStart, m.NewSlotStart+duration-1)))
 	}
 	for _, d := range days {
 		sb.WriteString(formatDayOccupancy(state, d) + "\n")
@@ -366,7 +366,7 @@ func Unplace(state *ScheduleState, taskID int) string {
 	// 4. 记录旧位置。
 	oldSlots := make([]TaskSlot, len(task.Slots))
 	copy(oldSlots, task.Slots)
-	oldDesc := formatTaskSlotsBrief(oldSlots)
+	oldDesc := formatTaskSlotsBriefWithState(state, oldSlots)
 
 	// 5. 清理嵌入关系。
 	// 如果该任务嵌入到了某个宿主上，清除宿主的 EmbeddedBy。
