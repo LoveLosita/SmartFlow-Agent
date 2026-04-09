@@ -18,6 +18,16 @@ type MoveRequest struct {
 	NewSlotStart int `json:"new_slot_start"`
 }
 
+const (
+	// maxBatchMoveSize 是 batch_move 的安全上限。
+	//
+	// 设计说明：
+	// 1. 旧链路中 batch_move 容易因组合冲突导致“整批回滚 + 连续重试”；
+	// 2. 先把批量规模限制在 2，作为止血策略，降低一次决策的冲突面；
+	// 3. 更大规模的调整应优先走队列化逐项处理（queue_pop_head + queue_apply_head_move）。
+	maxBatchMoveSize = 2
+)
+
 // ==================== Place ====================
 
 // Place 将一个待安排任务预排到指定位置。
@@ -259,6 +269,9 @@ func Swap(state *ScheduleState, taskAID, taskBID int) string {
 func BatchMove(state *ScheduleState, moves []MoveRequest) string {
 	if len(moves) == 0 {
 		return "批量移动失败：移动列表为空。"
+	}
+	if len(moves) > maxBatchMoveSize {
+		return fmt.Sprintf("批量移动失败：当前最多支持 %d 条移动请求。请改用队列化逐项处理（queue_pop_head + queue_apply_head_move）。", maxBatchMoveSize)
 	}
 
 	// 1. 全量校验阶段（不改 state）。

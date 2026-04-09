@@ -184,7 +184,7 @@ func findFreeRangesOnDay(state *ScheduleState, day int) []freeRange {
 }
 
 // getEmbeddableTasks 获取所有可嵌入时段的任务列表。
-// 条件：CanEmbed == true，用于 find_first_free 和 get_overview 输出可嵌入位置。
+// 条件：CanEmbed == true，用于 query_available_slots 和 get_overview 输出可嵌入位置。
 func getEmbeddableTasks(state *ScheduleState) []*ScheduleTask {
 	var result []*ScheduleTask
 	for i := range state.Tasks {

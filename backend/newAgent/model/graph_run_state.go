@@ -45,7 +45,9 @@ type RoughBuildPlacement struct {
 type RoughBuildFunc func(ctx context.Context, userID int, taskClassIDs []int) ([]RoughBuildPlacement, error)
 
 // WriteSchedulePreviewFunc 是排程预览写入的依赖注入签名。
-// 由 service 层封装 cacheDAO 后注入，deliver 节点在任务完成时调用，保证只有真正完成的结果才写入缓存。
+// 由 service 层封装 cacheDAO 后注入，execute/deliver 节点可按需调用：
+// 1. execute 写工具后可实时刷新，保障前端及时看到最新调整；
+// 2. deliver 结束时再做最终覆盖写，保障收口状态一致。
 type WriteSchedulePreviewFunc func(ctx context.Context, state *newagenttools.ScheduleState, userID int, conversationID string, taskClassIDs []int) error
 
 // AgentGraphDeps 描述 graph/node 层运行时真正依赖的可插拔能力。

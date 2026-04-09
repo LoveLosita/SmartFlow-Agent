@@ -21,7 +21,7 @@ const (
 
 	// executeTrimmedObservationText 是重复工具压缩后的 observation 占位文案。
 	// 当同工具在窗口内出现多次时，只保留最新一条真实结果，其余旧结果统一替换为该文案。
-	executeTrimmedObservationText = "当前工具调用结果过于久远，已经被删除。"
+	executeTrimmedObservationText = "当前工具调用结果已经被使用过，当前无需使用，为节省上下文空间，已折叠"
 )
 
 type executeToolSchemaDoc struct {
@@ -159,20 +159,23 @@ func buildExecuteMessage3(state *newagentmodel.CommonState, ctx *newagentmodel.C
 		"- 当前模式："+modeText,
 	)
 
-	goal := extractExecuteInitialGoal(ctx)
-	if goal == "" {
-		goal = "暂无可用目标描述，请按当前上下文稳步推进。"
+	initialGoal, currentGoal := extractExecuteGoalAnchors(ctx)
+	if currentGoal == "" {
+		currentGoal = "暂无可用目标描述，请按当前上下文稳步推进。"
 	}
 
 	lines = append(lines, "执行锚点：")
-	lines = append(lines, "- 初始用户目标："+goal)
+	lines = append(lines, "- 当前用户诉求："+currentGoal)
+	if initialGoal != "" && initialGoal != currentGoal {
+		lines = append(lines, "- 首轮目标来源："+initialGoal)
+	}
 	if taskClassText := renderExecuteTaskClassIDs(state); taskClassText != "" {
 		lines = append(lines, "- 目标任务类："+taskClassText)
 	}
 	lines = append(lines, "- 啥时候结束Loop：你可以根据工具调用记录自行判断。")
 	lines = append(lines, "- 非目标：不重新粗排、不修改无关任务类。")
 	if hasExecuteRoughBuildDone(ctx) {
-		lines = append(lines, "- 阶段约束：粗排已完成，本轮只微调 suggested；existing 仅作已安排事实参考，不做 move/batch_move。")
+		lines = append(lines, "- 阶段约束：粗排已完成，本轮只微调 suggested；existing 仅作已安排事实参考，不做 move/batch_move/spread_even。")
 	}
 	if state != nil {
 		if state.AllowReorder {
@@ -230,7 +233,7 @@ func renderExecuteToolCatalogCompact(ctx *newagentmodel.ConversationContext) str
 // renderExecuteToolReturnHint 返回工具的“返回类型 + 最小示例”。
 //
 // 说明：
-// 1. 所有工具当前都返回 string（自然语言），这里主要补“内容形态示例”，减少模型盲猜；
+// 1. 所有工具当前都返回 string，但部分是“JSON 字符串”，这里补齐内容形态示例减少模型盲猜；
 // 2. 示例只保留最小片段，避免工具说明过长挤占上下文窗口。
 func renderExecuteToolReturnHint(toolName string) (returnType string, sample string) {
 	returnType = "string（自然语言文本）"
@@ -241,8 +244,18 @@ func renderExecuteToolReturnHint(toolName string) (returnType string, sample str
 		return returnType, "已预排任务共24个： [35]第一章随机事件与概率 — 已预排至 第3天第5-6节..."
 	case "get_task_info":
 		return returnType, "[35]第一章随机事件与概率 | 状态：已预排(suggested) | 占用时段：第3天第5-6节"
-	case "find_first_free":
-		return returnType, "首个可用位置：第5天第1-2节（可直接放置）| 当日负载：总占6/12..."
+	case "query_available_slots":
+		return "string（JSON字符串）", `{"tool":"query_available_slots","count":12,"strict_count":8,"embedded_count":4,"slots":[{"day":5,"week":12,"day_of_week":3,"slot_start":1,"slot_end":2,"slot_type":"empty"}]}`
+	case "query_target_tasks":
+		return "string（JSON字符串）", `{"tool":"query_target_tasks","count":6,"status":"suggested","enqueue":true,"enqueued":6,"queue":{"pending_count":6},"items":[{"task_id":35,"name":"示例任务","status":"suggested","slots":[{"day":3,"week":12,"day_of_week":1,"slot_start":5,"slot_end":6}]}]}`
+	case "queue_pop_head":
+		return "string（JSON字符串）", `{"tool":"queue_pop_head","has_head":true,"pending_count":5,"current":{"task_id":35,"name":"示例任务","status":"suggested","slots":[{"day":3,"week":12,"day_of_week":1,"slot_start":5,"slot_end":6}]}}`
+	case "queue_status":
+		return "string（JSON字符串）", `{"tool":"queue_status","pending_count":5,"completed_count":1,"skipped_count":0,"current_task_id":35,"current_attempt":1}`
+	case "queue_apply_head_move":
+		return "string（JSON字符串）", `{"tool":"queue_apply_head_move","success":true,"task_id":35,"pending_count":4,"completed_count":2,"result":"已将 [35]... 从第3天第5-6节移至第5天第3-4节。"}`
+	case "queue_skip_head":
+		return "string（JSON字符串）", `{"tool":"queue_skip_head","success":true,"skipped_task_id":35,"pending_count":4,"skipped_count":1}`
 	case "query_range":
 		return returnType, "第5天第3-6节：第3节空、第4节空..."
 	case "place":
@@ -252,7 +265,9 @@ func renderExecuteToolReturnHint(toolName string) (returnType string, sample str
 	case "swap":
 		return returnType, "交换完成：[35]... ↔ [36]..."
 	case "batch_move":
-		return returnType, "批量移动完成，2个任务全部成功。"
+		return returnType, "批量移动完成，2个任务全部成功。（单次最多2条）"
+	case "spread_even":
+		return returnType, "均匀化调整完成：共处理 6 个任务，候选坑位 24 个。"
 	case "min_context_switch":
 		return returnType, "最少上下文切换重排完成：共处理 6 个任务，上下文切换次数 5 -> 2。"
 	case "unplace":
@@ -496,13 +511,13 @@ func buildEarlyExecuteReactSummary(records []executeLoopRecord, windowLimit int)
 	return fmt.Sprintf("已折叠 %d 条旧记录，涉及：%s。", len(early), strings.Join(parts, "、"))
 }
 
-func extractExecuteInitialGoal(ctx *newagentmodel.ConversationContext) string {
+func extractExecuteGoalAnchors(ctx *newagentmodel.ConversationContext) (initial string, current string) {
 	if ctx == nil {
-		return ""
+		return "", ""
 	}
 	history := ctx.HistorySnapshot()
-	firstUser, _ := pickExecuteUserInputs(history)
-	return firstUser
+	firstUser, lastUser := pickExecuteUserInputs(history)
+	return firstUser, lastUser
 }
 
 func hasExecuteRoughBuildDone(ctx *newagentmodel.ConversationContext) bool {

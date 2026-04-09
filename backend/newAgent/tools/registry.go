@@ -7,24 +7,16 @@ import (
 )
 
 // ToolHandler 是所有工具的统一执行签名。
-// 接收当前 ScheduleState + LLM 输出的原始参数，返回自然语言结果。
 type ToolHandler func(state *ScheduleState, args map[string]any) string
 
-// ToolSchemaEntry 是工具描述的轻量快照，用于 LLM prompt 注入。
-// 在注入 ConversationContext 时转换为 model.ToolSchemaContext。
+// ToolSchemaEntry 是注入给模型的工具说明快照。
 type ToolSchemaEntry struct {
 	Name       string
 	Desc       string
 	SchemaText string
 }
 
-// ToolRegistry 管理所有工具的注册、查找和执行。
-//
-// 职责边界：
-// 1. 负责工具名 → handler 的映射；
-// 2. 负责工具 schema 的存储（供 LLM prompt 注入）；
-// 3. 不负责 ScheduleState 的生命周期管理；
-// 4. 不负责 confirm 流程（由 execute.go 的 action 分支处理）。
+// ToolRegistry 管理工具注册、查找与执行。
 type ToolRegistry struct {
 	handlers map[string]ToolHandler
 	schemas  []ToolSchemaEntry
@@ -38,7 +30,7 @@ func NewToolRegistry() *ToolRegistry {
 	}
 }
 
-// Register 注册一个工具及其 schema 描述。
+// Register 注册一个工具及其 schema。
 func (r *ToolRegistry) Register(name, desc, schemaText string, handler ToolHandler) {
 	r.handlers[name] = handler
 	r.schemas = append(r.schemas, ToolSchemaEntry{
@@ -49,7 +41,6 @@ func (r *ToolRegistry) Register(name, desc, schemaText string, handler ToolHandl
 }
 
 // Execute 执行指定工具。
-// 工具名不存在时返回错误提示字符串。
 func (r *ToolRegistry) Execute(state *ScheduleState, toolName string, args map[string]any) string {
 	handler, ok := r.handlers[toolName]
 	if !ok {
@@ -64,36 +55,38 @@ func (r *ToolRegistry) HasTool(name string) bool {
 	return ok
 }
 
-// ToolNames 返回所有已注册工具名（按注册顺序）。
+// ToolNames 返回已注册工具名（按 schema 顺序）。
 func (r *ToolRegistry) ToolNames() []string {
 	names := make([]string, 0, len(r.handlers))
-	for _, s := range r.schemas {
-		names = append(names, s.Name)
+	for _, item := range r.schemas {
+		names = append(names, item.Name)
 	}
 	return names
 }
 
-// Schemas 返回所有工具的 schema 描述（供 LLM prompt 注入）。
+// Schemas 返回 schema 快照。
 func (r *ToolRegistry) Schemas() []ToolSchemaEntry {
 	result := make([]ToolSchemaEntry, len(r.schemas))
 	copy(result, r.schemas)
 	return result
 }
 
-// IsWriteTool 判断指定工具是否为写工具（需要 confirm 流程）。
+// IsWriteTool 判断工具是否是写工具（需要 confirm）。
 func (r *ToolRegistry) IsWriteTool(name string) bool {
 	return writeTools[name]
 }
 
-// ==================== 写工具名集合 ====================
+// ==================== 写工具集合 ====================
 
 var writeTools = map[string]bool{
-	"place":              true,
-	"move":               true,
-	"swap":               true,
-	"batch_move":         true,
-	"min_context_switch": true,
-	"unplace":            true,
+	"place":                 true,
+	"move":                  true,
+	"swap":                  true,
+	"batch_move":            true,
+	"queue_apply_head_move": true,
+	"spread_even":           true,
+	"min_context_switch":    true,
+	"unplace":               true,
 }
 
 // ==================== 默认注册表 ====================
@@ -123,20 +116,40 @@ func NewDefaultRegistry() *ToolRegistry {
 		},
 	)
 
-	r.Register("find_first_free",
-		"查找首个满足时长条件的可用位置，并返回该日详细负载信息。duration 必填；可用 day 指定单天，或用 day_start/day_end 指定搜索范围（互斥）。",
-		`{"name":"find_first_free","parameters":{"duration":{"type":"int","required":true},"day":{"type":"int"},"day_start":{"type":"int"},"day_end":{"type":"int"}}}`,
+	r.Register("query_available_slots",
+		"查询候选空位池（先返回纯空位，不足再补可嵌入位），适合 move 前的落点筛选。",
+		`{"name":"query_available_slots","parameters":{"span":{"type":"int"},"duration":{"type":"int"},"limit":{"type":"int"},"allow_embed":{"type":"bool"},"day":{"type":"int"},"day_start":{"type":"int"},"day_end":{"type":"int"},"day_scope":{"type":"string","enum":["all","workday","weekend"]},"day_of_week":{"type":"array","items":{"type":"int"}},"week":{"type":"int"},"week_filter":{"type":"array","items":{"type":"int"}},"week_from":{"type":"int"},"week_to":{"type":"int"},"slot_type":{"type":"string"},"slot_types":{"type":"array","items":{"type":"string"}},"exclude_sections":{"type":"array","items":{"type":"int"}},"after_section":{"type":"int"},"before_section":{"type":"int"},"section_from":{"type":"int"},"section_to":{"type":"int"}}}`,
 		func(state *ScheduleState, args map[string]any) string {
-			duration, ok := argsInt(args, "duration")
-			if !ok {
-				return "查询失败：缺少必填参数 duration。"
-			}
-			return FindFirstFree(state, duration, argsIntPtr(args, "day"), argsIntPtr(args, "day_start"), argsIntPtr(args, "day_end"))
+			return QueryAvailableSlots(state, args)
+		},
+	)
+
+	r.Register("query_target_tasks",
+		"查询候选任务集合，可按 status/week/day/task_id/category 筛选；默认自动入队，供后续 queue_pop_head 逐项处理。",
+		`{"name":"query_target_tasks","parameters":{"status":{"type":"string","enum":["all","existing","suggested","pending"]},"category":{"type":"string"},"limit":{"type":"int"},"day_scope":{"type":"string","enum":["all","workday","weekend"]},"day":{"type":"int"},"day_start":{"type":"int"},"day_end":{"type":"int"},"day_of_week":{"type":"array","items":{"type":"int"}},"week":{"type":"int"},"week_filter":{"type":"array","items":{"type":"int"}},"week_from":{"type":"int"},"week_to":{"type":"int"},"task_ids":{"type":"array","items":{"type":"int"}},"task_id":{"type":"int"},"task_item_ids":{"type":"array","items":{"type":"int"}},"task_item_id":{"type":"int"},"enqueue":{"type":"bool"},"reset_queue":{"type":"bool"}}}`,
+		func(state *ScheduleState, args map[string]any) string {
+			return QueryTargetTasks(state, args)
+		},
+	)
+
+	r.Register("queue_pop_head",
+		"弹出并返回当前队首任务；若已有 current 则复用，保证一次只处理一个任务。",
+		`{"name":"queue_pop_head","parameters":{}}`,
+		func(state *ScheduleState, args map[string]any) string {
+			return QueuePopHead(state, args)
+		},
+	)
+
+	r.Register("queue_status",
+		"查看当前待处理队列状态（pending/current/completed/skipped）。",
+		`{"name":"queue_status","parameters":{}}`,
+		func(state *ScheduleState, args map[string]any) string {
+			return QueueStatus(state, args)
 		},
 	)
 
 	r.Register("list_tasks",
-		"列出任务清单，可按类别和状态过滤。category 传任务类名称（非 ID 列表）可选，status 选填（默认 all，仅支持单值 all/existing/suggested/pending）。",
+		"列出任务清单，可按类别和状态过滤。category 传任务类名称，status 仅支持单值 all/existing/suggested/pending。",
 		`{"name":"list_tasks","parameters":{"category":{"type":"string"},"status":{"type":"string","enum":["all","existing","suggested","pending"]}}}`,
 		func(state *ScheduleState, args map[string]any) string {
 			return ListTasks(state, argsStringPtr(args, "category"), argsStringPtr(args, "status"))
@@ -144,7 +157,7 @@ func NewDefaultRegistry() *ToolRegistry {
 	)
 
 	r.Register("get_task_info",
-		"查询单个任务的详细信息，包括类别、状态、占用时段、嵌入关系。",
+		"查询单个任务详细信息，包括类别、状态、占用时段、嵌入关系。",
 		`{"name":"get_task_info","parameters":{"task_id":{"type":"int","required":true}}}`,
 		func(state *ScheduleState, args map[string]any) string {
 			taskID, ok := argsInt(args, "task_id")
@@ -213,7 +226,7 @@ func NewDefaultRegistry() *ToolRegistry {
 	)
 
 	r.Register("batch_move",
-		"原子性批量移动多个任务（仅 suggested），全部成功才生效。若含 existing/pending 将整批失败回滚。moves 数组必填。",
+		"原子性批量移动多个任务（仅 suggested，最多2条），全部成功才生效。若含 existing/pending 或任一冲突将整批失败回滚。",
 		`{"name":"batch_move","parameters":{"moves":{"type":"array","required":true,"items":{"task_id":"int","new_day":"int","new_slot_start":"int"}}}}`,
 		func(state *ScheduleState, args map[string]any) string {
 			moves, err := argsMoveList(args)
@@ -221,6 +234,22 @@ func NewDefaultRegistry() *ToolRegistry {
 				return fmt.Sprintf("批量移动失败：%s", err.Error())
 			}
 			return BatchMove(state, moves)
+		},
+	)
+
+	r.Register("queue_apply_head_move",
+		"将当前队首任务移动到指定位置并自动出队。仅作用于 current，不接受 task_id。new_day/new_slot_start 必填。",
+		`{"name":"queue_apply_head_move","parameters":{"new_day":{"type":"int","required":true},"new_slot_start":{"type":"int","required":true}}}`,
+		func(state *ScheduleState, args map[string]any) string {
+			return QueueApplyHeadMove(state, args)
+		},
+	)
+
+	r.Register("queue_skip_head",
+		"跳过当前队首任务（不改日程），将其标记为 skipped 并继续后续队列。",
+		`{"name":"queue_skip_head","parameters":{"reason":{"type":"string"}}}`,
+		func(state *ScheduleState, args map[string]any) string {
+			return QueueSkipHead(state, args)
 		},
 	)
 
@@ -236,6 +265,18 @@ func NewDefaultRegistry() *ToolRegistry {
 		},
 	)
 
+	r.Register("spread_even",
+		"在给定任务集合内做均匀化铺开：先按筛选条件收集候选坑位，再规划并原子落地。task_ids 必填（兼容 task_id）。",
+		`{"name":"spread_even","parameters":{"task_ids":{"type":"array","required":true,"items":{"type":"int"}},"task_id":{"type":"int"},"limit":{"type":"int"},"allow_embed":{"type":"bool"},"day":{"type":"int"},"day_start":{"type":"int"},"day_end":{"type":"int"},"day_scope":{"type":"string","enum":["all","workday","weekend"]},"day_of_week":{"type":"array","items":{"type":"int"}},"week":{"type":"int"},"week_filter":{"type":"array","items":{"type":"int"}},"week_from":{"type":"int"},"week_to":{"type":"int"},"slot_type":{"type":"string"},"slot_types":{"type":"array","items":{"type":"string"}},"exclude_sections":{"type":"array","items":{"type":"int"}},"after_section":{"type":"int"},"before_section":{"type":"int"}}}`,
+		func(state *ScheduleState, args map[string]any) string {
+			taskIDs, err := parseSpreadEvenTaskIDs(args)
+			if err != nil {
+				return fmt.Sprintf("均匀化调整失败：%s。", err.Error())
+			}
+			return SpreadEven(state, taskIDs, args)
+		},
+	)
+
 	r.Register("unplace",
 		"将一个已落位任务移除，恢复为待安排状态。会自动清理嵌入关系。task_id 必填。",
 		`{"name":"unplace","parameters":{"task_id":{"type":"int","required":true}}}`,
@@ -248,7 +289,7 @@ func NewDefaultRegistry() *ToolRegistry {
 		},
 	)
 
-	// 按 schema name 排序，保证输出稳定。
+	// 按 schema name 排序，确保输出稳定。
 	sort.Slice(r.schemas, func(i, j int) bool {
 		return r.schemas[i].Name < r.schemas[j].Name
 	})

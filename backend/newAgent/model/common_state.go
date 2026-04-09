@@ -184,6 +184,37 @@ func (s *CommonState) RejectPlan() {
 	s.ClearTerminalOutcome()
 }
 
+// ResetForNextRun 在“上一轮已经收口，且本轮准备开始新请求”时重置执行期临时状态。
+//
+// 职责边界：
+// 1. 负责清理会污染新一轮执行的临时字段（轮次、修正计数、计划游标、粗排开关、顺序基线、终止结果）；
+// 2. 不负责清理会话身份与跨轮共享数据（ConversationID/UserID/TaskClassIDs/TaskClasses/历史上下文/ScheduleState）；
+// 3. 该方法是幂等操作：重复调用不会引入额外副作用，便于在“加载兜底 + chat 入口”双保险场景下复用。
+func (s *CommonState) ResetForNextRun() {
+	if s == nil {
+		return
+	}
+
+	// 1. 先把阶段回收为 planning，确保新一轮从可路由的干净入口开始。
+	// 2. 这样即使后续还有兜底重置判断，也不会因为仍处于 done 而重复触发。
+	s.Phase = PhasePlanning
+
+	// 3. 清理执行轮次与连续修正计数，避免上一轮预算/异常计数污染本轮。
+	s.RoundUsed = 0
+	s.ConsecutiveCorrections = 0
+
+	// 4. 清理计划执行游标与粗排相关临时标记，确保新请求不会误沿用旧计划。
+	s.PlanSteps = nil
+	s.CurrentStep = 0
+	s.NeedsRoughBuild = false
+	s.NeedsRefineAfterRoughBuild = false
+
+	// 5. 重置顺序约束临时态与终止结果，避免上一轮 completed/aborted/exhausted 语义串到下一轮。
+	s.AllowReorder = false
+	s.SuggestedOrderBaseline = nil
+	s.ClearTerminalOutcome()
+}
+
 // AdvanceStep 推进到下一个计划步骤，并返回是否仍有剩余步骤。
 func (s *CommonState) AdvanceStep() bool {
 	s.CurrentStep++

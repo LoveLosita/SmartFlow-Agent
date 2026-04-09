@@ -245,8 +245,23 @@ func (s *AgentService) loadOrCreateRuntimeState(ctx context.Context, chatID stri
 		cs.UserID = userID
 		cs.ConversationID = chatID
 
-		// 不需要手动重置 Phase：所有请求统一先过 Chat 节点，Chat 会根据路由决策覆盖 Phase。
-		// 保留完整的 RuntimeState（PlanSteps、CurrentStep 等），支持连续对话调整日程。
+		// 1. 冷加载兜底：若上一轮已经收口且当前没有待恢复交互，说明本次是新一轮请求；
+		// 2. 这里先重置执行期临时字段，避免旧 round/terminal 状态污染 chat 路由和后续 execute；
+		// 3. 即使 chat 节点也有同条件重置，这里仍保留兜底，覆盖断线恢复或入口绕行场景。
+		if !snapshot.RuntimeState.HasPendingInteraction() && cs.Phase == newagentmodel.PhaseDone {
+			terminalBefore := cs.TerminalStatus()
+			roundBefore := cs.RoundUsed
+			cs.ResetForNextRun()
+			log.Printf(
+				"[DEBUG] loadOrCreateRuntimeState reset runtime for next run chat=%s round_before=%d terminal_before=%s",
+				chatID,
+				roundBefore,
+				terminalBefore,
+			)
+		}
+
+		// 常规场景仍由 Chat 节点基于路由覆盖 Phase，这里只在"上一轮已 done"时做一次前置清理兜底。
+		// 其余跨轮可复用状态（如任务类范围、会话历史、日程内存态）继续保留，支持连续对话调整日程。
 
 		originalScheduleState := snapshot.OriginalScheduleState
 		if snapshot.ScheduleState != nil && originalScheduleState == nil {
@@ -463,7 +478,7 @@ func (s *AgentService) makeRoughBuildFunc() newagentmodel.RoughBuildFunc {
 	}
 }
 
-// makeWriteSchedulePreviewFunc 封装 cacheDAO 写排程预览缓存的操作，供 Deliver 节点注入。
+// makeWriteSchedulePreviewFunc 封装 cacheDAO 写排程预览缓存的操作，供 Execute/Deliver 节点复用。
 func (s *AgentService) makeWriteSchedulePreviewFunc() newagentmodel.WriteSchedulePreviewFunc {
 	if s.cacheDAO == nil {
 		return nil
@@ -472,12 +487,12 @@ func (s *AgentService) makeWriteSchedulePreviewFunc() newagentmodel.WriteSchedul
 		stateDigest := summarizeScheduleStateForPreviewDebug(state)
 		preview := conv.ScheduleStateToPreview(state, userID, conversationID, taskClassIDs, "")
 		if preview == nil {
-			log.Printf("[WARN] deliver preview skipped chat=%s user=%d state=%s", conversationID, userID, stateDigest)
+			log.Printf("[WARN] schedule preview skipped chat=%s user=%d state=%s", conversationID, userID, stateDigest)
 			return nil
 		}
 		previewDigest := summarizeHybridEntriesForPreviewDebug(preview.HybridEntries)
 		log.Printf(
-			"[DEBUG] deliver preview write chat=%s user=%d state=%s preview=%s generated_at=%s",
+			"[DEBUG] schedule preview write chat=%s user=%d state=%s preview=%s generated_at=%s",
 			conversationID,
 			userID,
 			stateDigest,

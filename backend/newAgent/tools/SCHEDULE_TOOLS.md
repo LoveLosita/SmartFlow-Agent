@@ -251,32 +251,54 @@ DB 记录：
 
 ---
 
-### 4.3 find_first_free
+### 4.3 query_available_slots
 
-按天顺序查找“首个可用位”（先纯空位，再可嵌入位），并返回该日详细信息。
+查询候选坑位池（结构化返回）：默认先返回“纯空位”，不足时再补“可嵌入位”。
 
 **入参：**
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| duration | int | 是 | 需要的连续时段数 |
-| day | int | 否 | 限定某天；与 `day_start/day_end` 互斥 |
-| day_start | int | 否 | 搜索起始天（闭区间） |
-| day_end | int | 否 | 搜索结束天（闭区间） |
+| span / duration | int | 否 | 目标连续时段长度，默认 2 |
+| limit | int | 否 | 返回候选上限，默认 12 |
+| allow_embed | bool | 否 | 是否允许补可嵌入位，默认 true |
+| day / day_start / day_end | int | 否 | 天级范围过滤（`day` 与区间互斥） |
+| day_scope | string | 否 | `all` / `workday` / `weekend` |
+| day_of_week | []int | 否 | 星期过滤（1-7） |
+| week / week_filter / week_from / week_to | int / []int | 否 | 周级过滤 |
+| slot_type / slot_types | string / []string | 否 | `pure/empty/strict` 会强制只返回纯空位 |
+| exclude_sections | []int | 否 | 排除节次（1-12） |
+| after_section / before_section | int | 否 | 只返回区间之后/之前的候选 |
+| section_from + section_to | int | 否 | 精确节次区间查询（需同时提供） |
 
 **返回示例：**
 
-```
-首个可用位置：第5天第1-2节（可直接放置）。
-匹配条件：需要2个连续时段。
-当日负载：总占6/12（课程占2/12，任务占4/12）。
-当日任务明细（全量，已过滤课程）：
-  - [35]第一章随机事件与概率 | 状态:suggested | 类别:概率论 | 时段:第3-4节
-  - [36]第二章随机变量 | 状态:suggested | 类别:概率论 | 时段:第7-8节
-当日连续空闲区：
-  - 第1-2节（2时段连续空闲）
-  - 第5-6节（2时段连续空闲）
-  - 第9-12节（4时段连续空闲）
+```json
+{
+  "tool": "query_available_slots",
+  "count": 12,
+  "strict_count": 8,
+  "embedded_count": 4,
+  "fallback_used": true,
+  "day_scope": "all",
+  "day_of_week": [],
+  "week_filter": [12],
+  "week_from": 12,
+  "week_to": 12,
+  "span": 2,
+  "allow_embed": true,
+  "exclude_sections": [],
+  "slots": [
+    {
+      "day": 5,
+      "week": 12,
+      "day_of_week": 3,
+      "slot_start": 1,
+      "slot_end": 2,
+      "slot_type": "empty"
+    }
+  ]
+}
 ```
 
 ---
@@ -487,7 +509,7 @@ DB 记录：
 
 ### 5.4 batch_move
 
-批量原子移动多个任务（仅 suggested），要么全部成功，要么全部回滚。
+批量原子移动多个任务（仅 suggested，**单次最多 2 条**），要么全部成功，要么全部回滚。
 
 **入参：**
 
@@ -498,13 +520,17 @@ DB 记录：
 **成功返回：**
 
 ```
-批量移动完成，3个任务全部成功：
+批量移动完成，2个任务全部成功：
   [2]英语 → 第3天第1-2节
   [6]线代 → 第5天第3-4节
-  [8]程序设计 → 第9天第5-6节
 第3天当前占用：[2]英语(1-2节)，占用2/12。
 第5天当前占用：[6]线代(3-4节)，占用2/12。
-第9天当前占用：[8]程序设计(5-6节)，占用2/12。
+```
+
+**失败返回（超出上限）：**
+
+```
+批量移动失败：当前最多支持 2 条移动请求。请改用队列化逐项处理（queue_pop_head + queue_apply_head_move）。
 ```
 
 **失败返回：**
@@ -578,6 +604,114 @@ DB 记录：
 
 ---
 
+### 5.7 queue_pop_head
+
+弹出并返回当前队首任务；若已有 current 则复用，保证一次只处理一个任务。
+
+**入参：**
+
+无
+
+**返回示例：**
+
+```json
+{"tool":"queue_pop_head","has_head":true,"pending_count":5,"current":{"task_id":35,"name":"示例任务","status":"suggested","slots":[{"day":3,"week":12,"day_of_week":1,"slot_start":5,"slot_end":6}]}}
+```
+
+---
+
+### 5.8 queue_apply_head_move
+
+将当前队首任务移动到指定位置并自动出队。仅作用于 current，不接受 task_id。
+
+**入参：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| new_day | int | 是 | 目标 day |
+| new_slot_start | int | 是 | 目标起始节次 |
+
+**返回示例：**
+
+```json
+{"tool":"queue_apply_head_move","success":true,"task_id":35,"pending_count":4,"completed_count":2,"result":"已将 [35]... 从第3天第5-6节移至第5天第3-4节。"}
+```
+
+---
+
+### 5.9 queue_skip_head
+
+跳过当前队首任务（不改日程），标记为 skipped 并继续后续队列。
+
+**入参：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| reason | string | 否 | 跳过原因 |
+
+**返回示例：**
+
+```json
+{"tool":"queue_skip_head","success":true,"skipped_task_id":35,"pending_count":4,"skipped_count":1}
+```
+
+---
+
+### 5.10 queue_status
+
+查看当前待处理队列状态（pending/current/completed/skipped）。
+
+**入参：**
+
+无
+
+**返回示例：**
+
+```json
+{"tool":"queue_status","pending_count":5,"completed_count":1,"skipped_count":0,"current_task_id":35,"current_attempt":1}
+```
+
+---
+
+### 5.11 spread_even
+
+在给定任务集合内执行“均匀化铺开”：  
+先按筛选条件收集候选坑位，再用确定性规划器生成移动方案并原子提交。
+
+**入参：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| task_ids | array[int] | 是 | 参与均匀化的任务 ID 列表（至少 2 个） |
+| task_id | int | 否 | 兼容单值参数，不建议新调用使用 |
+| day/day_start/day_end | int | 否 | 天级范围过滤 |
+| day_scope | string | 否 | `all` / `workday` / `weekend` |
+| day_of_week | array[int] | 否 | 星期过滤（1~7） |
+| week/week_filter/week_from/week_to | int/array[int] | 否 | 周级过滤 |
+| limit | int | 否 | 每个跨度的候选坑位上限（内部会按任务数自动放大） |
+| allow_embed | bool | 否 | 是否允许补充可嵌入位，默认 true |
+| exclude_sections | array[int] | 否 | 排除节次 |
+| after_section/before_section | int | 否 | 节次边界过滤 |
+
+**成功返回：**
+
+```
+均匀化调整完成：共处理 6 个任务，候选坑位 24 个。
+本次调整：
+  [35]第一章复习：第3天(星期3)第5-6节 -> 第5天(星期5)第1-2节
+  [41]第二章练习：第4天(星期4)第5-6节 -> 第6天(星期6)第1-2节
+第5天当前占用：...
+第6天当前占用：...
+```
+
+**失败返回（候选不足）：**
+
+```
+均匀化调整失败：跨度=2 可用坑位不足：required=4, got=2。
+```
+
+---
+
 ## 6. 公共规则
 
 ### 冲突检测
@@ -591,8 +725,8 @@ DB 记录：
 
 ### 状态约束
 - pending 任务只能 place，不能 move / swap / unplace
-- suggested 任务可以 move / swap / unplace / min_context_switch
-- existing 任务不能 move / batch_move / min_context_switch（仅作已安排事实层）
+- suggested 任务可以 move / swap / unplace / spread_even / min_context_switch
+- existing 任务不能 move / batch_move / spread_even / min_context_switch（仅作已安排事实层）
 - 状态不符时返回明确错误信息
 
 ### 返回格式
@@ -609,7 +743,7 @@ DB 记录：
 ### 嵌入任务规则
 - `can_embed=true` 的任务（水课）允许其他任务嵌入到同一时段
 - 嵌入任务占位时不触发冲突检测（与宿主共存）
-- `find_first_free` 返回首个命中位，并附当日详细负载
+- `query_available_slots` 返回候选坑位池（先纯空位，必要时补可嵌入位）
 - `place` 到可嵌入时段时，若已有宿主任务，自动标记 embed_host 关系
 - 嵌入任务的 locked 继承宿主：宿主不可移动时，嵌入任务也不可单独移动
 

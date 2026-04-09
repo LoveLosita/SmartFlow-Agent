@@ -51,6 +51,7 @@ type ExecuteNodeInput struct {
 	ToolRegistry          *newagenttools.ToolRegistry
 	ScheduleState         *newagenttools.ScheduleState
 	SchedulePersistor     newagentmodel.SchedulePersistor
+	WriteSchedulePreview  newagentmodel.WriteSchedulePreviewFunc
 	OriginalScheduleState *newagenttools.ScheduleState
 	AlwaysExecute         bool // true 时写工具跳过确认闸门直接执行
 }
@@ -100,13 +101,31 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 
 	// 1.5. 确认执行分支：如果用户已确认写操作，直接执行工具。
 	if runtimeState.PendingConfirmTool != nil {
-		return executePendingTool(ctx, runtimeState, conversationContext, input.ToolRegistry, input.ScheduleState, input.SchedulePersistor, input.OriginalScheduleState, emitter)
+		return executePendingTool(
+			ctx,
+			runtimeState,
+			conversationContext,
+			input.ToolRegistry,
+			input.ScheduleState,
+			input.SchedulePersistor,
+			input.OriginalScheduleState,
+			input.WriteSchedulePreview,
+			emitter,
+		)
 	}
 
 	// 1.6. 顺序守卫基线初始化：
 	// 1) 仅在未授权打乱顺序时记录 suggested 顺序基线；
 	// 2) 只在基线为空时初始化，避免执行循环中反复覆盖；
 	// 3) 后续由 order_guard 节点基于该基线做相对顺序校验。
+	//
+	// 同时在“本轮 execute 首轮”重置一次临时队列，避免上一轮残留队列污染新请求。
+	// 判定依据：
+	// 1. RoundUsed==0 说明当前还未消耗执行预算；
+	// 2. 此时清理不会影响断线恢复中的中间进度（恢复场景通常 RoundUsed>0）。
+	if input.ScheduleState != nil && flowState.RoundUsed == 0 {
+		newagenttools.ResetTaskProcessingQueue(input.ScheduleState)
+	}
 	if !flowState.AllowReorder && len(flowState.SuggestedOrderBaseline) == 0 {
 		flowState.SuggestedOrderBaseline = buildSuggestedOrderSnapshot(input.ScheduleState)
 	}
@@ -329,7 +348,16 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		// 继续当前步骤的 ReAct 循环。
 		// 若有工具调用意图，则执行工具并记录证据。
 		if decision.ToolCall != nil {
-			return executeToolCall(ctx, flowState, conversationContext, decision.ToolCall, emitter, input.ToolRegistry, input.ScheduleState)
+			return executeToolCall(
+				ctx,
+				flowState,
+				conversationContext,
+				decision.ToolCall,
+				emitter,
+				input.ToolRegistry,
+				input.ScheduleState,
+				input.WriteSchedulePreview,
+			)
 		}
 		// 无工具调用且 speak 为空（speak 非空时已在步骤 6 写入历史）。
 		// 若 history 本轮完全没有更新，下一轮 LLM 会收到完全相同的上下文，容易死循环。
@@ -351,7 +379,16 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 	case newagentmodel.ExecuteActionConfirm:
 		// AlwaysExecute=true：跳过确认闸门，直接执行内存写工具，不走 confirm 节点。
 		if input.AlwaysExecute && decision.ToolCall != nil {
-			return executeToolCall(ctx, flowState, conversationContext, decision.ToolCall, emitter, input.ToolRegistry, input.ScheduleState)
+			return executeToolCall(
+				ctx,
+				flowState,
+				conversationContext,
+				decision.ToolCall,
+				emitter,
+				input.ToolRegistry,
+				input.ScheduleState,
+				input.WriteSchedulePreview,
+			)
 		}
 		// AlwaysExecute=false（默认）：暂存工具意图，设 Phase → 下游 confirm 节点接管。
 		return handleExecuteActionConfirm(decision, runtimeState, flowState)
@@ -552,6 +589,7 @@ func executeToolCall(
 	emitter *newagentstream.ChunkEmitter,
 	registry *newagenttools.ToolRegistry,
 	scheduleState *newagenttools.ScheduleState,
+	writePreview newagentmodel.WriteSchedulePreviewFunc,
 ) error {
 	if toolCall == nil {
 		return nil
@@ -700,6 +738,14 @@ func executeToolCall(
 		ToolName:   toolName,
 	})
 
+	// 4. 写工具实时预览：每次写工具执行后都尝试刷新 Redis 预览，确保前端可见“最新操作结果”。
+	//
+	// 步骤化说明：
+	// 1. 仅写工具触发实时预览刷新，读工具不触发，避免无意义放大写流量；
+	// 2. 这里采用“失败不阻断主流程”策略：预览写失败只记日志，不影响当前执行链路；
+	// 3. Deliver 节点仍保留最终覆盖写，保证 order_guard/收口后的最终态一致。
+	tryWritePreviewAfterWriteTool(ctx, flowState, scheduleState, registry, toolName, writePreview)
+
 	return nil
 }
 
@@ -732,6 +778,7 @@ func executePendingTool(
 	scheduleState *newagenttools.ScheduleState,
 	persistor newagentmodel.SchedulePersistor,
 	originalState *newagenttools.ScheduleState,
+	writePreview newagentmodel.WriteSchedulePreviewFunc,
 	emitter *newagentstream.ChunkEmitter,
 ) error {
 	pending := runtimeState.PendingConfirmTool
@@ -804,10 +851,51 @@ func executePendingTool(
 		ToolName:   pending.ToolName,
 	})
 
+	// 5. 写工具实时预览：confirm accept 后真实执行写工具时，立即刷新一次预览缓存。
+	tryWritePreviewAfterWriteTool(ctx, flowState, scheduleState, registry, pending.ToolName, writePreview)
+
 	// 6. 清空临时邮箱，避免重复执行。
 	runtimeState.PendingConfirmTool = nil
 
 	return nil
+}
+
+// tryWritePreviewAfterWriteTool 在写工具执行后尝试刷新一次排程预览缓存。
+//
+// 职责边界：
+// 1. 只负责“写工具后实时可见”的旁路写入，不负责最终收口；
+// 2. 只在 write tool 命中时执行，读工具直接跳过；
+// 3. 失败只记日志，不影响主流程，避免因为缓存抖动打断执行。
+func tryWritePreviewAfterWriteTool(
+	ctx context.Context,
+	flowState *newagentmodel.CommonState,
+	scheduleState *newagenttools.ScheduleState,
+	registry *newagenttools.ToolRegistry,
+	toolName string,
+	writePreview newagentmodel.WriteSchedulePreviewFunc,
+) {
+	if flowState == nil || scheduleState == nil || registry == nil || writePreview == nil {
+		return
+	}
+	if !registry.IsWriteTool(toolName) {
+		return
+	}
+
+	if err := writePreview(ctx, scheduleState, flowState.UserID, flowState.ConversationID, flowState.TaskClassIDs); err != nil {
+		log.Printf(
+			"[WARN] execute realtime preview write failed chat=%s tool=%s err=%v",
+			flowState.ConversationID,
+			toolName,
+			err,
+		)
+		return
+	}
+
+	log.Printf(
+		"[DEBUG] execute realtime preview write success chat=%s tool=%s",
+		flowState.ConversationID,
+		toolName,
+	)
 }
 
 // listItemRe 匹配被粘连在一起的列表序号（如 "）2. " "水课3. "），用于自动补换行。

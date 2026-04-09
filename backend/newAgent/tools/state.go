@@ -69,6 +69,13 @@ type ScheduleState struct {
 	Window      ScheduleWindow  `json:"window"`
 	Tasks       []ScheduleTask  `json:"tasks"`
 	TaskClasses []TaskClassMeta `json:"task_classes,omitempty"` // 任务类约束元数据，供 LLM 排课参考
+	// RuntimeQueue 是“本轮 execute 微调”的临时待处理队列。
+	//
+	// 职责边界：
+	// 1. 负责承载 LLM 队列化微调时的运行态（待处理/当前处理/已完成/已跳过）；
+	// 2. 只用于 newAgent 运行期，不参与数据库持久化；
+	// 3. 支持随 AgentStateSnapshot 一起快照，便于断线恢复后继续处理队首任务。
+	RuntimeQueue *TaskProcessingQueue `json:"runtime_queue,omitempty"`
 }
 
 // DayToWeekDay converts day_index to (week, day_of_week).
@@ -131,5 +138,6 @@ func (s *ScheduleState) Clone() *ScheduleState {
 			clone.Tasks[i].EmbedHost = &v
 		}
 	}
+	clone.RuntimeQueue = cloneTaskProcessingQueue(s.RuntimeQueue)
 	return clone
 }

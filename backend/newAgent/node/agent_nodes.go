@@ -218,6 +218,7 @@ func (n *AgentNodes) Execute(ctx context.Context, st *newagentmodel.AgentGraphSt
 			ToolRegistry:          st.Deps.ToolRegistry,
 			ScheduleState:         scheduleState,
 			SchedulePersistor:     st.Deps.SchedulePersistor,
+			WriteSchedulePreview:  st.Deps.WriteSchedulePreview,
 			OriginalScheduleState: st.OriginalScheduleState,
 			AlwaysExecute:         st.Request.AlwaysExecute,
 		},

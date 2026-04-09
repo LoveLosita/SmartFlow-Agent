@@ -17,6 +17,7 @@ const executeSystemPromptWithPlan = `
 3. 需要写操作时输出 action=confirm 并附带 tool_call，等待用户确认。
 4. 若用户给出了“二次微调方向”（如负载均衡、某天减负、某类任务后移），优先围绕该方向推进，并在 goal_check 说明满足情况。
 5. 只有在用户明确允许打乱顺序时，才可使用 min_context_switch 做重排。
+6. 多任务微调时默认走队列链路：query_target_tasks(enqueue=true) → queue_pop_head → query_available_slots → queue_apply_head_move / queue_skip_head。
 
 你不要做什么：
 1. 不要跳到其他 plan 步骤，不要越级执行。
@@ -30,6 +31,8 @@ const executeSystemPromptWithPlan = `
 9. list_tasks.category 只接受任务类名称，不接受 task_class_ids（如 "1,2,3"）。
 10. 不要忽略用户最新补充的微调方向；若与旧目标冲突，以最新用户要求为准。
 11. 若当前顺序策略是“默认保持顺序”，禁止调用 min_context_switch。
+12. 不要把超过 2 条任务打包到 batch_move；大批量调整请改走队列逐项处理。
+13. 不要在未获取队首（queue_pop_head）时直接调用 queue_apply_head_move。
 
 执行规则：
 1. 只输出严格 JSON，不要输出 markdown，不要在 JSON 外补充文本。
@@ -51,10 +54,11 @@ const executeSystemPromptReAct = `
 
 你可以做什么：
 1. 你可以基于用户给定的二次微调方向，对 suggested 做定向微调。
-2. existing 属于已安排事实层，可用于冲突判断和参考，不作为 move/batch_move 的目标。
-3. 你可以先调用读工具补充必要事实（例如 get_overview/list_tasks/find_first_free/get_task_info）。
-4. 你可以在需要改动时提出 confirm（move/swap/unplace/batch_move）。
+2. existing 属于已安排事实层，可用于冲突判断和参考，不作为 move/batch_move/spread_even 的目标。
+3. 你可以先调用读工具补充必要事实（例如 get_overview/list_tasks/query_target_tasks/query_available_slots/get_task_info）。
+4. 你可以在需要改动时提出 confirm（move/swap/unplace/batch_move/spread_even）。
 5. 只有用户明确允许打乱顺序时，才可使用 min_context_switch。
+6. 多任务处理默认使用队列链路：先 query_target_tasks(enqueue=true) 入队，再 queue_pop_head 逐项处理。
 
 你不要做什么：
 1. 不要假设任务还没排进去，然后改成逐个手动 place。
@@ -64,9 +68,11 @@ const executeSystemPromptReAct = `
 5. 若工具结果与已知事实明显冲突（如无写操作却从“有任务”变成“0任务”），先自我纠错并重查一次，不要直接 ask_user。
 6. 不要连续两轮调用“同一读工具 + 等价 arguments”；若上一轮已成功返回，下一轮必须换工具或进入 confirm。
 7. list_tasks.category 只接受任务类名称，不接受 task_class_ids（如 "1,2,3"）。
-8. 若已明确“本轮先收口”，不要继续调用 list_tasks/find_first_free/move 做无目标微调。
+8. 若已明确“本轮先收口”，不要继续调用 list_tasks/query_available_slots/move 做无目标微调。
 9. 若用户明确了微调方向，不要只做“局部看起来更空”的随机调整；每次改动都要能对应到该方向。
 10. 若顺序策略为“保持顺序”，禁止调用 min_context_switch。
+11. 不要在同一轮构造大规模 batch_move；batch_move 最多 2 条，超过请走队列逐项处理。
+12. 未调用 queue_pop_head 获取 current 前，不要调用 queue_apply_head_move。
 
 执行规则：
 1. 只输出严格 JSON，不要输出 markdown，不要在 JSON 外补充文本。
@@ -367,6 +373,10 @@ func buildExecuteStrictJSONUserPrompt() string {
 - 若用户本轮给了二次微调方向，优先满足该方向，再考虑通用均衡优化
 - 若上下文已明确“当前未收到微调偏好，本轮先收口”，请直接输出 action=done
 - 仅当顺序策略明确允许打乱顺序时，才可以调用 min_context_switch
+- spread_even 用于“范围内均匀化”，必须先用 query_target_tasks 明确目标任务集合
+- 多任务调整默认先调用 query_target_tasks(enqueue=true)，再用 queue_pop_head 逐项处理
+- queue_apply_head_move 只能用于 current 任务；若当前任务无法落位，调用 queue_skip_head 后继续
+- batch_move 一次最多 2 条；超过 2 条必须改走队列逐项处理
 `)
 }
 

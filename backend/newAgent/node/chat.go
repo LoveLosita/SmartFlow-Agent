@@ -67,6 +67,17 @@ func RunChatNode(ctx context.Context, input ChatNodeInput) error {
 
 	// 2. 无 pending → 路由决策（一次快速 LLM 调用，不开 thinking）。
 	flowState := runtimeState.EnsureCommonState()
+	if !runtimeState.HasPendingInteraction() && flowState.Phase == newagentmodel.PhaseDone {
+		terminalBefore := flowState.TerminalStatus()
+		roundBefore := flowState.RoundUsed
+		flowState.ResetForNextRun()
+		log.Printf(
+			"[DEBUG] chat reset runtime for next run chat=%s round_before=%d terminal_before=%s",
+			flowState.ConversationID,
+			roundBefore,
+			terminalBefore,
+		)
+	}
 	messages := newagentprompt.BuildChatRoutingMessages(conversationContext, input.UserInput, flowState)
 
 	decision, rawResult, err := newagentllm.GenerateJSON[newagentmodel.ChatRoutingDecision](
