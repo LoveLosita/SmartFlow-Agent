@@ -19,6 +19,7 @@ const (
 	planStageName        = "plan"
 	planStatusBlockID    = "plan.status"
 	planSpeakBlockID     = "plan.speak"
+	planSummaryBlockID   = "plan.summary"
 	planPinnedKey        = "current_plan"
 	planCurrentStepKey   = "current_step"
 	planCurrentStepTitle = "当前步骤"
@@ -170,6 +171,23 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 		// always_execute 开启时，计划层跳过确认闸门，直接进入执行阶段。
 		// 这样可以与 Execute 节点的“写工具跳过确认”语义保持一致。
 		if input.AlwaysExecute {
+			// 1. 自动执行模式不会经过 Confirm 卡片，因此这里先把完整计划明确展示给用户。
+			// 2. 摘要格式复用 Confirm 节点，保证“手动确认”和“自动执行”两条链路文案一致。
+			// 3. 推流后同步写入历史，确保后续 Execute 阶段的上下文也能看到这份计划。
+			summary := strings.TrimSpace(buildPlanSummary(decision.PlanSteps))
+			if summary != "" {
+				if err := emitter.EmitPseudoAssistantText(
+					ctx,
+					planSummaryBlockID,
+					planStageName,
+					summary,
+					newagentstream.DefaultPseudoStreamOptions(),
+				); err != nil {
+					return fmt.Errorf("自动执行前计划摘要推送失败: %w", err)
+				}
+				conversationContext.AppendHistory(schema.AssistantMessage(summary, nil))
+			}
+
 			flowState.ConfirmPlan()
 			_ = emitter.EmitStatus(
 				planStatusBlockID,

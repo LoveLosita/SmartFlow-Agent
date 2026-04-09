@@ -6,12 +6,12 @@ import (
 	"log"
 
 	"github.com/LoveLosita/smartflow/backend/api"
-	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
 	"github.com/LoveLosita/smartflow/backend/inits"
 	"github.com/LoveLosita/smartflow/backend/middleware"
+	newagentconv "github.com/LoveLosita/smartflow/backend/newAgent/conv"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/LoveLosita/smartflow/backend/routers"
@@ -108,8 +108,8 @@ func Start() {
 	// newAgent 依赖接线。
 	agentService.SetAgentStateStore(dao.NewAgentStateStoreAdapter(cacheRepo))
 	agentService.SetToolRegistry(newagenttools.NewDefaultRegistry())
-	agentService.SetScheduleProvider(conv.NewScheduleProvider(scheduleRepo, taskClassRepo))
-	agentService.SetSchedulePersistor(conv.NewSchedulePersistorAdapter(manager))
+	agentService.SetScheduleProvider(newagentconv.NewScheduleProvider(scheduleRepo, taskClassRepo))
+	agentService.SetSchedulePersistor(newagentconv.NewSchedulePersistorAdapter(manager))
 
 	// API 层初始化。
 	userApi := api.NewUserHandler(userService)

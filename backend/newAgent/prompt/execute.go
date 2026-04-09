@@ -320,7 +320,7 @@ func BuildExecuteMessages(state *newagentmodel.CommonState, ctx *newagentmodel.C
 			BuildExecuteSystemPrompt(),
 			state,
 			ctx,
-			buildExecuteStrictJSONUserPrompt(),
+			buildExecuteStrictJSONUserPromptWithPlan(state),
 		)
 	}
 
@@ -330,6 +330,50 @@ func BuildExecuteMessages(state *newagentmodel.CommonState, ctx *newagentmodel.C
 		ctx,
 		buildExecuteStrictJSONUserPrompt(),
 	)
+}
+
+// buildExecuteStrictJSONUserPromptWithPlan 在通用 JSON 约束上补充“当前计划步骤”强约束。
+//
+// 职责边界：
+// 1. 负责把“当前是第几步、当前步骤内容、done_when 判定”明确写进用户指令；
+// 2. 不负责替代系统提示词中的工具规则和安全边界；
+// 3. 当 state 无法提供有效当前步骤时，仅追加兜底提示，不在此处推进流程状态。
+func buildExecuteStrictJSONUserPromptWithPlan(state *newagentmodel.CommonState) string {
+	base := buildExecuteStrictJSONUserPrompt()
+	if state == nil || !state.HasPlan() {
+		return base
+	}
+
+	current, total := state.PlanProgress()
+	step, ok := state.CurrentPlanStep()
+	if !ok {
+		return strings.TrimSpace(base + `
+
+计划步骤强约束：
+- 当前没有可执行的计划步骤，请先基于已有事实检查是否已完成全部计划。
+- 若全部计划已完成：输出 action=done，并在 goal_check 总结完成证据。
+- 若未完成但缺少关键信息：输出 action=ask_user。`)
+	}
+
+	stepContent := strings.TrimSpace(step.Content)
+	if stepContent == "" {
+		stepContent = "（当前步骤内容为空，以 done_when 为准）"
+	}
+	doneWhen := strings.TrimSpace(step.DoneWhen)
+	if doneWhen == "" {
+		doneWhen = "（未提供 done_when，需基于当前步骤目标给出可验证完成证据）"
+	}
+
+	return strings.TrimSpace(fmt.Sprintf(`%s
+
+计划步骤强约束：
+- 你当前只允许推进第 %d/%d 步。
+- 当前步骤内容：%s
+- 当前步骤完成判定(done_when)：%s
+- 未满足 done_when 时：只能输出 continue / confirm / ask_user，禁止输出 next_plan。
+- 满足 done_when 时：优先输出 action=next_plan，并在 goal_check 逐条对照 done_when 给出证据。
+- 禁止跳步：不要提前执行后续步骤。`,
+		base, current, total, stepContent, doneWhen))
 }
 
 // buildExecutePromptWithFormatGuard 统一补一层更硬的 JSON 输出约束。

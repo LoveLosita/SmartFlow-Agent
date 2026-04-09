@@ -130,6 +130,10 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		flowState.SuggestedOrderBaseline = buildSuggestedOrderSnapshot(input.ScheduleState)
 	}
 
+	// 1. 每轮 execute 开始前先刷新一次执行锚点，避免 LLM 继续读取旧的当前步骤。
+	// 2. 这里仅维护上下文一致性，不改变流程状态。
+	syncExecutePinnedContext(conversationContext, flowState)
+
 	// 2. 推送执行阶段状态，让前端知道当前进度。
 	if flowState.HasCurrentPlanStep() {
 		// 有 plan：显示步骤进度。
@@ -400,6 +404,9 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 			// 所有步骤已完成，进入交付阶段。
 			flowState.Done()
 		}
+		// 1. next_plan 推进后立刻刷新 current_step / execution_context。
+		// 2. 若计划已结束，这里会移除 current_step，避免下轮读取到旧步骤。
+		syncExecutePinnedContext(conversationContext, flowState)
 		return nil
 
 	case newagentmodel.ExecuteActionDone:
@@ -462,6 +469,114 @@ func prepareExecuteNodeInput(input ExecuteNodeInput) (*newagentmodel.AgentRuntim
 // 1. 优先使用 LLM 输出的 speak；
 // 2. 其次使用 reason；
 // 3. 最后使用默认文案。
+// syncExecutePinnedContext 同步 execute 阶段的置顶上下文。
+//
+// 步骤说明：
+// 1. 每轮先刷新 execution_context，确保模型始终看到最新执行锚点。
+// 2. 若当前仍在计划执行且 current_step 可读，则覆盖 current_step 置顶块。
+// 3. 若计划已执行完或当前步骤不可读，则移除 current_step，避免模型误读旧步骤。
+func syncExecutePinnedContext(
+	conversationContext *newagentmodel.ConversationContext,
+	flowState *newagentmodel.CommonState,
+) {
+	if conversationContext == nil || flowState == nil {
+		return
+	}
+
+	execContent := buildExecuteContextPinnedMarkdown(flowState)
+	if strings.TrimSpace(execContent) != "" {
+		conversationContext.UpsertPinnedBlock(newagentmodel.ContextBlock{
+			Key:     executePinnedKey,
+			Title:   "执行上下文",
+			Content: execContent,
+		})
+	}
+
+	if !flowState.HasPlan() {
+		conversationContext.RemovePinnedBlock(planCurrentStepKey)
+		return
+	}
+
+	step, ok := flowState.CurrentPlanStep()
+	if !ok {
+		conversationContext.RemovePinnedBlock(planCurrentStepKey)
+		return
+	}
+
+	current, total := flowState.PlanProgress()
+	title := strings.TrimSpace(planCurrentStepTitle)
+	if title == "" {
+		title = "当前步骤"
+	}
+	conversationContext.UpsertPinnedBlock(newagentmodel.ContextBlock{
+		Key:     planCurrentStepKey,
+		Title:   title,
+		Content: buildCurrentPlanStepPinnedMarkdown(step, current, total),
+	})
+}
+
+// buildExecuteContextPinnedMarkdown 构造 execute 节点给模型的执行锚点文本。
+func buildExecuteContextPinnedMarkdown(flowState *newagentmodel.CommonState) string {
+	if flowState == nil {
+		return ""
+	}
+
+	lines := make([]string, 0, 8)
+	if flowState.HasPlan() {
+		lines = append(lines, "执行模式：计划执行（按步骤推进）")
+		current, total := flowState.PlanProgress()
+		lines = append(lines, fmt.Sprintf("计划进度：第 %d/%d 步", current, total))
+
+		if step, ok := flowState.CurrentPlanStep(); ok {
+			lines = append(lines, "当前步骤："+compactExecutePinnedText(step.Content))
+			doneWhen := compactExecutePinnedText(step.DoneWhen)
+			if doneWhen != "" {
+				lines = append(lines, "完成判定(done_when)："+doneWhen)
+			}
+			lines = append(lines, "动作纪律：未满足 done_when 禁止 next_plan；满足后优先 next_plan。")
+		} else {
+			lines = append(lines, "当前步骤：不可读（可能已执行完成）")
+		}
+	} else {
+		lines = append(lines, "执行模式：自由执行（无预定义步骤）")
+	}
+
+	if flowState.MaxRounds > 0 {
+		lines = append(lines, fmt.Sprintf("轮次预算：%d/%d", flowState.RoundUsed, flowState.MaxRounds))
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// buildCurrentPlanStepPinnedMarkdown 构造 current_step 置顶块内容。
+func buildCurrentPlanStepPinnedMarkdown(step newagentmodel.PlanStep, current, total int) string {
+	lines := make([]string, 0, 4)
+	lines = append(lines, fmt.Sprintf("步骤进度：第 %d/%d 步", current, total))
+
+	content := compactExecutePinnedText(step.Content)
+	if content == "" {
+		content = "（空）"
+	}
+	lines = append(lines, "步骤内容："+content)
+
+	doneWhen := compactExecutePinnedText(step.DoneWhen)
+	if doneWhen != "" {
+		lines = append(lines, "完成判定："+doneWhen)
+	}
+
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// compactExecutePinnedText 把多行文本压成单行，避免置顶块出现冗长换行噪音。
+func compactExecutePinnedText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\n", "；")
+	return strings.TrimSpace(text)
+}
+
 func resolveExecuteAskUserText(decision *newagentmodel.ExecuteDecision) string {
 	if decision == nil {
 		return "执行过程中遇到不确定的情况，需要向你确认。"

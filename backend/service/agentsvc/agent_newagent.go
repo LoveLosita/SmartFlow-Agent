@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	newagentconv "github.com/LoveLosita/smartflow/backend/newAgent/conv"
 	newagentgraph "github.com/LoveLosita/smartflow/backend/newAgent/graph"
 	newagentllm "github.com/LoveLosita/smartflow/backend/newAgent/llm"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
@@ -485,7 +486,7 @@ func (s *AgentService) makeWriteSchedulePreviewFunc() newagentmodel.WriteSchedul
 	}
 	return func(ctx context.Context, state *newagenttools.ScheduleState, userID int, conversationID string, taskClassIDs []int) error {
 		stateDigest := summarizeScheduleStateForPreviewDebug(state)
-		preview := conv.ScheduleStateToPreview(state, userID, conversationID, taskClassIDs, "")
+		preview := newagentconv.ScheduleStateToPreview(state, userID, conversationID, taskClassIDs, "")
 		if preview == nil {
 			log.Printf("[WARN] schedule preview skipped chat=%s user=%d state=%s", conversationID, userID, stateDigest)
 			return nil

@@ -1,9 +1,10 @@
-package conv
+package newagentconv
 
 import (
 	"context"
 	"fmt"
 
+	baseconv "github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/model"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
@@ -141,7 +142,7 @@ func applyPlaceTaskItem(ctx context.Context, manager *dao.RepoManager, change Sc
 		}
 	} else {
 		// 普通路径：新建 ScheduleEvent + Schedule 记录
-		startTime, endTime, err := RelativeTimeToRealTime(week, dayOfWeek, startSection, endSection)
+		startTime, endTime, err := baseconv.RelativeTimeToRealTime(week, dayOfWeek, startSection, endSection)
 		if err != nil {
 			return fmt.Errorf("时间转换失败: %w", err)
 		}

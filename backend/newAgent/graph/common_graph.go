@@ -83,24 +83,28 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	)); err != nil {
 		return nil, err
 	}
-	// Plan -> Plan(继续规划) / Confirm(规划完成) / Interrupt(需要追问用户)
+	// Plan -> Plan(继续规划) / Confirm(规划完成) / RoughBuild(需粗排) / Execute(直接执行) / Deliver(完成) / Interrupt(需要追问用户)
 	if err := g.AddBranch(NodePlan, compose.NewGraphBranch(
 		branchAfterPlan,
 		map[string]bool{
-			NodePlan:      true,
-			NodeConfirm:   true,
-			NodeInterrupt: true,
+			NodePlan:       true,
+			NodeConfirm:    true,
+			NodeRoughBuild: true,
+			NodeExecute:    true,
+			NodeDeliver:    true,
+			NodeInterrupt:  true,
 		},
 	)); err != nil {
 		return nil, err
 	}
-	// Confirm -> Plan(用户拒绝或重规划) / RoughBuild(需粗排) / Execute(直接执行) / Interrupt(等待用户确认)
+	// Confirm -> Plan(用户拒绝或重规划) / RoughBuild(需粗排) / Execute(直接执行) / Deliver(完成) / Interrupt(等待用户确认)
 	if err := g.AddBranch(NodeConfirm, compose.NewGraphBranch(
 		branchAfterConfirm,
 		map[string]bool{
 			NodePlan:       true,
 			NodeRoughBuild: true,
 			NodeExecute:    true,
+			NodeDeliver:    true,
 			NodeInterrupt:  true,
 		},
 	)); err != nil {

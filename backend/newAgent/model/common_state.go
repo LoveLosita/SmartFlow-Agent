@@ -57,7 +57,7 @@ func (o *FlowTerminalOutcome) Normalize() {
 	o.InternalReason = strings.TrimSpace(o.InternalReason)
 }
 
-const DefaultMaxRounds = 30
+const DefaultMaxRounds = 60
 
 // CommonState 承载可持久化的主流程状态。
 //

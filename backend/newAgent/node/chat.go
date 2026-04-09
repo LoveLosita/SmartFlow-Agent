@@ -19,6 +19,11 @@ const (
 	chatStageName     = "chat"
 	chatStatusBlockID = "chat.status"
 	chatSpeakBlockID  = "chat.speak"
+	// chatHistoryKindKey 用于在 history 中打运行态标记，供 prompt 层做上下文分层。
+	chatHistoryKindKey = "newagent_history_kind"
+	// chatHistoryKindExecuteLoopClosed 表示“上一轮 execute loop 已正常收口”。
+	// prompt 侧会据此把旧 loop 归档到 msg1，而不是继续占用 msg2 窗口。
+	chatHistoryKindExecuteLoopClosed = "execute_loop_closed"
 )
 
 type reorderPreference int
@@ -70,6 +75,12 @@ func RunChatNode(ctx context.Context, input ChatNodeInput) error {
 	if !runtimeState.HasPendingInteraction() && flowState.Phase == newagentmodel.PhaseDone {
 		terminalBefore := flowState.TerminalStatus()
 		roundBefore := flowState.RoundUsed
+		// 1. 只有“正常完成(completed)”才打 loop 收口标记：
+		// 1.1 这样下一轮进入 execute 时，msg2 会只保留“当前活跃循环”窗口；
+		// 1.2 异常收口（exhausted/aborted）不打标记，允许后续“继续”时沿用上一轮 loop 轨迹。
+		if terminalBefore == newagentmodel.FlowTerminalStatusCompleted {
+			appendExecuteLoopClosedMarker(conversationContext)
+		}
 		flowState.ResetForNextRun()
 		log.Printf(
 			"[DEBUG] chat reset runtime for next run chat=%s round_before=%d terminal_before=%s",
@@ -137,6 +148,45 @@ func RunChatNode(ctx context.Context, input ChatNodeInput) error {
 		flowState.Phase = newagentmodel.PhasePlanning
 		return nil
 	}
+}
+
+// appendExecuteLoopClosedMarker 在 history 中写入“execute loop 已正常收口”标记。
+//
+// 职责边界：
+// 1. 只负责写一个轻量 marker，供 prompt 分层；
+// 2. 不负责历史裁剪，不负责消息摘要；
+// 3. 若末尾已经是同类 marker，则幂等跳过，避免重复写入。
+func appendExecuteLoopClosedMarker(conversationContext *newagentmodel.ConversationContext) {
+	if conversationContext == nil {
+		return
+	}
+
+	history := conversationContext.HistorySnapshot()
+	if len(history) > 0 {
+		last := history[len(history)-1]
+		if isExecuteLoopClosedMarker(last) {
+			return
+		}
+	}
+
+	conversationContext.AppendHistory(&schema.Message{
+		Role:    schema.Assistant,
+		Content: "",
+		Extra: map[string]any{
+			chatHistoryKindKey: chatHistoryKindExecuteLoopClosed,
+		},
+	})
+}
+
+func isExecuteLoopClosedMarker(msg *schema.Message) bool {
+	if msg == nil || msg.Extra == nil {
+		return false
+	}
+	kind, ok := msg.Extra[chatHistoryKindKey].(string)
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(kind) == chatHistoryKindExecuteLoopClosed
 }
 
 // handleDirectReply 处理简单任务：直接输出回复。

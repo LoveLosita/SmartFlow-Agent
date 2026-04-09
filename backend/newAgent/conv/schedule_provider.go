@@ -1,4 +1,4 @@
-package conv
+package newagentconv
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	baseconv "github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/model"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
@@ -127,11 +128,11 @@ func buildWindowFromTaskClasses(taskClasses []model.TaskClass) (windowDays []Win
 		if tc.StartDate == nil || tc.EndDate == nil || tc.EndDate.Before(*tc.StartDate) {
 			continue
 		}
-		startWeek, startDay, err := RealDateToRelativeDate(tc.StartDate.Format(DateFormat))
+		startWeek, startDay, err := baseconv.RealDateToRelativeDate(tc.StartDate.Format(baseconv.DateFormat))
 		if err != nil {
 			continue
 		}
-		endWeek, endDay, err := RealDateToRelativeDate(tc.EndDate.Format(DateFormat))
+		endWeek, endDay, err := baseconv.RealDateToRelativeDate(tc.EndDate.Format(baseconv.DateFormat))
 		if err != nil {
 			continue
 		}
@@ -176,7 +177,7 @@ func buildWindowFromTaskClasses(taskClasses []model.TaskClass) (windowDays []Win
 // buildCurrentWeekWindow 构造“当前周 7 天”的兜底窗口。
 func buildCurrentWeekWindow() (windowDays []WindowDay, weeks []int, err error) {
 	now := time.Now()
-	currentWeek, _, err := RealDateToRelativeDate(now.Format(DateFormat))
+	currentWeek, _, err := baseconv.RealDateToRelativeDate(now.Format(baseconv.DateFormat))
 	if err != nil {
 		return nil, nil, fmt.Errorf("解析当前日期失败: %w", err)
 	}
