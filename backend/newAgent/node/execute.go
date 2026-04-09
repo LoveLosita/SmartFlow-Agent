@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,11 +20,13 @@ import (
 )
 
 const (
-	executeStageName     = "execute"
-	executeStatusBlockID = "execute.status"
-	executeSpeakBlockID  = "execute.speak"
-	executePinnedKey     = "execution_context"
-	toolMinContextSwitch = "min_context_switch"
+	executeStageName               = "execute"
+	executeStatusBlockID           = "execute.status"
+	executeSpeakBlockID            = "execute.speak"
+	executePinnedKey               = "execution_context"
+	toolMinContextSwitch           = "min_context_switch"
+	executeHistoryKindKey          = "newagent_history_kind"
+	executeHistoryKindStepAdvanced = "execute_step_advanced"
 
 	// maxConsecutiveCorrections 是 Execute 节点连续修正次数上限。
 	// 超过此阈值后终止执行，防止 LLM 陷入无限修正循环。
@@ -404,6 +407,9 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 			// 所有步骤已完成，进入交付阶段。
 			flowState.Done()
 		}
+		// 1. 写入“步骤推进完成”边界标记，把上一步骤 loop 从 msg2 挪入 msg1。
+		// 2. 标记只作为 prompt 分层锚点，不参与业务语义判断。
+		appendExecuteStepAdvancedMarker(conversationContext)
 		// 1. next_plan 推进后立刻刷新 current_step / execution_context。
 		// 2. 若计划已结束，这里会移除 current_step，避免下轮读取到旧步骤。
 		syncExecutePinnedContext(conversationContext, flowState)
@@ -512,6 +518,36 @@ func syncExecutePinnedContext(
 		Key:     planCurrentStepKey,
 		Title:   title,
 		Content: buildCurrentPlanStepPinnedMarkdown(step, current, total),
+	})
+}
+
+// appendExecuteStepAdvancedMarker 在 history 中写入“步骤已推进”标记。
+//
+// 职责边界：
+// 1. 仅写轻量 marker，供 prompt 侧把“上一步骤 loop”归档进 msg1；
+// 2. 若末尾已是同类 marker，则幂等跳过；
+// 3. 不负责裁剪历史、不负责摘要压缩。
+func appendExecuteStepAdvancedMarker(conversationContext *newagentmodel.ConversationContext) {
+	if conversationContext == nil {
+		return
+	}
+
+	history := conversationContext.HistorySnapshot()
+	if len(history) > 0 {
+		last := history[len(history)-1]
+		if last != nil && last.Extra != nil {
+			if kind, ok := last.Extra[executeHistoryKindKey].(string); ok && strings.TrimSpace(kind) == executeHistoryKindStepAdvanced {
+				return
+			}
+		}
+	}
+
+	conversationContext.AppendHistory(&schema.Message{
+		Role:    schema.Assistant,
+		Content: "",
+		Extra: map[string]any{
+			executeHistoryKindKey: executeHistoryKindStepAdvanced,
+		},
 	})
 }
 
@@ -690,6 +726,595 @@ func handleExecuteActionAbort(
 	return nil
 }
 
+// executeStepScope 描述当前计划步骤提取出的“硬范围约束”。
+//
+// 约束语义：
+// 1. WeekFrom/WeekTo：限制到指定周范围；
+// 2. DayStart/DayEnd：限制到指定 day_index 范围；
+// 3. DayOfWeekSet：限制到指定周几集合（1=周一 ... 7=周日）。
+type executeStepScope struct {
+	HasWeek  bool
+	WeekFrom int
+	WeekTo   int
+
+	HasDay   bool
+	DayStart int
+	DayEnd   int
+
+	DayOfWeekSet map[int]struct{}
+}
+
+var (
+	executeScopeWeekRangeRe    = regexp.MustCompile(`第\s*(\d+)\s*(?:-|到|至|~)\s*(\d+)\s*周`)
+	executeScopeWeekSingleRe   = regexp.MustCompile(`第\s*(\d+)\s*周`)
+	executeScopeDayRangeReA    = regexp.MustCompile(`第\s*(\d+)\s*(?:-|到|至|~)\s*(\d+)\s*天`)
+	executeScopeDayRangeReB    = regexp.MustCompile(`第\s*(\d+)\s*天\s*(?:-|到|至|~)\s*第?\s*(\d+)\s*天`)
+	executeScopeDaySingleRe    = regexp.MustCompile(`第\s*(\d+)\s*天`)
+	executeScopeWeekdayRangeRe = regexp.MustCompile(`周\s*([一二三四五六日天])\s*(?:-|到|至|~)\s*周?\s*([一二三四五六日天])`)
+	executeScopeWeekdayRe      = regexp.MustCompile(`周\s*([一二三四五六日天])`)
+)
+
+// deriveExecuteStepScope 从当前步骤文本提取范围锚点。
+//
+// 提取优先级：
+// 1. 优先识别“第X周 / 第X-Y周”；
+// 2. 其次识别“周一到周五 / 工作日 / 周末”等周几约束；
+// 3. 补充识别“第A-B天 / 第A天到第B天”。
+func deriveExecuteStepScope(flowState *newagentmodel.CommonState) (*executeStepScope, bool) {
+	if flowState == nil || !flowState.HasPlan() {
+		return nil, false
+	}
+	step, ok := flowState.CurrentPlanStep()
+	if !ok {
+		return nil, false
+	}
+
+	text := strings.TrimSpace(step.Content + "\n" + step.DoneWhen)
+	if text == "" {
+		return nil, false
+	}
+
+	scope := &executeStepScope{
+		DayOfWeekSet: make(map[int]struct{}, 7),
+	}
+	hit := false
+
+	if match := executeScopeWeekRangeRe.FindStringSubmatch(text); len(match) == 3 {
+		start, okStart := parseRegexInt(match[1])
+		end, okEnd := parseRegexInt(match[2])
+		if okStart && okEnd {
+			if start > end {
+				start, end = end, start
+			}
+			scope.HasWeek = true
+			scope.WeekFrom = start
+			scope.WeekTo = end
+			hit = true
+		}
+	} else {
+		if match := executeScopeWeekSingleRe.FindStringSubmatch(text); len(match) == 2 {
+			week, okWeek := parseRegexInt(match[1])
+			if okWeek {
+				scope.HasWeek = true
+				scope.WeekFrom = week
+				scope.WeekTo = week
+				hit = true
+			}
+		}
+	}
+
+	if rangeStart, rangeEnd, okRange := parseExecuteScopeDayRange(text); okRange {
+		scope.HasDay = true
+		scope.DayStart = rangeStart
+		scope.DayEnd = rangeEnd
+		hit = true
+	} else {
+		dayMatches := executeScopeDaySingleRe.FindAllStringSubmatch(text, -1)
+		if len(dayMatches) == 1 && len(dayMatches[0]) == 2 {
+			day, okDay := parseRegexInt(dayMatches[0][1])
+			if okDay {
+				scope.HasDay = true
+				scope.DayStart = day
+				scope.DayEnd = day
+				hit = true
+			}
+		}
+	}
+
+	for dayOfWeek := range parseExecuteScopeWeekdays(text) {
+		scope.DayOfWeekSet[dayOfWeek] = struct{}{}
+		hit = true
+	}
+	if len(scope.DayOfWeekSet) == 0 {
+		scope.DayOfWeekSet = nil
+	}
+
+	if !hit {
+		return nil, false
+	}
+	return scope, true
+}
+
+func parseExecuteScopeDayRange(text string) (start int, end int, ok bool) {
+	if match := executeScopeDayRangeReA.FindStringSubmatch(text); len(match) == 3 {
+		startA, okA := parseRegexInt(match[1])
+		endA, okB := parseRegexInt(match[2])
+		if okA && okB {
+			if startA > endA {
+				startA, endA = endA, startA
+			}
+			return startA, endA, true
+		}
+	}
+	if match := executeScopeDayRangeReB.FindStringSubmatch(text); len(match) == 3 {
+		startB, okA := parseRegexInt(match[1])
+		endB, okB := parseRegexInt(match[2])
+		if okA && okB {
+			if startB > endB {
+				startB, endB = endB, startB
+			}
+			return startB, endB, true
+		}
+	}
+	return 0, 0, false
+}
+
+func parseExecuteScopeWeekdays(text string) map[int]struct{} {
+	result := make(map[int]struct{}, 7)
+	compact := strings.TrimSpace(text)
+	if compact == "" {
+		return result
+	}
+
+	for _, match := range executeScopeWeekdayRangeRe.FindAllStringSubmatch(compact, -1) {
+		if len(match) != 3 {
+			continue
+		}
+		from, okFrom := normalizeChineseWeekday(match[1])
+		to, okTo := normalizeChineseWeekday(match[2])
+		if !okFrom || !okTo {
+			continue
+		}
+		if from <= to {
+			for day := from; day <= to; day++ {
+				result[day] = struct{}{}
+			}
+			continue
+		}
+		for day := from; day <= 7; day++ {
+			result[day] = struct{}{}
+		}
+		for day := 1; day <= to; day++ {
+			result[day] = struct{}{}
+		}
+	}
+
+	if len(result) == 0 {
+		switch {
+		case strings.Contains(compact, "工作日"):
+			for day := 1; day <= 5; day++ {
+				result[day] = struct{}{}
+			}
+		case strings.Contains(compact, "周末"):
+			result[6] = struct{}{}
+			result[7] = struct{}{}
+		}
+	}
+
+	if len(result) == 0 {
+		matches := executeScopeWeekdayRe.FindAllStringSubmatch(compact, -1)
+		if len(matches) == 1 && len(matches[0]) == 2 {
+			if day, ok := normalizeChineseWeekday(matches[0][1]); ok {
+				result[day] = struct{}{}
+			}
+		}
+	}
+	return result
+}
+
+func normalizeChineseWeekday(raw string) (int, bool) {
+	switch strings.TrimSpace(raw) {
+	case "一":
+		return 1, true
+	case "二":
+		return 2, true
+	case "三":
+		return 3, true
+	case "四":
+		return 4, true
+	case "五":
+		return 5, true
+	case "六":
+		return 6, true
+	case "日", "天":
+		return 7, true
+	default:
+		return 0, false
+	}
+}
+
+func parseRegexInt(raw string) (int, bool) {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, false
+	}
+	return value, true
+}
+
+func renderExecuteStepScope(scope *executeStepScope) string {
+	if scope == nil {
+		return "未设范围"
+	}
+	parts := make([]string, 0, 3)
+	if scope.HasWeek {
+		if scope.WeekFrom == scope.WeekTo {
+			parts = append(parts, fmt.Sprintf("第%d周", scope.WeekFrom))
+		} else {
+			parts = append(parts, fmt.Sprintf("第%d-%d周", scope.WeekFrom, scope.WeekTo))
+		}
+	}
+	if scope.HasDay {
+		if scope.DayStart == scope.DayEnd {
+			parts = append(parts, fmt.Sprintf("第%d天", scope.DayStart))
+		} else {
+			parts = append(parts, fmt.Sprintf("第%d-%d天", scope.DayStart, scope.DayEnd))
+		}
+	}
+	if len(scope.DayOfWeekSet) > 0 {
+		weekdays := make([]string, 0, 7)
+		for _, day := range []int{1, 2, 3, 4, 5, 6, 7} {
+			if _, ok := scope.DayOfWeekSet[day]; !ok {
+				continue
+			}
+			weekdays = append(weekdays, fmt.Sprintf("周%d", day))
+		}
+		if len(weekdays) > 0 {
+			parts = append(parts, strings.Join(weekdays, "/"))
+		}
+	}
+	if len(parts) == 0 {
+		return "未设范围"
+	}
+	return strings.Join(parts, "，")
+}
+
+func buildScopeDaySet(state *newagenttools.ScheduleState, scope *executeStepScope) map[int]struct{} {
+	result := make(map[int]struct{}, 16)
+	if state == nil || scope == nil {
+		return result
+	}
+	for day := 1; day <= state.Window.TotalDays; day++ {
+		if dayMatchesScope(state, scope, day) {
+			result[day] = struct{}{}
+		}
+	}
+	return result
+}
+
+func dayMatchesScope(state *newagenttools.ScheduleState, scope *executeStepScope, day int) bool {
+	if state == nil || scope == nil {
+		return true
+	}
+	if day < 1 || day > state.Window.TotalDays {
+		return false
+	}
+	week, dayOfWeek, ok := state.DayToWeekDay(day)
+	if !ok {
+		return false
+	}
+	if scope.HasWeek && (week < scope.WeekFrom || week > scope.WeekTo) {
+		return false
+	}
+	if scope.HasDay && (day < scope.DayStart || day > scope.DayEnd) {
+		return false
+	}
+	if len(scope.DayOfWeekSet) > 0 {
+		if _, matched := scope.DayOfWeekSet[dayOfWeek]; !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func estimateCandidateDaysFromArgs(state *newagenttools.ScheduleState, args map[string]any) (map[int]struct{}, bool, error) {
+	result := make(map[int]struct{}, 16)
+	if state == nil {
+		return result, false, fmt.Errorf("日程状态为空")
+	}
+
+	day, hasDay := readIntAnyFromMap(args, "day")
+	dayStart, hasDayStart := readIntAnyFromMap(args, "day_start")
+	dayEnd, hasDayEnd := readIntAnyFromMap(args, "day_end")
+	if hasDay && (hasDayStart || hasDayEnd) {
+		return nil, true, fmt.Errorf("day 与 day_start/day_end 不能同时传入")
+	}
+
+	if hasDay && (day < 1 || day > state.Window.TotalDays) {
+		return nil, true, fmt.Errorf("day=%d 超出窗口范围(1-%d)", day, state.Window.TotalDays)
+	}
+	if hasDayStart && (dayStart < 1 || dayStart > state.Window.TotalDays) {
+		return nil, true, fmt.Errorf("day_start=%d 超出窗口范围(1-%d)", dayStart, state.Window.TotalDays)
+	}
+	if hasDayEnd && (dayEnd < 1 || dayEnd > state.Window.TotalDays) {
+		return nil, true, fmt.Errorf("day_end=%d 超出窗口范围(1-%d)", dayEnd, state.Window.TotalDays)
+	}
+
+	start := 1
+	end := state.Window.TotalDays
+	if hasDay {
+		start, end = day, day
+	} else {
+		if hasDayStart {
+			start = dayStart
+		}
+		if hasDayEnd {
+			end = dayEnd
+		}
+	}
+	if start > end {
+		return nil, true, fmt.Errorf("day_start=%d 不能大于 day_end=%d", start, end)
+	}
+
+	week, hasWeek := readIntAnyFromMap(args, "week")
+	weekFrom, hasWeekFrom := readIntAnyFromMap(args, "week_from")
+	weekTo, hasWeekTo := readIntAnyFromMap(args, "week_to")
+	if hasWeek {
+		weekFrom, weekTo = week, week
+		hasWeekFrom, hasWeekTo = true, true
+	}
+	if hasWeekFrom && hasWeekTo && weekFrom > weekTo {
+		weekFrom, weekTo = weekTo, weekFrom
+	}
+	weekFilter := intSliceToSet(readIntSliceAnyFromMap(args, "week_filter"))
+
+	dayOfWeekSet := intSliceToSet(readIntSliceAnyFromMap(args, "day_of_week"))
+	dayScope := strings.ToLower(strings.TrimSpace(readStringAnyFromMap(args, "day_scope")))
+	if dayScope == "" {
+		dayScope = "all"
+	}
+
+	hasCalendarFilter := hasAnyCalendarArg(args)
+	for dayIndex := start; dayIndex <= end; dayIndex++ {
+		weekValue, dayOfWeek, ok := state.DayToWeekDay(dayIndex)
+		if !ok {
+			continue
+		}
+		if hasWeekFrom && weekValue < weekFrom {
+			continue
+		}
+		if hasWeekTo && weekValue > weekTo {
+			continue
+		}
+		if len(weekFilter) > 0 {
+			if _, hit := weekFilter[weekValue]; !hit {
+				continue
+			}
+		}
+		if len(dayOfWeekSet) > 0 {
+			if _, hit := dayOfWeekSet[dayOfWeek]; !hit {
+				continue
+			}
+		} else if !matchDayScopeForGuard(dayOfWeek, dayScope) {
+			continue
+		}
+		result[dayIndex] = struct{}{}
+	}
+	return result, hasCalendarFilter, nil
+}
+
+func matchDayScopeForGuard(dayOfWeek int, scope string) bool {
+	switch scope {
+	case "workday":
+		return dayOfWeek >= 1 && dayOfWeek <= 5
+	case "weekend":
+		return dayOfWeek == 6 || dayOfWeek == 7
+	default:
+		return true
+	}
+}
+
+func hasAnyCalendarArg(args map[string]any) bool {
+	if len(args) == 0 {
+		return false
+	}
+	keys := []string{"day", "day_start", "day_end", "week", "week_from", "week_to", "week_filter", "day_of_week", "day_scope"}
+	for _, key := range keys {
+		if _, exists := args[key]; exists {
+			return true
+		}
+	}
+	return false
+}
+
+func extractBatchMoveNewDays(args map[string]any) ([]int, error) {
+	rawMoves, exists := args["moves"]
+	if !exists {
+		return nil, fmt.Errorf("缺少 moves")
+	}
+	list, ok := rawMoves.([]any)
+	if !ok {
+		return nil, fmt.Errorf("moves 不是数组")
+	}
+
+	result := make([]int, 0, len(list))
+	for _, item := range list {
+		moveMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		newDay, hasDay := readIntAnyFromMap(moveMap, "new_day")
+		if !hasDay {
+			continue
+		}
+		result = append(result, newDay)
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("moves 未提供有效 new_day")
+	}
+	return result, nil
+}
+
+func intSliceToSet(values []int) map[int]struct{} {
+	result := make(map[int]struct{}, len(values))
+	for _, value := range values {
+		result[value] = struct{}{}
+	}
+	return result
+}
+
+func readIntAnyFromMap(args map[string]any, keys ...string) (int, bool) {
+	for _, key := range keys {
+		if args == nil {
+			continue
+		}
+		raw, exists := args[key]
+		if !exists {
+			continue
+		}
+		if value, ok := parseAnyToInt(raw); ok {
+			return value, true
+		}
+	}
+	return 0, false
+}
+
+func readIntSliceAnyFromMap(args map[string]any, keys ...string) []int {
+	for _, key := range keys {
+		if args == nil {
+			continue
+		}
+		raw, exists := args[key]
+		if !exists {
+			continue
+		}
+		values := parseAnyToIntSlice(raw)
+		if len(values) > 0 {
+			return values
+		}
+	}
+	return nil
+}
+
+func readStringAnyFromMap(args map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if args == nil {
+			continue
+		}
+		raw, exists := args[key]
+		if !exists {
+			continue
+		}
+		if text, ok := raw.(string); ok {
+			return text
+		}
+	}
+	return ""
+}
+
+func parseAnyToInt(value any) (int, bool) {
+	switch v := value.(type) {
+	case int:
+		return v, true
+	case int8:
+		return int(v), true
+	case int16:
+		return int(v), true
+	case int32:
+		return int(v), true
+	case int64:
+		return int(v), true
+	case float32:
+		return int(v), true
+	case float64:
+		return int(v), true
+	case json.Number:
+		if iv, err := v.Int64(); err == nil {
+			return int(iv), true
+		}
+		if fv, err := v.Float64(); err == nil {
+			return int(fv), true
+		}
+	case string:
+		text := strings.TrimSpace(v)
+		if text == "" {
+			return 0, false
+		}
+		iv, err := strconv.Atoi(text)
+		if err == nil {
+			return iv, true
+		}
+	}
+	return 0, false
+}
+
+func parseAnyToIntSlice(value any) []int {
+	switch values := value.(type) {
+	case []int:
+		result := make([]int, 0, len(values))
+		for _, value := range values {
+			result = append(result, value)
+		}
+		return result
+	case []any:
+		result := make([]int, 0, len(values))
+		for _, item := range values {
+			iv, ok := parseAnyToInt(item)
+			if !ok {
+				continue
+			}
+			result = append(result, iv)
+		}
+		return result
+	default:
+		return nil
+	}
+}
+
+// appendToolCallResultHistory 统一把“assistant tool_call + tool observation”写回历史。
+//
+// 设计说明：
+// 1. 采用标准配对消息格式，兼容 OpenAI tool_call 约束；
+// 2. args 序列化失败时降级为 "{}"，保证消息结构完整；
+// 3. 仅负责写历史，不负责工具执行或状态更新。
+func appendToolCallResultHistory(
+	conversationContext *newagentmodel.ConversationContext,
+	toolName string,
+	args map[string]any,
+	result string,
+) {
+	if conversationContext == nil {
+		return
+	}
+
+	argsJSON := "{}"
+	if args != nil {
+		if raw, err := json.Marshal(args); err == nil {
+			argsJSON = string(raw)
+		}
+	}
+	toolCallID := uuid.NewString()
+	conversationContext.AppendHistory(&schema.Message{
+		Role:    schema.Assistant,
+		Content: "",
+		ToolCalls: []schema.ToolCall{
+			{
+				ID:   toolCallID,
+				Type: "function",
+				Function: schema.FunctionCall{
+					Name:      toolName,
+					Arguments: argsJSON,
+				},
+			},
+		},
+	})
+	conversationContext.AppendHistory(&schema.Message{
+		Role:       schema.Tool,
+		Content:    result,
+		ToolCallID: toolCallID,
+		ToolName:   toolName,
+	})
+}
+
 // executeToolCall 执行工具调用并记录证据。
 //
 // 职责边界：
@@ -771,34 +1396,7 @@ func executeToolCall(
 			blockedResult,
 			false,
 		)
-
-		toolCallID := uuid.NewString()
-		argsJSON := "{}"
-		if toolCall.Arguments != nil {
-			if raw, marshalErr := json.Marshal(toolCall.Arguments); marshalErr == nil {
-				argsJSON = string(raw)
-			}
-		}
-		conversationContext.AppendHistory(&schema.Message{
-			Role:    schema.Assistant,
-			Content: "",
-			ToolCalls: []schema.ToolCall{
-				{
-					ID:   toolCallID,
-					Type: "function",
-					Function: schema.FunctionCall{
-						Name:      toolName,
-						Arguments: argsJSON,
-					},
-				},
-			},
-		})
-		conversationContext.AppendHistory(&schema.Message{
-			Role:       schema.Tool,
-			Content:    blockedResult,
-			ToolCallID: toolCallID,
-			ToolName:   toolName,
-		})
+		appendToolCallResultHistory(conversationContext, toolName, toolCall.Arguments, blockedResult)
 		return nil
 	}
 
@@ -816,42 +1414,8 @@ func executeToolCall(
 		flattenForLog(result),
 	)
 
-	// 3. 将工具调用和结果以合法的 assistant+tool 消息对追加到对话历史。
-	//
-	// 修复说明：
-	// 旧实现直接追加裸 Tool 消息（无 ToolCallID、无前置 assistant tool_calls），
-	// 违反 OpenAI 兼容 API 消息格式约束，导致 API 拒绝请求、连接断开。
-	// 正确做法：先追加带 ToolCalls 的 assistant 消息，再追加带匹配 ToolCallID 的 tool 消息。
-	toolCallID := uuid.NewString()
-
-	argsJSON := "{}"
-	if toolCall.Arguments != nil {
-		if raw, err := json.Marshal(toolCall.Arguments); err == nil {
-			argsJSON = string(raw)
-		}
-	}
-
-	conversationContext.AppendHistory(&schema.Message{
-		Role:    schema.Assistant,
-		Content: "",
-		ToolCalls: []schema.ToolCall{
-			{
-				ID:   toolCallID,
-				Type: "function",
-				Function: schema.FunctionCall{
-					Name:      toolName,
-					Arguments: argsJSON,
-				},
-			},
-		},
-	})
-
-	conversationContext.AppendHistory(&schema.Message{
-		Role:       schema.Tool,
-		Content:    result,
-		ToolCallID: toolCallID,
-		ToolName:   toolName,
-	})
+	// 3. 以标准 assistant+tool 消息对写回历史，避免消息链断裂。
+	appendToolCallResultHistory(conversationContext, toolName, toolCall.Arguments, result)
 
 	// 4. 写工具实时预览：每次写工具执行后都尝试刷新 Redis 预览，确保前端可见“最新操作结果”。
 	//
@@ -922,12 +1486,27 @@ func executePendingTool(
 	if scheduleState == nil {
 		return fmt.Errorf("日程状态未加载，无法执行已确认的写工具 %s", pending.ToolName)
 	}
+	flowState := runtimeState.EnsureCommonState()
+
+	// 3.1 顺序护栏在确认执行路径同样生效，避免绕过前置约束。
+	if shouldBlockMinContextSwitch(flowState, pending.ToolName) {
+		blockedResult := "已拒绝执行 min_context_switch：当前未授权打乱顺序。如需使用该工具，请先由用户明确说明“允许打乱顺序”。"
+		_ = emitter.EmitStatus(
+			executeStatusBlockID,
+			executeStageName,
+			"tool_blocked",
+			blockedResult,
+			false,
+		)
+		appendToolCallResultHistory(conversationContext, pending.ToolName, args, blockedResult)
+		runtimeState.PendingConfirmTool = nil
+		return nil
+	}
 
 	// 4. 执行工具。
 	beforeDigest := summarizeScheduleStateForDebug(scheduleState)
 	result := registry.Execute(scheduleState, pending.ToolName, args)
 	afterDigest := summarizeScheduleStateForDebug(scheduleState)
-	flowState := runtimeState.EnsureCommonState()
 	log.Printf(
 		"[DEBUG] execute pending tool chat=%s round=%d tool=%s args=%s before=%s after=%s result_preview=%.200s",
 		flowState.ConversationID,
@@ -939,32 +1518,8 @@ func executePendingTool(
 		flattenForLog(result),
 	)
 
-	// 5. 将工具调用和结果以合法的 assistant+tool 消息对追加到历史。
-	//
-	// 修复说明：同 executeToolCall，需要配对的 assistant+tool 消息。
-	toolCallID := uuid.NewString()
-
-	conversationContext.AppendHistory(&schema.Message{
-		Role:    schema.Assistant,
-		Content: "",
-		ToolCalls: []schema.ToolCall{
-			{
-				ID:   toolCallID,
-				Type: "function",
-				Function: schema.FunctionCall{
-					Name:      pending.ToolName,
-					Arguments: pending.ArgsJSON,
-				},
-			},
-		},
-	})
-
-	conversationContext.AppendHistory(&schema.Message{
-		Role:       schema.Tool,
-		Content:    result,
-		ToolCallID: toolCallID,
-		ToolName:   pending.ToolName,
-	})
+	// 5. 将工具调用和结果写回历史，维持标准 tool_call 配对格式。
+	appendToolCallResultHistory(conversationContext, pending.ToolName, args, result)
 
 	// 5. 写工具实时预览：confirm accept 后真实执行写工具时，立即刷新一次预览缓存。
 	tryWritePreviewAfterWriteTool(ctx, flowState, scheduleState, registry, pending.ToolName, writePreview)

@@ -9,6 +9,27 @@ import (
 	compositelogic "github.com/LoveLosita/smartflow/backend/logic"
 )
 
+var spreadEvenAllowedArgs = []string{
+	"task_ids",
+	"task_id",
+	"limit",
+	"allow_embed",
+	"day",
+	"day_start",
+	"day_end",
+	"day_scope",
+	"day_of_week",
+	"week",
+	"week_filter",
+	"week_from",
+	"week_to",
+	"slot_type",
+	"slot_types",
+	"exclude_sections",
+	"after_section",
+	"before_section",
+}
+
 // minContextSnapshot 记录任务在复合重排前后的最小快照，用于输出摘要。
 type minContextSnapshot struct {
 	StateID    int
@@ -176,6 +197,10 @@ func MinContextSwitch(state *ScheduleState, taskIDs []int) string {
 func SpreadEven(state *ScheduleState, taskIDs []int, args map[string]any) string {
 	if state == nil {
 		return "均匀化调整失败：日程状态为空。"
+	}
+	// 0. 参数白名单校验：未知字段直接失败，避免静默忽略导致候选范围漂移。
+	if err := validateToolArgsStrict(args, spreadEvenAllowedArgs); err != nil {
+		return fmt.Sprintf("均匀化调整失败：%s。", err.Error())
 	}
 
 	// 1. 先做任务侧校验，避免后续规划在脏输入上执行。

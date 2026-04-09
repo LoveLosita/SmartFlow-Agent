@@ -15,6 +15,7 @@ const (
 	executeHistoryKindKey            = "newagent_history_kind"
 	executeHistoryKindCorrectionUser = "llm_correction_prompt"
 	executeHistoryKindLoopClosed     = "execute_loop_closed"
+	executeHistoryKindStepAdvanced   = "execute_step_advanced"
 
 	// executeLoopWindowLimit 控制“当轮 ReAct Loop 窗口”最多保留多少条记录。
 	// 采用固定窗口能避免上下文无上限增长，且可保持“最近行为”可追踪。
@@ -217,7 +218,7 @@ func splitExecuteLoopRecordsByBoundary(history []*schema.Message) (archived []ex
 		return nil, nil
 	}
 
-	boundary := findLatestExecuteLoopClosedMarker(history)
+	boundary := findLatestExecuteBoundaryMarker(history)
 	if boundary < 0 {
 		return nil, collectExecuteLoopRecords(history)
 	}
@@ -231,7 +232,7 @@ func splitExecuteLoopRecordsByBoundary(history []*schema.Message) (archived []ex
 	return archived, active
 }
 
-func findLatestExecuteLoopClosedMarker(history []*schema.Message) int {
+func findLatestExecuteBoundaryMarker(history []*schema.Message) int {
 	for i := len(history) - 1; i >= 0; i-- {
 		msg := history[i]
 		if msg == nil || msg.Extra == nil {
@@ -241,7 +242,8 @@ func findLatestExecuteLoopClosedMarker(history []*schema.Message) int {
 		if !ok {
 			continue
 		}
-		if strings.TrimSpace(kind) == executeHistoryKindLoopClosed {
+		switch strings.TrimSpace(kind) {
+		case executeHistoryKindLoopClosed, executeHistoryKindStepAdvanced:
 			return i
 		}
 	}
@@ -407,8 +409,9 @@ func buildExecuteMessage3(state *newagentmodel.CommonState, ctx *newagentmodel.C
 	lines = append(lines, "- 啥时候结束Loop：你可以根据工具调用记录自行判断。")
 	lines = append(lines, "- 非目标：不重新粗排、不修改无关任务类。")
 	if hasExecuteRoughBuildDone(ctx) {
-		lines = append(lines, "- 阶段约束：粗排已完成，本轮只微调 suggested；existing 仅作已安排事实参考，不做 move/batch_move/spread_even。")
+		lines = append(lines, "- 阶段约束：粗排已完成，本轮只微调 suggested；existing 仅作已安排事实参考，不作为可移动目标。")
 	}
+	lines = append(lines, "- 参数纪律：工具参数必须严格使用 schema 字段；若返回“参数非法”，需先改参再继续。")
 	if state != nil {
 		if state.AllowReorder {
 			lines = append(lines, "- 顺序策略：用户已明确允许打乱顺序，可在必要时使用 min_context_switch。")

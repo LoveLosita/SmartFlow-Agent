@@ -126,8 +126,26 @@ func RunChatNode(ctx context.Context, input ChatNodeInput) error {
 		return nil
 	}
 
-	log.Printf("[DEBUG] chat routing chat=%s route=%s reason=%s",
-		flowState.ConversationID, decision.Route, decision.Reason)
+	// 1. 二次粗排硬闸门：若上下文已存在 rough_build_done 且用户未明确要求“重新粗排”，
+	//    则强制关闭 needs_rough_build，避免“微调请求被误判成再次粗排”。
+	// 2. 该闸门只收紧粗排开关，不改路由 route，确保 execute 微调链路仍可继续。
+	// 3. 一旦用户明确表达“从头重排/重新粗排”，仍允许 needs_rough_build=true 生效。
+	if shouldDisableRoughBuildForRefine(conversationContext, input.UserInput, decision) {
+		decision.NeedsRoughBuild = false
+		decision.NeedsRefineAfterRoughBuild = false
+	}
+
+	log.Printf(
+		"[DEBUG] chat routing chat=%s route=%s needs_rough_build=%v needs_refine_after_rough_build=%v allow_reorder=%v has_rough_build_done=%v task_class_count=%d reason=%s",
+		flowState.ConversationID,
+		decision.Route,
+		decision.NeedsRoughBuild,
+		decision.NeedsRefineAfterRoughBuild,
+		decision.AllowReorder,
+		hasRoughBuildDoneMarker(conversationContext),
+		len(flowState.TaskClassIDs),
+		decision.Reason,
+	)
 	flowState.AllowReorder = resolveAllowReorder(input.UserInput, decision.AllowReorder)
 
 	// 3. 按路由决策推进。
@@ -312,6 +330,62 @@ func containsAnyPhrase(text string, phrases []string) bool {
 		}
 	}
 	return false
+}
+
+// shouldDisableRoughBuildForRefine 判断是否应在 chat 路由阶段关闭“再次粗排”。
+//
+// 判定规则：
+// 1. 当前决策未请求粗排时，直接不干预；
+// 2. 上下文不存在 rough_build_done 时，不干预（首次粗排仍可走）；
+// 3. 若用户未明确要求“重新粗排/从头重排”，则关闭粗排开关，避免误触发。
+func shouldDisableRoughBuildForRefine(
+	conversationContext *newagentmodel.ConversationContext,
+	userInput string,
+	decision *newagentmodel.ChatRoutingDecision,
+) bool {
+	if decision == nil || !decision.NeedsRoughBuild {
+		return false
+	}
+	if !hasRoughBuildDoneMarker(conversationContext) {
+		return false
+	}
+	return !isExplicitRoughBuildRequest(userInput)
+}
+
+func hasRoughBuildDoneMarker(conversationContext *newagentmodel.ConversationContext) bool {
+	if conversationContext == nil {
+		return false
+	}
+	for _, block := range conversationContext.PinnedBlocksSnapshot() {
+		if strings.TrimSpace(block.Key) == "rough_build_done" {
+			return true
+		}
+	}
+	return false
+}
+
+// isExplicitRoughBuildRequest 识别用户是否明确要求“重新粗排/从头重排”。
+func isExplicitRoughBuildRequest(userInput string) bool {
+	text := strings.ToLower(strings.TrimSpace(userInput))
+	if text == "" {
+		return false
+	}
+	keywords := []string{
+		"重新粗排",
+		"重做粗排",
+		"从头排",
+		"从头重排",
+		"重新排一遍",
+		"重新排课",
+		"重排全部",
+		"全部重排",
+		"重置排程",
+		"重置后重排",
+		"重新生成初稿",
+		"rebuild",
+		"from scratch",
+	}
+	return containsAnyPhrase(text, keywords)
 }
 
 // handleDeepAnswer 处理复杂问答：推送过渡语 → 原地开 thinking 再调一次 LLM → 输出深度回答。

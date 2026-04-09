@@ -33,6 +33,7 @@ const executeSystemPromptWithPlan = `
 11. 若当前顺序策略是“默认保持顺序”，禁止调用 min_context_switch。
 12. 不要把超过 2 条任务打包到 batch_move；大批量调整请改走队列逐项处理。
 13. 不要在未获取队首（queue_pop_head）时直接调用 queue_apply_head_move。
+14. 工具参数必须严格使用 schema 字段，禁止自造别名；例如 day_from/day_to 非法，必须改用 day_start/day_end。
 
 执行规则：
 1. 只输出严格 JSON，不要输出 markdown，不要在 JSON 外补充文本。
@@ -73,6 +74,7 @@ const executeSystemPromptReAct = `
 10. 若顺序策略为“保持顺序”，禁止调用 min_context_switch。
 11. 不要在同一轮构造大规模 batch_move；batch_move 最多 2 条，超过请走队列逐项处理。
 12. 未调用 queue_pop_head 获取 current 前，不要调用 queue_apply_head_move。
+13. 工具参数必须严格使用 schema 字段，禁止自造别名；例如 day_from/day_to 非法，必须改用 day_start/day_end。
 
 执行规则：
 1. 只输出严格 JSON，不要输出 markdown，不要在 JSON 外补充文本。

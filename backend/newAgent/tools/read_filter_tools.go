@@ -112,6 +112,51 @@ type queryTargetOptions struct {
 	ResetQueue   bool
 }
 
+var (
+	queryAvailableAllowedArgs = []string{
+		"span",
+		"duration",
+		"limit",
+		"allow_embed",
+		"day",
+		"day_start",
+		"day_end",
+		"day_scope",
+		"day_of_week",
+		"week",
+		"week_filter",
+		"week_from",
+		"week_to",
+		"slot_type",
+		"slot_types",
+		"exclude_sections",
+		"after_section",
+		"before_section",
+		"section_from",
+		"section_to",
+	}
+	queryTargetAllowedArgs = []string{
+		"status",
+		"category",
+		"limit",
+		"day_scope",
+		"day",
+		"day_start",
+		"day_end",
+		"day_of_week",
+		"week",
+		"week_filter",
+		"week_from",
+		"week_to",
+		"task_ids",
+		"task_id",
+		"task_item_ids",
+		"task_item_id",
+		"enqueue",
+		"reset_queue",
+	}
+)
+
 // QueryAvailableSlots 返回“候选坑位池”。
 //
 // 职责边界：
@@ -119,6 +164,11 @@ type queryTargetOptions struct {
 // 2. 优先返回纯空位（strict），不足时再补可嵌入位（embedded）；
 // 3. 不负责移动策略决策，最终落点由模型结合目标再选择。
 func QueryAvailableSlots(state *ScheduleState, args map[string]any) string {
+	// 0. 先做字段白名单校验：未知参数直接报错，避免静默忽略造成范围漂移。
+	if err := validateToolArgsStrict(args, queryAvailableAllowedArgs); err != nil {
+		return fmt.Sprintf(`{"tool":"query_available_slots","success":false,"error":"%s"}`, err.Error())
+	}
+
 	// 1. 解析参数并做合法性校验。
 	options, err := parseQueryAvailableOptions(state, args)
 	if err != nil {
@@ -220,6 +270,11 @@ func QueryAvailableSlots(state *ScheduleState, args map[string]any) string {
 // 2. 默认 status=suggested，减少模型误选 existing/pending；
 // 3. 仅返回状态事实，不做“该不该移动”的语义判断。
 func QueryTargetTasks(state *ScheduleState, args map[string]any) string {
+	// 0. 先做字段白名单校验：未知参数直接报错，避免静默忽略造成范围漂移。
+	if err := validateToolArgsStrict(args, queryTargetAllowedArgs); err != nil {
+		return fmt.Sprintf(`{"tool":"query_target_tasks","success":false,"error":"%s"}`, err.Error())
+	}
+
 	// 1. 解析参数。
 	options, err := parseQueryTargetOptions(state, args)
 	if err != nil {

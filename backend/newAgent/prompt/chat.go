@@ -29,6 +29,9 @@ const chatRoutingSystemPrompt = `
 - plan：用户明确要求先制定计划，或涉及多阶段复杂规划。speak 写确认语。
 
 粗排判断：当用户意图包含"批量安排/排课/把任务类排进日程"，且上下文中有任务类 ID 时，设置 needs_rough_build=true。
+二次粗排约束（强约束）：
+- 若上下文已出现 rough_build_done，且用户未明确要求“重新粗排/从头重排”，必须设置 needs_rough_build=false。
+- “移动/微调/优化/均匀化/调顺序”等请求默认视为 refine，不得再次触发 rough build。
 粗排后微调判断：
 - 仅当 needs_rough_build=true 时才判断 needs_refine_after_rough_build。
 - 若用户明确提出优化目标/偏好（如"尽量均衡""周三别太满""某门课往后挪"），设 needs_refine_after_rough_build=true。

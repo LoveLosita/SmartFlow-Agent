@@ -23,6 +23,11 @@ import (
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 )
 
+const (
+	newAgentHistoryKindKey        = "newagent_history_kind"
+	newAgentHistoryKindLoopClosed = "execute_loop_closed"
+)
+
 // runNewAgentGraph 运行 newAgent 通用 graph，直接替换旧 agent 路由逻辑。
 //
 // 职责边界：
@@ -252,6 +257,12 @@ func (s *AgentService) loadOrCreateRuntimeState(ctx context.Context, chatID stri
 		if !snapshot.RuntimeState.HasPendingInteraction() && cs.Phase == newagentmodel.PhaseDone {
 			terminalBefore := cs.TerminalStatus()
 			roundBefore := cs.RoundUsed
+			// 1. 仅“正常完成(completed)”写 loop 收口 marker：
+			// 1.1 下一轮执行时，prompt 会把上一轮 loop 从 msg2 归档到 msg1；
+			// 1.2 异常中断（aborted/exhausted）不写 marker，保留 msg2 便于后续续跑。
+			if terminalBefore == newagentmodel.FlowTerminalStatusCompleted {
+				appendExecuteLoopClosedMarker(snapshot.ConversationContext)
+			}
 			cs.ResetForNextRun()
 			log.Printf(
 				"[DEBUG] loadOrCreateRuntimeState reset runtime for next run chat=%s round_before=%d terminal_before=%s",
@@ -274,6 +285,35 @@ func (s *AgentService) loadOrCreateRuntimeState(ctx context.Context, chatID stri
 		return snapshot.RuntimeState, snapshot.ConversationContext, snapshot.ScheduleState, originalScheduleState
 	}
 	return newRT()
+}
+
+// appendExecuteLoopClosedMarker 在 ConversationContext 写入“上一轮 loop 正常收口”标记。
+//
+// 职责边界：
+// 1. 只追加轻量 marker 供 prompt 分层，不做历史摘要或裁剪；
+// 2. 若末尾已是同类 marker，则幂等跳过；
+// 3. context 为空时直接返回，避免冷启动异常。
+func appendExecuteLoopClosedMarker(conversationContext *newagentmodel.ConversationContext) {
+	if conversationContext == nil {
+		return
+	}
+	history := conversationContext.HistorySnapshot()
+	if len(history) > 0 {
+		last := history[len(history)-1]
+		if last != nil && last.Extra != nil {
+			if kind, ok := last.Extra[newAgentHistoryKindKey].(string); ok && strings.TrimSpace(kind) == newAgentHistoryKindLoopClosed {
+				return
+			}
+		}
+	}
+
+	conversationContext.AppendHistory(&schema.Message{
+		Role:    schema.Assistant,
+		Content: "",
+		Extra: map[string]any{
+			newAgentHistoryKindKey: newAgentHistoryKindLoopClosed,
+		},
+	})
 }
 
 // loadConversationContext 加载对话历史，构造 ConversationContext。
