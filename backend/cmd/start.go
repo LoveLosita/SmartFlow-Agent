@@ -90,6 +90,9 @@ func Start() {
 		if err = eventsvc.RegisterAgentStateSnapshotHandler(eventBus, outboxRepo, manager); err != nil {
 			log.Fatalf("Failed to register agent state snapshot event handler: %v", err)
 		}
+		if err = eventsvc.RegisterMemoryExtractRequestedHandler(eventBus, outboxRepo); err != nil {
+			log.Fatalf("Failed to register memory extract event handler: %v", err)
+		}
 		eventBus.Start(context.Background())
 		defer eventBus.Close()
 		log.Println("Outbox event bus started")

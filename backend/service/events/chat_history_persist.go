@@ -44,6 +44,7 @@ func RegisterChatHistoryPersistHandler(
 	if repoManager == nil {
 		return errors.New("repo manager is nil")
 	}
+	kafkaCfg := kafkabus.LoadConfig()
 
 	// 2. 定义统一处理器：
 	// 2.1 解析 payload；
@@ -62,7 +63,7 @@ func RegisterChatHistoryPersistHandler(
 			// 2.2.1 基于同一个 tx 构造 RepoManager，复用你现有跨包事务模型。
 			txM := repoManager.WithTx(tx)
 			// 2.2.2 在同事务内写入聊天历史与会话计数。
-			return txM.Agent.SaveChatHistoryInTx(
+			if err := txM.Agent.SaveChatHistoryInTx(
 				ctx,
 				payload.UserID,
 				payload.ConversationID,
@@ -75,6 +76,19 @@ func RegisterChatHistoryPersistHandler(
 				payload.RetryFromUserMessageID,
 				payload.RetryFromAssistantMessageID,
 				payload.TokensConsumed,
+			); err != nil {
+				return err
+			}
+
+			// 2.2.3 Day1 追加“记忆抽取请求”事件入队：
+			// 1) 仅对 user 消息投递，避免把助手回复重复喂给抽取链路；
+			// 2) 与聊天落库放在同一事务，保证“消息存在 -> 事件一定可追踪”；
+			// 3) 若入队失败，整体回滚并触发 outbox 重试，不留半成功状态。
+			return EnqueueMemoryExtractRequestedInTx(
+				ctx,
+				outboxRepo.WithTx(tx),
+				kafkaCfg,
+				payload,
 			)
 		})
 	}
