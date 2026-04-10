@@ -28,6 +28,7 @@ type Pipeline struct {
 	store    VectorStore
 	reranker Reranker
 	logger   *log.Logger
+	observer Observer
 }
 
 func NewPipeline(chunker Chunker, embedder Embedder, store VectorStore, reranker Reranker) *Pipeline {
@@ -37,7 +38,24 @@ func NewPipeline(chunker Chunker, embedder Embedder, store VectorStore, reranker
 		store:    store,
 		reranker: reranker,
 		logger:   log.Default(),
+		observer: NewNopObserver(),
 	}
+}
+
+// SetLogger 设置 Pipeline 使用的日志器。
+func (p *Pipeline) SetLogger(logger *log.Logger) {
+	if p == nil || logger == nil {
+		return
+	}
+	p.logger = logger
+}
+
+// SetObserver 设置 Pipeline 使用的统一观测器。
+func (p *Pipeline) SetObserver(observer Observer) {
+	if p == nil || observer == nil {
+		return
+	}
+	p.observer = observer
 }
 
 // Ingest 执行统一入库流程。
@@ -62,6 +80,24 @@ func (p *Pipeline) Ingest(
 	docs, err := corpus.BuildIngestDocuments(ctx, input)
 	if err != nil {
 		return nil, err
+	}
+	return p.IngestDocuments(ctx, corpus.Name(), docs, opt)
+}
+
+// IngestDocuments 执行“已标准化文档”的统一入库流程。
+//
+// 职责边界：
+// 1. 负责处理已经完成 CorpusAdapter 映射的标准文档；
+// 2. 负责统一切块、向量化与 Upsert；
+// 3. 不负责再做业务输入解析，避免 Runtime 为拿到 document_id 重复 build 文档。
+func (p *Pipeline) IngestDocuments(
+	ctx context.Context,
+	corpusName string,
+	docs []SourceDocument,
+	opt IngestOption,
+) (*IngestResult, error) {
+	if p == nil || p.chunker == nil || p.embedder == nil || p.store == nil {
+		return nil, ErrNilDependency
 	}
 	if len(docs) == 0 {
 		return &IngestResult{DocumentCount: 0, ChunkCount: 0}, nil
@@ -102,7 +138,7 @@ func (p *Pipeline) Ingest(
 	now := time.Now()
 	for i, chunk := range chunks {
 		metadata := cloneMap(chunk.Metadata)
-		metadata["corpus"] = corpus.Name()
+		metadata["corpus"] = corpusName
 		metadata["document_id"] = chunk.DocumentID
 		metadata["chunk_order"] = chunk.Order
 		rows = append(rows, VectorRow{
@@ -214,7 +250,23 @@ func (p *Pipeline) Retrieve(
 		// 2. rerank 异常不终止主流程，统一降级为原排序。
 		result.FallbackUsed = true
 		result.FallbackReason = FallbackReasonRerankFailed
-		p.logger.Printf("rag rerank fallback: reason=%s err=%v", FallbackReasonRerankFailed, rerankErr)
+		if p.observer != nil {
+			p.observer.Observe(ctx, ObserveEvent{
+				Level:     ObserveLevelWarn,
+				Component: "pipeline",
+				Operation: "rerank_fallback",
+				Fields: map[string]any{
+					"status":          "fallback",
+					"fallback_reason": FallbackReasonRerankFailed,
+					"candidate_count": len(candidates),
+					"top_k":           topK,
+					"error":           rerankErr,
+					"error_code":      ClassifyErrorCode(rerankErr),
+				},
+			})
+		} else if p.logger != nil {
+			p.logger.Printf("rag rerank fallback: reason=%s err=%v", FallbackReasonRerankFailed, rerankErr)
+		}
 		return result, nil
 	}
 	result.Items = reranked

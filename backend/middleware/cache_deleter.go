@@ -11,6 +11,12 @@ import (
 	"gorm.io/gorm"
 )
 
+// GormCachePlugin 负责在 GORM 写操作成功后，按模型类型触发对应缓存失效。
+//
+// 职责边界：
+// 1. 只负责“识别模型 -> 调用对应缓存删除逻辑”；
+// 2. 不负责业务事务提交，也不负责缓存回填；
+// 3. 只处理当前项目真正依赖的前台读取缓存，未接缓存的模型应静默忽略。
 type GormCachePlugin struct {
 	cacheDAO *dao.CacheDAO
 }
@@ -21,14 +27,13 @@ func NewGormCachePlugin(dao *dao.CacheDAO) *GormCachePlugin {
 	}
 }
 
-// Name 插件名称
+// Name 返回 GORM 插件名。
 func (p *GormCachePlugin) Name() string {
 	return "GormCachePlugin"
 }
 
-// Initialize 注册 GORM 钩子
+// Initialize 注册 create/update/delete 成功后的统一失效钩子。
 func (p *GormCachePlugin) Initialize(db *gorm.DB) error {
-	// 在增、删、改成功后，统一触发清理逻辑
 	_ = db.Callback().Create().After("gorm:create").Register("clear_related_cache_after_create", p.afterWrite)
 	_ = db.Callback().Update().After("gorm:update").Register("clear_related_cache_after_update", p.afterWrite)
 	_ = db.Callback().Delete().After("gorm:delete").Register("clear_related_cache_after_delete", p.afterWrite)
@@ -40,24 +45,28 @@ func (p *GormCachePlugin) afterWrite(db *gorm.DB) {
 		return
 	}
 
-	// 获取 Model 的真实值（剥掉所有指针）
+	// 1. 先剥掉所有指针，拿到真实模型值。
+	// 2. 若本次写入的是切片，按“切片元素类型”分发缓存逻辑即可。
 	val := reflect.Indirect(reflect.ValueOf(db.Statement.Model))
-
-	// 如果是切片，拿切片里元素的类型
 	if val.Kind() == reflect.Slice {
 		if val.Len() > 0 {
-			p.dispatchCacheLogic(val.Index(0).Interface(), db)
+			p.dispatchCacheLogic(val.Index(0).Interface())
 		}
-	} else {
-		p.dispatchCacheLogic(val.Interface(), db)
+		return
 	}
+
+	p.dispatchCacheLogic(val.Interface())
 }
 
-// 根据不同的 Model 类型，调用不同的缓存失效逻辑
-func (p *GormCachePlugin) dispatchCacheLogic(modelObj interface{}, db *gorm.DB) {
+// dispatchCacheLogic 根据模型类型决定是否需要缓存失效。
+//
+// 步骤说明：
+// 1. 先匹配真正有前台缓存读取依赖的模型，命中后执行对应删除逻辑；
+// 2. 对已确认“不需要缓存失效”的模型显式静默忽略，避免正常链路反复刷屏；
+// 3. 只有未知模型才打印日志，方便后续补齐遗漏的缓存策略。
+func (p *GormCachePlugin) dispatchCacheLogic(modelObj interface{}) {
 	switch m := modelObj.(type) {
 	case model.Schedule:
-		// 无论传的是 &s, s, 还是 &[]s，剥开后都是 model.Schedule
 		p.invalidScheduleCache(m.UserID, m.Week)
 	case model.TaskClass:
 		p.invalidTaskClassCache(*m.UserID)
@@ -69,10 +78,16 @@ func (p *GormCachePlugin) dispatchCacheLogic(modelObj interface{}, db *gorm.DB) 
 		p.invalidConversationHistoryCache(m.UserID, m.ChatID)
 	case model.AgentChat:
 		p.invalidConversationHistoryCache(m.UserID, m.ChatID)
-	case model.AgentOutboxMessage, model.User:
-		// 这些模型目前没有定义缓存逻辑，先不处理
+	case model.AgentOutboxMessage,
+		model.User,
+		model.AgentStateSnapshotRecord,
+		model.MemoryJob,
+		model.MemoryItem,
+		model.MemoryAuditLog,
+		model.MemoryUserSetting:
+		// 这些模型当前没有前台缓存读取链路依赖，故意静默忽略。
+		return
 	default:
-		// 只有真正没定义的模型才会到这里
 		log.Printf("[GORM-Cache] No logic defined for model: %T", modelObj)
 	}
 }
@@ -81,13 +96,14 @@ func (p *GormCachePlugin) invalidScheduleCache(userID int, week int) {
 	if userID == 0 || week == 0 {
 		return
 	}
-	// 3. 异步执行，不阻塞主业务事务
+
+	// 1. 异步删除缓存，避免阻塞主事务提交。
+	// 2. 周视图变化后，同时清今天/最近完成/进行中缓存，保证口径一致。
 	go func() {
-		// 这里调用你的 CacheDAO 删缓存
 		_ = p.cacheDAO.DeleteUserWeeklyScheduleFromCache(context.Background(), userID, week)
-		_ = p.cacheDAO.DeleteUserTodayScheduleFromCache(context.Background(), userID)            // 同时删当天日程的缓存，确保数据一致
-		_ = p.cacheDAO.DeleteUserRecentCompletedSchedulesFromCache(context.Background(), userID) // 同时删最近完成日程的缓存，确保数据一致
-		_ = p.cacheDAO.DeleteUserOngoingScheduleFromCache(context.Background(), userID)          // 同时删正在进行日程的缓存，确保数据一致
+		_ = p.cacheDAO.DeleteUserTodayScheduleFromCache(context.Background(), userID)
+		_ = p.cacheDAO.DeleteUserRecentCompletedSchedulesFromCache(context.Background(), userID)
+		_ = p.cacheDAO.DeleteUserOngoingScheduleFromCache(context.Background(), userID)
 		log.Printf("[GORM-Cache] Invalidated cache for user %d, week %d", userID, week)
 	}()
 }
@@ -96,6 +112,7 @@ func (p *GormCachePlugin) invalidTaskClassCache(userID int) {
 	if userID == 0 {
 		return
 	}
+
 	go func() {
 		_ = p.cacheDAO.DeleteTaskClassList(context.Background(), userID)
 		log.Printf("[GORM-Cache] Invalidated task class list cache for user %d", userID)
@@ -106,6 +123,7 @@ func (p *GormCachePlugin) invalidTaskCache(userID int) {
 	if userID == 0 {
 		return
 	}
+
 	go func() {
 		_ = p.cacheDAO.DeleteUserTasksFromCache(context.Background(), userID)
 		log.Printf("[GORM-Cache] Invalidated task list cache for user %d", userID)
@@ -117,10 +135,10 @@ func (p *GormCachePlugin) invalidSchedulePlanPreviewCache(userID int, conversati
 	if userID == 0 || normalizedConversationID == "" {
 		return
 	}
+
 	go func() {
-		// 1. 这里的调用目的：当排程状态快照发生覆盖写入时，主动删除对应会话预览缓存。
-		// 2. 这样可以避免“Redis 里还是旧预览，但 MySQL 已经是新快照”的短暂口径不一致。
-		// 3. 失败策略：缓存删除失败只记日志，不影响主事务提交。
+		// 1. 排程快照被覆盖后，预览缓存必须同步删除，避免 Redis 里继续挂旧结果。
+		// 2. 删除失败只记日志，不影响主事务，因为缓存永远是可回源的副本。
 		if err := p.cacheDAO.DeleteSchedulePlanPreviewFromCache(context.Background(), userID, normalizedConversationID); err != nil {
 			log.Printf("[GORM-Cache] Failed to invalidate schedule preview cache for user %d conversation %s: %v", userID, normalizedConversationID, err)
 			return
@@ -134,10 +152,10 @@ func (p *GormCachePlugin) invalidConversationHistoryCache(userID int, conversati
 	if userID == 0 || normalizedConversationID == "" {
 		return
 	}
+
 	go func() {
-		// 1. 这里的调用目的：当聊天历史写入或重试补种更新后，删除“前端历史视图缓存”。
-		// 2. 这样下次访问 conversation-history 时会回源 DB，并把最新 retry 版本完整回填缓存。
-		// 3. 注意：这里只删历史视图缓存，不删 Agent 上下文热缓存，避免影响聊天首 token。
+		// 1. 聊天历史写入或重试补种后，删除历史视图缓存，保证下次列表/详情能拿到最新版本。
+		// 2. 这里只清“前台历史视图缓存”，不碰 LLM 上下文热缓存，避免影响首 token 体验。
 		if err := p.cacheDAO.DeleteConversationHistoryFromCache(context.Background(), userID, normalizedConversationID); err != nil {
 			log.Printf("[GORM-Cache] Failed to invalidate conversation history cache for user %d conversation %s: %v", userID, normalizedConversationID, err)
 			return

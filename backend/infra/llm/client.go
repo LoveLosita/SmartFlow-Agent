@@ -1,4 +1,4 @@
-package newagentllm
+package llm
 
 import (
 	"context"
@@ -23,11 +23,11 @@ const (
 	ThinkingModeDisabled ThinkingMode = "disabled"
 )
 
-// GenerateOptions 是 Agent 内部统一的模型调用选项。
+// GenerateOptions 是统一模型调用选项。
 //
 // 设计目的：
-// 1. 先把“每个 skill 都会反复传的参数”收敛成一份结构；
-// 2. 让 node 层以后只表达“我要什么”，不再自己重复组织 option；
+// 1. 先把“每个 skill / worker 都会反复传的参数”收敛成一份结构；
+// 2. 让上层以后只表达“我要什么”，不再自己重复组织 option；
 // 3. 暂时不追求覆盖所有 provider 参数，先把最常用的几个公共位抽出来。
 type GenerateOptions struct {
 	Temperature float64
@@ -49,7 +49,7 @@ type TextResult struct {
 
 // StreamReader 抽象了“可逐块 Recv 的流式返回器”。
 //
-// 之所以不直接依赖某个具体 SDK 的 reader 类型，是因为 Agent 现在还在建骨架阶段，
+// 之所以不直接依赖某个具体 SDK 的 reader 类型，是因为现在还处在骨架收敛阶段，
 // 后续接 ark、OpenAI 兼容层还是别的 provider，都可以往这个最小接口上适配。
 type StreamReader interface {
 	Recv() (*schema.Message, error)
@@ -62,10 +62,10 @@ type TextGenerateFunc func(ctx context.Context, messages []*schema.Message, opti
 // StreamGenerateFunc 是流式生成的统一适配函数签名。
 type StreamGenerateFunc func(ctx context.Context, messages []*schema.Message, options GenerateOptions) (StreamReader, error)
 
-// Client 是 Agent 里的统一模型客户端门面。
+// Client 是统一模型客户端门面。
 //
 // 职责边界：
-// 1. 负责把 node 层的“模型调用意图”收敛到统一入口；
+// 1. 负责把调用方的“模型调用意图”收敛到统一入口；
 // 2. 负责统一参数校验、空响应防御、GenerateJSON 复用；
 // 3. 不负责写 prompt，不负责业务 fallback，也不直接持有具体厂商 SDK 细节。
 type Client struct {
@@ -89,7 +89,7 @@ func NewClient(generateText TextGenerateFunc, streamText StreamGenerateFunc) *Cl
 // 3. 不负责业务 prompt 拼接，也不负责把文本再映射成业务结构。
 func (c *Client) GenerateText(ctx context.Context, messages []*schema.Message, options GenerateOptions) (*TextResult, error) {
 	if c == nil || c.generateText == nil {
-		return nil, errors.New("agent llm client is not ready")
+		return nil, errors.New("llm client is not ready")
 	}
 	if len(messages) == 0 {
 		return nil, errors.New("llm messages is empty")
@@ -111,10 +111,9 @@ func (c *Client) GenerateText(ctx context.Context, messages []*schema.Message, o
 // GenerateJSON 先走统一文本生成，再走统一 JSON 解析。
 //
 // 设计说明：
-// 1. 旧 agent 里每个 skill 都各自写了一份“Generate -> 提取 JSON -> 反序列化”；
-// 2. 这里先把这一整段收敛成公共链路，后续 quicknote/taskquery/schedule 都直接复用；
-// 3. 返回 parsed + rawResult，方便上层既能拿结构化字段，也能在打点/回退时保留原文。
-// 4. 这里做成泛型函数而不是方法，是因为 Go 不支持“方法自带类型参数”。
+// 1. 把“Generate -> 提取 JSON -> 反序列化”这段公共链路收敛起来；
+// 2. 上层只关心业务结构，不需要重复实现解析样板；
+// 3. 返回 parsed + rawResult，方便打点与回退时保留原文。
 func GenerateJSON[T any](ctx context.Context, client *Client, messages []*schema.Message, options GenerateOptions) (*T, *TextResult, error) {
 	result, err := client.GenerateText(ctx, messages, options)
 	if err != nil {
@@ -136,7 +135,7 @@ func GenerateJSON[T any](ctx context.Context, client *Client, messages []*schema
 // 3. 不负责累计全文，也不负责 token 统计落库。
 func (c *Client) Stream(ctx context.Context, messages []*schema.Message, options GenerateOptions) (StreamReader, error) {
 	if c == nil || c.streamText == nil {
-		return nil, errors.New("agent llm stream client is not ready")
+		return nil, errors.New("llm stream client is not ready")
 	}
 	if len(messages) == 0 {
 		return nil, errors.New("llm messages is empty")
@@ -147,9 +146,9 @@ func (c *Client) Stream(ctx context.Context, messages []*schema.Message, options
 // BuildSystemUserMessages 构造最常见的“system + history + user”消息列表。
 //
 // 设计说明：
-// 1. 这是旧 agent 中高频重复片段，几乎每个 skill 都会拼一次；
-// 2. 这里先把最稳定的消息编排方式沉淀下来，减少 node 层样板代码；
-// 3. 只做消息切片装配，不做 prompt 生成。
+// 1. 先把最稳定的消息编排方式沉淀下来，减少各业务域样板代码；
+// 2. 只做消息切片装配，不做 prompt 生成；
+// 3. 供 agent / memory 等多个能力域复用。
 func BuildSystemUserMessages(systemPrompt string, history []*schema.Message, userPrompt string) []*schema.Message {
 	messages := make([]*schema.Message, 0, len(history)+2)
 	if strings.TrimSpace(systemPrompt) != "" {

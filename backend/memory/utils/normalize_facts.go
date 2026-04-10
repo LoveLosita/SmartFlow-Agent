@@ -49,6 +49,11 @@ func NormalizeFacts(candidates []memorymodel.FactCandidate) []memorymodel.Normal
 		if confidence == 0 {
 			confidence = 0.6
 		}
+		importance := clamp01(candidate.Importance)
+		if importance == 0 {
+			importance = defaultImportanceByType(memoryType)
+		}
+		sensitivityLevel := clampInt(candidate.SensitivityLevel, 0, 2)
 
 		normalizedContent := strings.ToLower(content)
 		contentHash := hashContent(memoryType, normalizedContent)
@@ -65,6 +70,8 @@ func NormalizeFacts(candidates []memorymodel.FactCandidate) []memorymodel.Normal
 			NormalizedContent: normalizedContent,
 			ContentHash:       contentHash,
 			Confidence:        confidence,
+			Importance:        importance,
+			SensitivityLevel:  sensitivityLevel,
 			IsExplicit:        candidate.IsExplicit,
 		})
 	}
@@ -94,6 +101,29 @@ func clamp01(v float64) float64 {
 		return 1
 	}
 	return v
+}
+
+func clampInt(v, minValue, maxValue int) int {
+	if v < minValue {
+		return minValue
+	}
+	if v > maxValue {
+		return maxValue
+	}
+	return v
+}
+
+func defaultImportanceByType(memoryType string) float64 {
+	switch memoryType {
+	case memorymodel.MemoryTypePreference:
+		return 0.85
+	case memorymodel.MemoryTypeConstraint:
+		return 0.95
+	case memorymodel.MemoryTypeTodoHint:
+		return 0.8
+	default:
+		return 0.6
+	}
 }
 
 func hashContent(memoryType, normalizedContent string) string {

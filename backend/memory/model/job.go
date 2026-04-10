@@ -22,11 +22,13 @@ type ExtractJobPayload struct {
 
 // FactCandidate 表示抽取阶段得到的候选事实。
 type FactCandidate struct {
-	MemoryType string
-	Title      string
-	Content    string
-	Confidence float64
-	IsExplicit bool
+	MemoryType       string
+	Title            string
+	Content          string
+	Confidence       float64
+	Importance       float64
+	SensitivityLevel int
+	IsExplicit       bool
 }
 
 // NormalizedFact 表示通过标准化后的可入库事实。
@@ -37,5 +39,7 @@ type NormalizedFact struct {
 	NormalizedContent string
 	ContentHash       string
 	Confidence        float64
+	Importance        float64
+	SensitivityLevel  int
 	IsExplicit        bool
 }

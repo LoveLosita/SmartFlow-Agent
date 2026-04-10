@@ -17,6 +17,10 @@ func NewAuditRepo(db *gorm.DB) *AuditRepo {
 	return &AuditRepo{db: db}
 }
 
+func (r *AuditRepo) WithTx(tx *gorm.DB) *AuditRepo {
+	return &AuditRepo{db: tx}
+}
+
 func (r *AuditRepo) Create(ctx context.Context, log model.MemoryAuditLog) error {
 	if r == nil || r.db == nil {
 		return errors.New("memory audit repo is nil")

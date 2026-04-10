@@ -8,7 +8,7 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 
-	newagentllm "github.com/LoveLosita/smartflow/backend/newAgent/llm"
+	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
@@ -30,7 +30,7 @@ const (
 type DeliverNodeInput struct {
 	RuntimeState        *newagentmodel.AgentRuntimeState
 	ConversationContext *newagentmodel.ConversationContext
-	Client              *newagentllm.Client
+	Client              *infrallm.Client
 	ChunkEmitter        *newagentstream.ChunkEmitter
 }
 
@@ -95,7 +95,7 @@ func RunDeliverNode(ctx context.Context, input DeliverNodeInput) error {
 // generateDeliverSummary 尝试调用 LLM 生成交付总结，失败时降级到机械格式化。
 func generateDeliverSummary(
 	ctx context.Context,
-	client *newagentllm.Client,
+	client *infrallm.Client,
 	flowState *newagentmodel.CommonState,
 	conversationContext *newagentmodel.ConversationContext,
 ) string {
@@ -116,10 +116,10 @@ func generateDeliverSummary(
 	result, err := client.GenerateText(
 		ctx,
 		messages,
-		newagentllm.GenerateOptions{
+		infrallm.GenerateOptions{
 			Temperature: 0.5,
 			MaxTokens:   800,
-			Thinking:    newagentllm.ThinkingModeDisabled,
+			Thinking:    infrallm.ThinkingModeDisabled,
 			Metadata: map[string]any{
 				"stage": deliverStageName,
 			},

@@ -22,7 +22,11 @@ type MemoryIngestItem struct {
 	MemoryType       string
 	Title            string
 	Content          string
+	Confidence       float64
+	Importance       float64
 	SensitivityLevel int
+	IsExplicit       bool
+	Status           string
 	TTLAt            *time.Time
 	CreatedAt        *time.Time
 }
@@ -71,7 +75,12 @@ func (c *MemoryCorpus) BuildIngestDocuments(_ context.Context, input any) ([]cor
 			"assistant_id":      strings.TrimSpace(item.AssistantID),
 			"run_id":            strings.TrimSpace(item.RunID),
 			"memory_type":       strings.TrimSpace(strings.ToLower(item.MemoryType)),
+			"title":             strings.TrimSpace(item.Title),
+			"confidence":        item.Confidence,
+			"importance":        item.Importance,
 			"sensitivity_level": item.SensitivityLevel,
+			"is_explicit":       item.IsExplicit,
+			"status":            strings.TrimSpace(item.Status),
 		}
 		if item.TTLAt != nil {
 			metadata["ttl_at"] = item.TTLAt.Format(time.RFC3339)

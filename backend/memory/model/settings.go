@@ -10,3 +10,11 @@ type UserSettingDTO struct {
 	SensitiveMemoryEnabled bool
 	UpdatedAt              *time.Time
 }
+
+// UpdateUserSettingRequest 描述记忆开关写入请求。
+type UpdateUserSettingRequest struct {
+	UserID                 int
+	MemoryEnabled          bool
+	ImplicitMemoryEnabled  bool
+	SensitiveMemoryEnabled bool
+}

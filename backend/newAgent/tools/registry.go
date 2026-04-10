@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	infrarag "github.com/LoveLosita/smartflow/backend/infra/rag"
 )
 
 // ToolHandler 是所有工具的统一执行签名。
@@ -16,17 +18,34 @@ type ToolSchemaEntry struct {
 	SchemaText string
 }
 
+// DefaultRegistryDeps 描述默认工具注册表可选依赖。
+//
+// 说明：
+// 1. 这层依赖注入先为后续 websearch / memory 工具预留统一入口；
+// 2. 当前即便部分依赖暂未使用，也不应让业务侧再自行 new 底层 Infra；
+// 3. 后续新增读工具时，应优先在这里扩展依赖而不是走包级全局变量。
+type DefaultRegistryDeps struct {
+	RAGRuntime infrarag.Runtime
+}
+
 // ToolRegistry 管理工具注册、查找与执行。
 type ToolRegistry struct {
 	handlers map[string]ToolHandler
 	schemas  []ToolSchemaEntry
+	deps     DefaultRegistryDeps
 }
 
 // NewToolRegistry 创建空注册表。
 func NewToolRegistry() *ToolRegistry {
+	return NewToolRegistryWithDeps(DefaultRegistryDeps{})
+}
+
+// NewToolRegistryWithDeps 创建带依赖的空注册表。
+func NewToolRegistryWithDeps(deps DefaultRegistryDeps) *ToolRegistry {
 	return &ToolRegistry{
 		handlers: make(map[string]ToolHandler),
 		schemas:  make([]ToolSchemaEntry, 0),
+		deps:     deps,
 	}
 }
 
@@ -93,7 +112,12 @@ var writeTools = map[string]bool{
 
 // NewDefaultRegistry 创建默认日程工具注册表。
 func NewDefaultRegistry() *ToolRegistry {
-	r := NewToolRegistry()
+	return NewDefaultRegistryWithDeps(DefaultRegistryDeps{})
+}
+
+// NewDefaultRegistryWithDeps 创建带依赖的默认日程工具注册表。
+func NewDefaultRegistryWithDeps(deps DefaultRegistryDeps) *ToolRegistry {
+	r := NewToolRegistryWithDeps(deps)
 
 	// --- 读工具 ---
 	r.Register("get_overview",

@@ -1,4 +1,4 @@
-package newagentllm
+package llm
 
 import (
 	"encoding/json"
@@ -12,7 +12,7 @@ import (
 // 职责边界：
 // 1. 负责处理“模型输出前后夹杂解释文字 / markdown 代码块”的常见情况；
 // 2. 负责提取最外层 JSON object 并反序列化为目标结构；
-// 3. 不负责业务字段合法性校验，例如 priority 是否在 1~4，应由上层 node 再校验。
+// 3. 不负责业务字段合法性校验，应由上层调用方自行校验。
 func ParseJSONObject[T any](raw string) (*T, error) {
 	clean := strings.TrimSpace(raw)
 	if clean == "" {
@@ -36,7 +36,7 @@ func ParseJSONObject[T any](raw string) (*T, error) {
 // 设计说明：
 // 1. LLM 很容易输出“这里是结果：{...}”这种半结构化文本；
 // 2. 这里用括号计数而不是正则，避免嵌套对象一多就误截断；
-// 3. 目前只提取 object，不提取 array，因为当前 agent 的路由/规划契约基本都是对象。
+// 3. 目前只提取 object，不提取 array，因为当前契约基本都是对象。
 func ExtractJSONObject(text string) string {
 	clean := trimMarkdownCodeFence(strings.TrimSpace(text))
 	if clean == "" {

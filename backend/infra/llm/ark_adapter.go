@@ -1,4 +1,4 @@
-package newagentllm
+package llm
 
 import (
 	"context"
@@ -11,12 +11,12 @@ import (
 	arkModel "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
 )
 
-// WrapArkClient 将 ark.ChatModel 适配为 newAgent 的统一 Client。
+// WrapArkClient 将 ark.ChatModel 适配为统一 Client。
 //
 // 职责边界：
 // 1. generateText：调用 ark.ChatModel.Generate（非流式），供 GenerateJSON 使用；
-// 2. streamText：调用 ark.ChatModel.Stream（流式），供 EmitPseudoAssistantText 等使用；
-// 3. 两者共用 buildArkStreamOptions 统一构造调用选项。
+// 2. streamText：调用 ark.ChatModel.Stream（流式），供需要流式输出的场景使用；
+// 3. 两者共用同一套 options 转换。
 func WrapArkClient(arkChatModel *ark.ChatModel) *Client {
 	if arkChatModel == nil {
 		return nil
@@ -48,7 +48,7 @@ func WrapArkClient(arkChatModel *ark.ChatModel) *Client {
 	return NewClient(generateFunc, streamFunc)
 }
 
-// buildArkStreamOptions 将 newAgent 的 GenerateOptions 转换为 ark 的流式调用选项。
+// buildArkStreamOptions 将统一 GenerateOptions 转换为 ark 的流式调用选项。
 func buildArkStreamOptions(options GenerateOptions) []einoModel.Option {
 	thinkingEnabled := options.Thinking == ThinkingModeEnabled
 

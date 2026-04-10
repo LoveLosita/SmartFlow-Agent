@@ -8,7 +8,8 @@ import "time"
 // 1. 只承载模块运行参数，不承载业务状态；
 // 2. 允许启动期统一注入，避免业务层直接依赖配置中心。
 type Config struct {
-	Enabled bool
+	Enabled    bool
+	RAGEnabled bool
 
 	ExtractPrompt  string
 	DecisionPrompt string

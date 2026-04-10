@@ -1,14 +1,8 @@
-// 过渡期遗留文件。
+// 过渡期统一 Ark 调用封装。
 //
-// 这里的 CallArkText / CallArkJSON 是为了让旧 agent 代码（route/quicknote 等）
-// 在迁移到统一 Client 之前能继续直接持有 *ark.ChatModel。
-//
-// 替代路径：
-//   - CallArkText  → WrapArkClient(arkModel) + client.GenerateText(...)
-//   - CallArkJSON  → WrapArkClient(arkModel) + GenerateJSON[T](...)
-//
-// 待旧 agent 代码全部收敛到 Client 接口后，本文件可整体删除。
-package newagentllm
+// 这里保留 CallArkText / CallArkJSON，方便暂时还直接持有 *ark.ChatModel 的调用点
+// 逐步迁移到统一 Client。后续 memory 也可以直接复用这套中立层。
+package llm
 
 import (
 	"context"
@@ -24,9 +18,9 @@ import (
 // ArkCallOptions 是基于 ark.ChatModel 的通用调用选项。
 //
 // 设计目的：
-// 1. 当前 route / quicknote 都还直接持有 *ark.ChatModel；
-// 2. 在它们完全收敛到更抽象的 Client 前，先把重复的 ark 调用样板抽成公共层；
-// 3. 这样本轮就能先删除 route/quicknote 里那几份重复的 Generate 样板代码。
+// 1. 先把 Ark 调用样板抽成公共层；
+// 2. 再由 WrapArkClient 提供统一 Client；
+// 3. 让上层尽量只关注业务 prompt 和结构化结果。
 type ArkCallOptions struct {
 	Temperature float64
 	MaxTokens   int

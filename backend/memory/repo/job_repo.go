@@ -87,18 +87,19 @@ func (r *JobRepo) ClaimNextRunnableExtractJob(ctx context.Context, now time.Time
 	var claimed *model.MemoryJob
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var job model.MemoryJob
-		queryErr := tx.
+		query := tx.
 			Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("job_type = ?", model.MemoryJobTypeExtract).
 			Where("status IN ?", []string{model.MemoryJobStatusPending, model.MemoryJobStatusFailed}).
 			Where("(next_retry_at IS NULL OR next_retry_at <= ?)", now).
 			Order("id ASC").
-			First(&job).Error
-		if queryErr != nil {
-			if errors.Is(queryErr, gorm.ErrRecordNotFound) {
-				return nil
-			}
-			return queryErr
+			Limit(1).
+			Find(&job)
+		if query.Error != nil {
+			return query.Error
+		}
+		if query.RowsAffected == 0 {
+			return nil
 		}
 
 		updates := map[string]any{

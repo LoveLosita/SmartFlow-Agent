@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
-	newagentllm "github.com/LoveLosita/smartflow/backend/newAgent/llm"
+	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
@@ -31,7 +31,7 @@ type PlanNodeInput struct {
 	RuntimeState        *newagentmodel.AgentRuntimeState
 	ConversationContext *newagentmodel.ConversationContext
 	UserInput           string
-	Client              *newagentllm.Client
+	Client              *infrallm.Client
 	ChunkEmitter        *newagentstream.ChunkEmitter
 	ResumeNode          string
 	AlwaysExecute       bool // true 时计划生成后自动确认，不进入 confirm 节点
@@ -70,14 +70,14 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 	messages := newagentprompt.BuildPlanMessages(flowState, conversationContext, input.UserInput)
 
 	// 3. Phase 1：快速评估（开 thinking），让 LLM 同时产出复杂度评估和规划结果。
-	decision, rawResult, err := newagentllm.GenerateJSON[newagentmodel.PlanDecision](
+	decision, rawResult, err := infrallm.GenerateJSON[newagentmodel.PlanDecision](
 		ctx,
 		input.Client,
 		messages,
-		newagentllm.GenerateOptions{
+		infrallm.GenerateOptions{
 			Temperature: 0.2,
 			MaxTokens:   1600,
-			Thinking:    newagentllm.ThinkingModeEnabled,
+			Thinking:    infrallm.ThinkingModeEnabled,
 			Metadata: map[string]any{
 				"stage": planStageName,
 				"phase": "assessment",
@@ -108,14 +108,14 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 			return fmt.Errorf("深度规划状态推送失败: %w", err)
 		}
 
-		deepDecision, _, deepErr := newagentllm.GenerateJSON[newagentmodel.PlanDecision](
+		deepDecision, _, deepErr := infrallm.GenerateJSON[newagentmodel.PlanDecision](
 			ctx,
 			input.Client,
 			messages,
-			newagentllm.GenerateOptions{
+			infrallm.GenerateOptions{
 				Temperature: 0.2,
 				MaxTokens:   3200,
-				Thinking:    newagentllm.ThinkingModeEnabled,
+				Thinking:    infrallm.ThinkingModeEnabled,
 				Metadata: map[string]any{
 					"stage": planStageName,
 					"phase": "deep_planning",

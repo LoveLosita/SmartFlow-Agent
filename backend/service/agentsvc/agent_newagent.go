@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
+	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentconv "github.com/LoveLosita/smartflow/backend/newAgent/conv"
 	newagentgraph "github.com/LoveLosita/smartflow/backend/newAgent/graph"
-	newagentllm "github.com/LoveLosita/smartflow/backend/newAgent/llm"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
@@ -107,6 +107,10 @@ func (s *AgentService) runNewAgentGraph(
 	} else {
 		conversationContext = s.loadConversationContext(requestCtx, chatID, userMessage)
 	}
+	// 5.1. 在 graph 执行前统一补充与当前输入相关的记忆上下文。
+	// 5.1.1 这里采用 pinned block 注入，这样 chat / plan / execute / deliver 各阶段都能自动复用。
+	// 5.1.2 检索失败只降级为“本轮不注入记忆”，不阻断主链路。
+	s.injectMemoryContext(requestCtx, conversationContext, userID, chatID, userMessage)
 
 	// 5.5 若 extra 携带 task_class_ids，校验后写入 CommonState（仅首轮/尚未设置时生效，跨轮持久化）。
 	//    校验：通过 LoadTaskClassMetas → GetCompleteTaskClassesByIDs 检查所有 ID 是否存在且属于当前用户；
@@ -141,10 +145,10 @@ func (s *AgentService) runNewAgentGraph(
 	graphRequest.Normalize()
 
 	// 7. 适配 LLM clients（从 AIHub 的 ark.ChatModel 转换为 newAgent LLM Client）。
-	chatClient := newagentllm.WrapArkClient(s.AIHub.Worker)
-	planClient := newagentllm.WrapArkClient(s.AIHub.Worker)
-	executeClient := newagentllm.WrapArkClient(s.AIHub.Worker)
-	deliverClient := newagentllm.WrapArkClient(s.AIHub.Worker)
+	chatClient := infrallm.WrapArkClient(s.AIHub.Worker)
+	planClient := infrallm.WrapArkClient(s.AIHub.Worker)
+	executeClient := infrallm.WrapArkClient(s.AIHub.Worker)
+	deliverClient := infrallm.WrapArkClient(s.AIHub.Worker)
 
 	// 8. 适配 SSE emitter。
 	sseEmitter := newagentstream.NewSSEPayloadEmitter(outChan)

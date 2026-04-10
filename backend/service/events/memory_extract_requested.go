@@ -13,9 +13,8 @@ import (
 
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
+	"github.com/LoveLosita/smartflow/backend/memory"
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
-	memoryrepo "github.com/LoveLosita/smartflow/backend/memory/repo"
-	memoryservice "github.com/LoveLosita/smartflow/backend/memory/service"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/spf13/viper"
 	"gorm.io/gorm"
@@ -32,16 +31,20 @@ const (
 // 职责边界：
 // 1. 只负责把事件转为 memory_jobs 任务；
 // 2. 不在消费回调里执行 LLM 重计算；
-// 3. 用 outbox 通用事务保证“任务入库 + consumed 推进”原子一致。
+// 3. 通过 memory.Module.WithTx(tx) 复用同一套接入门面，保证事务边界仍由 outbox 掌控。
 func RegisterMemoryExtractRequestedHandler(
 	bus *outboxinfra.EventBus,
 	outboxRepo *outboxinfra.Repository,
+	memoryModule *memory.Module,
 ) error {
 	if bus == nil {
 		return errors.New("event bus is nil")
 	}
 	if outboxRepo == nil {
 		return errors.New("outbox repository is nil")
+	}
+	if memoryModule == nil {
+		return errors.New("memory module is nil")
 	}
 
 	handler := func(ctx context.Context, envelope kafkabus.Envelope) error {
@@ -57,7 +60,6 @@ func RegisterMemoryExtractRequestedHandler(
 		}
 
 		return outboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
-			enqueueService := memoryservice.NewEnqueueService(memoryrepo.NewJobRepo(tx))
 			jobPayload := memorymodel.ExtractJobPayload{
 				UserID:          payload.UserID,
 				ConversationID:  strings.TrimSpace(payload.ConversationID),
@@ -70,7 +72,7 @@ func RegisterMemoryExtractRequestedHandler(
 				TraceID:         strings.TrimSpace(payload.TraceID),
 				IdempotencyKey:  strings.TrimSpace(payload.IdempotencyKey),
 			}
-			return enqueueService.EnqueueExtractJob(ctx, jobPayload, envelope.EventID)
+			return memoryModule.WithTx(tx).EnqueueExtract(ctx, jobPayload, envelope.EventID)
 		})
 	}
 
@@ -80,8 +82,8 @@ func RegisterMemoryExtractRequestedHandler(
 // EnqueueMemoryExtractRequestedInTx 在事务内写入 memory.extract.requested outbox 消息。
 //
 // 设计目的：
-// 1. 让“聊天消息已落库”与“记忆抽取事件已入队”同事务提交；
-// 2. 任何一步失败都整体回滚，避免出现链路断点。
+// 1. 让“聊天消息已落库”和“记忆抽取事件已入队”同事务提交；
+// 2. 任意一步失败都整体回滚，避免出现链路断点。
 func EnqueueMemoryExtractRequestedInTx(
 	ctx context.Context,
 	outboxRepo *outboxinfra.Repository,
@@ -128,6 +130,7 @@ func buildMemoryExtractPayloadFromChat(chatPayload model.ChatHistoryPersistPaylo
 	if role != "user" {
 		return model.MemoryExtractRequestedPayload{}, false
 	}
+
 	sourceText := strings.TrimSpace(chatPayload.Message)
 	if sourceText == "" {
 		return model.MemoryExtractRequestedPayload{}, false
@@ -179,6 +182,7 @@ func truncateByRune(raw string, max int) string {
 	if max <= 0 {
 		return ""
 	}
+
 	runes := []rune(raw)
 	if len(runes) <= max {
 		return raw

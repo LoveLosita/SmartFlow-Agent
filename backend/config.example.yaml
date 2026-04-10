@@ -54,3 +54,54 @@ agent:
   baseURL: "https://ark.cn-beijing.volces.com/api/v3" # Worker服务的基础URL，需根据实际情况调整
   dailyRefineConcurrency: 3 # 日内并发优化并发度，建议按模型配额调整
   weeklyAdjustBudget: 5 # 周级跨天配平额度上限，防止过度调整
+
+rag:
+  enabled: false
+  store: "inmemory" # 可选：inmemory / milvus
+  topK: 8
+  threshold: 0.55
+  retrieve:
+    timeoutMs: 1500
+  ingest:
+    chunkSize: 400
+    chunkOverlap: 80
+  embed:
+    provider: "mock" # 可选：mock / eino
+    model: "" # 例如 Ark/OpenAI 兼容 embedding 模型名
+    baseURL: "https://ark.cn-beijing.volces.com/api/v3"
+    apiKeyEnv: "ARK_API_KEY"
+    timeoutMs: 1200
+    dimension: 1024
+  reranker:
+    enabled: false
+    provider: "noop" # 当前默认 noop，后续可扩展
+    timeoutMs: 1200
+  milvus:
+    address: "http://localhost:19530" # Milvus REST 入口，当前联调确认不要填 9091 健康检查口
+    token: "root:Milvus"
+    dbName: ""
+    collectionName: "smartflow_rag_chunks"
+    metricType: "COSINE"
+    requestTimeoutMs: 1500
+
+memory:
+  enabled: true
+  rag:
+    enabled: false
+  prompt:
+    extract: ""
+    decision: ""
+  threshold: 0.55
+  enableReranker: false
+  llm:
+    temperature: 0.1
+    topP: 0.2
+  job:
+    maxRetry: 6
+  worker:
+    pollEvery: 2s
+    claimBatch: 1
+
+websearch:
+  rag:
+    enabled: false

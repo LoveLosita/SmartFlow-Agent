@@ -9,7 +9,7 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 
-	newagentllm "github.com/LoveLosita/smartflow/backend/newAgent/llm"
+	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
@@ -46,7 +46,7 @@ type ChatNodeInput struct {
 	ConversationContext *newagentmodel.ConversationContext
 	UserInput           string
 	ConfirmAction       string
-	Client              *newagentllm.Client
+	Client              *infrallm.Client
 	ChunkEmitter        *newagentstream.ChunkEmitter
 }
 
@@ -91,14 +91,14 @@ func RunChatNode(ctx context.Context, input ChatNodeInput) error {
 	}
 	messages := newagentprompt.BuildChatRoutingMessages(conversationContext, input.UserInput, flowState)
 
-	decision, rawResult, err := newagentllm.GenerateJSON[newagentmodel.ChatRoutingDecision](
+	decision, rawResult, err := infrallm.GenerateJSON[newagentmodel.ChatRoutingDecision](
 		ctx,
 		input.Client,
 		messages,
-		newagentllm.GenerateOptions{
+		infrallm.GenerateOptions{
 			Temperature: 0.1,
 			MaxTokens:   500,
-			Thinking:    newagentllm.ThinkingModeDisabled,
+			Thinking:    infrallm.ThinkingModeDisabled,
 			Metadata: map[string]any{
 				"stage": chatStageName,
 				"phase": "routing",
@@ -412,10 +412,10 @@ func handleDeepAnswer(
 
 	// 2. 第二次 LLM 调用：开 thinking，深度回答。
 	deepMessages := newagentprompt.BuildDeepAnswerMessages(conversationContext, input.UserInput)
-	deepResult, err := input.Client.GenerateText(ctx, deepMessages, newagentllm.GenerateOptions{
+	deepResult, err := input.Client.GenerateText(ctx, deepMessages, infrallm.GenerateOptions{
 		Temperature: 0.5,
 		MaxTokens:   2000,
-		Thinking:    newagentllm.ThinkingModeEnabled,
+		Thinking:    infrallm.ThinkingModeEnabled,
 		Metadata: map[string]any{
 			"stage": chatStageName,
 			"phase": "deep_answer",

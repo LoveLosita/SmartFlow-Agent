@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	newagentllm "github.com/LoveLosita/smartflow/backend/newAgent/llm"
+	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
@@ -48,7 +48,7 @@ type ExecuteNodeInput struct {
 	RuntimeState          *newagentmodel.AgentRuntimeState
 	ConversationContext   *newagentmodel.ConversationContext
 	UserInput             string
-	Client                *newagentllm.Client
+	Client                *infrallm.Client
 	ChunkEmitter          *newagentstream.ChunkEmitter
 	ResumeNode            string
 	ToolRegistry          *newagenttools.ToolRegistry
@@ -188,14 +188,14 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		flowState.ConversationID,
 		flowState.RoundUsed,
 	)
-	decision, rawResult, err := newagentllm.GenerateJSON[newagentmodel.ExecuteDecision](
+	decision, rawResult, err := infrallm.GenerateJSON[newagentmodel.ExecuteDecision](
 		ctx,
 		input.Client,
 		messages,
-		newagentllm.GenerateOptions{
+		infrallm.GenerateOptions{
 			Temperature: 1.0,   // thinking 模式强制要求 temperature=1
 			MaxTokens:   16000, // 需为 thinking chain 留出足够预算
-			Thinking:    newagentllm.ThinkingModeEnabled,
+			Thinking:    infrallm.ThinkingModeEnabled,
 			Metadata: map[string]any{
 				"stage":      executeStageName,
 				"step_index": flowState.CurrentStep,

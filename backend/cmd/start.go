@@ -8,8 +8,12 @@ import (
 	"github.com/LoveLosita/smartflow/backend/api"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
+	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
+	infrarag "github.com/LoveLosita/smartflow/backend/infra/rag"
+	ragconfig "github.com/LoveLosita/smartflow/backend/infra/rag/config"
 	"github.com/LoveLosita/smartflow/backend/inits"
+	"github.com/LoveLosita/smartflow/backend/memory"
 	"github.com/LoveLosita/smartflow/backend/middleware"
 	newagentconv "github.com/LoveLosita/smartflow/backend/newAgent/conv"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
@@ -51,6 +55,30 @@ func Start() {
 		log.Fatalf("Failed to initialize Eino: %v", err)
 	}
 
+	ragCfg := ragconfig.LoadFromViper()
+	var ragRuntime infrarag.Runtime
+	if ragCfg.Enabled {
+		// 1. 当前项目尚未完成全局观测平台建设，这里先注入一层轻量 Observer；
+		// 2. RAG 内部只依赖 Observer 接口，后续若全项目统一日志/指标系统，只需替换这里；
+		// 3. 这样可以避免 RAG 单独自建一套割裂的日志基础设施。
+		ragLogger := log.Default()
+		ragRuntime, err = infrarag.NewRuntimeFromConfig(context.Background(), ragCfg, infrarag.FactoryDeps{
+			Logger:   ragLogger,
+			Observer: infrarag.NewLoggerObserver(ragLogger),
+		})
+		if err != nil {
+			log.Fatalf("Failed to initialize RAG runtime: %v", err)
+		}
+		log.Printf("RAG runtime initialized: store=%s embed=%s reranker=%s", ragCfg.Store, ragCfg.EmbedProvider, ragCfg.RerankerProvider)
+	} else {
+		log.Println("RAG runtime is disabled")
+	}
+
+	// 1. memory 模块对启动层只暴露一个门面。
+	// 2. 后续若接入统一 DI 容器，也优先注入这个门面，而不是继续暴露内部 repo/service。
+	memoryCfg := memory.LoadConfigFromViper()
+	memoryModule := memory.NewModule(db, infrallm.WrapArkClient(aiHub.Worker), ragRuntime, memoryCfg)
+
 	// DAO 层初始化。
 	cacheRepo := dao.NewCacheDAO(rdb)
 	agentCacheRepo := dao.NewAgentCache(rdb)
@@ -67,7 +95,7 @@ func Start() {
 	// outbox 通用事件总线接线（第二阶段）：
 	// 1. 读取 Kafka 配置；
 	// 2. 创建 infra 级 EventBus；
-	// 3. 显式注册"聊天持久化"事件处理器；
+	// 3. 显式注册业务事件处理器；
 	// 4. 启动总线后台 dispatch/consume 循环。
 	kafkaCfg := kafkabus.LoadConfig()
 	eventBus, err := outboxinfra.NewEventBus(outboxRepo, kafkaCfg)
@@ -75,9 +103,8 @@ func Start() {
 		log.Fatalf("Failed to initialize outbox event bus: %v", err)
 	}
 	if eventBus != nil {
-		// 3. 在启动前完成"业务事件处理器"注册。
-		// 3.1 这里显式调用 service/events，保证 infra 层不承载业务语义。
-		// 3.2 若注册失败直接中止启动，避免"消息已入队但无人消费"的隐性故障。
+		// 1. 在启动前完成业务事件处理器注册。
+		// 2. memory 事件处理器也统一通过 memoryModule 接入，避免启动层感知内部细节。
 		if err = eventsvc.RegisterChatHistoryPersistHandler(eventBus, outboxRepo, manager); err != nil {
 			log.Fatalf("Failed to register chat history event handler: %v", err)
 		}
@@ -90,7 +117,7 @@ func Start() {
 		if err = eventsvc.RegisterAgentStateSnapshotHandler(eventBus, outboxRepo, manager); err != nil {
 			log.Fatalf("Failed to register agent state snapshot event handler: %v", err)
 		}
-		if err = eventsvc.RegisterMemoryExtractRequestedHandler(eventBus, outboxRepo); err != nil {
+		if err = eventsvc.RegisterMemoryExtractRequestedHandler(eventBus, outboxRepo, memoryModule); err != nil {
 			log.Fatalf("Failed to register memory extract event handler: %v", err)
 		}
 		eventBus.Start(context.Background())
@@ -99,6 +126,8 @@ func Start() {
 	} else {
 		log.Println("Outbox event bus is disabled")
 	}
+
+	memoryModule.StartWorker(context.Background())
 
 	// Service 层初始化。
 	userService := service.NewUserService(userRepo, cacheRepo)
@@ -110,9 +139,12 @@ func Start() {
 
 	// newAgent 依赖接线。
 	agentService.SetAgentStateStore(dao.NewAgentStateStoreAdapter(cacheRepo))
-	agentService.SetToolRegistry(newagenttools.NewDefaultRegistry())
+	agentService.SetToolRegistry(newagenttools.NewDefaultRegistryWithDeps(newagenttools.DefaultRegistryDeps{
+		RAGRuntime: ragRuntime,
+	}))
 	agentService.SetScheduleProvider(newagentconv.NewScheduleProvider(scheduleRepo, taskClassRepo))
 	agentService.SetSchedulePersistor(newagentconv.NewSchedulePersistorAdapter(manager))
+	agentService.SetMemoryReader(memoryModule)
 
 	// API 层初始化。
 	userApi := api.NewUserHandler(userService)

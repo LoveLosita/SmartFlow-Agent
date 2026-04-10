@@ -16,6 +16,7 @@ import (
 func LoadConfigFromViper() memorymodel.Config {
 	cfg := memorymodel.Config{
 		Enabled:          viper.GetBool("memory.enabled"),
+		RAGEnabled:       viper.GetBool("memory.rag.enabled"),
 		ExtractPrompt:    viper.GetString("memory.prompt.extract"),
 		DecisionPrompt:   viper.GetString("memory.prompt.decision"),
 		Threshold:        viper.GetFloat64("memory.threshold"),
