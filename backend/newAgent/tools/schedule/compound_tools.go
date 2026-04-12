@@ -1,4 +1,4 @@
-package newagenttools
+package schedule
 
 import (
 	"encoding/json"
@@ -305,19 +305,19 @@ func SpreadEven(state *ScheduleState, taskIDs []int, args map[string]any) string
 	return strings.TrimSpace(sb.String())
 }
 
-func parseMinContextSwitchTaskIDs(args map[string]any) ([]int, error) {
-	return parseCompositeTaskIDs(args)
+func ParseMinContextSwitchTaskIDs(args map[string]any) ([]int, error) {
+	return ParseCompositeTaskIDs(args)
 }
 
-func parseSpreadEvenTaskIDs(args map[string]any) ([]int, error) {
-	return parseCompositeTaskIDs(args)
+func ParseSpreadEvenTaskIDs(args map[string]any) ([]int, error) {
+	return ParseCompositeTaskIDs(args)
 }
 
-func parseCompositeTaskIDs(args map[string]any) ([]int, error) {
-	if ids, ok := argsIntSlice(args, "task_ids"); ok && len(ids) > 0 {
+func ParseCompositeTaskIDs(args map[string]any) ([]int, error) {
+	if ids, ok := ArgsIntSlice(args, "task_ids"); ok && len(ids) > 0 {
 		return ids, nil
 	}
-	if id, ok := argsInt(args, "task_id"); ok {
+	if id, ok := ArgsInt(args, "task_id"); ok {
 		return []int{id}, nil
 	}
 	return nil, fmt.Errorf("缺少必填参数 task_ids（兼容单值 task_id）")

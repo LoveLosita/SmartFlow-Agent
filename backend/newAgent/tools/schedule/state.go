@@ -1,4 +1,4 @@
-package newagenttools
+package schedule
 
 // DayMapping maps a day_index to a real (week, day_of_week) coordinate.
 type DayMapping struct {

@@ -15,6 +15,7 @@ import (
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
+	"github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 )
@@ -52,10 +53,10 @@ type ExecuteNodeInput struct {
 	ChunkEmitter          *newagentstream.ChunkEmitter
 	ResumeNode            string
 	ToolRegistry          *newagenttools.ToolRegistry
-	ScheduleState         *newagenttools.ScheduleState
+	ScheduleState         *schedule.ScheduleState
 	SchedulePersistor     newagentmodel.SchedulePersistor
 	WriteSchedulePreview  newagentmodel.WriteSchedulePreviewFunc
-	OriginalScheduleState *newagenttools.ScheduleState
+	OriginalScheduleState *schedule.ScheduleState
 	AlwaysExecute         bool // true 时写工具跳过确认闸门直接执行
 }
 
@@ -127,7 +128,7 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 	// 1. RoundUsed==0 说明当前还未消耗执行预算；
 	// 2. 此时清理不会影响断线恢复中的中间进度（恢复场景通常 RoundUsed>0）。
 	if input.ScheduleState != nil && flowState.RoundUsed == 0 {
-		newagenttools.ResetTaskProcessingQueue(input.ScheduleState)
+		schedule.ResetTaskProcessingQueue(input.ScheduleState)
 	}
 	if !flowState.AllowReorder && len(flowState.SuggestedOrderBaseline) == 0 {
 		flowState.SuggestedOrderBaseline = buildSuggestedOrderSnapshot(input.ScheduleState)
@@ -978,7 +979,7 @@ func renderExecuteStepScope(scope *executeStepScope) string {
 	return strings.Join(parts, "，")
 }
 
-func buildScopeDaySet(state *newagenttools.ScheduleState, scope *executeStepScope) map[int]struct{} {
+func buildScopeDaySet(state *schedule.ScheduleState, scope *executeStepScope) map[int]struct{} {
 	result := make(map[int]struct{}, 16)
 	if state == nil || scope == nil {
 		return result
@@ -991,7 +992,7 @@ func buildScopeDaySet(state *newagenttools.ScheduleState, scope *executeStepScop
 	return result
 }
 
-func dayMatchesScope(state *newagenttools.ScheduleState, scope *executeStepScope, day int) bool {
+func dayMatchesScope(state *schedule.ScheduleState, scope *executeStepScope, day int) bool {
 	if state == nil || scope == nil {
 		return true
 	}
@@ -1016,7 +1017,7 @@ func dayMatchesScope(state *newagenttools.ScheduleState, scope *executeStepScope
 	return true
 }
 
-func estimateCandidateDaysFromArgs(state *newagenttools.ScheduleState, args map[string]any) (map[int]struct{}, bool, error) {
+func estimateCandidateDaysFromArgs(state *schedule.ScheduleState, args map[string]any) (map[int]struct{}, bool, error) {
 	result := make(map[int]struct{}, 16)
 	if state == nil {
 		return result, false, fmt.Errorf("日程状态为空")
@@ -1328,7 +1329,7 @@ func executeToolCall(
 	toolCall *newagentmodel.ToolCallIntent,
 	emitter *newagentstream.ChunkEmitter,
 	registry *newagenttools.ToolRegistry,
-	scheduleState *newagenttools.ScheduleState,
+	scheduleState *schedule.ScheduleState,
 	writePreview newagentmodel.WriteSchedulePreviewFunc,
 ) error {
 	if toolCall == nil {
@@ -1454,9 +1455,9 @@ func executePendingTool(
 	runtimeState *newagentmodel.AgentRuntimeState,
 	conversationContext *newagentmodel.ConversationContext,
 	registry *newagenttools.ToolRegistry,
-	scheduleState *newagenttools.ScheduleState,
+	scheduleState *schedule.ScheduleState,
 	persistor newagentmodel.SchedulePersistor,
-	originalState *newagenttools.ScheduleState,
+	originalState *schedule.ScheduleState,
 	writePreview newagentmodel.WriteSchedulePreviewFunc,
 	emitter *newagentstream.ChunkEmitter,
 ) error {
@@ -1539,7 +1540,7 @@ func executePendingTool(
 func tryWritePreviewAfterWriteTool(
 	ctx context.Context,
 	flowState *newagentmodel.CommonState,
-	scheduleState *newagenttools.ScheduleState,
+	scheduleState *schedule.ScheduleState,
 	registry *newagenttools.ToolRegistry,
 	toolName string,
 	writePreview newagentmodel.WriteSchedulePreviewFunc,
@@ -1601,7 +1602,7 @@ func truncateText(text string, maxLen int) string {
 }
 
 // summarizeScheduleStateForDebug 返回内存日程状态的关键计数，用于判断工具是否真的修改了 state。
-func summarizeScheduleStateForDebug(state *newagenttools.ScheduleState) string {
+func summarizeScheduleStateForDebug(state *schedule.ScheduleState) string {
 	if state == nil {
 		return "state=nil"
 	}
@@ -1618,11 +1619,11 @@ func summarizeScheduleStateForDebug(state *newagenttools.ScheduleState) string {
 		hasSlot := len(t.Slots) > 0
 
 		switch {
-		case newagenttools.IsPendingTask(*t):
+		case schedule.IsPendingTask(*t):
 			pendingNoSlot++
-		case newagenttools.IsSuggestedTask(*t):
+		case schedule.IsSuggestedTask(*t):
 			suggestedTotal++
-		case newagenttools.IsExistingTask(*t):
+		case schedule.IsExistingTask(*t):
 			existingTotal++
 		}
 

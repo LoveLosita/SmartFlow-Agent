@@ -1,4 +1,4 @@
-package newagenttools
+package schedule
 
 import "fmt"
 
@@ -7,7 +7,7 @@ import "fmt"
 // JSON 反序列化后数字默认为 float64，字符串为 string，需要类型断言。
 
 // argsInt 从 map 中提取 int 值。支持 float64（JSON 反序列化的默认类型）。
-func argsInt(args map[string]any, key string) (int, bool) {
+func ArgsInt(args map[string]any, key string) (int, bool) {
 	v, ok := args[key]
 	if !ok {
 		return 0, false
@@ -22,7 +22,7 @@ func argsInt(args map[string]any, key string) (int, bool) {
 }
 
 // argsString 从 map 中提取 string 值。
-func argsString(args map[string]any, key string) (string, bool) {
+func ArgsString(args map[string]any, key string) (string, bool) {
 	v, ok := args[key]
 	if !ok {
 		return "", false
@@ -32,8 +32,8 @@ func argsString(args map[string]any, key string) (string, bool) {
 }
 
 // argsIntPtr 从 map 中提取可选 int 值，不存在返回 nil。
-func argsIntPtr(args map[string]any, key string) *int {
-	v, ok := argsInt(args, key)
+func ArgsIntPtr(args map[string]any, key string) *int {
+	v, ok := ArgsInt(args, key)
 	if !ok {
 		return nil
 	}
@@ -41,8 +41,8 @@ func argsIntPtr(args map[string]any, key string) *int {
 }
 
 // argsStringPtr 从 map 中提取可选 string 值，不存在返回 nil。
-func argsStringPtr(args map[string]any, key string) *string {
-	v, ok := argsString(args, key)
+func ArgsStringPtr(args map[string]any, key string) *string {
+	v, ok := ArgsString(args, key)
 	if !ok {
 		return nil
 	}
@@ -50,7 +50,7 @@ func argsStringPtr(args map[string]any, key string) *string {
 }
 
 // argsIntSlice 从 map 中提取 int 数组，支持 []any / []int / []float64。
-func argsIntSlice(args map[string]any, key string) ([]int, bool) {
+func ArgsIntSlice(args map[string]any, key string) ([]int, bool) {
 	v, ok := args[key]
 	if !ok {
 		return nil, false
@@ -88,7 +88,7 @@ func argsIntSlice(args map[string]any, key string) ([]int, bool) {
 }
 
 // argsMoveList 从 map 中提取 batch_move 的 moves 数组。
-func argsMoveList(args map[string]any) ([]MoveRequest, error) {
+func ArgsMoveList(args map[string]any) ([]MoveRequest, error) {
 	v, ok := args["moves"]
 	if !ok {
 		return nil, fmt.Errorf("缺少 moves 参数")
@@ -103,15 +103,15 @@ func argsMoveList(args map[string]any) ([]MoveRequest, error) {
 		if !ok {
 			return nil, fmt.Errorf("moves[%d] 不是有效对象", i)
 		}
-		taskID, ok := argsInt(m, "task_id")
+		taskID, ok := ArgsInt(m, "task_id")
 		if !ok {
 			return nil, fmt.Errorf("moves[%d].task_id 缺失或无效", i)
 		}
-		newDay, ok := argsInt(m, "new_day")
+		newDay, ok := ArgsInt(m, "new_day")
 		if !ok {
 			return nil, fmt.Errorf("moves[%d].new_day 缺失或无效", i)
 		}
-		newSlotStart, ok := argsInt(m, "new_slot_start")
+		newSlotStart, ok := ArgsInt(m, "new_slot_start")
 		if !ok {
 			return nil, fmt.Errorf("moves[%d].new_slot_start 缺失或无效", i)
 		}

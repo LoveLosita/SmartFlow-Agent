@@ -13,6 +13,7 @@ import (
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
+	schedule "github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
 	"github.com/cloudwego/eino/schema"
 
 	agentchat "github.com/LoveLosita/smartflow/backend/agent/chat"
@@ -223,8 +224,8 @@ func (s *AgentService) runNewAgentGraph(
 //     这些消息不会出现在 Redis LLM 历史缓存中；
 //  2. 恢复场景（confirm/ask_user）必须使用快照中的 ConversationContext，否则工具结果丢失，
 //     导致后续 LLM 调用收到非法的裸 Tool 消息，API 拒绝请求、连接断开。
-func (s *AgentService) loadOrCreateRuntimeState(ctx context.Context, chatID string, userID int) (*newagentmodel.AgentRuntimeState, *newagentmodel.ConversationContext, *newagenttools.ScheduleState, *newagenttools.ScheduleState) {
-	newRT := func() (*newagentmodel.AgentRuntimeState, *newagentmodel.ConversationContext, *newagenttools.ScheduleState, *newagenttools.ScheduleState) {
+func (s *AgentService) loadOrCreateRuntimeState(ctx context.Context, chatID string, userID int) (*newagentmodel.AgentRuntimeState, *newagentmodel.ConversationContext, *schedule.ScheduleState, *schedule.ScheduleState) {
+	newRT := func() (*newagentmodel.AgentRuntimeState, *newagentmodel.ConversationContext, *schedule.ScheduleState, *schedule.ScheduleState) {
 		rt := newagentmodel.NewAgentRuntimeState(nil)
 		cs := rt.EnsureCommonState()
 		cs.UserID = userID
@@ -528,7 +529,7 @@ func (s *AgentService) makeWriteSchedulePreviewFunc() newagentmodel.WriteSchedul
 	if s.cacheDAO == nil {
 		return nil
 	}
-	return func(ctx context.Context, state *newagenttools.ScheduleState, userID int, conversationID string, taskClassIDs []int) error {
+	return func(ctx context.Context, state *schedule.ScheduleState, userID int, conversationID string, taskClassIDs []int) error {
 		stateDigest := summarizeScheduleStateForPreviewDebug(state)
 		preview := newagentconv.ScheduleStateToPreview(state, userID, conversationID, taskClassIDs, "")
 		if preview == nil {
@@ -549,7 +550,7 @@ func (s *AgentService) makeWriteSchedulePreviewFunc() newagentmodel.WriteSchedul
 }
 
 // summarizeScheduleStateForPreviewDebug 统计 Deliver 写预览前的内存日程摘要。
-func summarizeScheduleStateForPreviewDebug(state *newagenttools.ScheduleState) string {
+func summarizeScheduleStateForPreviewDebug(state *schedule.ScheduleState) string {
 	if state == nil {
 		return "state=nil"
 	}
@@ -565,11 +566,11 @@ func summarizeScheduleStateForPreviewDebug(state *newagenttools.ScheduleState) s
 		hasSlot := len(t.Slots) > 0
 
 		switch {
-		case newagenttools.IsPendingTask(*t):
+		case schedule.IsPendingTask(*t):
 			pendingTotal++
-		case newagenttools.IsSuggestedTask(*t):
+		case schedule.IsSuggestedTask(*t):
 			suggestedTotal++
-		case newagenttools.IsExistingTask(*t):
+		case schedule.IsExistingTask(*t):
 			existingTotal++
 		}
 		if hasSlot {

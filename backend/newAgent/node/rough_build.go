@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
-	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
+	"github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
 )
 
 const (
@@ -205,20 +205,20 @@ func RunRoughBuildNode(ctx context.Context, st *newagentmodel.AgentGraphState) e
 // 1. 第一轮修复后，粗排成功会把任务直接标记为 suggested；
 // 2. 为兼容旧快照，仍按“pending 且 Slots 为空”认定真正未覆盖；
 // 3. 只要这里仍大于 0，就应视为粗排异常，而不是交给 LLM 补排。
-func countPendingTasks(state *newagenttools.ScheduleState, taskClassIDs []int) int {
+func countPendingTasks(state *schedule.ScheduleState, taskClassIDs []int) int {
 	if state == nil {
 		return 0
 	}
 	count := 0
 	for i := range state.Tasks {
 		task := state.Tasks[i]
-		if !newagenttools.IsPendingTask(task) {
+		if !schedule.IsPendingTask(task) {
 			continue
 		}
-		if len(taskClassIDs) > 0 && !newagenttools.IsTaskInRequestedClassScope(task, taskClassIDs) {
+		if len(taskClassIDs) > 0 && !schedule.IsTaskInRequestedClassScope(task, taskClassIDs) {
 			continue
 		}
-		if newagenttools.IsPendingTask(task) {
+		if schedule.IsPendingTask(task) {
 			count++
 		}
 	}
@@ -234,7 +234,7 @@ func countPendingTasks(state *newagenttools.ScheduleState, taskClassIDs []int) i
 //  4. suggested 表示“粗排建议位”，后续可用 move/swap/unplace 微调；
 //  5. 转换失败的条目静默跳过，不中断整体流程。
 func applyRoughBuildPlacements(
-	state *newagenttools.ScheduleState,
+	state *schedule.ScheduleState,
 	placements []newagentmodel.RoughBuildPlacement,
 ) roughBuildApplyStats {
 	stats := roughBuildApplyStats{}
@@ -262,10 +262,10 @@ func applyRoughBuildPlacements(
 		matched := false
 		for _, index := range taskIndexByItemID[p.TaskItemID] {
 			t := &state.Tasks[index]
-			t.Slots = []newagenttools.TaskSlot{
+			t.Slots = []schedule.TaskSlot{
 				{Day: day, SlotStart: p.SectionFrom, SlotEnd: p.SectionTo},
 			}
-			t.Status = newagenttools.TaskStatusSuggested
+			t.Status = schedule.TaskStatusSuggested
 			stats.AppliedCount++
 			matched = true
 			break
@@ -294,7 +294,7 @@ func appendPlacementSample(samples []string, placement newagentmodel.RoughBuildP
 }
 
 // summarizeRoughBuildWindow 提供 DayMapping 的紧凑摘要，便于判断窗口是否退化到错误周。
-func summarizeRoughBuildWindow(state *newagenttools.ScheduleState) string {
+func summarizeRoughBuildWindow(state *schedule.ScheduleState) string {
 	if state == nil || len(state.Window.DayMapping) == 0 {
 		return "empty"
 	}
@@ -311,7 +311,7 @@ func summarizeRoughBuildWindow(state *newagenttools.ScheduleState) string {
 }
 
 // collectScopedTaskSamples 提供当前 state 中可用于匹配的 task_item 样本，便于排查 ID 对不上。
-func collectScopedTaskSamples(state *newagenttools.ScheduleState, taskClassIDs []int) []string {
+func collectScopedTaskSamples(state *schedule.ScheduleState, taskClassIDs []int) []string {
 	if state == nil {
 		return nil
 	}
@@ -321,7 +321,7 @@ func collectScopedTaskSamples(state *newagenttools.ScheduleState, taskClassIDs [
 		if task.Source != "task_item" {
 			continue
 		}
-		if len(taskClassIDs) > 0 && !newagenttools.IsTaskInRequestedClassScope(task, taskClassIDs) {
+		if len(taskClassIDs) > 0 && !schedule.IsTaskInRequestedClassScope(task, taskClassIDs) {
 			continue
 		}
 		samples = append(samples, fmt.Sprintf(

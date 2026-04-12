@@ -1,4 +1,4 @@
-package newagenttools
+package schedule
 
 import (
 	"encoding/json"
@@ -850,7 +850,7 @@ func inferWeekBounds(state *ScheduleState) (int, int) {
 // readIntAny 按别名顺序读取 int 参数。
 func readIntAny(args map[string]any, keys ...string) (int, bool) {
 	for _, key := range keys {
-		value, ok := argsInt(args, key)
+		value, ok := ArgsInt(args, key)
 		if ok {
 			return value, true
 		}
@@ -861,7 +861,7 @@ func readIntAny(args map[string]any, keys ...string) (int, bool) {
 // readStringAny 按别名顺序读取 string 参数。
 func readStringAny(args map[string]any, keys ...string) string {
 	for _, key := range keys {
-		if value, ok := argsString(args, key); ok {
+		if value, ok := ArgsString(args, key); ok {
 			return value
 		}
 	}
@@ -894,7 +894,7 @@ func readBoolAnyWithDefault(args map[string]any, defaultValue bool, keys ...stri
 // readIntSliceAny 按别名顺序读取 int 列表参数。
 func readIntSliceAny(args map[string]any, keys ...string) []int {
 	for _, key := range keys {
-		if values, ok := argsIntSlice(args, key); ok {
+		if values, ok := ArgsIntSlice(args, key); ok {
 			return values
 		}
 	}

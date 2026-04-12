@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/model"
-	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
+	schedule "github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
 )
 
 // ScheduleStateToPreview 将 newAgent 的 ScheduleState 转换为前端预览缓存格式。
@@ -16,7 +16,7 @@ import (
 // 3. Day → (Week, DayOfWeek) 通过 ScheduleState.DayToWeekDay 转换；
 // 4. 转换失败的 slot（day_index 无效）静默跳过。
 func ScheduleStateToPreview(
-	state *newagenttools.ScheduleState,
+	state *schedule.ScheduleState,
 	userID int,
 	conversationID string,
 	taskClassIDs []int,
@@ -30,7 +30,7 @@ func ScheduleStateToPreview(
 	for i := range state.Tasks {
 		t := &state.Tasks[i]
 		// 待安排且无位置的任务不生成 entry。
-		if newagenttools.IsPendingTask(*t) {
+		if schedule.IsPendingTask(*t) {
 			continue
 		}
 
@@ -116,6 +116,6 @@ func ScheduleStateToPreview(
 //  1. 新语义下，显式 suggested 直接输出为建议态；
 //  2. 兼容旧快照：pending+Slots、existing+Duration>0 的 task_item 也继续按 suggested 输出；
 //  3. 这样前端预览口径可以在迁移期保持稳定，不会因为状态枚举切换而抖动。
-func shouldMarkSuggestedInPreview(t newagenttools.ScheduleTask) bool {
-	return newagenttools.IsSuggestedTask(t)
+func shouldMarkSuggestedInPreview(t schedule.ScheduleTask) bool {
+	return schedule.IsSuggestedTask(t)
 }

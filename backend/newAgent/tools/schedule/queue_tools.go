@@ -1,4 +1,4 @@
-package newagenttools
+package schedule
 
 import (
 	"encoding/json"
@@ -117,7 +117,7 @@ func QueueApplyHeadMove(state *ScheduleState, args map[string]any) string {
 		}, "queue_apply_head_move")
 	}
 
-	newDay, ok := argsInt(args, "new_day")
+	newDay, ok := ArgsInt(args, "new_day")
 	if !ok {
 		return mustJSON(queueApplyHeadMoveResult{
 			Tool:           "queue_apply_head_move",
@@ -130,7 +130,7 @@ func QueueApplyHeadMove(state *ScheduleState, args map[string]any) string {
 			Result:         "缺少必填参数 new_day。",
 		}, "queue_apply_head_move")
 	}
-	newSlotStart, ok := argsInt(args, "new_slot_start")
+	newSlotStart, ok := ArgsInt(args, "new_slot_start")
 	if !ok {
 		return mustJSON(queueApplyHeadMoveResult{
 			Tool:           "queue_apply_head_move",
@@ -190,7 +190,7 @@ func QueueSkipHead(state *ScheduleState, args map[string]any) string {
 	}
 
 	reason := ""
-	if raw, ok := argsString(args, "reason"); ok {
+	if raw, ok := ArgsString(args, "reason"); ok {
 		reason = strings.TrimSpace(raw)
 	}
 	markCurrentTaskSkipped(state)

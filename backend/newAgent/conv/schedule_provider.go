@@ -9,7 +9,7 @@ import (
 	baseconv "github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/model"
-	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
+	schedule "github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
 )
 
 // ScheduleProvider 实现 model.ScheduleStateProvider 接口。
@@ -39,7 +39,7 @@ func NewScheduleProvider(scheduleDAO *dao.ScheduleDAO, taskClassDAO *dao.TaskCla
 // 2. task class 无日期信息时，降级到当前周 7 天（兼容普通查询场景）。
 //
 // 日程加载策略：对窗口内每周分别调用 GetUserWeeklySchedule 并合并结果。
-func (p *ScheduleProvider) LoadScheduleState(ctx context.Context, userID int) (*newagenttools.ScheduleState, error) {
+func (p *ScheduleProvider) LoadScheduleState(ctx context.Context, userID int) (*schedule.ScheduleState, error) {
 	// 1. 加载用户所有任务类（含 Items 预加载）。
 	taskClasses, err := p.loadCompleteTaskClasses(ctx, userID)
 	if err != nil {
@@ -59,7 +59,7 @@ func (p *ScheduleProvider) LoadScheduleStateForTaskClasses(
 	ctx context.Context,
 	userID int,
 	taskClassIDs []int,
-) (*newagenttools.ScheduleState, error) {
+) (*schedule.ScheduleState, error) {
 	if len(taskClassIDs) == 0 {
 		return p.LoadScheduleState(ctx, userID)
 	}
@@ -82,7 +82,7 @@ func (p *ScheduleProvider) loadScheduleStateWithTaskClasses(
 	ctx context.Context,
 	userID int,
 	taskClasses []model.TaskClass,
-) (*newagenttools.ScheduleState, error) {
+) (*schedule.ScheduleState, error) {
 	// 1. 确定规划窗口：优先使用 task class 日期范围，降级到当前周。
 	windowDays, weeks := buildWindowFromTaskClasses(taskClasses)
 	if len(windowDays) == 0 {
@@ -236,7 +236,7 @@ func (p *ScheduleProvider) loadCompleteTaskClassesByIDs(
 }
 
 // LoadTaskClassMetas 加载指定任务类的约束元数据（不含 Items、不含日程），供 Plan 阶段提前消费。
-func (p *ScheduleProvider) LoadTaskClassMetas(ctx context.Context, userID int, taskClassIDs []int) ([]newagenttools.TaskClassMeta, error) {
+func (p *ScheduleProvider) LoadTaskClassMetas(ctx context.Context, userID int, taskClassIDs []int) ([]schedule.TaskClassMeta, error) {
 	if len(taskClassIDs) == 0 {
 		return nil, nil
 	}
@@ -244,9 +244,9 @@ func (p *ScheduleProvider) LoadTaskClassMetas(ctx context.Context, userID int, t
 	if err != nil {
 		return nil, fmt.Errorf("加载任务类元数据失败: %w", err)
 	}
-	metas := make([]newagenttools.TaskClassMeta, 0, len(complete))
+	metas := make([]schedule.TaskClassMeta, 0, len(complete))
 	for _, tc := range complete {
-		meta := newagenttools.TaskClassMeta{
+		meta := schedule.TaskClassMeta{
 			ID:   tc.ID,
 			Name: derefString(tc.Name),
 		}

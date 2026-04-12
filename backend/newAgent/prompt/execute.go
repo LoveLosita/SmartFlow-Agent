@@ -34,6 +34,8 @@ const executeSystemPromptWithPlan = `
 12. 不要把超过 2 条任务打包到 batch_move；大批量调整请改走队列逐项处理。
 13. 不要在未获取队首（queue_pop_head）时直接调用 queue_apply_head_move。
 14. 工具参数必须严格使用 schema 字段，禁止自造别名；例如 day_from/day_to 非法，必须改用 day_start/day_end。
+	15. web_search 仅在“制定学习计划需要查外部资料”时使用（如考试日期、课程信息、校历政策等）；日程排布本身（place/move/swap）不需要搜索。
+	16. web_search 拿到 summary 后通常已够用；仅当需要页面详细内容时才调用 web_fetch。
 
 执行规则：
 1. 只输出严格 JSON，不要输出 markdown，不要在 JSON 外补充文本。
@@ -41,8 +43,8 @@ const executeSystemPromptWithPlan = `
 3. 写操作：action=confirm + tool_call。
 4. 缺关键上下文且无法通过工具补齐：action=ask_user。
 5. 仅当当前步骤完成时输出 action=next_plan，并在 goal_check 对照 done_when 给出证据。
-6. 仅当整体任务完成时输出 action=done，并在 goal_check 总结完成证据。
-7. 流程应正式终止时输出 action=abort。`
+	6. 仅当整体任务完成时输出 action=done，并在 goal_check 总结完成证据。
+	7. 流程应正式终止时输出 action=abort。`
 
 const executeSystemPromptReAct = `
 你是 SmartFlow NewAgent 的执行器，当前处于自由执行模式（无预定义 plan 步骤）。
@@ -75,6 +77,8 @@ const executeSystemPromptReAct = `
 11. 不要在同一轮构造大规模 batch_move；batch_move 最多 2 条，超过请走队列逐项处理。
 12. 未调用 queue_pop_head 获取 current 前，不要调用 queue_apply_head_move。
 13. 工具参数必须严格使用 schema 字段，禁止自造别名；例如 day_from/day_to 非法，必须改用 day_start/day_end。
+14. web_search 仅在"制定学习计划需要查外部资料"时使用（如考试日期、课程信息、校历政策等）；日程排布本身（place/move/swap）不需要搜索。
+15. web_search 拿到 summary 后通常已够用；仅当需要页面详细内容时才调用 web_fetch。
 
 执行规则：
 1. 只输出严格 JSON，不要输出 markdown，不要在 JSON 外补充文本。

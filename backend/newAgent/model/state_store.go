@@ -3,7 +3,7 @@ package model
 import (
 	"context"
 
-	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
+	schedule "github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
 )
 
 // AgentStateSnapshot 是需要持久化的 agent 运行态最小快照。
@@ -14,10 +14,10 @@ import (
 // 3. 不保存 Deps（依赖注入，每次由 Service 层重建）；
 // 4. 不保存 ToolSchemas（每次请求由 Service 层重新注入）。
 type AgentStateSnapshot struct {
-	RuntimeState          *AgentRuntimeState           `json:"runtime_state"`
-	ConversationContext   *ConversationContext         `json:"conversation_context"`
-	ScheduleState         *newagenttools.ScheduleState `json:"schedule_state,omitempty"`
-	OriginalScheduleState *newagenttools.ScheduleState `json:"original_schedule_state,omitempty"`
+	RuntimeState          *AgentRuntimeState      `json:"runtime_state"`
+	ConversationContext   *ConversationContext    `json:"conversation_context"`
+	ScheduleState         *schedule.ScheduleState `json:"schedule_state,omitempty"`
+	OriginalScheduleState *schedule.ScheduleState `json:"original_schedule_state,omitempty"`
 }
 
 // AgentStateStore 定义 agent 状态持久化的最小接口。
@@ -58,9 +58,9 @@ type AgentStateStore interface {
 // 由 DAO 层或 Service 层实现，注入到 AgentGraphDeps 中。
 // 使用接口而非具体 DAO 类型，避免 model → dao 的循环依赖。
 type ScheduleStateProvider interface {
-	LoadScheduleState(ctx context.Context, userID int) (*newagenttools.ScheduleState, error)
+	LoadScheduleState(ctx context.Context, userID int) (*schedule.ScheduleState, error)
 	// LoadTaskClassMetas 只加载指定任务类的约束元数据，供 Plan 节点提前消费。
-	LoadTaskClassMetas(ctx context.Context, userID int, taskClassIDs []int) ([]newagenttools.TaskClassMeta, error)
+	LoadTaskClassMetas(ctx context.Context, userID int, taskClassIDs []int) ([]schedule.TaskClassMeta, error)
 }
 
 // ScopedScheduleStateProvider 定义“按本轮任务类范围加载 ScheduleState”的可选增强接口。
@@ -70,12 +70,12 @@ type ScheduleStateProvider interface {
 // 2. 不负责：改变既有 ScheduleStateProvider 的基础能力，老实现仍可只实现 LoadScheduleState；
 // 3. 兜底策略：若调用方拿到的 provider 不实现该接口，则回退到全量 LoadScheduleState，再走工具层 scope 裁剪。
 type ScopedScheduleStateProvider interface {
-	LoadScheduleStateForTaskClasses(ctx context.Context, userID int, taskClassIDs []int) (*newagenttools.ScheduleState, error)
+	LoadScheduleStateForTaskClasses(ctx context.Context, userID int, taskClassIDs []int) (*schedule.ScheduleState, error)
 }
 
 // SchedulePersistor 定义持久化 ScheduleState 变更的接口。
 // 由 Service 层或 DAO 层实现，注入到 AgentGraphDeps 中。
 // 使用接口而非具体 DAO 类型，避免 model → dao 的循环依赖。
 type SchedulePersistor interface {
-	PersistScheduleChanges(ctx context.Context, original, modified *newagenttools.ScheduleState, userID int) error
+	PersistScheduleChanges(ctx context.Context, original, modified *schedule.ScheduleState, userID int) error
 }

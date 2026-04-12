@@ -4,7 +4,7 @@ import (
 	"sort"
 
 	"github.com/LoveLosita/smartflow/backend/model"
-	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
+	schedule "github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
 )
 
 // WindowDay 表示排课窗口中的一天（相对周 + 周几）。
@@ -24,20 +24,20 @@ func LoadScheduleState(
 	taskClasses []model.TaskClass,
 	extraItemCategories map[int]string,
 	windowDays []WindowDay,
-) *newagenttools.ScheduleState {
-	state := &newagenttools.ScheduleState{
-		Window: newagenttools.ScheduleWindow{
+) *schedule.ScheduleState {
+	state := &schedule.ScheduleState{
+		Window: schedule.ScheduleWindow{
 			TotalDays:  len(windowDays),
-			DayMapping: make([]newagenttools.DayMapping, len(windowDays)),
+			DayMapping: make([]schedule.DayMapping, len(windowDays)),
 		},
-		Tasks: make([]newagenttools.ScheduleTask, 0),
+		Tasks: make([]schedule.ScheduleTask, 0),
 	}
 
 	// 1. 构建 day_index 与 (week, day_of_week) 的双向转换基础索引。
 	dayLookup := make(map[[2]int]int, len(windowDays))
 	for i, wd := range windowDays {
 		dayIndex := i + 1
-		state.Window.DayMapping[i] = newagenttools.DayMapping{
+		state.Window.DayMapping[i] = schedule.DayMapping{
 			DayIndex:  dayIndex,
 			Week:      wd.Week,
 			DayOfWeek: wd.DayOfWeek,
@@ -118,7 +118,7 @@ func LoadScheduleState(
 		}
 
 		locked := event.Type == "course" && !event.CanBeEmbedded
-		var slots []newagenttools.TaskSlot
+		var slots []schedule.TaskSlot
 		for _, g := range groups {
 			if len(g.sections) == 0 {
 				continue
@@ -131,12 +131,12 @@ func LoadScheduleState(
 					continue
 				}
 				if day, ok := dayLookup[[2]int{g.week, g.dayOfWeek}]; ok {
-					slots = append(slots, newagenttools.TaskSlot{Day: day, SlotStart: start, SlotEnd: end})
+					slots = append(slots, schedule.TaskSlot{Day: day, SlotStart: start, SlotEnd: end})
 				}
 				start, end = sec, sec
 			}
 			if day, ok := dayLookup[[2]int{g.week, g.dayOfWeek}]; ok {
-				slots = append(slots, newagenttools.TaskSlot{Day: day, SlotStart: start, SlotEnd: end})
+				slots = append(slots, schedule.TaskSlot{Day: day, SlotStart: start, SlotEnd: end})
 			}
 		}
 		sort.Slice(slots, func(i, j int) bool {
@@ -147,7 +147,7 @@ func LoadScheduleState(
 		})
 
 		stateID := nextStateID
-		state.Tasks = append(state.Tasks, newagenttools.ScheduleTask{
+		state.Tasks = append(state.Tasks, schedule.ScheduleTask{
 			StateID:   stateID,
 			Source:    "event",
 			SourceID:  eventID,
@@ -207,12 +207,12 @@ func LoadScheduleState(
 			}
 
 			if hostStateID, ok := itemIDToEmbedHostStateID[item.ID]; ok {
-				hostSlots := []newagenttools.TaskSlot(nil)
+				hostSlots := []schedule.TaskSlot(nil)
 				if hostTask := state.TaskByStateID(hostStateID); hostTask != nil {
 					hostSlots = cloneTaskSlots(hostTask.Slots)
 				}
 				stateID := nextStateID
-				state.Tasks = append(state.Tasks, newagenttools.ScheduleTask{
+				state.Tasks = append(state.Tasks, schedule.ScheduleTask{
 					StateID:     stateID,
 					Source:      "task_item",
 					SourceID:    item.ID,
@@ -230,7 +230,7 @@ func LoadScheduleState(
 
 			if slots, ok := slotsFromTargetTime(item.EmbeddedTime, dayLookup); ok {
 				stateID := nextStateID
-				state.Tasks = append(state.Tasks, newagenttools.ScheduleTask{
+				state.Tasks = append(state.Tasks, schedule.ScheduleTask{
 					StateID:     stateID,
 					Source:      "task_item",
 					SourceID:    item.ID,
@@ -251,7 +251,7 @@ func LoadScheduleState(
 			}
 
 			stateID := nextStateID
-			state.Tasks = append(state.Tasks, newagenttools.ScheduleTask{
+			state.Tasks = append(state.Tasks, schedule.ScheduleTask{
 				StateID:     stateID,
 				Source:      "task_item",
 				SourceID:    item.ID,
@@ -269,7 +269,7 @@ func LoadScheduleState(
 
 		// 仅当该任务类仍有 pending item 时，才把约束暴露给 LLM。
 		if pendingCount > 0 {
-			meta := newagenttools.TaskClassMeta{
+			meta := schedule.TaskClassMeta{
 				ID:   tc.ID,
 				Name: catName,
 			}
@@ -328,12 +328,12 @@ func LoadScheduleState(
 			if cat, exists := itemCategoryLookup[itemID]; exists && cat != "" {
 				category = cat
 			}
-			hostSlots := []newagenttools.TaskSlot(nil)
+			hostSlots := []schedule.TaskSlot(nil)
 			if hostTask != nil {
 				hostSlots = cloneTaskSlots(hostTask.Slots)
 			}
 			guestStateID = nextStateID
-			state.Tasks = append(state.Tasks, newagenttools.ScheduleTask{
+			state.Tasks = append(state.Tasks, schedule.ScheduleTask{
 				StateID:     guestStateID,
 				Source:      "task_item",
 				SourceID:    itemID,
@@ -412,7 +412,7 @@ func taskItemName(item model.TaskClassItem) string {
 func slotsFromTargetTime(
 	target *model.TargetTime,
 	dayLookup map[[2]int]int,
-) ([]newagenttools.TaskSlot, bool) {
+) ([]schedule.TaskSlot, bool) {
 	if target == nil {
 		return nil, false
 	}
@@ -423,7 +423,7 @@ func slotsFromTargetTime(
 	if !ok {
 		return nil, false
 	}
-	return []newagenttools.TaskSlot{
+	return []schedule.TaskSlot{
 		{
 			Day:       day,
 			SlotStart: target.SectionFrom,
@@ -471,8 +471,8 @@ type ScheduleChange struct {
 
 // DiffScheduleState 比较 original 与 modified，返回需要持久化的变更集合。
 func DiffScheduleState(
-	original *newagenttools.ScheduleState,
-	modified *newagenttools.ScheduleState,
+	original *schedule.ScheduleState,
+	modified *schedule.ScheduleState,
 ) []ScheduleChange {
 	if original == nil || modified == nil {
 		return nil
@@ -534,8 +534,8 @@ func DiffScheduleState(
 }
 
 // indexByStateID 将任务列表按 state_id 建立索引。
-func indexByStateID(state *newagenttools.ScheduleState) map[int]*newagenttools.ScheduleTask {
-	m := make(map[int]*newagenttools.ScheduleTask, len(state.Tasks))
+func indexByStateID(state *schedule.ScheduleState) map[int]*schedule.ScheduleTask {
+	m := make(map[int]*schedule.ScheduleTask, len(state.Tasks))
 	for i := range state.Tasks {
 		m[state.Tasks[i].StateID] = &state.Tasks[i]
 	}
@@ -543,7 +543,7 @@ func indexByStateID(state *newagenttools.ScheduleState) map[int]*newagenttools.S
 }
 
 // slotsEqual 判断两个压缩槽位切片是否完全一致。
-func slotsEqual(a, b []newagenttools.TaskSlot) bool {
+func slotsEqual(a, b []schedule.TaskSlot) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -556,18 +556,18 @@ func slotsEqual(a, b []newagenttools.TaskSlot) bool {
 }
 
 // cloneTaskSlots 深拷贝槽位切片。
-func cloneTaskSlots(src []newagenttools.TaskSlot) []newagenttools.TaskSlot {
+func cloneTaskSlots(src []schedule.TaskSlot) []schedule.TaskSlot {
 	if len(src) == 0 {
 		return nil
 	}
-	dst := make([]newagenttools.TaskSlot, len(src))
+	dst := make([]schedule.TaskSlot, len(src))
 	copy(dst, src)
 	return dst
 }
 
 // resolveHostEventID 通过任务的 EmbedHost 反查宿主 event_id。
 // 非嵌入任务或宿主不存在时返回 0。
-func resolveHostEventID(task *newagenttools.ScheduleTask, state *newagenttools.ScheduleState) int {
+func resolveHostEventID(task *schedule.ScheduleTask, state *schedule.ScheduleState) int {
 	if task == nil || task.EmbedHost == nil {
 		return 0
 	}
@@ -579,7 +579,7 @@ func resolveHostEventID(task *newagenttools.ScheduleTask, state *newagenttools.S
 }
 
 // expandToCoords 将压缩槽位展开成逐节坐标，便于后续持久化层处理。
-func expandToCoords(slots []newagenttools.TaskSlot, state *newagenttools.ScheduleState) []SlotCoord {
+func expandToCoords(slots []schedule.TaskSlot, state *schedule.ScheduleState) []SlotCoord {
 	var coords []SlotCoord
 	for _, slot := range slots {
 		week, dow, ok := state.DayToWeekDay(slot.Day)

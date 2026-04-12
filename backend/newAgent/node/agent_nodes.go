@@ -7,7 +7,7 @@ import (
 	"log"
 
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
-	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
+	"github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
 )
 
 // AgentNodes 是 newAgent 通用图的节点容器。
@@ -185,7 +185,7 @@ func (n *AgentNodes) Execute(ctx context.Context, st *newagentmodel.AgentGraphSt
 	}
 
 	// 按需加载 ScheduleState（首次执行时从 DB 加载，后续复用内存中的 state）。
-	var scheduleState *newagenttools.ScheduleState
+	var scheduleState *schedule.ScheduleState
 	if ss, loadErr := st.EnsureScheduleState(ctx); loadErr != nil {
 		return nil, fmt.Errorf("execute node: 加载日程状态失败: %w", loadErr)
 	} else if ss != nil {

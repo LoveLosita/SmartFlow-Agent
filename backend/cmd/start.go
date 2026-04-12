@@ -17,6 +17,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/middleware"
 	newagentconv "github.com/LoveLosita/smartflow/backend/newAgent/conv"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
+	"github.com/LoveLosita/smartflow/backend/newAgent/tools/web"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/LoveLosita/smartflow/backend/routers"
 	"github.com/LoveLosita/smartflow/backend/service"
@@ -139,8 +140,33 @@ func Start() {
 
 	// newAgent 依赖接线。
 	agentService.SetAgentStateStore(dao.NewAgentStateStoreAdapter(cacheRepo))
+
+	// 1. WebSearch provider 初始化：根据配置选择 mock/bocha；
+	// 2. provider 为 nil 时，web_search / web_fetch 返回"暂未启用"，不阻断主流程。
+	var webSearchProvider web.SearchProvider
+	webProvider := viper.GetString("websearch.provider")
+	switch webProvider {
+	case "bocha":
+		bochaKey := viper.GetString("websearch.apiKey")
+		if bochaKey == "" {
+			log.Println("WebSearch: 博查 API Key 为空，降级为 mock")
+			webSearchProvider = &web.MockProvider{}
+		} else {
+			webSearchProvider = web.NewBochaProvider(bochaKey, "")
+			log.Println("WebSearch provider: bocha")
+		}
+	case "mock", "":
+		webSearchProvider = &web.MockProvider{}
+		log.Println("WebSearch provider: mock（模拟模式）")
+	default:
+		// 未识别的 provider 类型降级为 mock 并输出警告。
+		log.Printf("WebSearch provider %q 未识别，降级为 mock", webProvider)
+		webSearchProvider = &web.MockProvider{}
+	}
+
 	agentService.SetToolRegistry(newagenttools.NewDefaultRegistryWithDeps(newagenttools.DefaultRegistryDeps{
-		RAGRuntime: ragRuntime,
+		RAGRuntime:        ragRuntime,
+		WebSearchProvider: webSearchProvider,
 	}))
 	agentService.SetScheduleProvider(newagentconv.NewScheduleProvider(scheduleRepo, taskClassRepo))
 	agentService.SetSchedulePersistor(newagentconv.NewSchedulePersistorAdapter(manager))

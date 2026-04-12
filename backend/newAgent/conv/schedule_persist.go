@@ -7,7 +7,7 @@ import (
 	baseconv "github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/model"
-	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
+	schedule "github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
 )
 
 // SchedulePersistorAdapter 实现 model.SchedulePersistor 接口。
@@ -22,7 +22,7 @@ func NewSchedulePersistorAdapter(manager *dao.RepoManager) *SchedulePersistorAda
 }
 
 // PersistScheduleChanges 实现 model.SchedulePersistor 接口。
-func (a *SchedulePersistorAdapter) PersistScheduleChanges(ctx context.Context, original, modified *newagenttools.ScheduleState, userID int) error {
+func (a *SchedulePersistorAdapter) PersistScheduleChanges(ctx context.Context, original, modified *schedule.ScheduleState, userID int) error {
 	return PersistScheduleChanges(ctx, a.manager, original, modified, userID)
 }
 
@@ -35,8 +35,8 @@ func (a *SchedulePersistorAdapter) PersistScheduleChanges(ctx context.Context, o
 func PersistScheduleChanges(
 	ctx context.Context,
 	manager *dao.RepoManager,
-	original *newagenttools.ScheduleState,
-	modified *newagenttools.ScheduleState,
+	original *schedule.ScheduleState,
+	modified *schedule.ScheduleState,
 	userID int,
 ) error {
 	changes := DiffScheduleState(original, modified)

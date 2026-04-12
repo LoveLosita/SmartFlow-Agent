@@ -507,6 +507,10 @@ func renderExecuteToolReturnHint(toolName string) (returnType string, sample str
 		return returnType, "最少上下文切换重排完成：共处理 6 个任务，上下文切换次数 5 -> 2。"
 	case "unplace":
 		return returnType, "已将 [35]... 移除，恢复为待安排状态。"
+	case "web_search":
+		return "string（JSON字符串）", `{"tool":"web_search","query":"检索关键词","count":2,"items":[{"title":"搜索结果标题","url":"https://example.com/page","snippet":"摘要片段...","domain":"example.com","published_at":"2025-04-10"}]}`
+	case "web_fetch":
+		return "string（JSON字符串）", `{"tool":"web_fetch","url":"https://example.com/page","title":"页面标题","content":"正文内容...","truncated":false}`
 	default:
 		return returnType, "自然语言结果（成功/失败原因/关键数据摘要）。"
 	}

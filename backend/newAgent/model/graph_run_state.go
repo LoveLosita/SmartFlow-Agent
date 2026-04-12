@@ -7,6 +7,7 @@ import (
 	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
+	schedule "github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
 )
 
 // AgentGraphRequest 描述一次 agent graph 运行的请求级输入。
@@ -48,7 +49,7 @@ type RoughBuildFunc func(ctx context.Context, userID int, taskClassIDs []int) ([
 // 由 service 层封装 cacheDAO 后注入，execute/deliver 节点可按需调用：
 // 1. execute 写工具后可实时刷新，保障前端及时看到最新调整；
 // 2. deliver 结束时再做最终覆盖写，保障收口状态一致。
-type WriteSchedulePreviewFunc func(ctx context.Context, state *newagenttools.ScheduleState, userID int, conversationID string, taskClassIDs []int) error
+type WriteSchedulePreviewFunc func(ctx context.Context, state *schedule.ScheduleState, userID int, conversationID string, taskClassIDs []int) error
 
 // AgentGraphDeps 描述 graph/node 层运行时真正依赖的可插拔能力。
 //
@@ -151,8 +152,8 @@ func (d *AgentGraphDeps) ResolveDeliverClient() *infrallm.Client {
 type AgentGraphRunInput struct {
 	RuntimeState          *AgentRuntimeState
 	ConversationContext   *ConversationContext
-	ScheduleState         *newagenttools.ScheduleState
-	OriginalScheduleState *newagenttools.ScheduleState
+	ScheduleState         *schedule.ScheduleState
+	OriginalScheduleState *schedule.ScheduleState
 	Request               AgentGraphRequest
 	Deps                  AgentGraphDeps
 }
@@ -168,8 +169,8 @@ type AgentGraphState struct {
 	ConversationContext   *ConversationContext
 	Request               AgentGraphRequest
 	Deps                  AgentGraphDeps
-	ScheduleState         *newagenttools.ScheduleState // 工具操作的内存数据源，Execute 节点按需加载
-	OriginalScheduleState *newagenttools.ScheduleState // 首次加载时的原始快照，供 diff 用
+	ScheduleState         *schedule.ScheduleState // 工具操作的内存数据源，Execute 节点按需加载
+	OriginalScheduleState *schedule.ScheduleState // 首次加载时的原始快照，供 diff 用
 }
 
 // NewAgentGraphState 把入口参数整理成 graph 内部状态。
@@ -239,7 +240,7 @@ func (s *AgentGraphState) ResolveToolRegistry() *newagenttools.ToolRegistry {
 
 // EnsureScheduleState 确保 ScheduleState 已加载。
 // 首次调用时通过 ScheduleProvider 从 DB 加载，后续复用内存中的 state。
-func (s *AgentGraphState) EnsureScheduleState(ctx context.Context) (*newagenttools.ScheduleState, error) {
+func (s *AgentGraphState) EnsureScheduleState(ctx context.Context) (*schedule.ScheduleState, error) {
 	if s == nil {
 		return nil, nil
 	}
@@ -251,8 +252,8 @@ func (s *AgentGraphState) EnsureScheduleState(ctx context.Context) (*newagenttoo
 			// 3. 因此这里在“已恢复出 ScheduleState、但缺 original”时补一份克隆兜底。
 			s.OriginalScheduleState = s.ScheduleState.Clone()
 		}
-		newagenttools.FilterScheduleStateForTaskClassScope(s.ScheduleState, flowState.TaskClassIDs)
-		newagenttools.FilterScheduleStateForTaskClassScope(s.OriginalScheduleState, flowState.TaskClassIDs)
+		schedule.FilterScheduleStateForTaskClassScope(s.ScheduleState, flowState.TaskClassIDs)
+		schedule.FilterScheduleStateForTaskClassScope(s.OriginalScheduleState, flowState.TaskClassIDs)
 		return s.ScheduleState, nil
 	}
 	if s.Deps.ScheduleProvider == nil {
@@ -260,7 +261,7 @@ func (s *AgentGraphState) EnsureScheduleState(ctx context.Context) (*newagenttoo
 	}
 	userID := flowState.UserID
 	var (
-		state *newagenttools.ScheduleState
+		state *schedule.ScheduleState
 		err   error
 	)
 	// 1. 若 provider 支持按 task_class_ids 精确加载，则优先走 scoped 入口。
@@ -277,7 +278,7 @@ func (s *AgentGraphState) EnsureScheduleState(ctx context.Context) (*newagenttoo
 	s.ScheduleState = state
 	// 保存原始快照，供后续 diff 使用。
 	s.OriginalScheduleState = state.Clone()
-	newagenttools.FilterScheduleStateForTaskClassScope(s.ScheduleState, flowState.TaskClassIDs)
-	newagenttools.FilterScheduleStateForTaskClassScope(s.OriginalScheduleState, flowState.TaskClassIDs)
+	schedule.FilterScheduleStateForTaskClassScope(s.ScheduleState, flowState.TaskClassIDs)
+	schedule.FilterScheduleStateForTaskClassScope(s.OriginalScheduleState, flowState.TaskClassIDs)
 	return state, nil
 }

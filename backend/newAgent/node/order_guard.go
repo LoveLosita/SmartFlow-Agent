@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
-	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
+	"github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
 )
 
 const (
@@ -21,7 +21,7 @@ type suggestedOrderItem struct {
 	Day       int
 	SlotStart int
 	SlotEnd   int
-	Slots     []newagenttools.TaskSlot
+	Slots     []schedule.TaskSlot
 }
 
 type orderRestoreResult struct {
@@ -126,7 +126,7 @@ func RunOrderGuardNode(ctx context.Context, st *newagentmodel.AgentGraphState) e
 // 1. 这里只关心 suggested 任务，因为顺序守卫目标是约束“本轮建议层”的相对次序；
 // 2. 多 slot 任务取“最早 slot”作为排序锚点，保证排序键稳定；
 // 3. 返回值是 state_id 列表，便于写入 CommonState 做跨节点持久化。
-func buildSuggestedOrderSnapshot(state *newagenttools.ScheduleState) []int {
+func buildSuggestedOrderSnapshot(state *schedule.ScheduleState) []int {
 	items := buildSuggestedOrderItems(state)
 	order := make([]int, 0, len(items))
 	for _, item := range items {
@@ -141,7 +141,7 @@ func buildSuggestedOrderSnapshot(state *newagenttools.ScheduleState) []int {
 // 1. 统一封装顺序守卫和自动复原都需要的排序素材，避免两处逻辑口径漂移；
 // 2. 排序键保持与历史实现一致：day -> slot_start -> slot_end -> state_id；
 // 3. 每项附带完整 slots 快照，供“坑位复用式复原”直接使用。
-func buildSuggestedOrderItems(state *newagenttools.ScheduleState) []suggestedOrderItem {
+func buildSuggestedOrderItems(state *schedule.ScheduleState) []suggestedOrderItem {
 	if state == nil || len(state.Tasks) == 0 {
 		return nil
 	}
@@ -149,7 +149,7 @@ func buildSuggestedOrderItems(state *newagenttools.ScheduleState) []suggestedOrd
 	items := make([]suggestedOrderItem, 0, len(state.Tasks))
 	for i := range state.Tasks {
 		task := state.Tasks[i]
-		if !newagenttools.IsSuggestedTask(task) || len(task.Slots) == 0 {
+		if !schedule.IsSuggestedTask(task) || len(task.Slots) == 0 {
 			continue
 		}
 		day, slotStart, slotEnd := earliestTaskSlot(task.Slots)
@@ -178,7 +178,7 @@ func buildSuggestedOrderItems(state *newagenttools.ScheduleState) []suggestedOrd
 	return items
 }
 
-func earliestTaskSlot(slots []newagenttools.TaskSlot) (day int, slotStart int, slotEnd int) {
+func earliestTaskSlot(slots []schedule.TaskSlot) (day int, slotStart int, slotEnd int) {
 	if len(slots) == 0 {
 		return 0, 0, 0
 	}
@@ -250,7 +250,7 @@ func detectRelativeOrderViolation(baseline []int, current []int) (bool, string) 
 // 2. 复用 current 的“坑位序列”（时段集合），按 baseline 顺序重新回填任务；
 // 3. 回填前校验时长兼容，避免把长任务塞进短坑位；
 // 4. 回填后再次校验顺序；若失败则回滚，保证状态不会半成功。
-func restoreSuggestedOrderByBaseline(state *newagenttools.ScheduleState, baseline []int) orderRestoreResult {
+func restoreSuggestedOrderByBaseline(state *schedule.ScheduleState, baseline []int) orderRestoreResult {
 	if state == nil {
 		return orderRestoreResult{Restored: false, Detail: "schedule_state=nil"}
 	}
@@ -306,7 +306,7 @@ func restoreSuggestedOrderByBaseline(state *newagenttools.ScheduleState, baselin
 	}
 
 	// 1. 先构建“当前坑位序列”。
-	slotPool := make([][]newagenttools.TaskSlot, 0, len(filteredCurrent))
+	slotPool := make([][]schedule.TaskSlot, 0, len(filteredCurrent))
 	for _, currentID := range filteredCurrent {
 		item, ok := itemByID[currentID]
 		if !ok {
@@ -343,7 +343,7 @@ func restoreSuggestedOrderByBaseline(state *newagenttools.ScheduleState, baselin
 	}
 
 	// 3. 执行回填，并在失败时支持回滚。
-	beforeSlots := make(map[int][]newagenttools.TaskSlot, len(baselineInScope))
+	beforeSlots := make(map[int][]schedule.TaskSlot, len(baselineInScope))
 	changed := 0
 	for i, targetID := range baselineInScope {
 		task := state.TaskByStateID(targetID)
@@ -401,16 +401,16 @@ func sameIDOrder(left, right []int) bool {
 	return true
 }
 
-func cloneTaskSlots(slots []newagenttools.TaskSlot) []newagenttools.TaskSlot {
+func cloneTaskSlots(slots []schedule.TaskSlot) []schedule.TaskSlot {
 	if len(slots) == 0 {
 		return nil
 	}
-	copied := make([]newagenttools.TaskSlot, len(slots))
+	copied := make([]schedule.TaskSlot, len(slots))
 	copy(copied, slots)
 	return copied
 }
 
-func equalTaskSlots(left, right []newagenttools.TaskSlot) bool {
+func equalTaskSlots(left, right []schedule.TaskSlot) bool {
 	if len(left) != len(right) {
 		return false
 	}
@@ -428,7 +428,7 @@ func equalTaskSlots(left, right []newagenttools.TaskSlot) bool {
 	return true
 }
 
-func expectedTaskDuration(task newagenttools.ScheduleTask) int {
+func expectedTaskDuration(task schedule.ScheduleTask) int {
 	if task.Duration > 0 {
 		return task.Duration
 	}
@@ -438,7 +438,7 @@ func expectedTaskDuration(task newagenttools.ScheduleTask) int {
 	return 0
 }
 
-func totalSlotDuration(slots []newagenttools.TaskSlot) int {
+func totalSlotDuration(slots []schedule.TaskSlot) int {
 	total := 0
 	for _, slot := range slots {
 		total += slot.SlotEnd - slot.SlotStart + 1
@@ -446,7 +446,7 @@ func totalSlotDuration(slots []newagenttools.TaskSlot) int {
 	return total
 }
 
-func isSlotsCompatibleWithTask(task newagenttools.ScheduleTask, slots []newagenttools.TaskSlot) bool {
+func isSlotsCompatibleWithTask(task schedule.ScheduleTask, slots []schedule.TaskSlot) bool {
 	if len(slots) == 0 {
 		return false
 	}

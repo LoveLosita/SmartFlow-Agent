@@ -103,5 +103,10 @@ memory:
     claimBatch: 1
 
 websearch:
+  provider: mock          # 可选：mock | bocha（mock 为空实现，跑通链路用）
+  apiKey: ""              # 搜索供应商 API Key（bocha 模式必填，否则降级为 mock）
+  timeout: 10s            # 单次搜索请求超时
+  fetchTimeout: 15s       # 单次 URL 抓取超时
+  fetchMaxChars: 4000     # 抓取正文最大字符数
   rag:
     enabled: false
