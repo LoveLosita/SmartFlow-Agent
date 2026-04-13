@@ -13,7 +13,6 @@ type Config struct {
 	EmbedProvider  string
 	EmbedModel     string
 	EmbedBaseURL   string
-	EmbedAPIKeyEnv string
 	EmbedTimeoutMS int
 	EmbedDimension int
 
@@ -44,7 +43,6 @@ func LoadFromViper() Config {
 		EmbedProvider:          viper.GetString("rag.embed.provider"),
 		EmbedModel:             viper.GetString("rag.embed.model"),
 		EmbedBaseURL:           viper.GetString("rag.embed.baseURL"),
-		EmbedAPIKeyEnv:         viper.GetString("rag.embed.apiKeyEnv"),
 		EmbedTimeoutMS:         viper.GetInt("rag.embed.timeoutMs"),
 		EmbedDimension:         viper.GetInt("rag.embed.dimension"),
 		RerankerEnabled:        viper.GetBool("rag.reranker.enabled"),
@@ -74,9 +72,6 @@ func LoadFromViper() Config {
 	}
 	if cfg.EmbedBaseURL == "" {
 		cfg.EmbedBaseURL = viper.GetString("agent.baseURL")
-	}
-	if cfg.EmbedAPIKeyEnv == "" {
-		cfg.EmbedAPIKeyEnv = "ARK_API_KEY"
 	}
 	if cfg.EmbedTimeoutMS <= 0 {
 		cfg.EmbedTimeoutMS = 1200

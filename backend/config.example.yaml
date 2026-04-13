@@ -49,15 +49,15 @@ time:
     semesterEndDate: "2026-07-19" #学期结束日期，一定要设定为周日，确保最后一周完整
 
 agent:
-  workerModel: "doubao-seed-1-6-lite-251015" # 智能体使用的Worker模型，需根据实际情况调整
-  strategistModel: "deepseek-v3-2-251201" # 策略师使用的Worker模型，需根据实际情况调整
+  workerModel: "doubao-seed-2-0-code-preview-260215" # 智能体使用的Worker模型，需根据实际情况调整
+  strategistModel: "doubao-seed-2-0-code-preview-260215" # 策略师使用的Worker模型，需根据实际情况调整
   baseURL: "https://ark.cn-beijing.volces.com/api/v3" # Worker服务的基础URL，需根据实际情况调整
-  dailyRefineConcurrency: 3 # 日内并发优化并发度，建议按模型配额调整
+  dailyRefineConcurrency: 7 # 日内并发优化并发度，建议按模型配额调整
   weeklyAdjustBudget: 5 # 周级跨天配平额度上限，防止过度调整
 
 rag:
-  enabled: false
-  store: "inmemory" # 可选：inmemory / milvus
+  enabled: true
+  store: "milvus" # 可选：inmemory / milvus
   topK: 8
   threshold: 0.55
   retrieve:
@@ -66,16 +66,14 @@ rag:
     chunkSize: 400
     chunkOverlap: 80
   embed:
-    provider: "mock" # 可选：mock / eino
-    model: "" # 例如 Ark/OpenAI 兼容 embedding 模型名
-    baseURL: "https://ark.cn-beijing.volces.com/api/v3"
-    apiKeyEnv: "ARK_API_KEY"
+    provider: "eino" # 可选：mock / eino
+    model: "doubao-embedding-vision-251215" # 例如 Ark/OpenAI 兼容 embedding 模型名
+    baseURL: "https://ark.cn-beijing.volces.com/api/v3" # 这里填服务根路径，SDK 会自动拼接 /embeddings；API Key 统一从环境变量 ARK_API_KEY 读取
     timeoutMs: 1200
     dimension: 1024
   reranker:
     enabled: false
     provider: "noop" # 当前默认 noop，后续可扩展
-    timeoutMs: 1200
   milvus:
     address: "http://localhost:19530" # Milvus REST 入口，当前联调确认不要填 9091 健康检查口
     token: "root:Milvus"
@@ -87,7 +85,7 @@ rag:
 memory:
   enabled: true
   rag:
-    enabled: false
+    enabled: true
   prompt:
     extract: ""
     decision: ""
@@ -103,7 +101,7 @@ memory:
     claimBatch: 1
 
 websearch:
-  provider: mock          # 可选：mock | bocha（mock 为空实现，跑通链路用）
+  provider: bocha         # 可选：mock | bocha（mock 为空实现，跑通链路用）
   apiKey: ""              # 搜索供应商 API Key（bocha 模式必填，否则降级为 mock）
   timeout: 10s            # 单次搜索请求超时
   fetchTimeout: 15s       # 单次 URL 抓取超时

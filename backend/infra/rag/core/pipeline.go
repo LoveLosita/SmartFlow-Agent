@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"strings"
 	"time"
 )
@@ -69,7 +70,9 @@ func (p *Pipeline) Ingest(
 	corpus CorpusAdapter,
 	input any,
 	opt IngestOption,
-) (*IngestResult, error) {
+) (result *IngestResult, err error) {
+	defer p.recoverExecutionPanic(ctx, "ingest", &err)
+
 	if p == nil || p.chunker == nil || p.embedder == nil || p.store == nil {
 		return nil, ErrNilDependency
 	}
@@ -95,7 +98,9 @@ func (p *Pipeline) IngestDocuments(
 	corpusName string,
 	docs []SourceDocument,
 	opt IngestOption,
-) (*IngestResult, error) {
+) (result *IngestResult, err error) {
+	defer p.recoverExecutionPanic(ctx, "ingest_documents", &err)
+
 	if p == nil || p.chunker == nil || p.embedder == nil || p.store == nil {
 		return nil, ErrNilDependency
 	}
@@ -170,7 +175,9 @@ func (p *Pipeline) Retrieve(
 	ctx context.Context,
 	corpus CorpusAdapter,
 	req RetrieveRequest,
-) (*RetrieveResult, error) {
+) (result *RetrieveResult, err error) {
+	defer p.recoverExecutionPanic(ctx, "retrieve", &err)
+
 	if p == nil || p.embedder == nil || p.store == nil {
 		return nil, ErrNilDependency
 	}
@@ -236,7 +243,7 @@ func (p *Pipeline) Retrieve(
 		})
 	}
 
-	result := &RetrieveResult{
+	result = &RetrieveResult{
 		Items:        candidates,
 		RawCount:     rawCount,
 		FallbackUsed: false,
@@ -271,6 +278,39 @@ func (p *Pipeline) Retrieve(
 	}
 	result.Items = reranked
 	return result, nil
+}
+
+func (p *Pipeline) recoverExecutionPanic(ctx context.Context, operation string, errPtr *error) {
+	recovered := recover()
+	if recovered == nil || errPtr == nil {
+		return
+	}
+
+	panicErr := fmt.Errorf("rag pipeline panic recovered: operation=%s panic=%v", operation, recovered)
+	*errPtr = panicErr
+
+	// 1. Pipeline 是 chunk/embed/store/rerank 的统一编排边界，第三方依赖异常不应直接杀掉上层请求。
+	// 2. 这里统一 recover 后继续走 error 语义，让 runtime/service 决定降级、回退或记日志。
+	// 3. stack 只写观测层，不塞进返回值，避免把超长堆栈直接暴露给上层业务错误文案。
+	if p != nil && p.observer != nil {
+		p.observer.Observe(ctx, ObserveEvent{
+			Level:     ObserveLevelError,
+			Component: "pipeline",
+			Operation: operation + "_panic_recovered",
+			Fields: map[string]any{
+				"status":     "failed",
+				"panic":      fmt.Sprintf("%v", recovered),
+				"panic_type": fmt.Sprintf("%T", recovered),
+				"error":      panicErr,
+				"error_code": ClassifyErrorCode(panicErr),
+				"stack":      string(debug.Stack()),
+			},
+		})
+		return
+	}
+	if p != nil && p.logger != nil {
+		p.logger.Printf("rag pipeline panic recovered: operation=%s panic=%v stack=%s", operation, recovered, string(debug.Stack()))
+	}
 }
 
 func normalizeChunkOption(opt ChunkOption) ChunkOption {

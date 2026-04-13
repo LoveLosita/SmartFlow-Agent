@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -33,7 +34,9 @@ func newRuntime(cfg ragconfig.Config, pipeline *core.Pipeline, observer Observer
 }
 
 // IngestMemory 统一承接记忆语料入库。
-func (r *runtime) IngestMemory(ctx context.Context, req MemoryIngestRequest) (*IngestResult, error) {
+func (r *runtime) IngestMemory(ctx context.Context, req MemoryIngestRequest) (result *IngestResult, err error) {
+	defer r.recoverPublicPanic(ctx, req.TraceID, "memory", normalizeAction(req.Action, "add"), "ingest", &err)
+
 	items := make([]corpus.MemoryIngestItem, 0, len(req.Items))
 	for _, item := range req.Items {
 		items = append(items, corpus.MemoryIngestItem{
@@ -58,7 +61,9 @@ func (r *runtime) IngestMemory(ctx context.Context, req MemoryIngestRequest) (*I
 }
 
 // RetrieveMemory 统一承接记忆语料检索。
-func (r *runtime) RetrieveMemory(ctx context.Context, req MemoryRetrieveRequest) (*RetrieveResult, error) {
+func (r *runtime) RetrieveMemory(ctx context.Context, req MemoryRetrieveRequest) (result *RetrieveResult, err error) {
+	defer r.recoverPublicPanic(ctx, req.TraceID, "memory", normalizeAction(req.Action, "search"), "retrieve", &err)
+
 	corpusInput := corpus.MemoryRetrieveInput{
 		UserID:         req.UserID,
 		ConversationID: req.ConversationID,
@@ -69,7 +74,7 @@ func (r *runtime) RetrieveMemory(ctx context.Context, req MemoryRetrieveRequest)
 		corpusInput.MemoryType = req.MemoryTypes[0]
 	}
 
-	result, err := r.retrieveWithCorpus(ctx, req.TraceID, "memory", r.memoryCorpus, core.RetrieveRequest{
+	result, err = r.retrieveWithCorpus(ctx, req.TraceID, "memory", r.memoryCorpus, core.RetrieveRequest{
 		Query:       req.Query,
 		TopK:        normalizeTopK(req.TopK, r.cfg.TopK),
 		Threshold:   normalizeThreshold(req.Threshold, r.cfg.Threshold),
@@ -113,7 +118,9 @@ func (r *runtime) RetrieveMemory(ctx context.Context, req MemoryRetrieveRequest)
 }
 
 // IngestWeb 统一承接网页语料入库。
-func (r *runtime) IngestWeb(ctx context.Context, req WebIngestRequest) (*IngestResult, error) {
+func (r *runtime) IngestWeb(ctx context.Context, req WebIngestRequest) (result *IngestResult, err error) {
+	defer r.recoverPublicPanic(ctx, req.TraceID, "web", normalizeAction(req.Action, "add"), "ingest", &err)
+
 	items := make([]corpus.WebIngestItem, 0, len(req.Items))
 	for _, item := range req.Items {
 		items = append(items, corpus.WebIngestItem{
@@ -133,7 +140,9 @@ func (r *runtime) IngestWeb(ctx context.Context, req WebIngestRequest) (*IngestR
 }
 
 // RetrieveWeb 统一承接网页语料检索。
-func (r *runtime) RetrieveWeb(ctx context.Context, req WebRetrieveRequest) (*RetrieveResult, error) {
+func (r *runtime) RetrieveWeb(ctx context.Context, req WebRetrieveRequest) (result *RetrieveResult, err error) {
+	defer r.recoverPublicPanic(ctx, req.TraceID, "web", normalizeAction(req.Action, "search"), "retrieve", &err)
+
 	return r.retrieveWithCorpus(ctx, req.TraceID, "web", r.webCorpus, core.RetrieveRequest{
 		Query:     req.Query,
 		TopK:      normalizeTopK(req.TopK, r.cfg.TopK),
@@ -309,6 +318,41 @@ func (r *runtime) observe(ctx context.Context, event ObserveEvent) {
 		return
 	}
 	r.observer.Observe(ctx, event)
+}
+
+func (r *runtime) recoverPublicPanic(
+	ctx context.Context,
+	traceID string,
+	corpusName string,
+	action string,
+	operation string,
+	errPtr *error,
+) {
+	recovered := recover()
+	if recovered == nil || errPtr == nil {
+		return
+	}
+
+	// 1. runtime 是 RAG Infra 对业务侧暴露的最终方法面，任何下层 panic 都不应再穿透到业务协程。
+	// 2. 这里统一把 panic 转成 error，并补一条结构化观测，方便继续排查是哪一层依赖失控。
+	// 3. 保留 stack 是为了在“进程不崩”的前提下仍能定位根因，避免只剩一句 recovered 无法复盘。
+	panicErr := fmt.Errorf("rag runtime panic recovered: corpus=%s operation=%s panic=%v", corpusName, operation, recovered)
+	*errPtr = panicErr
+
+	observeCtx := newObserveContext(ctx, traceID, corpusName, action)
+	r.observe(observeCtx, ObserveEvent{
+		Level:     ObserveLevelError,
+		Component: "runtime",
+		Operation: operation + "_panic_recovered",
+		Fields: map[string]any{
+			"status":     "failed",
+			"panic":      fmt.Sprintf("%v", recovered),
+			"panic_type": fmt.Sprintf("%T", recovered),
+			"error":      panicErr,
+			"error_code": core.ClassifyErrorCode(panicErr),
+			"stack":      string(debug.Stack()),
+		},
+	})
 }
 
 func newObserveContext(ctx context.Context, traceID string, corpusName string, action string) context.Context {

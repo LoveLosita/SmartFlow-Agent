@@ -21,7 +21,15 @@ func NewVectorRetriever(embedder core.Embedder, store core.VectorStore) *VectorR
 	}
 }
 
-func (r *VectorRetriever) Retrieve(ctx context.Context, req core.RetrieveRequest) ([]core.ScoredChunk, error) {
+func (r *VectorRetriever) Retrieve(ctx context.Context, req core.RetrieveRequest) (result []core.ScoredChunk, err error) {
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			return
+		}
+		err = fmt.Errorf("vector retriever panic recovered: %v", recovered)
+	}()
+
 	if r == nil || r.embedder == nil || r.store == nil {
 		return nil, core.ErrNilDependency
 	}
@@ -55,7 +63,7 @@ func (r *VectorRetriever) Retrieve(ctx context.Context, req core.RetrieveRequest
 		return nil, err
 	}
 
-	result := make([]core.ScoredChunk, 0, len(rows))
+	result = make([]core.ScoredChunk, 0, len(rows))
 	for _, row := range rows {
 		if row.Score < req.Threshold {
 			continue

@@ -108,6 +108,9 @@ func NewMilvusStore(cfg MilvusConfig) (*MilvusStore, error) {
 }
 
 func (s *MilvusStore) Upsert(ctx context.Context, rows []core.VectorRow) error {
+	if err := s.ensureReady(); err != nil {
+		return err
+	}
 	start := time.Now()
 	if len(rows) == 0 {
 		return nil
@@ -171,6 +174,9 @@ func (s *MilvusStore) Upsert(ctx context.Context, rows []core.VectorRow) error {
 }
 
 func (s *MilvusStore) Search(ctx context.Context, req core.VectorSearchRequest) ([]core.ScoredVectorRow, error) {
+	if err := s.ensureReady(); err != nil {
+		return nil, err
+	}
 	start := time.Now()
 	if len(req.QueryVector) == 0 {
 		return nil, nil
@@ -314,6 +320,9 @@ func (s *MilvusStore) Search(ctx context.Context, req core.VectorSearchRequest) 
 }
 
 func (s *MilvusStore) Delete(ctx context.Context, ids []string) error {
+	if err := s.ensureReady(); err != nil {
+		return err
+	}
 	start := time.Now()
 	if len(ids) == 0 {
 		return nil
@@ -356,6 +365,9 @@ func (s *MilvusStore) Delete(ctx context.Context, ids []string) error {
 }
 
 func (s *MilvusStore) Get(ctx context.Context, ids []string) ([]core.VectorRow, error) {
+	if err := s.ensureReady(); err != nil {
+		return nil, err
+	}
 	start := time.Now()
 	if len(ids) == 0 {
 		return nil, nil
@@ -438,6 +450,9 @@ func (s *MilvusStore) Get(ctx context.Context, ids []string) ([]core.VectorRow, 
 }
 
 func (s *MilvusStore) ensureCollection(ctx context.Context, dimension int) error {
+	if err := s.ensureReady(); err != nil {
+		return err
+	}
 	start := time.Now()
 	if dimension <= 0 {
 		dimension = s.cfg.Dimension
@@ -537,6 +552,9 @@ func (s *MilvusStore) ensureCollection(ctx context.Context, dimension int) error
 }
 
 func (s *MilvusStore) postJSON(ctx context.Context, path string, payload map[string]any) ([]byte, error) {
+	if err := s.ensureReady(); err != nil {
+		return nil, err
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -575,6 +593,19 @@ func (s *MilvusStore) postJSON(ctx context.Context, path string, payload map[str
 	}
 
 	return respBody, nil
+}
+
+func (s *MilvusStore) ensureReady() error {
+	if s == nil || s.client == nil {
+		return errors.New("milvus store is not initialized")
+	}
+	if strings.TrimSpace(s.cfg.Address) == "" {
+		return errors.New("milvus address is empty")
+	}
+	if strings.TrimSpace(s.cfg.CollectionName) == "" {
+		return errors.New("milvus collection name is empty")
+	}
+	return nil
 }
 
 func (s *MilvusStore) observe(ctx context.Context, event core.ObserveEvent) {

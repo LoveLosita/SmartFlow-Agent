@@ -73,9 +73,12 @@ func buildEmbedder(ctx context.Context, cfg ragconfig.Config) (core.Embedder, er
 	case "", "mock":
 		return ragembed.NewMockEmbedder(cfg.EmbedDimension), nil
 	case "eino":
-		apiKey := strings.TrimSpace(os.Getenv(cfg.EmbedAPIKeyEnv))
+		// 1. RAG embedding 与普通 LLM 链路保持同一套密钥来源，统一直接读取 ARK_API_KEY；
+		// 2. 这样可以避免再维护一层 “env 名称配置 -> 再读环境变量” 的间接映射，减少配置分叉；
+		// 3. 若后续真的需要多套 embedding 凭据，再显式设计独立字段，而不是继续隐式透传 env 名称。
+		apiKey := strings.TrimSpace(os.Getenv("ARK_API_KEY"))
 		if apiKey == "" {
-			return nil, fmt.Errorf("rag embed api key is empty: env=%s", cfg.EmbedAPIKeyEnv)
+			return nil, fmt.Errorf("rag embed api key is empty: env=%s", "ARK_API_KEY")
 		}
 		return ragembed.NewEinoEmbedder(ctx, ragembed.EinoConfig{
 			APIKey:    apiKey,

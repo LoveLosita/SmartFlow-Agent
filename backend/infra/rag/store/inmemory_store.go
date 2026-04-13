@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -29,12 +30,18 @@ func NewInMemoryVectorStore() *InMemoryVectorStore {
 }
 
 func (s *InMemoryVectorStore) Upsert(_ context.Context, rows []core.VectorRow) error {
+	if s == nil {
+		return errors.New("inmemory vector store is nil")
+	}
 	if len(rows) == 0 {
 		return nil
 	}
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.rows == nil {
+		s.rows = make(map[string]core.VectorRow)
+	}
 	for _, row := range rows {
 		current, exists := s.rows[row.ID]
 		if exists {
@@ -52,6 +59,9 @@ func (s *InMemoryVectorStore) Upsert(_ context.Context, rows []core.VectorRow) e
 }
 
 func (s *InMemoryVectorStore) Search(_ context.Context, req core.VectorSearchRequest) ([]core.ScoredVectorRow, error) {
+	if s == nil {
+		return nil, errors.New("inmemory vector store is nil")
+	}
 	topK := req.TopK
 	if topK <= 0 {
 		topK = 8
@@ -81,6 +91,9 @@ func (s *InMemoryVectorStore) Search(_ context.Context, req core.VectorSearchReq
 }
 
 func (s *InMemoryVectorStore) Delete(_ context.Context, ids []string) error {
+	if s == nil {
+		return errors.New("inmemory vector store is nil")
+	}
 	if len(ids) == 0 {
 		return nil
 	}
@@ -93,6 +106,9 @@ func (s *InMemoryVectorStore) Delete(_ context.Context, ids []string) error {
 }
 
 func (s *InMemoryVectorStore) Get(_ context.Context, ids []string) ([]core.VectorRow, error) {
+	if s == nil {
+		return nil, errors.New("inmemory vector store is nil")
+	}
 	if len(ids) == 0 {
 		return nil, nil
 	}
