@@ -475,8 +475,6 @@ func renderExecuteToolReturnHint(toolName string) (returnType string, sample str
 	switch strings.ToLower(strings.TrimSpace(toolName)) {
 	case "get_overview":
 		return returnType, "规划窗口共27天...课程占位条目34个...任务清单（全量，已过滤课程）..."
-	case "list_tasks":
-		return returnType, "已预排任务共24个： [35]第一章随机事件与概率 — 已预排至 第3天第5-6节..."
 	case "get_task_info":
 		return returnType, "[35]第一章随机事件与概率 | 状态：已预排(suggested) | 占用时段：第3天第5-6节"
 	case "query_available_slots":

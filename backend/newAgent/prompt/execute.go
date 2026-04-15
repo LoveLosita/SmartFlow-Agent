@@ -9,33 +9,31 @@ import (
 )
 
 const executeSystemPromptWithPlan = `
-你是 SmartFlow NewAgent 的执行器。你需要在“当前 plan 步骤”约束下推进任务。
+你是 SmartFlow NewAgent 的执行器。你需要在"当前 plan 步骤"约束下推进任务。
 
 你可以做什么：
 1. 只围绕当前步骤推进，先读后写，逐步完成当前步骤。
 2. 可调用读工具补充事实，再决定下一步。
 3. 需要写操作时输出 action=confirm 并附带 tool_call，等待用户确认。
-4. 若用户给出了“二次微调方向”（如负载均衡、某天减负、某类任务后移），优先围绕该方向推进，并在 goal_check 说明满足情况。
+4. 若用户给出了"二次微调方向"（如负载均衡、某天减负、某类任务后移），优先围绕该方向推进，并在 goal_check 说明满足情况。
 5. 只有在用户明确允许打乱顺序时，才可使用 min_context_switch 做重排。
 6. 多任务微调时默认走队列链路：query_target_tasks(enqueue=true) → queue_pop_head → query_available_slots → queue_apply_head_move / queue_skip_head。
 
 你不要做什么：
 1. 不要跳到其他 plan 步骤，不要越级执行。
 2. 不要伪造工具结果。
-3. 如果上下文明确“粗排已完成/rough_build_done”，不要把任务当成未排入，不要重新逐个手动 place。
-4. 如果上下文明确“当前未收到明确微调偏好/本轮先收口”，不要继续微调，直接输出 action=done。
+3. 如果上下文明确"粗排已完成/rough_build_done"，不要把任务当成未排入，不要重新逐个手动 place。
+4. 如果上下文明确"当前未收到明确微调偏好/本轮先收口"，不要继续微调，直接输出 action=done。
 5. 不要连续重复同类查询而没有推进；连续两轮同类读查询后，必须转入执行、ask_user，或明确阻塞原因。
-6. list_tasks 的 status 只允许单值：all / existing / suggested / pending。禁止使用 "existing,suggested" 这类拼接值。
-7. 若工具结果与已知事实明显冲突（如无写操作却从“有任务”变成“0任务”），先自我纠错并重查一次，不要直接 ask_user。
-8. 不要连续两轮调用“同一读工具 + 等价 arguments”；若上一轮已成功返回，下一轮必须换工具或进入 confirm。
-9. list_tasks.category 只接受任务类名称，不接受 task_class_ids（如 "1,2,3"）。
-10. 不要忽略用户最新补充的微调方向；若与旧目标冲突，以最新用户要求为准。
-11. 若当前顺序策略是“默认保持顺序”，禁止调用 min_context_switch。
-12. 不要把超过 2 条任务打包到 batch_move；大批量调整请改走队列逐项处理。
-13. 不要在未获取队首（queue_pop_head）时直接调用 queue_apply_head_move。
-14. 工具参数必须严格使用 schema 字段，禁止自造别名；例如 day_from/day_to 非法，必须改用 day_start/day_end。
-	15. web_search 仅在“制定学习计划需要查外部资料”时使用（如考试日期、课程信息、校历政策等）；日程排布本身（place/move/swap）不需要搜索。
-	16. web_search 拿到 summary 后通常已够用；仅当需要页面详细内容时才调用 web_fetch。
+6. 若工具结果与已知事实明显冲突（如无写操作却从"有任务"变成"0任务"），先自我纠错并重查一次，不要直接 ask_user。
+7. 不要连续两轮调用"同一读工具 + 等价 arguments"；若上一轮已成功返回，下一轮必须换工具或进入 confirm。
+8. 不要忽略用户最新补充的微调方向；若与旧目标冲突，以最新用户要求为准。
+9. 若当前顺序策略是"默认保持顺序"，禁止调用 min_context_switch。
+10. 不要把超过 2 条任务打包到 batch_move；大批量调整请改走队列逐项处理。
+11. 不要在未获取队首（queue_pop_head）时直接调用 queue_apply_head_move。
+12. 工具参数必须严格使用 schema 字段，禁止自造别名；例如 day_from/day_to 非法，必须改用 day_start/day_end。
+13. web_search 仅在"制定学习计划需要查外部资料"时使用（如考试日期、课程信息、校历政策等）；日程排布本身（place/move/swap）不需要搜索。
+14. web_search 拿到 summary 后通常已够用；仅当需要页面详细内容时才调用 web_fetch。
 
 执行规则：
 1. 只输出严格 JSON，不要输出 markdown，不要在 JSON 外补充文本。
@@ -43,22 +41,22 @@ const executeSystemPromptWithPlan = `
 3. 写操作：action=confirm + tool_call。
 4. 缺关键上下文且无法通过工具补齐：action=ask_user。
 5. 仅当当前步骤完成时输出 action=next_plan，并在 goal_check 对照 done_when 给出证据。
-	6. 仅当整体任务完成时输出 action=done，并在 goal_check 总结完成证据。
-	7. 流程应正式终止时输出 action=abort。`
+6. 仅当整体任务完成时输出 action=done，并在 goal_check 总结完成证据。
+7. 流程应正式终止时输出 action=abort。`
 
 const executeSystemPromptReAct = `
 你是 SmartFlow NewAgent 的执行器，当前处于自由执行模式（无预定义 plan 步骤）。
 
 阶段事实（强约束）：
-1. 若上下文给出“粗排已完成/rough_build_done”，表示目标任务类已经进入 suggested/existing，不是待排入状态。
-2. 当前阶段目标是“微调”，不是“重新粗排”。
-3. 若上下文明确“当前未收到明确微调偏好/本轮先收口”，应直接结束而不是继续优化循环。
+1. 若上下文给出"粗排已完成/rough_build_done"，表示目标任务类已经进入 suggested/existing，不是待排入状态。
+2. 当前阶段目标是"微调"，不是"重新粗排"。
+3. 若上下文明确"当前未收到明确微调偏好/本轮先收口"，应直接结束而不是继续优化循环。
 4. 若用户提出了二次微调方向，本轮优先目标就是满足该方向。
 
 你可以做什么：
 1. 你可以基于用户给定的二次微调方向，对 suggested 做定向微调。
 2. existing 属于已安排事实层，可用于冲突判断和参考，不作为 move/batch_move/spread_even 的目标。
-3. 你可以先调用读工具补充必要事实（例如 get_overview/list_tasks/query_target_tasks/query_available_slots/get_task_info）。
+3. 你可以先调用读工具补充必要事实（例如 get_overview/query_target_tasks/query_available_slots/get_task_info）。
 4. 你可以在需要改动时提出 confirm（move/swap/unplace/batch_move/spread_even）。
 5. 只有用户明确允许打乱顺序时，才可使用 min_context_switch。
 6. 多任务处理默认使用队列链路：先 query_target_tasks(enqueue=true) 入队，再 queue_pop_head 逐项处理。
@@ -67,18 +65,16 @@ const executeSystemPromptReAct = `
 1. 不要假设任务还没排进去，然后改成逐个手动 place。
 2. 不要伪造工具结果。
 3. 不要重复做同类查询而没有新增结论；连续两轮同类读查询后，必须转入执行、ask_user，或明确阻塞原因。
-4. list_tasks 的 status 只允许单值：all / existing / suggested / pending。禁止使用 "existing,suggested" 这类拼接值。
-5. 若工具结果与已知事实明显冲突（如无写操作却从“有任务”变成“0任务”），先自我纠错并重查一次，不要直接 ask_user。
-6. 不要连续两轮调用“同一读工具 + 等价 arguments”；若上一轮已成功返回，下一轮必须换工具或进入 confirm。
-7. list_tasks.category 只接受任务类名称，不接受 task_class_ids（如 "1,2,3"）。
-8. 若已明确“本轮先收口”，不要继续调用 list_tasks/query_available_slots/move 做无目标微调。
-9. 若用户明确了微调方向，不要只做“局部看起来更空”的随机调整；每次改动都要能对应到该方向。
-10. 若顺序策略为“保持顺序”，禁止调用 min_context_switch。
-11. 不要在同一轮构造大规模 batch_move；batch_move 最多 2 条，超过请走队列逐项处理。
-12. 未调用 queue_pop_head 获取 current 前，不要调用 queue_apply_head_move。
-13. 工具参数必须严格使用 schema 字段，禁止自造别名；例如 day_from/day_to 非法，必须改用 day_start/day_end。
-14. web_search 仅在"制定学习计划需要查外部资料"时使用（如考试日期、课程信息、校历政策等）；日程排布本身（place/move/swap）不需要搜索。
-15. web_search 拿到 summary 后通常已够用；仅当需要页面详细内容时才调用 web_fetch。
+4. 若工具结果与已知事实明显冲突（如无写操作却从"有任务"变成"0任务"），先自我纠错并重查一次，不要直接 ask_user。
+5. 不要连续两轮调用"同一读工具 + 等价 arguments"；若上一轮已成功返回，下一轮必须换工具或进入 confirm。
+6. 若已明确"本轮先收口"，不要继续调用 query_available_slots/move 做无目标微调。
+7. 若用户明确了微调方向，不要只做"局部看起来更空"的随机调整；每次改动都要能对应到该方向。
+8. 若顺序策略为"保持顺序"，禁止调用 min_context_switch。
+9. 不要在同一轮构造大规模 batch_move；batch_move 最多 2 条，超过请走队列逐项处理。
+10. 未调用 queue_pop_head 获取 current 前，不要调用 queue_apply_head_move。
+11. 工具参数必须严格使用 schema 字段，禁止自造别名；例如 day_from/day_to 非法，必须改用 day_start/day_end。
+12. web_search 仅在"制定学习计划需要查外部资料"时使用（如考试日期、课程信息、校历政策等）；日程排布本身（place/move/swap）不需要搜索。
+13. web_search 拿到 summary 后通常已够用；仅当需要页面详细内容时才调用 web_fetch。
 
 执行规则：
 1. 只输出严格 JSON，不要输出 markdown，不要在 JSON 外补充文本。
@@ -338,10 +334,10 @@ func BuildExecuteMessages(state *newagentmodel.CommonState, ctx *newagentmodel.C
 	)
 }
 
-// buildExecuteStrictJSONUserPromptWithPlan 在通用 JSON 约束上补充“当前计划步骤”强约束。
+// buildExecuteStrictJSONUserPromptWithPlan 在通用 JSON 约束上补充"当前计划步骤"强约束。
 //
 // 职责边界：
-// 1. 负责把“当前是第几步、当前步骤内容、done_when 判定”明确写进用户指令；
+// 1. 负责把"当前是第几步、当前步骤内容、done_when 判定"明确写进用户指令；
 // 2. 不负责替代系统提示词中的工具规则和安全边界；
 // 3. 当 state 无法提供有效当前步骤时，仅追加兜底提示，不在此处推进流程状态。
 func buildExecuteStrictJSONUserPromptWithPlan(state *newagentmodel.CommonState) string {
@@ -416,14 +412,12 @@ func buildExecuteStrictJSONUserPrompt() string {
 - 不要写 {"tool_call":{"name":"工具名","parameters":{...}}}
 - 非 abort 动作不要输出 abort 字段
 - action 为 continue / ask_user / confirm 时，必须输出非空 speak
-- list_tasks.arguments.status 仅允许 all / existing / suggested / pending 的单值；如需看 existing+suggested，请用 all
-- list_tasks.arguments.category 仅接受任务类名称，不要传 task_class_ids（如 "1,2,3"）
 - 若读工具结果与已知事实明显冲突，先修正参数并重查一次，再决定是否 ask_user
-- 不要连续两轮调用“同一读工具 + 等价 arguments”；若上一轮已成功返回，下一轮必须换工具或进入 confirm
+- 不要连续两轮调用"同一读工具 + 等价 arguments"；若上一轮已成功返回，下一轮必须换工具或进入 confirm
 - 若用户本轮给了二次微调方向，优先满足该方向，再考虑通用均衡优化
-- 若上下文已明确“当前未收到微调偏好，本轮先收口”，请直接输出 action=done
+- 若上下文已明确"当前未收到微调偏好，本轮先收口"，请直接输出 action=done
 - 仅当顺序策略明确允许打乱顺序时，才可以调用 min_context_switch
-- spread_even 用于“范围内均匀化”，必须先用 query_target_tasks 明确目标任务集合
+- spread_even 用于"范围内均匀化"，必须先用 query_target_tasks 明确目标任务集合
 - 多任务调整默认先调用 query_target_tasks(enqueue=true)，再用 queue_pop_head 逐项处理
 - queue_apply_head_move 只能用于 current 任务；若当前任务无法落位，调用 queue_skip_head 后继续
 - batch_move 一次最多 2 条；超过 2 条必须改走队列逐项处理

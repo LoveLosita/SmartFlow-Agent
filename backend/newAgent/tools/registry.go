@@ -177,14 +177,6 @@ func NewDefaultRegistryWithDeps(deps DefaultRegistryDeps) *ToolRegistry {
 		},
 	)
 
-	r.Register("list_tasks",
-		"列出任务清单，可按类别和状态过滤。category 传任务类名称，status 仅支持单值 all/existing/suggested/pending。",
-		`{"name":"list_tasks","parameters":{"category":{"type":"string"},"status":{"type":"string","enum":["all","existing","suggested","pending"]}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
-			return schedule.ListTasks(state, schedule.ArgsStringPtr(args, "category"), schedule.ArgsStringPtr(args, "status"))
-		},
-	)
-
 	r.Register("get_task_info",
 		"查询单个任务详细信息，包括类别、状态、占用时段、嵌入关系。",
 		`{"name":"get_task_info","parameters":{"task_id":{"type":"int","required":true}}}`,

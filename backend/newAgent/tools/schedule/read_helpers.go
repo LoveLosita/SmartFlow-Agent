@@ -42,7 +42,7 @@ func formatTaskLabel(task ScheduleTask) string {
 
 // formatTaskLabelWithCategory 输出带类别和锁定标记的标签。
 // 如 "[1]高等数学(课程,固定)" 或 "[2]英语(课程)"。
-// 用于 get_overview 和 list_tasks 的概要输出。
+// 用于 get_overview 的概要输出。
 func formatTaskLabelWithCategory(task ScheduleTask) string {
 	label := fmt.Sprintf("[%d]%s(%s", task.StateID, task.Name, task.Category)
 	if task.Locked {

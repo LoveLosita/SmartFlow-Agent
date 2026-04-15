@@ -50,7 +50,7 @@ func IsSuggestedTask(task ScheduleTask) bool {
 //
 // 说明：
 // 1. 这里会主动排除 suggested 兼容形态，避免旧快照里的 existing+Duration>0 被误当成已确定任务；
-// 2. 这样 list_tasks / get_overview 才能稳定区分“事实层 existing”和“建议层 suggested”。
+// 2. 这样 get_overview 等工具才能稳定区分”事实层 existing”和”建议层 suggested”。
 func IsExistingTask(task ScheduleTask) bool {
 	return task.Status == TaskStatusExisting && !IsSuggestedTask(task)
 }
