@@ -90,6 +90,12 @@ func normalizeConversationID(chatID string) string {
 	return trimmed
 }
 
+// thinkingModeToBool 将前端传入的 thinking 模式转换为旧链路所需的 bool 值。
+// 仅 "true" 返回 true，其余（"false"/"auto"/""）均返回 false。
+func thinkingModeToBool(mode string) bool {
+	return strings.TrimSpace(strings.ToLower(mode)) == "true"
+}
+
 // pickChatModel 根据请求选择模型。
 // 当前约定：
 // - strategist：策略模型；
@@ -569,7 +575,7 @@ func (s *AgentService) runNormalChatFlow(
 	s.ensureConversationTitleAsync(userID, chatID)
 }
 
-func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThinking bool, modelName string, userID int, chatID string, extra map[string]any) (<-chan string, <-chan error) {
+func (s *AgentService) AgentChat(ctx context.Context, userMessage string, thinkingMode string, modelName string, userID int, chatID string, extra map[string]any) (<-chan string, <-chan error) {
 	requestStart := time.Now()
 	traceID := uuid.NewString()
 
@@ -578,7 +584,7 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 
 	go func() {
 		defer close(outChan)
-		s.runNewAgentGraph(ctx, userMessage, ifThinking, modelName, userID, chatID, extra, traceID, requestStart, outChan, errChan)
+		s.runNewAgentGraph(ctx, userMessage, thinkingMode, modelName, userID, chatID, extra, traceID, requestStart, outChan, errChan)
 	}()
 
 	return outChan, errChan
@@ -586,7 +592,8 @@ func (s *AgentService) AgentChat(ctx context.Context, userMessage string, ifThin
 
 // agentChatOld 是旧路由逻辑的备份，暂时保留供回滚使用。
 // TODO: 新 graph 稳定后删除。
-func (s *AgentService) agentChatOld(ctx context.Context, userMessage string, ifThinking bool, modelName string, userID int, chatID string, extra map[string]any) (<-chan string, <-chan error) {
+func (s *AgentService) agentChatOld(ctx context.Context, userMessage string, thinkingMode string, modelName string, userID int, chatID string, extra map[string]any) (<-chan string, <-chan error) {
+	ifThinking := thinkingModeToBool(thinkingMode)
 	requestStart := time.Now()
 	traceID := uuid.NewString()
 

@@ -58,7 +58,7 @@ type UserSendMessageRequest struct {
 	ConversationID string         `json:"conversation_id,omitempty"`
 	Message        string         `json:"message" binding:"required"`
 	Model          string         `json:"model,omitempty"`
-	Thinking       bool           `json:"thinking,omitempty"`
+	Thinking       string         `json:"thinking,omitempty"`
 	Extra          map[string]any `json:"extra,omitempty"`
 }
 

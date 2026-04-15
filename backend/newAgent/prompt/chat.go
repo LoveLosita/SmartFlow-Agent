@@ -3,62 +3,71 @@ package newagentprompt
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	"github.com/cloudwego/eino/schema"
 )
 
 const chatRoutingSystemPrompt = `
-你是 SmartFlow 的智能路由器。你的职责是判断用户意图的复杂度，并决定后续处理路径。
-
-你会看到：
-- 历史对话
-- 用户本轮输入
-- 当前可用工具摘要（如有）
-- 本次排课涉及的任务类约束（如有）
-
-请遵守以下规则：
-1. 只输出严格 JSON，不要输出 markdown，不要输出额外解释。
-2. 根据用户意图判断复杂度并选择路由。
-3. speak 字段始终填写：给用户看的话。
+你是 SmartFlow 的智能路由器。你的回复必须以路由控制码开头，控制码后紧跟用户可见的内容。
 
 路由规则：
-- direct_reply：纯闲聊、简单问答、打招呼、感谢等。speak 直接写你的完整回复。
-- execute：需要用工具处理的请求（查询日程、移动课程、排课等），但不需要先制定计划。speak 写简短确认。
-- deep_answer：复杂问题但不需要工具（如分析建议、深度解释等），需要深度思考后直接回答。speak 写过渡语（如"让我想想"）。
-- plan：用户明确要求先制定计划，或涉及多阶段复杂规划。speak 写确认语。
+- direct_reply：纯闲聊、简单问答、打招呼、感谢等。控制码后直接输出完整回复。
+- execute：需要用工具处理的请求（查询日程、移动课程、排课等），但不需要先制定计划。控制码后输出简短确认。
+- deep_answer：复杂问题但不需要工具（如分析建议、深度解释等），需要深度思考后回答。控制码后输出过渡语（如"让我想想"）。
+- plan：用户明确要求先制定计划，或涉及多阶段复杂规划。控制码后输出简短确认。
 
-粗排判断：当用户意图包含"批量安排/排课/把任务类排进日程"，且上下文中有任务类 ID 时，设置 needs_rough_build=true。
+粗排判断：当用户意图包含"批量安排/排课/把任务类排进日程"，且上下文中有任务类 ID 时，设置 rough_build=true。
 二次粗排约束（强约束）：
-- 若上下文已出现 rough_build_done，且用户未明确要求“重新粗排/从头重排”，必须设置 needs_rough_build=false。
-- “移动/微调/优化/均匀化/调顺序”等请求默认视为 refine，不得再次触发 rough build。
+- 若上下文已出现 rough_build_done，且用户未明确要求"重新粗排/从头重排"，必须设置 rough_build=false。
+- "移动/微调/优化/均匀化/调顺序"等请求默认视为 refine，不得再次触发 rough build。
 粗排后微调判断：
-- 仅当 needs_rough_build=true 时才判断 needs_refine_after_rough_build。
-- 若用户明确提出优化目标/偏好（如"尽量均衡""周三别太满""某门课往后挪"），设 needs_refine_after_rough_build=true。
-- 若用户只要求"先排进去/给初稿"，未提出微调目标，设 needs_refine_after_rough_build=false。
+- 仅当 rough_build=true 时才判断 refine。
+- 若用户明确提出优化目标/偏好（如"尽量均衡""周三别太满""某门课往后挪"），设 refine=true。
+- 若用户只要求"先排进去/给初稿"，未提出微调目标，设 refine=false。
 顺序授权判断：
-- allow_reorder 仅在用户明确说明“允许打乱顺序/顺序不重要”时才为 true。
-- 用户明确要求“保持顺序/不要打乱”时必须为 false。
+- reorder 仅在用户明确说明"允许打乱顺序/顺序不重要"时才为 true。
+- 用户明确要求"保持顺序/不要打乱"时必须为 false。
 - 若用户未明确提及顺序，一律为 false。
+深度思考判断：
+- thinking 仅在 route=execute 时有效。
+- 当用户请求涉及复杂推理、多条件约束、需要深度分析后才能执行的操作时，设 thinking=true。
+- 简单查询、单步操作设 thinking=false。
 
-输出协议（严格 JSON）：
-{"route":"direct_reply / execute / deep_answer / plan","speak":"给用户看的话","needs_rough_build":false,"needs_refine_after_rough_build":false,"allow_reorder":false,"reason":"简短判断依据"}
+输出格式（严格两段式）：
+第一段（控制码，用户不可见，后端会截取）：
+<SMARTFLOW_ROUTE nonce="给定nonce" route="direct_reply|execute|deep_answer|plan" rough_build="false" refine="false" reorder="false" thinking="false"/>
+第二段（紧接控制码之后，用户可见）：
+根据路由输出对应内容。
+
+属性说明（仅 route=execute 时有效，其余路由省略这些属性）：
+- rough_build：是否需要粗排
+- refine：粗排后是否需要微调
+- reorder：是否允许打乱顺序
+- thinking：后续执行阶段是否需要深度思考
 
 合法示例：
 
-{"route":"direct_reply","speak":"你好！我是 SmartFlow 助手，有什么可以帮你的？","reason":"用户打招呼"}
+<SMARTFLOW_ROUTE nonce="给定nonce" route="direct_reply"/>
+你好！我是 SmartFlow 助手，有什么可以帮你的？
 
-{"route":"execute","speak":"好的，我来帮你看看今天的安排。","reason":"需要调用工具查询日程","needs_rough_build":false,"needs_refine_after_rough_build":false,"allow_reorder":false}
+<SMARTFLOW_ROUTE nonce="给定nonce" route="execute"/>
+好的，我来帮你看看今天的安排。
 
-{"route":"execute","speak":"好的，我来帮你排课。","reason":"批量排课需求，有任务类 ID，未给微调偏好","needs_rough_build":true,"needs_refine_after_rough_build":false,"allow_reorder":false}
+<SMARTFLOW_ROUTE nonce="给定nonce" route="execute" rough_build="true" refine="false" reorder="false" thinking="false"/>
+好的，我来帮你排课。
 
-{"route":"execute","speak":"好的，我来帮你排课并按你的偏好做微调。","reason":"批量排课需求，有任务类 ID，且给出明确微调偏好","needs_rough_build":true,"needs_refine_after_rough_build":true,"allow_reorder":false}
+<SMARTFLOW_ROUTE nonce="给定nonce" route="execute" rough_build="true" refine="true" reorder="false" thinking="true"/>
+好的，我来帮你排课并按你的偏好做微调。
 
-{"route":"execute","speak":"好的，我按你的要求重排。","reason":"用户明确允许打乱顺序","needs_rough_build":false,"needs_refine_after_rough_build":false,"allow_reorder":true}
+<SMARTFLOW_ROUTE nonce="给定nonce" route="deep_answer"/>
+这是个好问题，让我仔细想想。
 
-{"route":"deep_answer","speak":"这是个好问题，让我仔细想想。","reason":"需要深度分析但不需要工具"}
+<SMARTFLOW_ROUTE nonce="给定nonce" route="plan"/>
+明白，我来帮你制定一个完整的学习计划。
 
-{"route":"plan","speak":"明白，我来帮你制定一个完整的学习计划。","reason":"用户明确要求制定计划"}
+禁止输出任何 JSON、markdown 代码块或额外解释。nonce 必须精确使用给定值。
 `
 
 // BuildChatRoutingSystemPrompt 返回路由阶段的系统提示词。
@@ -67,22 +76,21 @@ func BuildChatRoutingSystemPrompt() string {
 }
 
 // BuildChatRoutingMessages 组装路由阶段的 messages。
-func BuildChatRoutingMessages(ctx *newagentmodel.ConversationContext, userInput string, state *newagentmodel.CommonState) []*schema.Message {
+func BuildChatRoutingMessages(ctx *newagentmodel.ConversationContext, userInput string, state *newagentmodel.CommonState, nonce string) []*schema.Message {
 	return buildStageMessages(
 		BuildChatRoutingSystemPrompt(),
 		ctx,
-		BuildChatRoutingUserPrompt(ctx, userInput, state),
+		BuildChatRoutingUserPrompt(ctx, userInput, state, nonce),
 	)
 }
 
 // BuildChatRoutingUserPrompt 构造路由阶段的用户提示词。
-func BuildChatRoutingUserPrompt(ctx *newagentmodel.ConversationContext, userInput string, state *newagentmodel.CommonState) string {
+func BuildChatRoutingUserPrompt(ctx *newagentmodel.ConversationContext, userInput string, state *newagentmodel.CommonState, nonce string) string {
 	var sb strings.Builder
 
-	sb.WriteString("请判断用户本轮意图的复杂度，并选择最合适的路由。\n")
-	sb.WriteString("若 route=execute 且 needs_rough_build=true，请同时判断 needs_refine_after_rough_build：")
-	sb.WriteString("只有用户明确提出微调目标时才为 true。\n")
-	sb.WriteString("请同时输出 allow_reorder：只有用户明确授权打乱顺序时才为 true，默认 false。\n")
+	sb.WriteString(fmt.Sprintf("nonce=%s\n", nonce))
+	sb.WriteString(fmt.Sprintf("当前时间=%s\n", time.Now().In(time.Local).Format("2006-01-02 15:04")))
+	sb.WriteString("\n请判断用户本轮意图的复杂度，选择最合适的路由，并输出控制码和对应内容。\n")
 
 	// 注入任务类上下文（供粗排判断参考）。
 	if state != nil && len(state.TaskClassIDs) > 0 {

@@ -3,15 +3,18 @@ package newagentnode
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"strings"
 	"time"
 
 	"github.com/cloudwego/eino/schema"
+	"github.com/google/uuid"
 
 	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
+	newagentrouter "github.com/LoveLosita/smartflow/backend/newAgent/router"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
 )
 
@@ -21,7 +24,7 @@ const (
 	chatSpeakBlockID  = "chat.speak"
 	// chatHistoryKindKey 用于在 history 中打运行态标记，供 prompt 层做上下文分层。
 	chatHistoryKindKey = "newagent_history_kind"
-	// chatHistoryKindExecuteLoopClosed 表示“上一轮 execute loop 已正常收口”。
+	// chatHistoryKindExecuteLoopClosed 表示"上一轮 execute loop 已正常收口"。
 	// prompt 侧会据此把旧 loop 归档到 msg1，而不是继续占用 msg2 窗口。
 	chatHistoryKindExecuteLoopClosed = "execute_loop_closed"
 )
@@ -75,9 +78,9 @@ func RunChatNode(ctx context.Context, input ChatNodeInput) error {
 	if !runtimeState.HasPendingInteraction() && flowState.Phase == newagentmodel.PhaseDone {
 		terminalBefore := flowState.TerminalStatus()
 		roundBefore := flowState.RoundUsed
-		// 1. 只有“正常完成(completed)”才打 loop 收口标记：
-		// 1.1 这样下一轮进入 execute 时，msg2 会只保留“当前活跃循环”窗口；
-		// 1.2 异常收口（exhausted/aborted）不打标记，允许后续“继续”时沿用上一轮 loop 轨迹。
+		// 1. 只有"正常完成(completed)"才打 loop 收口标记：
+		// 1.1 这样下一轮进入 execute 时，msg2 会只保留"当前活跃循环"窗口；
+		// 1.2 异常收口（exhausted/aborted）不打标记，允许后续"继续"时沿用上一轮 loop 轨迹。
 		if terminalBefore == newagentmodel.FlowTerminalStatusCompleted {
 			appendExecuteLoopClosedMarker(conversationContext)
 		}
@@ -89,86 +92,28 @@ func RunChatNode(ctx context.Context, input ChatNodeInput) error {
 			terminalBefore,
 		)
 	}
-	messages := newagentprompt.BuildChatRoutingMessages(conversationContext, input.UserInput, flowState)
+	nonce := uuid.NewString()
+	messages := newagentprompt.BuildChatRoutingMessages(conversationContext, input.UserInput, flowState, nonce)
 
-	decision, rawResult, err := infrallm.GenerateJSON[newagentmodel.ChatRoutingDecision](
-		ctx,
-		input.Client,
-		messages,
-		infrallm.GenerateOptions{
-			Temperature: 0.1,
-			MaxTokens:   500,
-			Thinking:    infrallm.ThinkingModeDisabled,
-			Metadata: map[string]any{
-				"stage": chatStageName,
-				"phase": "routing",
-			},
+	reader, err := input.Client.Stream(ctx, messages, infrallm.GenerateOptions{
+		Temperature: 0.7,
+		Thinking:    infrallm.ThinkingModeDisabled,
+		Metadata: map[string]any{
+			"stage": chatStageName,
+			"phase": "routing",
 		},
-	)
-
-	rawText := ""
-	if rawResult != nil {
-		rawText = strings.TrimSpace(rawResult.Text)
-	}
-
+	})
 	if err != nil {
-		// 路由失败 → 保守：走 plan。
-		log.Printf("[WARN] chat routing LLM failed chat=%s raw=%s err=%v",
-			flowState.ConversationID, rawText, err)
+		log.Printf("[WARN] chat routing stream failed chat=%s err=%v", flowState.ConversationID, err)
 		flowState.Phase = newagentmodel.PhasePlanning
 		return nil
 	}
 
-	if validateErr := decision.Validate(); validateErr != nil {
-		log.Printf("[WARN] chat routing decision invalid chat=%s raw=%s err=%v",
-			flowState.ConversationID, rawText, validateErr)
-		flowState.Phase = newagentmodel.PhasePlanning
-		return nil
-	}
-
-	// 1. 二次粗排硬闸门：若上下文已存在 rough_build_done 且用户未明确要求“重新粗排”，
-	//    则强制关闭 needs_rough_build，避免“微调请求被误判成再次粗排”。
-	// 2. 该闸门只收紧粗排开关，不改路由 route，确保 execute 微调链路仍可继续。
-	// 3. 一旦用户明确表达“从头重排/重新粗排”，仍允许 needs_rough_build=true 生效。
-	if shouldDisableRoughBuildForRefine(conversationContext, input.UserInput, decision) {
-		decision.NeedsRoughBuild = false
-		decision.NeedsRefineAfterRoughBuild = false
-	}
-
-	log.Printf(
-		"[DEBUG] chat routing chat=%s route=%s needs_rough_build=%v needs_refine_after_rough_build=%v allow_reorder=%v has_rough_build_done=%v task_class_count=%d reason=%s",
-		flowState.ConversationID,
-		decision.Route,
-		decision.NeedsRoughBuild,
-		decision.NeedsRefineAfterRoughBuild,
-		decision.AllowReorder,
-		hasRoughBuildDoneMarker(conversationContext),
-		len(flowState.TaskClassIDs),
-		decision.Reason,
-	)
-	flowState.AllowReorder = resolveAllowReorder(input.UserInput, decision.AllowReorder)
-
-	// 3. 按路由决策推进。
-	switch decision.Route {
-	case newagentmodel.ChatRouteDirectReply:
-		return handleDirectReply(ctx, decision, conversationContext, emitter, flowState)
-
-	case newagentmodel.ChatRouteExecute:
-		return handleRouteExecute(decision, emitter, flowState)
-
-	case newagentmodel.ChatRouteDeepAnswer:
-		return handleDeepAnswer(ctx, input, decision, conversationContext, emitter, flowState)
-
-	case newagentmodel.ChatRoutePlan:
-		return handleRoutePlan(decision, emitter, flowState)
-
-	default:
-		flowState.Phase = newagentmodel.PhasePlanning
-		return nil
-	}
+	parser := newagentrouter.NewStreamRouteParser(nonce)
+	return streamAndDispatch(ctx, reader, parser, input, emitter, flowState, conversationContext)
 }
 
-// appendExecuteLoopClosedMarker 在 history 中写入“execute loop 已正常收口”标记。
+// appendExecuteLoopClosedMarker 在 history 中写入"execute loop 已正常收口"标记。
 //
 // 职责边界：
 // 1. 只负责写一个轻量 marker，供 prompt 分层；
@@ -207,51 +152,254 @@ func isExecuteLoopClosedMarker(msg *schema.Message) bool {
 	return strings.TrimSpace(kind) == chatHistoryKindExecuteLoopClosed
 }
 
-// handleDirectReply 处理简单任务：直接输出回复。
-func handleDirectReply(
+// streamAndDispatch 是流式路由分发的核心循环。
+//
+// 步骤说明：
+// 1. 从 StreamReader 逐 chunk 读取，喂给 StreamRouteParser 增量解析控制码；
+// 2. 控制码解析完成后，根据 route 进入对应的流式处理分支；
+// 3. 控制码解析超时或流异常结束 → fallback 到 plan。
+func streamAndDispatch(
 	ctx context.Context,
-	decision *newagentmodel.ChatRoutingDecision,
-	conversationContext *newagentmodel.ConversationContext,
+	reader infrallm.StreamReader,
+	parser *newagentrouter.StreamRouteParser,
+	input ChatNodeInput,
 	emitter *newagentstream.ChunkEmitter,
 	flowState *newagentmodel.CommonState,
+	conversationContext *newagentmodel.ConversationContext,
 ) error {
-	if strings.TrimSpace(decision.Speak) != "" {
-		if err := emitter.EmitPseudoAssistantText(
-			ctx, chatSpeakBlockID, chatStageName,
-			decision.Speak,
-			newagentstream.DefaultPseudoStreamOptions(),
-		); err != nil {
-			return fmt.Errorf("闲聊回复推送失败: %w", err)
+	for {
+		chunk, err := reader.Recv()
+		if err == io.EOF {
+			if !parser.RouteReady() {
+				log.Printf("[WARN] chat stream ended before route resolved chat=%s", flowState.ConversationID)
+				flowState.Phase = newagentmodel.PhasePlanning
+				return nil
+			}
+			break
 		}
-		conversationContext.AppendHistory(schema.AssistantMessage(decision.Speak, nil))
+		if err != nil {
+			log.Printf("[WARN] chat stream recv error chat=%s err=%v", flowState.ConversationID, err)
+			flowState.Phase = newagentmodel.PhasePlanning
+			return nil
+		}
+
+		content := ""
+		if chunk != nil {
+			content = chunk.Content
+		}
+
+		visible, routeReady, _ := parser.Feed(content)
+		if !routeReady {
+			continue
+		}
+
+		// 控制码解析完成，进入路由分发。
+		decision := parser.Decision()
+
+		// 二次粗排硬闸门：若上下文已存在 rough_build_done 且用户未明确要求"重新粗排"，
+		// 则强制关闭 needs_rough_build，避免"微调请求被误判成再次粗排"。
+		if shouldDisableRoughBuildForRefine(conversationContext, input.UserInput, decision) {
+			decision.NeedsRoughBuild = false
+			decision.NeedsRefineAfterRoughBuild = false
+		}
+
+		log.Printf(
+			"[DEBUG] chat routing chat=%s route=%s needs_rough_build=%v needs_refine_after_rough_build=%v allow_reorder=%v thinking=%v has_rough_build_done=%v task_class_count=%d raw=%s",
+			flowState.ConversationID,
+			decision.Route,
+			decision.NeedsRoughBuild,
+			decision.NeedsRefineAfterRoughBuild,
+			decision.AllowReorder,
+			decision.Thinking,
+			hasRoughBuildDoneMarker(conversationContext),
+			len(flowState.TaskClassIDs),
+			decision.Raw,
+		)
+
+		flowState.AllowReorder = resolveAllowReorder(input.UserInput, decision.AllowReorder)
+		effectiveThinking := resolveEffectiveThinking(flowState.ThinkingMode, decision.Thinking)
+
+		switch decision.Route {
+		case newagentmodel.ChatRouteDirectReply:
+			return handleDirectReplyStream(ctx, reader, input, emitter, conversationContext, flowState, effectiveThinking, visible)
+
+		case newagentmodel.ChatRouteExecute:
+			return handleRouteExecuteStream(reader, emitter, flowState, decision, input.UserInput, effectiveThinking, visible)
+
+		case newagentmodel.ChatRouteDeepAnswer:
+			return handleDeepAnswerStream(ctx, reader, input, emitter, conversationContext, flowState, effectiveThinking)
+
+		case newagentmodel.ChatRoutePlan:
+			return handleRoutePlanStream(reader, emitter, flowState, effectiveThinking, visible)
+
+		default:
+			flowState.Phase = newagentmodel.PhasePlanning
+			return nil
+		}
+	}
+	return nil
+}
+
+// resolveEffectiveThinking 根据前端 ThinkingMode 和路由决策合并出最终 thinking 状态。
+//
+// 规则：
+// - "true" 强制开启；
+// - "false" 强制关闭；
+// - "auto"/"" 交给路由决策的 decisionThinking。
+func resolveEffectiveThinking(mode string, decisionThinking bool) bool {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "true":
+		return true
+	case "false":
+		return false
+	default:
+		return decisionThinking
+	}
+}
+
+// handleDirectReplyStream 处理闲聊回复。
+//
+// 两种模式：
+// 1. thinking=false：同一流续传，逐 chunk 推送；
+// 2. thinking=true：关闭路由流，发起第二次 thinking 流式调用。
+func handleDirectReplyStream(
+	ctx context.Context,
+	reader infrallm.StreamReader,
+	input ChatNodeInput,
+	emitter *newagentstream.ChunkEmitter,
+	conversationContext *newagentmodel.ConversationContext,
+	flowState *newagentmodel.CommonState,
+	effectiveThinking bool,
+	firstVisible string,
+) error {
+	if effectiveThinking {
+		return handleThinkingReplyStream(ctx, reader, input, emitter, conversationContext, flowState)
+	}
+	return handleDirectReplyContinueStream(ctx, reader, emitter, conversationContext, flowState, firstVisible)
+}
+
+// handleThinkingReplyStream 处理需要思考的回复：关闭路由流 → 第二次 thinking 流式调用。
+func handleThinkingReplyStream(
+	ctx context.Context,
+	reader infrallm.StreamReader,
+	input ChatNodeInput,
+	emitter *newagentstream.ChunkEmitter,
+	conversationContext *newagentmodel.ConversationContext,
+	flowState *newagentmodel.CommonState,
+) error {
+	_ = reader.Close()
+
+	deepMessages := newagentprompt.BuildDeepAnswerMessages(conversationContext, input.UserInput)
+	deepReader, err := input.Client.Stream(ctx, deepMessages, infrallm.GenerateOptions{
+		Temperature: 0.5,
+		MaxTokens:   2000,
+		Thinking:    infrallm.ThinkingModeEnabled,
+		Metadata: map[string]any{
+			"stage": chatStageName,
+			"phase": "direct_reply_thinking",
+		},
+	})
+	if err != nil {
+		log.Printf("[WARN] thinking reply stream failed chat=%s err=%v", flowState.ConversationID, err)
+		flowState.Phase = newagentmodel.PhaseChatting
+		return nil
+	}
+
+	deepText, err := emitter.EmitStreamAssistantText(ctx, deepReader, chatSpeakBlockID, chatStageName)
+	_ = deepReader.Close()
+	if err != nil {
+		log.Printf("[WARN] thinking reply emit error chat=%s err=%v", flowState.ConversationID, err)
+		flowState.Phase = newagentmodel.PhaseChatting
+		return nil
+	}
+
+	deepText = strings.TrimSpace(deepText)
+	if deepText != "" {
+		conversationContext.AppendHistory(schema.AssistantMessage(deepText, nil))
 	}
 
 	flowState.Phase = newagentmodel.PhaseChatting
 	return nil
 }
 
-// handleRouteExecute 处理中等任务：推送简短确认，设 PhaseExecuting。
+// handleDirectReplyContinueStream 处理无思考的闲聊：同一流续传。
+func handleDirectReplyContinueStream(
+	ctx context.Context,
+	reader infrallm.StreamReader,
+	emitter *newagentstream.ChunkEmitter,
+	conversationContext *newagentmodel.ConversationContext,
+	flowState *newagentmodel.CommonState,
+	firstVisible string,
+) error {
+	var fullText strings.Builder
+	fullText.WriteString(firstVisible)
+
+	// 推送控制码之后的第一段内容。
+	if strings.TrimSpace(firstVisible) != "" {
+		if err := emitter.EmitAssistantText(chatSpeakBlockID, chatStageName, firstVisible, true); err != nil {
+			return fmt.Errorf("闲聊回复推送失败: %w", err)
+		}
+	}
+
+	firstChunk := firstVisible == ""
+	// 继续读同一个流，逐 chunk 推送。
+	for {
+		chunk, err := reader.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Printf("[WARN] direct_reply stream error chat=%s err=%v", flowState.ConversationID, err)
+			break
+		}
+		if chunk == nil || chunk.Content == "" {
+			continue
+		}
+		if err := emitter.EmitAssistantText(chatSpeakBlockID, chatStageName, chunk.Content, firstChunk); err != nil {
+			return fmt.Errorf("闲聊回复推送失败: %w", err)
+		}
+		fullText.WriteString(chunk.Content)
+		firstChunk = false
+	}
+
+	text := fullText.String()
+	if strings.TrimSpace(text) != "" {
+		conversationContext.AppendHistory(schema.AssistantMessage(text, nil))
+	}
+
+	flowState.Phase = newagentmodel.PhaseChatting
+	return nil
+}
+
+// handleRouteExecuteStream 处理工具调用路由：推送状态确认 → 设 PhaseExecuting。
 //
-// 不把 speak 写入 history，因为真正的回复由 Execute 节点产出。
-func handleRouteExecute(
-	decision *newagentmodel.ChatRoutingDecision,
+// 说明：
+// 1. 关闭路由流（后续内容不需要）；
+// 2. 推送轻量状态通知；
+// 3. 设置流程状态，进入 Execute 或 RoughBuild。
+func handleRouteExecuteStream(
+	reader infrallm.StreamReader,
 	emitter *newagentstream.ChunkEmitter,
 	flowState *newagentmodel.CommonState,
+	decision *newagentmodel.ChatRoutingDecision,
+	userInput string,
+	effectiveThinking bool,
+	speak string,
 ) error {
-	speak := strings.TrimSpace(decision.Speak)
-	if speak == "" {
+	// 关闭路由流。
+	_ = reader.Close()
+
+	if strings.TrimSpace(speak) == "" {
 		speak = "好的，我来处理。"
 	}
 
-	// 推送轻量状态通知，让前端知道请求已接收。
+	// 推送轻量状态通知。
 	_ = emitter.EmitStatus(chatStatusBlockID, chatStageName, "accepted", speak, false)
 
-	// 清空旧 PlanSteps 并设 PhaseExecuting，避免上一次任务残留的步骤被 HasPlan() 误判。
+	// 清空旧 PlanSteps 并设 PhaseExecuting。
 	flowState.StartDirectExecute()
 
-	// 1. 默认不走粗排与粗排后微调，避免沿用上轮遗留标记。
-	// 2. 只有 route 判定为“需要粗排”且确实有 task_class_ids 时，才打开粗排开关。
-	// 3. 粗排后是否立即进入微调，完全由路由决策显式标记控制。
+	// 粗排开关逻辑。
 	flowState.NeedsRoughBuild = false
 	flowState.NeedsRefineAfterRoughBuild = false
 	if decision.NeedsRoughBuild && len(flowState.TaskClassIDs) > 0 {
@@ -259,15 +407,17 @@ func handleRouteExecute(
 		flowState.NeedsRefineAfterRoughBuild = decision.NeedsRefineAfterRoughBuild
 	}
 
+	flowState.ExecuteThinking = effectiveThinking
+
 	return nil
 }
 
-// resolveAllowReorder 统一计算“本轮是否允许打乱顺序”。
+// resolveAllowReorder 统一计算"本轮是否允许打乱顺序"。
 //
 // 步骤化说明：
 // 1. 后端先做显式语义判定：用户明确允许/明确禁止时，直接以后端判定为准；
 // 2. 若后端未识别到显式语义，再回退到路由模型的 allow_reorder 字段；
-// 3. 默认返回 false，确保“保持顺序”是系统默认行为。
+// 3. 默认返回 false，确保"保持顺序"是系统默认行为。
 func resolveAllowReorder(userInput string, modelAllowReorder bool) bool {
 	switch detectReorderPreference(userInput) {
 	case reorderAllow:
@@ -279,11 +429,11 @@ func resolveAllowReorder(userInput string, modelAllowReorder bool) bool {
 	}
 }
 
-// detectReorderPreference 识别用户是否“明确授权打乱顺序”。
+// detectReorderPreference 识别用户是否"明确授权打乱顺序"。
 //
 // 职责边界：
 // 1. 只负责关键词级别的显式意图识别，不做复杂语义推理；
-// 2. 若同时命中“允许”与“禁止”，优先按“禁止”处理，避免误放开顺序约束；
+// 2. 若同时命中"允许"与"禁止"，优先按"禁止"处理，避免误放开顺序约束；
 // 3. 未命中显式表达时返回 unknown，交给上层兜底策略。
 func detectReorderPreference(userInput string) reorderPreference {
 	text := strings.ToLower(strings.TrimSpace(userInput))
@@ -332,12 +482,12 @@ func containsAnyPhrase(text string, phrases []string) bool {
 	return false
 }
 
-// shouldDisableRoughBuildForRefine 判断是否应在 chat 路由阶段关闭“再次粗排”。
+// shouldDisableRoughBuildForRefine 判断是否应在 chat 路由阶段关闭"再次粗排"。
 //
 // 判定规则：
 // 1. 当前决策未请求粗排时，直接不干预；
 // 2. 上下文不存在 rough_build_done 时，不干预（首次粗排仍可走）；
-// 3. 若用户未明确要求“重新粗排/从头重排”，则关闭粗排开关，避免误触发。
+// 3. 若用户未明确要求"重新粗排/从头重排"，则关闭粗排开关，避免误触发。
 func shouldDisableRoughBuildForRefine(
 	conversationContext *newagentmodel.ConversationContext,
 	userInput string,
@@ -364,7 +514,7 @@ func hasRoughBuildDoneMarker(conversationContext *newagentmodel.ConversationCont
 	return false
 }
 
-// isExplicitRoughBuildRequest 识别用户是否明确要求“重新粗排/从头重排”。
+// isExplicitRoughBuildRequest 识别用户是否明确要求"重新粗排/从头重排"。
 func isExplicitRoughBuildRequest(userInput string) bool {
 	text := strings.ToLower(strings.TrimSpace(userInput))
 	if text == "" {
@@ -388,80 +538,81 @@ func isExplicitRoughBuildRequest(userInput string) bool {
 	return containsAnyPhrase(text, keywords)
 }
 
-// handleDeepAnswer 处理复杂问答：推送过渡语 → 原地开 thinking 再调一次 LLM → 输出深度回答。
-func handleDeepAnswer(
+// handleDeepAnswerStream 处理复杂问答：关闭路由流 → 第二次流式调用。
+//
+// 步骤说明：
+// 1. 关闭第一个路由流；
+// 2. 发起第二次流式 LLM 调用（thinking 由 effectiveThinking 控制）；
+// 3. 真流式推送 reasoning + 正文；
+// 4. 完整回复写入 history。
+func handleDeepAnswerStream(
 	ctx context.Context,
+	reader infrallm.StreamReader,
 	input ChatNodeInput,
-	decision *newagentmodel.ChatRoutingDecision,
-	conversationContext *newagentmodel.ConversationContext,
 	emitter *newagentstream.ChunkEmitter,
+	conversationContext *newagentmodel.ConversationContext,
 	flowState *newagentmodel.CommonState,
+	effectiveThinking bool,
 ) error {
-	// 1. 推送过渡语。
-	briefSpeak := strings.TrimSpace(decision.Speak)
-	if briefSpeak == "" {
-		briefSpeak = "让我想想。"
-	}
-	if err := emitter.EmitPseudoAssistantText(
-		ctx, chatSpeakBlockID, chatStageName,
-		briefSpeak,
-		newagentstream.DefaultPseudoStreamOptions(),
-	); err != nil {
-		return fmt.Errorf("过渡文案推送失败: %w", err)
-	}
+	// 1. 关闭第一个路由流。
+	_ = reader.Close()
 
-	// 2. 第二次 LLM 调用：开 thinking，深度回答。
+	// 2. 第二次流式调用。
+	thinkingOpt := infrallm.ThinkingModeDisabled
+	if effectiveThinking {
+		thinkingOpt = infrallm.ThinkingModeEnabled
+	}
 	deepMessages := newagentprompt.BuildDeepAnswerMessages(conversationContext, input.UserInput)
-	deepResult, err := input.Client.GenerateText(ctx, deepMessages, infrallm.GenerateOptions{
+	deepReader, err := input.Client.Stream(ctx, deepMessages, infrallm.GenerateOptions{
 		Temperature: 0.5,
 		MaxTokens:   2000,
-		Thinking:    infrallm.ThinkingModeEnabled,
+		Thinking:    thinkingOpt,
 		Metadata: map[string]any{
 			"stage": chatStageName,
 			"phase": "deep_answer",
 		},
 	})
-
-	if err != nil || deepResult == nil {
-		// 深度回答失败 → 降级，只保留过渡语。
-		log.Printf("[WARN] deep answer LLM failed chat=%s err=%v", flowState.ConversationID, err)
-		conversationContext.AppendHistory(schema.AssistantMessage(briefSpeak, nil))
+	if err != nil {
+		// 深度回答失败 → 降级返回。
+		log.Printf("[WARN] deep answer stream failed chat=%s err=%v", flowState.ConversationID, err)
 		flowState.Phase = newagentmodel.PhaseChatting
 		return nil
 	}
 
-	// 3. 输出深度回答。
-	deepText := strings.TrimSpace(deepResult.Text)
+	// 3. 真流式推送 reasoning + 正文。
+	deepText, err := emitter.EmitStreamAssistantText(ctx, deepReader, chatSpeakBlockID, chatStageName)
+	_ = deepReader.Close()
+	if err != nil {
+		log.Printf("[WARN] deep answer stream emit error chat=%s err=%v", flowState.ConversationID, err)
+		flowState.Phase = newagentmodel.PhaseChatting
+		return nil
+	}
+
+	deepText = strings.TrimSpace(deepText)
 	if deepText == "" {
-		conversationContext.AppendHistory(schema.AssistantMessage(briefSpeak, nil))
 		flowState.Phase = newagentmodel.PhaseChatting
 		return nil
 	}
 
-	if err := emitter.EmitPseudoAssistantText(
-		ctx, chatSpeakBlockID, chatStageName,
-		deepText,
-		newagentstream.DefaultPseudoStreamOptions(),
-	); err != nil {
-		return fmt.Errorf("深度回答推送失败: %w", err)
-	}
-
-	// 将完整回复（过渡语 + 深度回答）写入 history。
-	fullReply := briefSpeak + "\n\n" + deepText
-	conversationContext.AppendHistory(schema.AssistantMessage(fullReply, nil))
+	// 4. 完整回复写入 history。
+	conversationContext.AppendHistory(schema.AssistantMessage(deepText, nil))
 
 	flowState.Phase = newagentmodel.PhaseChatting
 	return nil
 }
 
-// handleRoutePlan 处理复杂规划：推送确认语，设 PhasePlanning。
-func handleRoutePlan(
-	decision *newagentmodel.ChatRoutingDecision,
+// handleRoutePlanStream 处理规划路由：推送状态确认 → 设 PhasePlanning。
+func handleRoutePlanStream(
+	reader infrallm.StreamReader,
 	emitter *newagentstream.ChunkEmitter,
 	flowState *newagentmodel.CommonState,
+	effectiveThinking bool,
+	speak string,
 ) error {
-	speak := strings.TrimSpace(decision.Speak)
-	if speak == "" {
+	// 关闭路由流。
+	_ = reader.Close()
+
+	if strings.TrimSpace(speak) == "" {
 		speak = "好的，让我来规划一下。"
 	}
 

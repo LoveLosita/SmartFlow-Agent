@@ -44,7 +44,7 @@ const (
 func (s *AgentService) runNewAgentGraph(
 	ctx context.Context,
 	userMessage string,
-	ifThinking bool,
+	thinkingMode string,
 	modelName string,
 	userID int,
 	chatID string,
@@ -113,9 +113,11 @@ func (s *AgentService) runNewAgentGraph(
 	// 5.1.2 检索失败只降级为“本轮不注入记忆”，不阻断主链路。
 	s.injectMemoryContext(requestCtx, conversationContext, userID, chatID, userMessage)
 
-	// 5.5 若 extra 携带 task_class_ids，校验后写入 CommonState（仅首轮/尚未设置时生效，跨轮持久化）。
-	//    校验：通过 LoadTaskClassMetas → GetCompleteTaskClassesByIDs 检查所有 ID 是否存在且属于当前用户；
-	//    校验失败时向 errChan 推送 WrongTaskClassID（code=40040），前端收到 SSE 错误事件。
+	// 5.5 将前端传入的 thinkingMode 写入 CommonState，供 ChatNode 及下游节点读取。
+	cs := runtimeState.EnsureCommonState()
+	cs.ThinkingMode = thinkingMode
+
+	// 5.6 若 extra 携带 task_class_ids，校验后写入 CommonState（仅首轮/尚未设置时生效，跨轮持久化）。
 	if taskClassIDs := readAgentExtraIntSlice(extra, "task_class_ids"); len(taskClassIDs) > 0 {
 		cs := runtimeState.EnsureCommonState()
 		if len(cs.TaskClassIDs) == 0 {
@@ -186,7 +188,7 @@ func (s *AgentService) runNewAgentGraph(
 		pushErrNonBlocking(errChan, fmt.Errorf("graph 执行失败: %w", graphErr))
 
 		// Graph 出错时回退普通聊天，保证可用性。
-		s.runNormalChatFlow(requestCtx, s.AIHub.Worker, resolvedModelName, userMessage, "", nil, retryMeta, ifThinking, userID, chatID, traceID, requestStart, outChan, errChan)
+		s.runNormalChatFlow(requestCtx, s.AIHub.Worker, resolvedModelName, userMessage, "", nil, retryMeta, thinkingModeToBool(thinkingMode), userID, chatID, traceID, requestStart, outChan, errChan)
 		return
 	}
 

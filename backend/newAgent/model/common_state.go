@@ -30,7 +30,7 @@ const (
 	FlowTerminalStatusExhausted FlowTerminalStatus = "exhausted"
 )
 
-// FlowTerminalOutcome 保存“流程为什么结束”的最终结果快照。
+// FlowTerminalOutcome 保存"流程为什么结束"的最终结果快照。
 //
 // 职责边界：
 // 1. Stage 说明终止发生在哪个阶段，便于 graph/deliver/debug 统一收口；
@@ -97,7 +97,7 @@ type CommonState struct {
 	// NeedsRoughBuild 由 Plan 节点在 plan_done 时写入，标记 Confirm 后是否需要走粗排节点。
 	// 粗排节点执行完毕后会将此字段重置为 false。
 	NeedsRoughBuild bool `json:"needs_rough_build,omitempty"`
-	// NeedsRefineAfterRoughBuild 表示“粗排完成后是否需要立即进入微调”。
+	// NeedsRefineAfterRoughBuild 表示"粗排完成后是否需要立即进入微调"。
 	//
 	// 说明：
 	// 1. 该标记主要用于 chat->execute 的直执行链路；
@@ -105,13 +105,21 @@ type CommonState struct {
 	// 3. false 表示用户仅要求完成排入，粗排成功后可直接收口，等待后续再优化。
 	NeedsRefineAfterRoughBuild bool `json:"needs_refine_after_rough_build,omitempty"`
 	// AllowReorder 表示本轮是否允许打乱 suggested 任务的相对顺序。
-	// 默认 false，只有用户明确说明“可以打乱顺序/顺序不重要”才会为 true。
+	// 默认 false，只有用户明确说明"可以打乱顺序/顺序不重要"才会为 true。
 	AllowReorder bool `json:"allow_reorder,omitempty"`
-	// SuggestedOrderBaseline 保存“本轮 execute 启动前”的 suggested 任务相对顺序基线。
+	// SuggestedOrderBaseline 保存"本轮 execute 启动前"的 suggested 任务相对顺序基线。
 	// OrderGuard 节点会基于该基线判断微调是否破坏顺序约束。
 	SuggestedOrderBaseline []int `json:"suggested_order_baseline,omitempty"`
 
-	// TerminalOutcome 保存“本轮流程最终如何结束”的统一收口结果。
+	// ExecuteThinking 由 Chat 路由决策传入，表示 Execute 节点是否应开启深度思考。
+	// 预埋字段，当前阶段 Execute 节点可自行决定是否读取。
+	ExecuteThinking bool `json:"execute_thinking,omitempty"`
+
+	// ThinkingMode 由前端传入，控制所有下游 LLM 调用的 thinking 行为。
+	// "true" 强制开启，"false" 强制关闭，"auto"（默认）交给路由决策。
+	ThinkingMode string `json:"thinking_mode,omitempty"`
+
+	// TerminalOutcome 保存"本轮流程最终如何结束"的统一收口结果。
 	// 第二轮开始，rough_build / execute / deliver 都应围绕这份快照判断收口语义。
 	TerminalOutcome *FlowTerminalOutcome `json:"terminal_outcome,omitempty"`
 }
@@ -184,12 +192,12 @@ func (s *CommonState) RejectPlan() {
 	s.ClearTerminalOutcome()
 }
 
-// ResetForNextRun 在“上一轮已经收口，且本轮准备开始新请求”时重置执行期临时状态。
+// ResetForNextRun 在"上一轮已经收口，且本轮准备开始新请求"时重置执行期临时状态。
 //
 // 职责边界：
 // 1. 负责清理会污染新一轮执行的临时字段（轮次、修正计数、计划游标、粗排开关、顺序基线、终止结果）；
 // 2. 不负责清理会话身份与跨轮共享数据（ConversationID/UserID/TaskClassIDs/TaskClasses/历史上下文/ScheduleState）；
-// 3. 该方法是幂等操作：重复调用不会引入额外副作用，便于在“加载兜底 + chat 入口”双保险场景下复用。
+// 3. 该方法是幂等操作：重复调用不会引入额外副作用，便于在"加载兜底 + chat 入口"双保险场景下复用。
 func (s *CommonState) ResetForNextRun() {
 	if s == nil {
 		return
@@ -237,7 +245,7 @@ func (s *CommonState) Done() {
 	}
 }
 
-// Abort 将当前流程标记为“业务语义上的主动终止”。
+// Abort 将当前流程标记为"业务语义上的主动终止"。
 //
 // 步骤说明：
 // 1. 统一写入 PhaseDone，保证 graph 后续直接进入 deliver 收口；
@@ -255,7 +263,7 @@ func (s *CommonState) Abort(stage, code, userMessage, internalReason string) {
 	s.TerminalOutcome.Normalize()
 }
 
-// Exhaust 将当前流程标记为“安全边界触发的被动停止”。
+// Exhaust 将当前流程标记为"安全边界触发的被动停止"。
 func (s *CommonState) Exhaust(stage, userMessage, internalReason string) {
 	s.Phase = PhaseDone
 	s.TerminalOutcome = &FlowTerminalOutcome{
@@ -289,17 +297,17 @@ func (s *CommonState) TerminalStatus() FlowTerminalStatus {
 	return s.TerminalOutcome.Status
 }
 
-// IsCompleted 判断当前是否属于“正常完成”。
+// IsCompleted 判断当前是否属于"正常完成"。
 func (s *CommonState) IsCompleted() bool {
 	return s.TerminalStatus() == FlowTerminalStatusCompleted
 }
 
-// IsAborted 判断当前是否属于“主动中止”。
+// IsAborted 判断当前是否属于"主动中止"。
 func (s *CommonState) IsAborted() bool {
 	return s.TerminalStatus() == FlowTerminalStatusAborted
 }
 
-// IsExhaustedTerminal 判断当前是否属于“轮次耗尽收口”。
+// IsExhaustedTerminal 判断当前是否属于"轮次耗尽收口"。
 func (s *CommonState) IsExhaustedTerminal() bool {
 	return s.TerminalStatus() == FlowTerminalStatusExhausted
 }

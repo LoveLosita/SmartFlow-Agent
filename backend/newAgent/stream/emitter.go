@@ -3,19 +3,22 @@ package newagentstream
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
+
+	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 )
 
 // PayloadEmitter 是真正向外层 SSE 管道写 chunk 的最小接口。
 //
 // 说明：
 // 1. 这里刻意不用 chan/string 绑死实现；
-// 2. 上层既可以传“写 channel”的函数，也可以传“写 gin stream”的函数；
+// 2. 上层既可以传"写 channel"的函数，也可以传"写 gin stream"的函数；
 // 3. 只要签名是 `func(string) error`，都能接进来。
 type PayloadEmitter func(payload string) error
 
-// StageEmitter 是 graph/node 对“当前阶段”进行推送的兼容接口。
+// StageEmitter 是 graph/node 对"当前阶段"进行推送的兼容接口。
 //
 // 设计说明：
 // 1. 旧调用侧仍然只关心 stage/detail 两段文本，因此这里先保留；
@@ -23,7 +26,7 @@ type PayloadEmitter func(payload string) error
 // 3. 这样能兼顾当前兼容性和后续协议升级空间。
 type StageEmitter func(stage, detail string)
 
-// PseudoStreamOptions 描述“整段文字伪流式输出”的切块与节奏配置。
+// PseudoStreamOptions 描述"整段文字伪流式输出"的切块与节奏配置。
 //
 // 字段语义：
 // 1. MinChunkRunes：达到该最小长度后，若命中标点/换行等边界，可提前切块；
@@ -51,7 +54,7 @@ func DefaultPseudoStreamOptions() PseudoStreamOptions {
 // ChunkEmitter 是 newAgent 统一的 SSE chunk 发射器。
 //
 // 职责边界：
-// 1. 负责把“正文 / 思考 / 工具事件 / 确认请求 / 中断提示”统一转换成 OpenAI 兼容 payload；
+// 1. 负责把"正文 / 思考 / 工具事件 / 确认请求 / 中断提示"统一转换成 OpenAI 兼容 payload；
 // 2. 负责在必要时把结构化事件附带成 extra，同时给当前前端提供可读的降级文本；
 // 3. 不负责决定什么时候发什么，也不负责持久化状态。
 type ChunkEmitter struct {
@@ -365,7 +368,92 @@ func (e *ChunkEmitter) EmitDone() error {
 	return e.emit("[DONE]")
 }
 
-// EmitStageAsReasoning 把“阶段提示”伪装成 reasoning chunk 推给前端。
+// EmitStreamAssistantText 从 StreamReader 逐 chunk 读取并实时推送 assistant 正文。
+//
+// 职责边界：
+// 1. 负责把 StreamReader 的每个 chunk 实时转换为 SSE payload 推送；
+// 2. 负责累计完整文本并返回，供调用方写入 history；
+// 3. 不负责打开/关闭 StreamReader，调用方负责生命周期管理。
+func (e *ChunkEmitter) EmitStreamAssistantText(
+	ctx context.Context,
+	reader infrallm.StreamReader,
+	blockID, stage string,
+) (string, error) {
+	if e == nil || reader == nil {
+		return "", nil
+	}
+
+	var fullText strings.Builder
+	firstChunk := true
+
+	for {
+		chunk, err := reader.Recv()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fullText.String(), err
+		}
+
+		// 推送 reasoning content。
+		if chunk != nil && strings.TrimSpace(chunk.ReasoningContent) != "" {
+			if emitErr := e.EmitReasoningText(blockID, stage, chunk.ReasoningContent, firstChunk); emitErr != nil {
+				return fullText.String(), emitErr
+			}
+			firstChunk = false
+		}
+
+		// 推送 assistant 正文。
+		if chunk != nil && chunk.Content != "" {
+			if emitErr := e.EmitAssistantText(blockID, stage, chunk.Content, firstChunk); emitErr != nil {
+				return fullText.String(), emitErr
+			}
+			fullText.WriteString(chunk.Content)
+			firstChunk = false
+		}
+	}
+
+	return fullText.String(), nil
+}
+
+// EmitStreamReasoningText 从 StreamReader 逐 chunk 读取并实时推送 reasoning 文字。
+//
+// 与 EmitStreamAssistantText 结构相同，但只推送 ReasoningContent，不推送 Content。
+// 用于只需展示思考过程而无需展示正文的场景。
+func (e *ChunkEmitter) EmitStreamReasoningText(
+	ctx context.Context,
+	reader infrallm.StreamReader,
+	blockID, stage string,
+) (string, error) {
+	if e == nil || reader == nil {
+		return "", nil
+	}
+
+	var fullText strings.Builder
+	firstChunk := true
+
+	for {
+		chunk, err := reader.Recv()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fullText.String(), err
+		}
+
+		if chunk != nil && strings.TrimSpace(chunk.ReasoningContent) != "" {
+			if emitErr := e.EmitReasoningText(blockID, stage, chunk.ReasoningContent, firstChunk); emitErr != nil {
+				return fullText.String(), emitErr
+			}
+			fullText.WriteString(chunk.ReasoningContent)
+			firstChunk = false
+		}
+	}
+
+	return fullText.String(), nil
+}
+
+// EmitStageAsReasoning 把"阶段提示"伪装成 reasoning chunk 推给前端。
 //
 // 兼容说明：
 // 1. 保留旧函数签名，方便当前旧链路直接复用；
@@ -378,7 +466,7 @@ func EmitStageAsReasoning(emit PayloadEmitter, requestID, modelName string, crea
 // EmitAssistantReply 把一段完整正文作为 assistant chunk 推出。
 //
 // 注意：
-// 1. 这里保持“整段发”，不主动切块；
+// 1. 这里保持"整段发"，不主动切块；
 // 2. 若后续某条链路需要更自然的阅读节奏，应直接调用 EmitPseudoAssistantText；
 // 3. 为兼容老调用侧，这里 blockID 和 stage 都留空。
 func EmitAssistantReply(emit PayloadEmitter, requestID, modelName string, created int64, content string, includeRole bool) error {
@@ -493,7 +581,7 @@ func (e *ChunkEmitter) emitPseudoText(ctx context.Context, text string, options 
 	return nil
 }
 
-// SplitPseudoStreamText 按“标点优先、长度兜底”的策略切分整段文本。
+// SplitPseudoStreamText 按"标点优先、长度兜底"的策略切分整段文本。
 //
 // 步骤说明：
 // 1. 优先在句号、问号、感叹号、分号、换行等自然边界切块，保证阅读顺畅；
