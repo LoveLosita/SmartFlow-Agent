@@ -270,19 +270,22 @@ type SSEMessageData struct {
 }
 
 type AgentChat struct {
-	ID            int64      `gorm:"column:id;primaryKey;autoIncrement;comment:自增ID"`
-	ChatID        string     `gorm:"column:chat_id;type:varchar(36);not null;uniqueIndex:uk_chat_id;comment:会话UUID"`
-	UserID        int        `gorm:"column:user_id;not null;index:idx_user_last,priority:1;index:idx_user_status,priority:1;comment:所属用户ID"`
-	Title         *string    `gorm:"column:title;type:varchar(255);comment:会话标题"`
-	SystemPrompt  *string    `gorm:"column:system_prompt;type:text;comment:系统提示词"`
-	Model         *string    `gorm:"column:model;type:varchar(100);comment:模型标识"`
-	MessageCount  int        `gorm:"column:message_count;not null;default:0;comment:消息总数"`
-	TokensTotal   int        `gorm:"column:tokens_total;not null;default:0;comment:累计Token"`
-	LastMessageAt *time.Time `gorm:"column:last_message_at;comment:最后消息时间"`
-	Status        string     `gorm:"column:status;type:varchar(32);not null;default:active;index:idx_user_status,priority:2;comment:会话状态"`
-	CreatedAt     *time.Time `gorm:"column:created_at;autoCreateTime"`
-	UpdatedAt     *time.Time `gorm:"column:updated_at;autoUpdateTime"`
-	DeletedAt     *time.Time `gorm:"column:deleted_at;comment:软删除时间"`
+	ID                  int64      `gorm:"column:id;primaryKey;autoIncrement;comment:自增ID"`
+	ChatID              string     `gorm:"column:chat_id;type:varchar(36);not null;uniqueIndex:uk_chat_id;comment:会话UUID"`
+	UserID              int        `gorm:"column:user_id;not null;index:idx_user_last,priority:1;index:idx_user_status,priority:1;comment:所属用户ID"`
+	Title               *string    `gorm:"column:title;type:varchar(255);comment:会话标题"`
+	SystemPrompt        *string    `gorm:"column:system_prompt;type:text;comment:系统提示词"`
+	Model               *string    `gorm:"column:model;type:varchar(100);comment:模型标识"`
+	MessageCount        int        `gorm:"column:message_count;not null;default:0;comment:消息总数"`
+	TokensTotal         int        `gorm:"column:tokens_total;not null;default:0;comment:累计Token"`
+	LastMessageAt       *time.Time `gorm:"column:last_message_at;comment:最后消息时间"`
+	Status              string     `gorm:"column:status;type:varchar(32);not null;default:active;index:idx_user_status,priority:2;comment:会话状态"`
+	CompactionSummary   *string    `gorm:"column:compaction_summary;type:text;comment:历史上下文压缩摘要"`
+	CompactionWatermark int        `gorm:"column:compaction_watermark;not null;default:0;comment:压缩水位线（最后被压缩的消息ID）"`
+	ContextTokenStats   *string    `gorm:"column:context_token_stats;type:json;comment:上下文窗口实时token分布"`
+	CreatedAt           *time.Time `gorm:"column:created_at;autoCreateTime"`
+	UpdatedAt           *time.Time `gorm:"column:updated_at;autoUpdateTime"`
+	DeletedAt           *time.Time `gorm:"column:deleted_at;comment:软删除时间"`
 }
 
 func (AgentChat) TableName() string { return "agent_chats" }

@@ -67,6 +67,7 @@ type AgentGraphDeps struct {
 	ToolRegistry         *newagenttools.ToolRegistry
 	ScheduleProvider     ScheduleStateProvider    // 按 DAO 注入，Execute 节点按需加载 ScheduleState
 	SchedulePersistor    SchedulePersistor        // 按 DAO 注入，用于写工具执行后持久化变更
+	CompactionStore      CompactionStore          // 按 DAO 注入，用于 Execute 上下文压缩持久化
 	RoughBuildFunc       RoughBuildFunc           // 按 Service 注入，粗排算法入口
 	WriteSchedulePreview WriteSchedulePreviewFunc // 按 Service 注入，排程预览写入入口
 }

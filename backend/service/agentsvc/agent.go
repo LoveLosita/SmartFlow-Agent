@@ -56,6 +56,7 @@ type AgentService struct {
 	scheduleProvider  newagentmodel.ScheduleStateProvider
 	schedulePersistor newagentmodel.SchedulePersistor
 	agentStateStore   newagentmodel.AgentStateStore
+	compactionStore   newagentmodel.CompactionStore
 	memoryReader      MemoryReader
 }
 

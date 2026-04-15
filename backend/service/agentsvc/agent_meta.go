@@ -349,3 +349,8 @@ func trimRunes(text string, limit int) string {
 	runes := []rune(text)
 	return string(runes[:limit])
 }
+
+// GetContextStats 获取指定会话的上下文窗口 token 分布统计。
+func (s *AgentService) GetContextStats(ctx context.Context, userID int, chatID string) (string, error) {
+	return s.repo.LoadContextTokenStats(ctx, userID, chatID)
+}

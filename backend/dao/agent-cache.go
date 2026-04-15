@@ -305,3 +305,39 @@ func extractMessageHistoryID(msg *schema.Message) int {
 		return 0
 	}
 }
+
+// ---- Compaction 缓存 ----
+
+func (m *AgentCache) compactionKey(chatID string) string {
+	return fmt.Sprintf("smartflow:compaction:%s", chatID)
+}
+
+// SaveCompactionCache 将压缩摘要缓存到 Redis。
+func (m *AgentCache) SaveCompactionCache(ctx context.Context, chatID string, summary string, watermark int) error {
+	key := m.compactionKey(chatID)
+	data, _ := json.Marshal(map[string]any{
+		"summary":   summary,
+		"watermark": watermark,
+	})
+	return m.client.Set(ctx, key, data, m.expiration).Err()
+}
+
+// LoadCompactionCache 从 Redis 读取压缩摘要缓存。
+func (m *AgentCache) LoadCompactionCache(ctx context.Context, chatID string) (summary string, watermark int, ok bool, err error) {
+	key := m.compactionKey(chatID)
+	val, err := m.client.Get(ctx, key).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return "", 0, false, nil
+		}
+		return "", 0, false, err
+	}
+	var data struct {
+		Summary   string `json:"summary"`
+		Watermark int    `json:"watermark"`
+	}
+	if jsonErr := json.Unmarshal([]byte(val), &data); jsonErr != nil {
+		return "", 0, false, nil
+	}
+	return data.Summary, data.Watermark, true, nil
+}

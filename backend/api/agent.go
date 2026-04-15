@@ -264,3 +264,27 @@ func (api *AgentHandler) GetSchedulePlanPreview(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, preview))
 }
+
+// GetContextStats 获取指定会话的上下文窗口 token 分布统计。
+func (api *AgentHandler) GetContextStats(c *gin.Context) {
+	conversationID := strings.TrimSpace(c.Query("conversation_id"))
+	if conversationID == "" {
+		c.JSON(http.StatusBadRequest, respond.MissingParam)
+		return
+	}
+
+	userID := c.GetInt("user_id")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel()
+
+	statsJSON, err := api.svc.GetContextStats(ctx, userID, conversationID)
+	if err != nil {
+		respond.DealWithError(c, err)
+		return
+	}
+
+	// 直接透传 JSON 字符串，避免二次序列化。
+	var raw json.RawMessage = json.RawMessage(statsJSON)
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, raw))
+}

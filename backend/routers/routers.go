@@ -95,6 +95,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, userRepo *d
 			agentGroup.GET("/conversation-list", handlers.AgentHandler.GetConversationList)
 			agentGroup.GET("/conversation-history", handlers.AgentHandler.GetConversationHistory)
 			agentGroup.GET("/schedule-preview", handlers.AgentHandler.GetSchedulePlanPreview)
+			agentGroup.GET("/context-stats", handlers.AgentHandler.GetContextStats)
 		}
 	}
 	// 初始化Gin引擎

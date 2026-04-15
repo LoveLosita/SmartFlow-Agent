@@ -487,7 +487,8 @@ func parseQueryAvailableOptions(state *ScheduleState, args map[string]any) (quer
 		if exactFrom < 1 || exactTo > 12 || exactFrom > exactTo {
 			return queryAvailableOptions{}, fmt.Errorf("精确节次区间非法：%d-%d", exactFrom, exactTo)
 		}
-		span = exactTo - exactFrom + 1
+		// 不再用 section_from/section_to 覆盖 span（duration），
+		// 两者独立：span 控制每段长度，section_from/section_to 控制搜索范围。
 	}
 
 	options := queryAvailableOptions{
@@ -663,7 +664,8 @@ func matchSectionRange(
 	exactTo *int,
 ) bool {
 	if exactFrom != nil && exactTo != nil {
-		if slotStart != *exactFrom || slotEnd != *exactTo {
+		// 范围包含语义：slot 必须完全落在 [section_from, section_to] 区间内
+		if slotStart < *exactFrom || slotEnd > *exactTo {
 			return false
 		}
 	}

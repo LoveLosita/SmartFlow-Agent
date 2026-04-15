@@ -401,3 +401,57 @@ func (a *AgentDAO) GetConversationList(ctx context.Context, userID, page, pageSi
 	}
 	return chats, total, nil
 }
+
+// ---- Compaction 相关 ----
+
+// SaveCompaction 保存压缩摘要和水位线。
+func (a *AgentDAO) SaveCompaction(ctx context.Context, userID int, chatID string, summary string, watermark int) error {
+	return a.db.WithContext(ctx).
+		Model(&model.AgentChat{}).
+		Where("user_id = ? AND chat_id = ?", userID, chatID).
+		Updates(map[string]any{
+			"compaction_summary":   summary,
+			"compaction_watermark": watermark,
+		}).Error
+}
+
+// LoadCompaction 读取压缩摘要和水位线。
+func (a *AgentDAO) LoadCompaction(ctx context.Context, userID int, chatID string) (summary string, watermark int, err error) {
+	var chat model.AgentChat
+	err = a.db.WithContext(ctx).
+		Select("compaction_summary", "compaction_watermark").
+		Where("user_id = ? AND chat_id = ?", userID, chatID).
+		First(&chat).Error
+	if err != nil {
+		return "", 0, err
+	}
+	if chat.CompactionSummary != nil {
+		summary = *chat.CompactionSummary
+	}
+	watermark = chat.CompactionWatermark
+	return
+}
+
+// SaveContextTokenStats 保存上下文窗口 token 分布统计。
+func (a *AgentDAO) SaveContextTokenStats(ctx context.Context, userID int, chatID string, statsJSON string) error {
+	return a.db.WithContext(ctx).
+		Model(&model.AgentChat{}).
+		Where("user_id = ? AND chat_id = ?", userID, chatID).
+		Update("context_token_stats", statsJSON).Error
+}
+
+// LoadContextTokenStats 读取上下文窗口 token 分布统计。
+func (a *AgentDAO) LoadContextTokenStats(ctx context.Context, userID int, chatID string) (string, error) {
+	var chat model.AgentChat
+	err := a.db.WithContext(ctx).
+		Select("context_token_stats").
+		Where("user_id = ? AND chat_id = ?", userID, chatID).
+		First(&chat).Error
+	if err != nil {
+		return "", err
+	}
+	if chat.ContextTokenStats != nil {
+		return *chat.ContextTokenStats, nil
+	}
+	return "", nil
+}

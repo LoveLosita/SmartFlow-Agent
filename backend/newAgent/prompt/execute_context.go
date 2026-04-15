@@ -17,13 +17,15 @@ const (
 	executeHistoryKindLoopClosed     = "execute_loop_closed"
 	executeHistoryKindStepAdvanced   = "execute_step_advanced"
 
-	// executeLoopWindowLimit 控制“当轮 ReAct Loop 窗口”最多保留多少条记录。
-	// 采用固定窗口能避免上下文无上限增长，且可保持“最近行为”可追踪。
+	// executeLoopWindowLimit 控制当轮 ReAct Loop 窗口最多保留多少条记录。
 	executeLoopWindowLimit = 8
 
 	// executeTrimmedObservationText 是重复工具压缩后的 observation 占位文案。
-	// 当同工具在窗口内出现多次时，只保留最新一条真实结果，其余旧结果统一替换为该文案。
 	executeTrimmedObservationText = "当前工具调用结果已经被使用过，当前无需使用，为节省上下文空间，已折叠"
+
+	// executeConversationTurnLimit 控制 msg1 注入的最大对话轮数（user + assistant speak）。
+	// 超出时保留最近的条目，早期部分由 ReAct 摘要兜底。
+	executeConversationTurnLimit = 30
 )
 
 type executeToolSchemaDoc struct {
@@ -44,9 +46,9 @@ const executeMessage1MaxRunes = 1400
 //
 // 消息结构（固定）：
 // 1. message[0] 固定 prompt（规则 + 微调硬引导 + 输出约束 + 工具简表）
-// 2. message[1] 历史上下文（聊天摘要 + 早期 ReAct 摘要）
+// 2. message[1] 历史上下文（真实对话流 + 早期 ReAct 摘要）
 // 3. message[2] 当轮 ReAct Loop 窗口（thought/reason + tool_call + observation 绑定展示）
-// 4. message[3] 当前执行状态（含初始目标、结束判断原则、非目标）
+// 4. message[3] 当前执行状态（轮次、模式、plan 步骤、任务类等）
 func buildExecuteStageMessages(
 	stageSystemPrompt string,
 	state *newagentmodel.CommonState,
@@ -80,134 +82,7 @@ func buildExecuteMessage0(stageSystemPrompt string, ctx *newagentmodel.Conversat
 	return base + "\n\n" + toolCatalog
 }
 
-// buildExecuteMessage1 生成历史上下文短摘要。
-func buildExecuteMessage1(ctx *newagentmodel.ConversationContext) string {
-	lines := []string{"历史上下文（仅供参考）："}
-	if ctx == nil {
-		lines = append(lines,
-			"- 用户目标：暂无可用历史输入。",
-			"- 阶段锚点：按当前工具事实推进执行。",
-			"- 早期 ReAct 摘要：暂无。",
-		)
-		return strings.Join(lines, "\n")
-	}
-
-	history := ctx.HistorySnapshot()
-	firstUser, lastUser := pickExecuteUserInputs(history)
-	switch {
-	case firstUser == "":
-		lines = append(lines, "- 用户目标：暂无可用历史输入。")
-	case lastUser != "" && lastUser != firstUser:
-		lines = append(lines, "- 用户目标："+firstUser+"；最近补充："+lastUser)
-	default:
-		lines = append(lines, "- 用户目标："+firstUser)
-	}
-
-	if hasExecuteRoughBuildDone(ctx) {
-		lines = append(lines, "- 阶段锚点：粗排已完成，本轮仅做微调，不重新 place。")
-	} else {
-		lines = append(lines, "- 阶段锚点：按当前工具事实推进，不做无依据操作。")
-	}
-
-	allLoops := collectExecuteLoopRecords(history)
-	lines = append(lines, "- 早期 ReAct 摘要："+buildEarlyExecuteReactSummary(allLoops, executeLoopWindowLimit))
-	return strings.Join(lines, "\n")
-}
-
-// buildExecuteMessage2 生成当轮 ReAct Loop 窗口。
-//
-// 规则：
-// 1. 每条记录都展示 thought/reason + tool_call + observation；
-// 2. 对窗口内重复工具应用压缩：同工具只保留最新一条真实 observation；
-// 3. 被压缩的旧 observation 统一替换为占位文案，避免语义断裂。
-func buildExecuteMessage2(ctx *newagentmodel.ConversationContext) string {
-	lines := []string{"当轮 ReAct Loop 记录（窗口）："}
-	if ctx == nil {
-		lines = append(lines, "- 暂无可用 ReAct 记录。")
-		return strings.Join(lines, "\n")
-	}
-
-	allLoops := collectExecuteLoopRecords(ctx.HistorySnapshot())
-	if len(allLoops) == 0 {
-		lines = append(lines, "- 暂无可用 ReAct 记录。")
-		return strings.Join(lines, "\n")
-	}
-
-	windowLoops := tailExecuteLoops(allLoops, executeLoopWindowLimit)
-	windowLoops = compressExecuteLoopObservationsByTool(windowLoops)
-	for i, loop := range windowLoops {
-		lines = append(lines, fmt.Sprintf("%d) thought/reason：%s", i+1, loop.Thought))
-		lines = append(lines, fmt.Sprintf("   tool_call：%s", renderExecuteToolCallText(loop.ToolName, loop.ToolArgs)))
-		lines = append(lines, fmt.Sprintf("   observation：%s", loop.Observation))
-	}
-	return strings.Join(lines, "\n")
-}
-
-// buildExecuteMessage3 生成当前执行状态与执行锚点。
-// buildExecuteMessage1V2 生成历史摘要：
-// 1. 已收口的 loop 归档到 msg1；
-// 2. 当前活跃 loop 只保留“早期摘要”；
-// 3. 最终对 msg1 做统一长度裁剪，控制 token 开销。
-func buildExecuteMessage1V2(ctx *newagentmodel.ConversationContext) string {
-	lines := []string{"历史上下文（仅供参考）："}
-	if ctx == nil {
-		lines = append(lines,
-			"- 用户目标：暂无可用历史输入。",
-			"- 阶段锚点：按当前工具事实推进执行。",
-			"- 历史归档 ReAct 摘要：暂无。",
-			"- 当前循环早期摘要：暂无。",
-		)
-		return trimExecuteMessage1ByBudget(strings.Join(lines, "\n"))
-	}
-
-	history := ctx.HistorySnapshot()
-	firstUser, lastUser := pickExecuteUserInputs(history)
-	switch {
-	case firstUser == "":
-		lines = append(lines, "- 用户目标：暂无可用历史输入。")
-	case lastUser != "" && lastUser != firstUser:
-		lines = append(lines, "- 用户目标："+firstUser+"；最近补充："+lastUser)
-	default:
-		lines = append(lines, "- 用户目标："+firstUser)
-	}
-
-	if hasExecuteRoughBuildDone(ctx) {
-		lines = append(lines, "- 阶段锚点：粗排已完成，本轮仅做微调，不重新 place。")
-	} else {
-		lines = append(lines, "- 阶段锚点：按当前工具事实推进，不做无依据操作。")
-	}
-
-	archivedLoops, activeLoops := splitExecuteLoopRecordsByBoundary(history)
-	lines = append(lines, "- 历史归档 ReAct 摘要："+buildEarlyExecuteReactSummary(archivedLoops, 0))
-	lines = append(lines, "- 当前循环早期摘要："+buildEarlyExecuteReactSummary(activeLoops, executeLoopWindowLimit))
-	return trimExecuteMessage1ByBudget(strings.Join(lines, "\n"))
-}
-
-// buildExecuteMessage2V2 仅展示“当前活跃 loop”的窗口记录。
-func buildExecuteMessage2V2(ctx *newagentmodel.ConversationContext) string {
-	lines := []string{"当轮 ReAct Loop 记录（窗口）："}
-	if ctx == nil {
-		lines = append(lines, "- 暂无可用 ReAct 记录。")
-		return strings.Join(lines, "\n")
-	}
-
-	_, activeLoops := splitExecuteLoopRecordsByBoundary(ctx.HistorySnapshot())
-	if len(activeLoops) == 0 {
-		lines = append(lines, "- 暂无可用 ReAct 记录。")
-		return strings.Join(lines, "\n")
-	}
-
-	windowLoops := tailExecuteLoops(activeLoops, executeLoopWindowLimit)
-	windowLoops = compressExecuteLoopObservationsByTool(windowLoops)
-	for i, loop := range windowLoops {
-		lines = append(lines, fmt.Sprintf("%d) thought/reason：%s", i+1, loop.Thought))
-		lines = append(lines, fmt.Sprintf("   tool_call：%s", renderExecuteToolCallText(loop.ToolName, loop.ToolArgs)))
-		lines = append(lines, fmt.Sprintf("   observation：%s", loop.Observation))
-	}
-	return strings.Join(lines, "\n")
-}
-
-// splitExecuteLoopRecordsByBoundary 按“已收口标记”拆分归档/活跃 ReAct 记录。
+// splitExecuteLoopRecordsByBoundary 按已收口标记拆分归档/活跃 ReAct 记录。
 //
 // 规则：
 // 1. 标记之前的记录归档到 msg1；
@@ -265,29 +140,38 @@ func trimExecuteMessage1ByBudget(content string) string {
 	return string(runes[:executeMessage1MaxRunes-3]) + "..."
 }
 
-// buildExecuteMessage1V3 负责把“上一轮 loop 归档”并入 msg1，并统一做长度裁剪。
+// buildExecuteMessage1V3 负责把真实对话流 + 上一轮 loop 归档并入 msg1，并统一做长度裁剪。
+//
+// 改造说明：
+// 1. msg1 从人工提炼的摘要变为真实对话流，只注入 user + assistant speak；
+// 2. tool_call / observation 不在 msg1 中重复（已由 msg2 承载）；
+// 3. 超出 executeConversationTurnLimit 的早期对话不注入，由 ReAct 摘要兜底。
 func buildExecuteMessage1V3(ctx *newagentmodel.ConversationContext) string {
-	lines := []string{"历史上下文（仅供参考）："}
+	lines := []string{"历史上下文："}
 	if ctx == nil {
 		lines = append(lines,
-			"- 用户目标：暂无可用历史输入。",
+			"- 对话历史：暂无。",
 			"- 阶段锚点：按当前工具事实推进执行。",
 			"- 历史归档 ReAct 摘要：暂无。",
 			"- 历史归档 ReAct 窗口：暂无。",
 			"- 当前循环早期摘要：暂无。",
 		)
-		return trimExecuteMessage1ByBudget(strings.Join(lines, "\n"))
+		return strings.Join(lines, "\n")
 	}
 
 	history := ctx.HistorySnapshot()
-	firstUser, lastUser := pickExecuteUserInputs(history)
-	switch {
-	case firstUser == "":
-		lines = append(lines, "- 用户目标：暂无可用历史输入。")
-	case lastUser != "" && lastUser != firstUser:
-		lines = append(lines, "- 用户目标："+firstUser+"；最近补充："+lastUser)
-	default:
-		lines = append(lines, "- 用户目标："+firstUser)
+
+	// 注入真实对话流（user + assistant speak），全量放入，不再限制轮数和单条长度。
+	turns := collectExecuteConversationTurns(history)
+	if len(turns) == 0 {
+		lines = append(lines, "- 对话历史：暂无。")
+	} else {
+		turnLines := make([]string, 0, len(turns)+1)
+		turnLines = append(turnLines, "对话历史：")
+		for _, turn := range turns {
+			turnLines = append(turnLines, turn.Role+": \""+turn.Content+"\"")
+		}
+		lines = append(lines, strings.Join(turnLines, "\n"))
 	}
 
 	if hasExecuteRoughBuildDone(ctx) {
@@ -296,20 +180,18 @@ func buildExecuteMessage1V3(ctx *newagentmodel.ConversationContext) string {
 		lines = append(lines, "- 阶段锚点：按当前工具事实推进，不做无依据操作。")
 	}
 
-	// 1. 通过收口标记拆分“归档 loop / 当前活跃 loop”。
-	// 2. 归档 loop 的窗口条目直接并入 msg1，满足“上一轮 msg2 挪入 msg1”。
-	// 3. 当前活跃 loop 在 msg1 只保留早期摘要，详细窗口交给 msg2。
 	archivedLoops, activeLoops := splitExecuteLoopRecordsByBoundary(history)
 	lines = append(lines, "- 历史归档 ReAct 摘要："+buildEarlyExecuteReactSummary(archivedLoops, executeLoopWindowLimit))
 	lines = append(lines, renderArchivedExecuteLoopWindowForMessage1V3(archivedLoops))
 	lines = append(lines, "- 当前循环早期摘要："+buildEarlyExecuteReactSummary(activeLoops, executeLoopWindowLimit))
-	return trimExecuteMessage1ByBudget(strings.Join(lines, "\n"))
+	return strings.Join(lines, "\n")
 }
 
-// buildExecuteMessage2V3 仅承载“当前活跃 loop”的窗口。
-// 若是新一轮刚开始（活跃 loop 为空），明确返回“已清空”状态。
+// buildExecuteMessage2V3 承载当前活跃 loop 的全部记录。
+// 若是新一轮刚开始（活跃 loop 为空），明确返回已清空状态。
+// 不再限制窗口大小，token 预算由 execute 层统一管理。
 func buildExecuteMessage2V3(ctx *newagentmodel.ConversationContext) string {
-	lines := []string{"当轮 ReAct Loop 记录（窗口）："}
+	lines := []string{"当轮 ReAct Loop 记录："}
 	if ctx == nil {
 		lines = append(lines, "- 暂无可用 ReAct 记录。")
 		return strings.Join(lines, "\n")
@@ -321,9 +203,8 @@ func buildExecuteMessage2V3(ctx *newagentmodel.ConversationContext) string {
 		return strings.Join(lines, "\n")
 	}
 
-	windowLoops := tailExecuteLoops(activeLoops, executeLoopWindowLimit)
-	windowLoops = compressExecuteLoopObservationsByTool(windowLoops)
-	for i, loop := range windowLoops {
+	// 全量放入，不再限制窗口大小
+	for i, loop := range activeLoops {
 		lines = append(lines, fmt.Sprintf("%d) thought/reason：%s", i+1, loop.Thought))
 		lines = append(lines, fmt.Sprintf("   tool_call：%s", renderExecuteToolCallText(loop.ToolName, loop.ToolArgs)))
 		lines = append(lines, fmt.Sprintf("   observation：%s", loop.Observation))
@@ -367,18 +248,8 @@ func buildExecuteMessage3(state *newagentmodel.CommonState, ctx *newagentmodel.C
 		"- 当前模式："+modeText,
 	)
 
-	initialGoal, currentGoal := extractExecuteGoalAnchors(ctx)
-	if currentGoal == "" {
-		currentGoal = "暂无可用目标描述，请按当前上下文稳步推进。"
-	}
-
-	lines = append(lines, "执行锚点：")
-	lines = append(lines, "- 当前用户诉求："+currentGoal)
-	if initialGoal != "" && initialGoal != currentGoal {
-		lines = append(lines, "- 首轮目标来源："+initialGoal)
-	}
 	// 1. 有 plan 时，把当前步骤与完成判定强制写入 msg3。
-	// 2. 该锚点用于约束模型“只推进当前步骤”，避免退化成泛化 ReAct。
+	// 2. 该锚点用于约束模型只推进当前步骤，避免退化成泛化 ReAct。
 	// 3. 当前步骤不可读时给出兜底指引，避免引用旧步骤。
 	if state != nil && state.HasPlan() {
 		current, total := state.PlanProgress()
@@ -411,7 +282,7 @@ func buildExecuteMessage3(state *newagentmodel.CommonState, ctx *newagentmodel.C
 	if hasExecuteRoughBuildDone(ctx) {
 		lines = append(lines, "- 阶段约束：粗排已完成，本轮只微调 suggested；existing 仅作已安排事实参考，不作为可移动目标。")
 	}
-	lines = append(lines, "- 参数纪律：工具参数必须严格使用 schema 字段；若返回“参数非法”，需先改参再继续。")
+	lines = append(lines, "- 参数纪律：工具参数必须严格使用 schema 字段；若返回'参数非法'，需先改参再继续。")
 	if state != nil {
 		if state.AllowReorder {
 			lines = append(lines, "- 顺序策略：用户已明确允许打乱顺序，可在必要时使用 min_context_switch。")
@@ -465,11 +336,7 @@ func renderExecuteToolCatalogCompact(ctx *newagentmodel.ConversationContext) str
 	return strings.Join(lines, "\n")
 }
 
-// renderExecuteToolReturnHint 返回工具的“返回类型 + 最小示例”。
-//
-// 说明：
-// 1. 所有工具当前都返回 string，但部分是“JSON 字符串”，这里补齐内容形态示例减少模型盲猜；
-// 2. 示例只保留最小片段，避免工具说明过长挤占上下文窗口。
+// renderExecuteToolReturnHint 返回工具的返回类型 + 最小示例。
 func renderExecuteToolReturnHint(toolName string) (returnType string, sample string) {
 	returnType = "string（自然语言文本）"
 	switch strings.ToLower(strings.TrimSpace(toolName)) {
@@ -669,11 +536,6 @@ func tailExecuteLoops(records []executeLoopRecord, limit int) []executeLoopRecor
 }
 
 // compressExecuteLoopObservationsByTool 对窗口内重复工具做 observation 压缩。
-//
-// 规则：
-// 1. 以“工具名”作为压缩键；
-// 2. 同工具仅保留最新一条 observation 原文；
-// 3. 旧记录保持 thought/tool_call，不丢记录，仅替换 observation。
 func compressExecuteLoopObservationsByTool(records []executeLoopRecord) []executeLoopRecord {
 	if len(records) == 0 {
 		return records
@@ -748,15 +610,6 @@ func buildEarlyExecuteReactSummary(records []executeLoopRecord, windowLimit int)
 	return fmt.Sprintf("已折叠 %d 条旧记录，涉及：%s。", len(early), strings.Join(parts, "、"))
 }
 
-func extractExecuteGoalAnchors(ctx *newagentmodel.ConversationContext) (initial string, current string) {
-	if ctx == nil {
-		return "", ""
-	}
-	history := ctx.HistorySnapshot()
-	firstUser, lastUser := pickExecuteUserInputs(history)
-	return firstUser, lastUser
-}
-
 func hasExecuteRoughBuildDone(ctx *newagentmodel.ConversationContext) bool {
 	if ctx == nil {
 		return false
@@ -769,25 +622,47 @@ func hasExecuteRoughBuildDone(ctx *newagentmodel.ConversationContext) bool {
 	return false
 }
 
-func pickExecuteUserInputs(history []*schema.Message) (first string, last string) {
-	realUsers := make([]string, 0, 2)
+// conversationTurn 表示对话历史中的一轮交互（user 或 assistant speak）。
+type conversationTurn struct {
+	Role    string
+	Content string
+}
+
+// collectExecuteConversationTurns 从历史消息中提取 user + assistant speak 对话流。
+//
+// 提取规则：
+// 1. 只保留 user 消息（排除 correction prompt）和 assistant speak 消息（非空 Content 且无 ToolCalls）；
+// 2. 全量保留，不再限制轮数和单条长度（token 预算由 execute 层统一管理）；
+// 3. 返回的条目按原始时间顺序排列。
+func collectExecuteConversationTurns(history []*schema.Message) []conversationTurn {
+	if len(history) == 0 {
+		return nil
+	}
+
+	turns := make([]conversationTurn, 0, len(history))
 	for _, msg := range history {
-		if msg == nil || msg.Role != schema.User {
+		if msg == nil {
 			continue
 		}
-		if isExecuteCorrectionPrompt(msg) {
-			continue
-		}
-		text := compactExecuteText(msg.Content, 120)
+		text := strings.TrimSpace(msg.Content)
 		if text == "" {
 			continue
 		}
-		realUsers = append(realUsers, text)
+		switch msg.Role {
+		case schema.User:
+			if isExecuteCorrectionPrompt(msg) {
+				continue
+			}
+			turns = append(turns, conversationTurn{Role: "user", Content: text})
+		case schema.Assistant:
+			if len(msg.ToolCalls) > 0 {
+				continue
+			}
+			turns = append(turns, conversationTurn{Role: "assistant", Content: text})
+		}
 	}
-	if len(realUsers) == 0 {
-		return "", ""
-	}
-	return realUsers[0], realUsers[len(realUsers)-1]
+
+	return turns
 }
 
 func isExecuteCorrectionPrompt(msg *schema.Message) bool {

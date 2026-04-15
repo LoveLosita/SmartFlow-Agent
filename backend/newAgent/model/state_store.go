@@ -79,3 +79,11 @@ type ScopedScheduleStateProvider interface {
 type SchedulePersistor interface {
 	PersistScheduleChanges(ctx context.Context, original, modified *schedule.ScheduleState, userID int) error
 }
+
+// CompactionStore 定义上下文压缩的持久化接口。
+// 由 Service 层实现（组合 DAO + Redis Cache），注入到 ExecuteNodeInput。
+type CompactionStore interface {
+	LoadCompaction(ctx context.Context, userID int, chatID string) (summary string, watermark int, err error)
+	SaveCompaction(ctx context.Context, userID int, chatID string, summary string, watermark int) error
+	SaveContextTokenStats(ctx context.Context, userID int, chatID string, statsJSON string) error
+}

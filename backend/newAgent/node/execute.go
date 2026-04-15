@@ -55,6 +55,7 @@ type ExecuteNodeInput struct {
 	ToolRegistry          *newagenttools.ToolRegistry
 	ScheduleState         *schedule.ScheduleState
 	SchedulePersistor     newagentmodel.SchedulePersistor
+	CompactionStore       newagentmodel.CompactionStore
 	WriteSchedulePreview  newagentmodel.WriteSchedulePreviewFunc
 	OriginalScheduleState *schedule.ScheduleState
 	AlwaysExecute         bool // true 时写工具跳过确认闸门直接执行
@@ -180,6 +181,12 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 
 	// 5. 构造本轮执行输入，请求 LLM 输出 ExecuteDecision。
 	messages := newagentprompt.BuildExecuteMessages(flowState, conversationContext)
+
+	// 5.1 Token 预算检查 & 上下文压缩。
+	messages = compactExecuteMessagesIfNeeded(
+		ctx, messages, input, flowState, emitter,
+	)
+
 	log.Printf(
 		"[DEBUG] execute LLM context begin chat=%s round=%d message_count=%d\n%s\n[DEBUG] execute LLM context end chat=%s round=%d",
 		flowState.ConversationID,
