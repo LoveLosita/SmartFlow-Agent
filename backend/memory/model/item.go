@@ -67,10 +67,39 @@ type ListItemsRequest struct {
 	Limit          int
 }
 
-// DeleteItemRequest 描述软删除一条记忆时所需的最小参数。
-type DeleteItemRequest struct {
-	UserID       int
-	MemoryID     int64
-	Reason       string
-	OperatorType string
+// CreateItemFields 是 repo 层落库时真正需要的字段集合。
+type CreateItemFields struct {
+	UserID            int
+	ConversationID    string
+	AssistantID       string
+	RunID             string
+	MemoryType        string
+	Title             string
+	Content           string
+	NormalizedContent string
+	ContentHash       string
+	Confidence        float64
+	Importance        float64
+	SensitivityLevel  int
+	IsExplicit        bool
+	Status            string
+	TTLAt             *time.Time
+	VectorStatus      string
+	SourceMessageID   *int64
+	SourceEventID     *string
+	LastAccessAt      *time.Time
+}
+
+// UpdateItemFields 是“用户管理侧修改记忆”时 repo 层允许更新的字段集合。
+type UpdateItemFields struct {
+	MemoryType        string
+	Title             string
+	Content           string
+	NormalizedContent string
+	ContentHash       string
+	Confidence        float64
+	Importance        float64
+	SensitivityLevel  int
+	IsExplicit        bool
+	TTLAt             *time.Time
 }

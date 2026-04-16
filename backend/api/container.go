@@ -7,4 +7,5 @@ type ApiHandlers struct {
 	TaskClassHandler *TaskClassHandler
 	ScheduleHandler  *ScheduleAPI
 	AgentHandler     *AgentHandler
+	MemoryHandler    *MemoryHandler
 }

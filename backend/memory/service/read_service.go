@@ -10,6 +10,7 @@ import (
 
 	infrarag "github.com/LoveLosita/smartflow/backend/infra/rag"
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
+	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	memoryrepo "github.com/LoveLosita/smartflow/backend/memory/repo"
 	memoryutils "github.com/LoveLosita/smartflow/backend/memory/utils"
 	"github.com/LoveLosita/smartflow/backend/model"
@@ -31,6 +32,26 @@ type ReadService struct {
 	settingsRepo *memoryrepo.SettingsRepo
 	ragRuntime   infrarag.Runtime
 	cfg          memorymodel.Config
+	observer     memoryobserve.Observer
+	metrics      memoryobserve.MetricsRecorder
+}
+
+type retrieveTelemetry struct {
+	ReadMode         string
+	QueryLen         int
+	LegacyHitCount   int
+	PinnedHitCount   int
+	SemanticHitCount int
+	DedupDropCount   int
+	FinalCount       int
+	Degraded         bool
+	RAGFallbackUsed  bool
+}
+
+type semanticRetrieveTelemetry struct {
+	HitCount        int
+	Degraded        bool
+	RAGFallbackUsed bool
 }
 
 func NewReadService(
@@ -38,12 +59,22 @@ func NewReadService(
 	settingsRepo *memoryrepo.SettingsRepo,
 	ragRuntime infrarag.Runtime,
 	cfg memorymodel.Config,
+	observer memoryobserve.Observer,
+	metrics memoryobserve.MetricsRecorder,
 ) *ReadService {
+	if observer == nil {
+		observer = memoryobserve.NewNopObserver()
+	}
+	if metrics == nil {
+		metrics = memoryobserve.NewNopMetrics()
+	}
 	return &ReadService{
 		itemRepo:     itemRepo,
 		settingsRepo: settingsRepo,
 		ragRuntime:   ragRuntime,
 		cfg:          cfg,
+		observer:     observer,
+		metrics:      metrics,
 	}
 }
 
@@ -60,9 +91,14 @@ func (s *ReadService) Retrieve(ctx context.Context, req memorymodel.RetrieveRequ
 	if now.IsZero() {
 		now = time.Now()
 	}
+	telemetry := retrieveTelemetry{
+		ReadMode: s.cfg.EffectiveReadMode(),
+		QueryLen: len(strings.TrimSpace(req.Query)),
+	}
 
 	setting, err := s.settingsRepo.GetByUserID(ctx, req.UserID)
 	if err != nil {
+		s.recordRetrieve(ctx, req, telemetry, err)
 		return nil, err
 	}
 	effectiveSetting := memoryutils.EffectiveUserSetting(setting, req.UserID)
@@ -72,16 +108,29 @@ func (s *ReadService) Retrieve(ctx context.Context, req memorymodel.RetrieveRequ
 
 	limit := normalizeLimit(req.Limit, defaultRetrieveLimit, maxRetrieveLimit)
 	if s.cfg.EffectiveReadMode() == memorymodel.MemoryReadModeHybrid {
-		return s.HybridRetrieve(ctx, req, effectiveSetting, limit, now)
+		items, hybridTelemetry, hybridErr := s.HybridRetrieve(ctx, req, effectiveSetting, limit, now)
+		hybridTelemetry.ReadMode = memorymodel.MemoryReadModeHybrid
+		hybridTelemetry.QueryLen = telemetry.QueryLen
+		s.recordRetrieve(ctx, req, hybridTelemetry, hybridErr)
+		return items, hybridErr
 	}
 	if s.cfg.RAGEnabled && s.ragRuntime != nil && strings.TrimSpace(req.Query) != "" {
 		items, ragErr := s.retrieveByRAG(ctx, req, effectiveSetting, limit, now)
 		if ragErr == nil && len(items) > 0 {
+			telemetry.SemanticHitCount = len(items)
+			telemetry.FinalCount = len(items)
+			s.recordRetrieve(ctx, req, telemetry, nil)
 			return items, nil
 		}
+		telemetry.Degraded = true
+		telemetry.RAGFallbackUsed = true
 	}
 
-	return s.retrieveByLegacy(ctx, req, limit, now, effectiveSetting)
+	items, legacyErr := s.retrieveByLegacy(ctx, req, limit, now, effectiveSetting)
+	telemetry.LegacyHitCount = len(items)
+	telemetry.FinalCount = len(items)
+	s.recordRetrieve(ctx, req, telemetry, legacyErr)
+	return items, legacyErr
 }
 
 func (s *ReadService) retrieveByLegacy(
@@ -177,6 +226,58 @@ func normalizeRetrieveMemoryTypes(raw []string) []string {
 		memorymodel.MemoryTypePreference,
 		memorymodel.MemoryTypeTodoHint,
 		memorymodel.MemoryTypeFact,
+	}
+}
+
+func (s *ReadService) recordRetrieve(
+	ctx context.Context,
+	req memorymodel.RetrieveRequest,
+	telemetry retrieveTelemetry,
+	err error,
+) {
+	if s == nil {
+		return
+	}
+
+	level := memoryobserve.LevelInfo
+	if err != nil {
+		level = memoryobserve.LevelWarn
+	}
+	s.observer.Observe(ctx, memoryobserve.Event{
+		Level:     level,
+		Component: memoryobserve.ComponentRead,
+		Operation: memoryobserve.OperationRetrieve,
+		Fields: map[string]any{
+			"user_id":            req.UserID,
+			"read_mode":          telemetry.ReadMode,
+			"query_len":          telemetry.QueryLen,
+			"legacy_hit_count":   telemetry.LegacyHitCount,
+			"pinned_hit_count":   telemetry.PinnedHitCount,
+			"semantic_hit_count": telemetry.SemanticHitCount,
+			"dedup_drop_count":   telemetry.DedupDropCount,
+			"final_count":        telemetry.FinalCount,
+			"degraded":           telemetry.Degraded,
+			"rag_fallback_used":  telemetry.RAGFallbackUsed,
+			"success":            err == nil,
+			"error":              err,
+			"error_code":         memoryobserve.ClassifyError(err),
+		},
+	})
+
+	if telemetry.FinalCount > 0 {
+		s.metrics.AddCounter(memoryobserve.MetricRetrieveHitTotal, int64(telemetry.FinalCount), map[string]string{
+			"read_mode": strings.TrimSpace(telemetry.ReadMode),
+		})
+	}
+	if telemetry.DedupDropCount > 0 {
+		s.metrics.AddCounter(memoryobserve.MetricRetrieveDedupDropTotal, int64(telemetry.DedupDropCount), map[string]string{
+			"read_mode": strings.TrimSpace(telemetry.ReadMode),
+		})
+	}
+	if telemetry.RAGFallbackUsed {
+		s.metrics.AddCounter(memoryobserve.MetricRAGFallbackTotal, 1, map[string]string{
+			"read_mode": strings.TrimSpace(telemetry.ReadMode),
+		})
 	}
 }
 

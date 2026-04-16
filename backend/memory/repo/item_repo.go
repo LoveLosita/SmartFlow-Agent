@@ -46,6 +46,54 @@ func (r *ItemRepo) UpsertItems(ctx context.Context, items []model.MemoryItem) er
 	return nil
 }
 
+// Create 写入单条记忆并返回带自增主键的结果。
+//
+// 职责边界：
+// 1. 只负责单条落库，不负责内容归一化与业务校验；
+// 2. 默认把 vector_status 视为上游已决策好的桥接状态，不在这里擅自改写；
+// 3. 返回值用于上游继续写 audit 或做向量同步。
+func (r *ItemRepo) Create(ctx context.Context, fields memorymodel.CreateItemFields) (*model.MemoryItem, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("memory item repo is nil")
+	}
+	if fields.UserID <= 0 {
+		return nil, errors.New("memory item create user_id is invalid")
+	}
+
+	item := model.MemoryItem{
+		UserID:            fields.UserID,
+		ConversationID:    strPtrOrNil(fields.ConversationID),
+		AssistantID:       strPtrOrNil(fields.AssistantID),
+		RunID:             strPtrOrNil(fields.RunID),
+		MemoryType:        fields.MemoryType,
+		Title:             fields.Title,
+		Content:           fields.Content,
+		NormalizedContent: strPtrOrNil(fields.NormalizedContent),
+		ContentHash:       strPtrOrNil(fields.ContentHash),
+		Confidence:        fields.Confidence,
+		Importance:        fields.Importance,
+		SensitivityLevel:  fields.SensitivityLevel,
+		SourceMessageID:   fields.SourceMessageID,
+		SourceEventID:     fields.SourceEventID,
+		IsExplicit:        fields.IsExplicit,
+		Status:            fields.Status,
+		TTLAt:             fields.TTLAt,
+		LastAccessAt:      fields.LastAccessAt,
+		VectorStatus:      fields.VectorStatus,
+	}
+	if item.Status == "" {
+		item.Status = model.MemoryItemStatusActive
+	}
+	if strings.TrimSpace(item.VectorStatus) == "" {
+		item.VectorStatus = "pending"
+	}
+
+	if err := r.db.WithContext(ctx).Create(&item).Error; err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
 // FindByQuery 按统一过滤条件读取记忆条目。
 //
 // 步骤化说明：
@@ -324,6 +372,53 @@ func (r *ItemRepo) UpdateContentByID(ctx context.Context, memoryID int64, fields
 		}).Error
 }
 
+// UpdateManagedFieldsByID 更新“用户管理侧”允许修改的记忆字段。
+func (r *ItemRepo) UpdateManagedFieldsByID(ctx context.Context, userID int, memoryID int64, fields memorymodel.UpdateItemFields) error {
+	return r.UpdateManagedFieldsByIDAt(ctx, userID, memoryID, fields, time.Now())
+}
+
+// UpdateManagedFieldsByIDAt 更新“用户管理侧”允许修改的记忆字段，并允许显式指定更新时间。
+//
+// 步骤化说明：
+// 1. 这里只改内容侧和展示侧字段，不改 user_id/status 等归属语义；
+// 2. memory_type/content 变化后，会把 vector_status 置为 pending，提示上游需要重新同步向量；
+// 3. TTLAt 允许被设置为 nil，用于显式清空过期时间。
+func (r *ItemRepo) UpdateManagedFieldsByIDAt(
+	ctx context.Context,
+	userID int,
+	memoryID int64,
+	fields memorymodel.UpdateItemFields,
+	updatedAt time.Time,
+) error {
+	if r == nil || r.db == nil {
+		return errors.New("memory item repo is nil")
+	}
+	if userID <= 0 || memoryID <= 0 {
+		return errors.New("memory item update params is invalid")
+	}
+	if updatedAt.IsZero() {
+		updatedAt = time.Now()
+	}
+
+	return r.db.WithContext(ctx).
+		Model(&model.MemoryItem{}).
+		Where("id = ? AND user_id = ?", memoryID, userID).
+		Updates(map[string]any{
+			"memory_type":        fields.MemoryType,
+			"title":              fields.Title,
+			"content":            fields.Content,
+			"normalized_content": fields.NormalizedContent,
+			"content_hash":       fields.ContentHash,
+			"confidence":         fields.Confidence,
+			"importance":         fields.Importance,
+			"sensitivity_level":  fields.SensitivityLevel,
+			"is_explicit":        fields.IsExplicit,
+			"ttl_at":             fields.TTLAt,
+			"vector_status":      "pending",
+			"updated_at":         updatedAt,
+		}).Error
+}
+
 // SoftDeleteByID 软删除指定用户的某条记忆。
 //
 // 说明：
@@ -346,6 +441,95 @@ func (r *ItemRepo) SoftDeleteByID(ctx context.Context, userID int, memoryID int6
 			"vector_status": "pending",
 			"updated_at":    time.Now(),
 		}).Error
+}
+
+// RestoreByID 把 deleted/archived 记忆恢复为 active。
+func (r *ItemRepo) RestoreByID(ctx context.Context, userID int, memoryID int64) error {
+	return r.RestoreByIDAt(ctx, userID, memoryID, time.Now())
+}
+
+// RestoreByIDAt 把 deleted/archived 记忆恢复为 active，并显式刷新 vector_status。
+//
+// 这样做的原因：
+// 1. 恢复后的记忆需要重新参与语义召回，因此向量侧也要重新同步；
+// 2. 这里统一把 vector_status 置为 pending，避免上游遗漏桥接状态更新；
+// 3. 若目标记录本身已是 active，上游应先读快照决定是否真的调用恢复。
+func (r *ItemRepo) RestoreByIDAt(ctx context.Context, userID int, memoryID int64, updatedAt time.Time) error {
+	if r == nil || r.db == nil {
+		return errors.New("memory item repo is nil")
+	}
+	if userID <= 0 || memoryID <= 0 {
+		return errors.New("memory item restore params is invalid")
+	}
+	if updatedAt.IsZero() {
+		updatedAt = time.Now()
+	}
+
+	return r.db.WithContext(ctx).
+		Model(&model.MemoryItem{}).
+		Where("id = ? AND user_id = ?", memoryID, userID).
+		Updates(map[string]any{
+			"status":        model.MemoryItemStatusActive,
+			"vector_status": "pending",
+			"updated_at":    updatedAt,
+		}).Error
+}
+
+// ArchiveByIDsAt 把一批重复记忆改为 archived，并等待上游删除向量副本。
+func (r *ItemRepo) ArchiveByIDsAt(ctx context.Context, ids []int64, updatedAt time.Time) error {
+	if r == nil || r.db == nil {
+		return errors.New("memory item repo is nil")
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if updatedAt.IsZero() {
+		updatedAt = time.Now()
+	}
+
+	return r.db.WithContext(ctx).
+		Model(&model.MemoryItem{}).
+		Where("id IN ?", ids).
+		Where("status = ?", model.MemoryItemStatusActive).
+		Updates(map[string]any{
+			"status":        model.MemoryItemStatusArchived,
+			"vector_status": "pending",
+			"updated_at":    updatedAt,
+		}).Error
+}
+
+// ListActiveItemsForDedup 读取“当前仍 active 且带 content_hash”的候选记忆，供离线 dedup 治理使用。
+//
+// 步骤化说明：
+// 1. 只扫描 status=active 且 hash 非空的记录，因为治理目标是“活跃重复项”；
+// 2. 先按 user/type/hash 分组，再按更新时间、置信度、主键逆序排列，方便上游顺序分组；
+// 3. Limit 仅用于保守控量，不保证整组完整，因此首次治理建议留空或给足够大值。
+func (r *ItemRepo) ListActiveItemsForDedup(ctx context.Context, userID int, limit int) ([]model.MemoryItem, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("memory item repo is nil")
+	}
+
+	db := r.db.WithContext(ctx).
+		Model(&model.MemoryItem{}).
+		Where("status = ?", model.MemoryItemStatusActive).
+		Where("content_hash IS NOT NULL AND content_hash <> ''")
+	if userID > 0 {
+		db = db.Where("user_id = ?", userID)
+	}
+	if limit > 0 {
+		db = db.Limit(limit)
+	}
+
+	var items []model.MemoryItem
+	err := db.
+		Order("user_id ASC").
+		Order("memory_type ASC").
+		Order("content_hash ASC").
+		Order("updated_at DESC").
+		Order("confidence DESC").
+		Order("id DESC").
+		Find(&items).Error
+	return items, err
 }
 
 func applyScopedEquality(db *gorm.DB, column, value string, includeGlobal bool) *gorm.DB {

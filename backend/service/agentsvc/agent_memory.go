@@ -7,6 +7,7 @@ import (
 	"time"
 
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
+	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 )
 
@@ -27,10 +28,21 @@ type MemoryReader interface {
 	Retrieve(ctx context.Context, req memorymodel.RetrieveRequest) ([]memorymodel.ItemDTO, error)
 }
 
+type memoryObserveProvider interface {
+	MemoryObserver() memoryobserve.Observer
+	MemoryMetrics() memoryobserve.MetricsRecorder
+}
+
 // SetMemoryReader 注入 newAgent 主链路读取记忆所需的薄接口与渲染配置。
 func (s *AgentService) SetMemoryReader(reader MemoryReader, cfg memorymodel.Config) {
 	s.memoryReader = reader
 	s.memoryCfg = cfg
+	s.memoryObserver = memoryobserve.NewNopObserver()
+	s.memoryMetrics = memoryobserve.NewNopMetrics()
+	if provider, ok := reader.(memoryObserveProvider); ok {
+		s.memoryObserver = provider.MemoryObserver()
+		s.memoryMetrics = provider.MemoryMetrics()
+	}
 }
 
 // injectMemoryContext 在 graph 执行前，把本轮相关记忆写入 ConversationContext 的 pinned block。
@@ -64,6 +76,7 @@ func (s *AgentService) injectMemoryContext(
 	})
 	if err != nil {
 		conversationContext.RemovePinnedBlock(newAgentMemoryBlockKey)
+		s.recordMemoryInject(ctx, userID, 0, false, err)
 		log.Printf("读取记忆上下文失败 user=%d chat=%s err=%v", userID, chatID, err)
 		return
 	}
@@ -71,6 +84,7 @@ func (s *AgentService) injectMemoryContext(
 	content := renderMemoryPinnedContentByMode(items, s.memoryCfg.EffectiveInjectRenderMode())
 	if content == "" {
 		conversationContext.RemovePinnedBlock(newAgentMemoryBlockKey)
+		s.recordMemoryInject(ctx, userID, len(items), false, nil)
 		return
 	}
 
@@ -79,6 +93,7 @@ func (s *AgentService) injectMemoryContext(
 		Title:   newAgentMemoryBlockTitle,
 		Content: content,
 	})
+	s.recordMemoryInject(ctx, userID, len(items), true, nil)
 }
 
 // shouldInjectMemoryForInput 判断当前输入是否值得触发一次记忆召回。
@@ -98,5 +113,51 @@ func shouldInjectMemoryForInput(userMessage string) bool {
 		return false
 	default:
 		return true
+	}
+}
+
+func (s *AgentService) recordMemoryInject(
+	ctx context.Context,
+	userID int,
+	inputCount int,
+	success bool,
+	err error,
+) {
+	if s == nil {
+		return
+	}
+	observer := s.memoryObserver
+	if observer == nil {
+		observer = memoryobserve.NewNopObserver()
+	}
+	metrics := s.memoryMetrics
+	if metrics == nil {
+		metrics = memoryobserve.NewNopMetrics()
+	}
+
+	level := memoryobserve.LevelInfo
+	if err != nil {
+		level = memoryobserve.LevelWarn
+	}
+	observer.Observe(ctx, memoryobserve.Event{
+		Level:     level,
+		Component: memoryobserve.ComponentInject,
+		Operation: memoryobserve.OperationInject,
+		Fields: map[string]any{
+			"user_id":        userID,
+			"inject_mode":    s.memoryCfg.EffectiveInjectRenderMode(),
+			"input_count":    inputCount,
+			"rendered_count": inputCount,
+			"token_budget":   0,
+			"fallback":       false,
+			"success":        success && err == nil,
+			"error":          err,
+			"error_code":     memoryobserve.ClassifyError(err),
+		},
+	})
+	if inputCount > 0 {
+		metrics.AddCounter(memoryobserve.MetricInjectItemTotal, int64(inputCount), map[string]string{
+			"inject_mode": s.memoryCfg.EffectiveInjectRenderMode(),
+		})
 	}
 }

@@ -97,6 +97,16 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, userRepo *d
 			agentGroup.GET("/schedule-preview", handlers.AgentHandler.GetSchedulePlanPreview)
 			agentGroup.GET("/context-stats", handlers.AgentHandler.GetContextStats)
 		}
+		memoryGroup := apiGroup.Group("/memory")
+		{
+			memoryGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
+			memoryGroup.GET("/items", handlers.MemoryHandler.ListItems)
+			memoryGroup.GET("/items/:id", handlers.MemoryHandler.GetItem)
+			memoryGroup.POST("/items", middleware.IdempotencyMiddleware(cache), handlers.MemoryHandler.CreateItem)
+			memoryGroup.PATCH("/items/:id", middleware.IdempotencyMiddleware(cache), handlers.MemoryHandler.UpdateItem)
+			memoryGroup.DELETE("/items/:id", middleware.IdempotencyMiddleware(cache), handlers.MemoryHandler.DeleteItem)
+			memoryGroup.POST("/items/:id/restore", middleware.IdempotencyMiddleware(cache), handlers.MemoryHandler.RestoreItem)
+		}
 	}
 	// 初始化Gin引擎
 	log.Println("Routes setup completed")

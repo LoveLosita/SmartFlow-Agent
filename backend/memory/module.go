@@ -7,11 +7,15 @@ import (
 
 	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	infrarag "github.com/LoveLosita/smartflow/backend/infra/rag"
+	memorycleanup "github.com/LoveLosita/smartflow/backend/memory/cleanup"
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
+	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	memoryorchestrator "github.com/LoveLosita/smartflow/backend/memory/orchestrator"
 	memoryrepo "github.com/LoveLosita/smartflow/backend/memory/repo"
 	memoryservice "github.com/LoveLosita/smartflow/backend/memory/service"
+	memoryvectorsync "github.com/LoveLosita/smartflow/backend/memory/vectorsync"
 	memoryworker "github.com/LoveLosita/smartflow/backend/memory/worker"
+	"github.com/LoveLosita/smartflow/backend/model"
 	"gorm.io/gorm"
 )
 
@@ -26,6 +30,8 @@ type Module struct {
 	cfg        memorymodel.Config
 	llmClient  *infrallm.Client
 	ragRuntime infrarag.Runtime
+	observer   memoryobserve.Observer
+	metrics    memoryobserve.MetricsRecorder
 
 	jobRepo      *memoryrepo.JobRepo
 	itemRepo     *memoryrepo.ItemRepo
@@ -35,7 +41,15 @@ type Module struct {
 	enqueueService *memoryservice.EnqueueService
 	readService    *memoryservice.ReadService
 	manageService  *memoryservice.ManageService
+	vectorSyncer   *memoryvectorsync.Syncer
+	dedupRunner    *memorycleanup.DedupRunner
 	runner         *memoryworker.Runner
+}
+
+// ObserveDeps 描述 memory 模块可选的观测依赖。
+type ObserveDeps struct {
+	Observer memoryobserve.Observer
+	Metrics  memoryobserve.MetricsRecorder
 }
 
 // LoadConfigFromViper 复用 memory 子包里的配置加载逻辑，对外收口一个统一入口。
@@ -51,7 +65,18 @@ func LoadConfigFromViper() memorymodel.Config {
 // 3. ragRuntime 允许为 nil，此时读取/向量同步自动回退旧逻辑；
 // 4. 若后续接入统一 DI 容器，也应优先注册这个 Module，而不是把内部 repo/service 继续向外泄漏。
 func NewModule(db *gorm.DB, llmClient *infrallm.Client, ragRuntime infrarag.Runtime, cfg memorymodel.Config) *Module {
-	return wireModule(db, llmClient, ragRuntime, cfg)
+	return NewModuleWithObserve(db, llmClient, ragRuntime, cfg, ObserveDeps{})
+}
+
+// NewModuleWithObserve 创建带观测依赖的 memory 模块门面。
+func NewModuleWithObserve(
+	db *gorm.DB,
+	llmClient *infrallm.Client,
+	ragRuntime infrarag.Runtime,
+	cfg memorymodel.Config,
+	deps ObserveDeps,
+) *Module {
+	return wireModule(db, llmClient, ragRuntime, cfg, deps)
 }
 
 // WithTx 返回绑定到指定事务连接的同构门面。
@@ -67,7 +92,10 @@ func (m *Module) WithTx(tx *gorm.DB) *Module {
 	if tx == nil {
 		return m
 	}
-	return wireModule(tx, m.llmClient, m.ragRuntime, m.cfg)
+	return wireModule(tx, m.llmClient, m.ragRuntime, m.cfg, ObserveDeps{
+		Observer: m.observer,
+		Metrics:  m.metrics,
+	})
 }
 
 // EnqueueExtract 把一次记忆抽取请求入队到 memory_jobs。
@@ -98,12 +126,44 @@ func (m *Module) ListItems(ctx context.Context, req memorymodel.ListItemsRequest
 	return m.manageService.ListItems(ctx, req)
 }
 
+// GetItem 返回当前用户自己的单条记忆详情。
+func (m *Module) GetItem(ctx context.Context, req model.MemoryGetItemRequest) (*memorymodel.ItemDTO, error) {
+	if m == nil || m.manageService == nil {
+		return nil, errors.New("memory module manage service is nil")
+	}
+	return m.manageService.GetItem(ctx, req)
+}
+
+// CreateItem 手动新增一条用户记忆。
+func (m *Module) CreateItem(ctx context.Context, req model.MemoryCreateItemRequest) (*memorymodel.ItemDTO, error) {
+	if m == nil || m.manageService == nil {
+		return nil, errors.New("memory module manage service is nil")
+	}
+	return m.manageService.CreateItem(ctx, req)
+}
+
+// UpdateItem 手动修改一条用户记忆。
+func (m *Module) UpdateItem(ctx context.Context, req model.MemoryUpdateItemRequest) (*memorymodel.ItemDTO, error) {
+	if m == nil || m.manageService == nil {
+		return nil, errors.New("memory module manage service is nil")
+	}
+	return m.manageService.UpdateItem(ctx, req)
+}
+
 // DeleteItem 软删除一条记忆，并补写审计日志。
-func (m *Module) DeleteItem(ctx context.Context, req memorymodel.DeleteItemRequest) (*memorymodel.ItemDTO, error) {
+func (m *Module) DeleteItem(ctx context.Context, req model.MemoryDeleteItemRequest) (*memorymodel.ItemDTO, error) {
 	if m == nil || m.manageService == nil {
 		return nil, errors.New("memory module manage service is nil")
 	}
 	return m.manageService.DeleteItem(ctx, req)
+}
+
+// RestoreItem 恢复一条 deleted/archived 记忆。
+func (m *Module) RestoreItem(ctx context.Context, req model.MemoryRestoreItemRequest) (*memorymodel.ItemDTO, error) {
+	if m == nil || m.manageService == nil {
+		return nil, errors.New("memory module manage service is nil")
+	}
+	return m.manageService.RestoreItem(ctx, req)
 }
 
 // GetUserSetting 读取用户当前生效的记忆开关。
@@ -120,6 +180,30 @@ func (m *Module) UpsertUserSetting(ctx context.Context, req memorymodel.UpdateUs
 		return memorymodel.UserSettingDTO{}, errors.New("memory module manage service is nil")
 	}
 	return m.manageService.UpsertUserSetting(ctx, req)
+}
+
+// RunDedupCleanup 执行一次离线 dedup 治理。
+func (m *Module) RunDedupCleanup(ctx context.Context, req model.MemoryDedupCleanupRequest) (model.MemoryDedupCleanupResult, error) {
+	if m == nil || m.dedupRunner == nil {
+		return model.MemoryDedupCleanupResult{}, errors.New("memory module dedup runner is nil")
+	}
+	return m.dedupRunner.Run(ctx, req)
+}
+
+// MemoryObserver 暴露 memory 模块当前使用的 observer，供注入桥接等外围能力复用。
+func (m *Module) MemoryObserver() memoryobserve.Observer {
+	if m == nil || m.observer == nil {
+		return memoryobserve.NewNopObserver()
+	}
+	return m.observer
+}
+
+// MemoryMetrics 暴露 memory 模块当前使用的轻量计数器。
+func (m *Module) MemoryMetrics() memoryobserve.MetricsRecorder {
+	if m == nil || m.metrics == nil {
+		return memoryobserve.NewNopMetrics()
+	}
+	return m.metrics
 }
 
 // StartWorker 启动 memory 后台 worker。
@@ -142,15 +226,30 @@ func (m *Module) StartWorker(ctx context.Context) {
 	log.Println("Memory worker started")
 }
 
-func wireModule(db *gorm.DB, llmClient *infrallm.Client, ragRuntime infrarag.Runtime, cfg memorymodel.Config) *Module {
+func wireModule(
+	db *gorm.DB,
+	llmClient *infrallm.Client,
+	ragRuntime infrarag.Runtime,
+	cfg memorymodel.Config,
+	deps ObserveDeps,
+) *Module {
 	jobRepo := memoryrepo.NewJobRepo(db)
 	itemRepo := memoryrepo.NewItemRepo(db)
 	auditRepo := memoryrepo.NewAuditRepo(db)
 	settingsRepo := memoryrepo.NewSettingsRepo(db)
+	observer := deps.Observer
+	if observer == nil {
+		observer = memoryobserve.NewLoggerObserver(log.Default())
+	}
+	metrics := deps.Metrics
+	if metrics == nil {
+		metrics = memoryobserve.NewMetricsRegistry()
+	}
+	vectorSyncer := memoryvectorsync.NewSyncer(ragRuntime, itemRepo, observer, metrics)
 
 	enqueueService := memoryservice.NewEnqueueService(jobRepo)
-	readService := memoryservice.NewReadService(itemRepo, settingsRepo, ragRuntime, cfg)
-	manageService := memoryservice.NewManageService(db, itemRepo, auditRepo, settingsRepo)
+	readService := memoryservice.NewReadService(itemRepo, settingsRepo, ragRuntime, cfg, observer, metrics)
+	manageService := memoryservice.NewManageService(db, itemRepo, auditRepo, settingsRepo, vectorSyncer, observer, metrics)
 	extractor := memoryorchestrator.NewLLMWriteOrchestrator(llmClient, cfg)
 
 	// 决策编排器：仅在 DecisionEnabled 时才创建有效实例。
@@ -161,13 +260,16 @@ func wireModule(db *gorm.DB, llmClient *infrallm.Client, ragRuntime infrarag.Run
 		decisionOrchestrator = memoryorchestrator.NewLLMDecisionOrchestrator(llmClient, cfg)
 	}
 
-	runner := memoryworker.NewRunner(db, jobRepo, itemRepo, auditRepo, settingsRepo, extractor, ragRuntime, cfg, decisionOrchestrator)
+	runner := memoryworker.NewRunner(db, jobRepo, itemRepo, auditRepo, settingsRepo, extractor, ragRuntime, cfg, decisionOrchestrator, vectorSyncer, observer, metrics)
+	dedupRunner := memorycleanup.NewDedupRunner(db, itemRepo, auditRepo, vectorSyncer, observer, metrics)
 
 	return &Module{
 		db:             db,
 		cfg:            cfg,
 		llmClient:      llmClient,
 		ragRuntime:     ragRuntime,
+		observer:       observer,
+		metrics:        metrics,
 		jobRepo:        jobRepo,
 		itemRepo:       itemRepo,
 		auditRepo:      auditRepo,
@@ -175,6 +277,8 @@ func wireModule(db *gorm.DB, llmClient *infrallm.Client, ragRuntime infrarag.Run
 		enqueueService: enqueueService,
 		readService:    readService,
 		manageService:  manageService,
+		vectorSyncer:   vectorSyncer,
+		dedupRunner:    dedupRunner,
 		runner:         runner,
 	}
 }

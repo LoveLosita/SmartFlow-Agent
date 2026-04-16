@@ -14,6 +14,7 @@ import (
 	ragconfig "github.com/LoveLosita/smartflow/backend/infra/rag/config"
 	"github.com/LoveLosita/smartflow/backend/inits"
 	"github.com/LoveLosita/smartflow/backend/memory"
+	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	"github.com/LoveLosita/smartflow/backend/middleware"
 	newagentconv "github.com/LoveLosita/smartflow/backend/newAgent/conv"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
@@ -78,7 +79,18 @@ func Start() {
 	// 1. memory 模块对启动层只暴露一个门面。
 	// 2. 后续若接入统一 DI 容器，也优先注入这个门面，而不是继续暴露内部 repo/service。
 	memoryCfg := memory.LoadConfigFromViper()
-	memoryModule := memory.NewModule(db, infrallm.WrapArkClient(aiHub.Worker), ragRuntime, memoryCfg)
+	memoryObserver := memoryobserve.NewLoggerObserver(log.Default())
+	memoryMetrics := memoryobserve.NewMetricsRegistry()
+	memoryModule := memory.NewModuleWithObserve(
+		db,
+		infrallm.WrapArkClient(aiHub.Worker),
+		ragRuntime,
+		memoryCfg,
+		memory.ObserveDeps{
+			Observer: memoryObserver,
+			Metrics:  memoryMetrics,
+		},
+	)
 
 	// DAO 层初始化。
 	cacheRepo := dao.NewCacheDAO(rdb)
@@ -180,6 +192,7 @@ func Start() {
 	taskClassApi := api.NewTaskClassHandler(taskClassService)
 	scheduleApi := api.NewScheduleAPI(scheduleService)
 	agentApi := api.NewAgentHandler(agentService)
+	memoryApi := api.NewMemoryHandler(memoryModule)
 	handlers := &api.ApiHandlers{
 		UserHandler:      userApi,
 		TaskHandler:      taskApi,
@@ -187,6 +200,7 @@ func Start() {
 		CourseHandler:    courseApi,
 		ScheduleHandler:  scheduleApi,
 		AgentHandler:     agentApi,
+		MemoryHandler:    memoryApi,
 	}
 
 	r := routers.RegisterRouters(handlers, cacheRepo, userRepo, limiter)

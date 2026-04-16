@@ -16,6 +16,7 @@ import (
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
 	"github.com/LoveLosita/smartflow/backend/inits"
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
+	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	"github.com/LoveLosita/smartflow/backend/model"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
@@ -60,6 +61,8 @@ type AgentService struct {
 	compactionStore   newagentmodel.CompactionStore
 	memoryReader      MemoryReader
 	memoryCfg         memorymodel.Config
+	memoryObserver    memoryobserve.Observer
+	memoryMetrics     memoryobserve.MetricsRecorder
 }
 
 // NewAgentService 构造 AgentService。

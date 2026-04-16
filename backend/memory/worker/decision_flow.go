@@ -33,6 +33,11 @@ type factDecisionResult struct {
 	Outcomes []*ApplyActionOutcome
 }
 
+type candidateRecallResult struct {
+	Items        []memorymodel.CandidateSnapshot
+	FallbackMode string
+}
+
 // executeDecisionFlow 在 worker 内编排"召回→逐对比对→汇总→执行"全流程。
 //
 // 职责边界：
@@ -116,6 +121,7 @@ func (r *Runner) executeDecisionForFact(
 		}
 	}
 	if len(existing) > 0 {
+		r.recordDecisionObservation(ctx, job, payload, fact, 0, memorymodel.DecisionActionNone, "hash_exact", true, nil)
 		result.Outcomes = append(result.Outcomes, &ApplyActionOutcome{
 			Action:    memorymodel.DecisionActionNone,
 			NeedsSync: false,
@@ -124,7 +130,8 @@ func (r *Runner) executeDecisionForFact(
 	}
 
 	// Step 2: Milvus 语义召回（含降级）。
-	candidates := r.recallCandidates(ctx, payload, fact)
+	recallResult := r.recallCandidates(ctx, payload, fact)
+	candidates := recallResult.Items
 
 	// 打印召回候选详情，便于排查向量召回和阈值过滤效果。
 	if r.logger != nil {
@@ -151,9 +158,11 @@ func (r *Runner) executeDecisionForFact(
 	// Step 5: 校验 + 执行。
 	actionOutcome, err := ApplyFinalDecision(ctx, itemRepo, auditRepo, *decision, fact, job, payload)
 	if err != nil {
+		r.recordDecisionObservation(ctx, job, payload, fact, len(candidates), decision.Action, recallResult.FallbackMode, false, err)
 		return nil, fmt.Errorf("执行决策动作失败: %w", err)
 	}
 	result.Outcomes = append(result.Outcomes, actionOutcome)
+	r.recordDecisionObservation(ctx, job, payload, fact, len(candidates), decision.Action, recallResult.FallbackMode, true, nil)
 
 	// Step 6: conflict (DELETE) 后需要补一个 ADD 写入新 fact。
 	// 原因：旧记忆矛盾需删除，但新事实本身仍然有效，必须写入。
@@ -180,7 +189,7 @@ func (r *Runner) recallCandidates(
 	ctx context.Context,
 	payload memorymodel.ExtractJobPayload,
 	fact memorymodel.NormalizedFact,
-) []memorymodel.CandidateSnapshot {
+) candidateRecallResult {
 	// 1. 优先使用 Milvus 向量语义召回。
 	if r.ragRuntime != nil {
 		retrieveResult, err := r.ragRuntime.RetrieveMemory(ctx, infrarag.MemoryRetrieveRequest{
@@ -194,7 +203,10 @@ func (r *Runner) recallCandidates(
 		if err == nil && len(retrieveResult.Items) > 0 {
 			candidates := r.buildCandidatesFromRAG(retrieveResult.Items)
 			if len(candidates) > 0 {
-				return candidates
+				return candidateRecallResult{
+					Items:        candidates,
+					FallbackMode: "rag",
+				}
 			}
 			// RAG 返回了结果但 DocumentID 全部解析失败，降级到 MySQL。
 			if r.logger != nil {
@@ -204,10 +216,17 @@ func (r *Runner) recallCandidates(
 		if err != nil && r.logger != nil {
 			r.logger.Printf("[WARN][去重] Milvus 语义召回失败，降级到 MySQL: user_id=%d memory_type=%s topk=%d err=%v", payload.UserID, fact.MemoryType, r.cfg.DecisionCandidateTopK, err)
 		}
+		return candidateRecallResult{
+			Items:        r.recallCandidatesFromMySQL(ctx, payload, fact),
+			FallbackMode: "rag_to_mysql",
+		}
 	}
 
 	// 2. 降级：按 user_id + memory_type + status=active 查最近 N 条。
-	return r.recallCandidatesFromMySQL(ctx, payload, fact)
+	return candidateRecallResult{
+		Items:        r.recallCandidatesFromMySQL(ctx, payload, fact),
+		FallbackMode: "mysql_only",
+	}
 }
 
 // buildCandidatesFromRAG 从 RAG 检索结果构建候选快照列表。

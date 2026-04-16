@@ -12,8 +12,12 @@ const (
 	AuditOperationCreate = "create"
 	// AuditOperationUpdate 表示决策层更新已有记忆的内容。
 	AuditOperationUpdate = "update"
+	// AuditOperationArchive 表示治理层把重复记忆归档。
+	AuditOperationArchive = "archive"
 	// AuditOperationDelete 表示对已有记忆做软删除。
 	AuditOperationDelete = "delete"
+	// AuditOperationRestore 表示把已删除/归档记忆恢复为 active。
+	AuditOperationRestore = "restore"
 )
 
 // BuildItemAuditLog 构造记忆变更审计日志。

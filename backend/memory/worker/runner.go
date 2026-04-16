@@ -6,15 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"strconv"
 	"strings"
 	"time"
 
 	infrarag "github.com/LoveLosita/smartflow/backend/infra/rag"
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
+	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	memoryorchestrator "github.com/LoveLosita/smartflow/backend/memory/orchestrator"
 	memoryrepo "github.com/LoveLosita/smartflow/backend/memory/repo"
 	memoryutils "github.com/LoveLosita/smartflow/backend/memory/utils"
+	memoryvectorsync "github.com/LoveLosita/smartflow/backend/memory/vectorsync"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"gorm.io/gorm"
 )
@@ -42,6 +43,9 @@ type Runner struct {
 	extractor    Extractor
 	ragRuntime   infrarag.Runtime
 	logger       *log.Logger
+	vectorSyncer *memoryvectorsync.Syncer
+	observer     memoryobserve.Observer
+	metrics      memoryobserve.MetricsRecorder
 
 	// 决策层依赖。
 	// 说明：
@@ -62,7 +66,16 @@ func NewRunner(
 	ragRuntime infrarag.Runtime,
 	cfg memorymodel.Config,
 	decisionOrchestrator *memoryorchestrator.LLMDecisionOrchestrator,
+	vectorSyncer *memoryvectorsync.Syncer,
+	observer memoryobserve.Observer,
+	metrics memoryobserve.MetricsRecorder,
 ) *Runner {
+	if observer == nil {
+		observer = memoryobserve.NewNopObserver()
+	}
+	if metrics == nil {
+		metrics = memoryobserve.NewNopMetrics()
+	}
 	return &Runner{
 		db:                   db,
 		jobRepo:              jobRepo,
@@ -72,6 +85,9 @@ func NewRunner(
 		extractor:            extractor,
 		ragRuntime:           ragRuntime,
 		logger:               log.Default(),
+		vectorSyncer:         vectorSyncer,
+		observer:             observer,
+		metrics:              metrics,
 		cfg:                  cfg,
 		decisionOrchestrator: decisionOrchestrator,
 	}
@@ -96,6 +112,11 @@ func (r *Runner) RunOnce(ctx context.Context) (*RunOnceResult, error) {
 	if job == nil {
 		return &RunOnceResult{Claimed: false}, nil
 	}
+	if job.RetryCount > 0 {
+		r.metrics.AddCounter(memoryobserve.MetricJobRetryTotal, 1, map[string]string{
+			"job_type": strings.TrimSpace(job.JobType),
+		})
+	}
 
 	result := &RunOnceResult{
 		Claimed: true,
@@ -110,21 +131,25 @@ func (r *Runner) RunOnce(ctx context.Context) (*RunOnceResult, error) {
 		failReason := fmt.Sprintf("解析任务载荷失败: %v", err)
 		_ = r.jobRepo.MarkFailed(ctx, job.ID, failReason)
 		result.Status = model.MemoryJobStatusFailed
+		r.recordJobOutcome(ctx, job, nil, result.Status, false, err)
 		return result, nil
 	}
 
 	// 3. 先读取用户记忆设置。总开关关闭时，任务直接成功结束，不再继续抽取和落库。
 	setting, err := r.settingsRepo.GetByUserID(ctx, payload.UserID)
 	if err != nil {
+		r.recordJobOutcome(ctx, job, &payload, model.MemoryJobStatusFailed, false, err)
 		return nil, err
 	}
 	effectiveSetting := memoryutils.EffectiveUserSetting(setting, payload.UserID)
 	if !effectiveSetting.MemoryEnabled {
 		if err = r.jobRepo.MarkSuccess(ctx, job.ID); err != nil {
+			r.recordJobOutcome(ctx, job, &payload, model.MemoryJobStatusFailed, false, err)
 			return nil, err
 		}
 		result.Status = model.MemoryJobStatusSuccess
 		r.logger.Printf("memory worker skipped by user setting: job_id=%d user_id=%d", job.ID, payload.UserID)
+		r.recordJobOutcome(ctx, job, &payload, result.Status, true, nil)
 		return result, nil
 	}
 
@@ -134,26 +159,31 @@ func (r *Runner) RunOnce(ctx context.Context) (*RunOnceResult, error) {
 		failReason := fmt.Sprintf("抽取执行失败: %v", extractErr)
 		_ = r.jobRepo.MarkFailed(ctx, job.ID, failReason)
 		result.Status = model.MemoryJobStatusFailed
+		r.recordJobOutcome(ctx, job, &payload, result.Status, false, extractErr)
 		return result, nil
 	}
 	facts = memoryutils.FilterFactsBySetting(facts, effectiveSetting)
 
 	if len(facts) == 0 {
 		if err = r.jobRepo.MarkSuccess(ctx, job.ID); err != nil {
+			r.recordJobOutcome(ctx, job, &payload, model.MemoryJobStatusFailed, false, err)
 			return nil, err
 		}
 		result.Status = model.MemoryJobStatusSuccess
 		r.logger.Printf("memory worker run once noop: job_id=%d", job.ID)
+		r.recordJobOutcome(ctx, job, &payload, result.Status, true, nil)
 		return result, nil
 	}
 
 	items := buildMemoryItems(job, payload, facts)
 	if len(items) == 0 {
 		if err = r.jobRepo.MarkSuccess(ctx, job.ID); err != nil {
+			r.recordJobOutcome(ctx, job, &payload, model.MemoryJobStatusFailed, false, err)
 			return nil, err
 		}
 		result.Status = model.MemoryJobStatusSuccess
 		r.logger.Printf("memory worker run once empty-after-normalize: job_id=%d", job.ID)
+		r.recordJobOutcome(ctx, job, &payload, result.Status, true, nil)
 		return result, nil
 	}
 
@@ -169,16 +199,19 @@ func (r *Runner) RunOnce(ctx context.Context) (*RunOnceResult, error) {
 					failReason := fmt.Sprintf("决策降级后记忆落库失败: %v", err)
 					_ = r.jobRepo.MarkFailed(ctx, job.ID, failReason)
 					result.Status = model.MemoryJobStatusFailed
+					r.recordJobOutcome(ctx, job, &payload, result.Status, false, err)
 					return result, nil
 				}
 				result.Status = model.MemoryJobStatusSuccess
 				result.Facts = len(items)
 				r.syncMemoryVectors(ctx, items)
+				r.recordJobOutcome(ctx, job, &payload, result.Status, true, nil)
 				return result, nil
 			}
 			// FallbackMode=drop：丢弃本轮抽取结果，直接标记 job 成功。
 			_ = r.jobRepo.MarkSuccess(ctx, job.ID)
 			result.Status = model.MemoryJobStatusSuccess
+			r.recordJobOutcome(ctx, job, &payload, result.Status, true, nil)
 			return result, nil
 		}
 
@@ -189,6 +222,7 @@ func (r *Runner) RunOnce(ctx context.Context) (*RunOnceResult, error) {
 		r.syncVectorDeletes(ctx, outcome.VectorDeletes)
 		r.logger.Printf("[去重] 决策流程完成: job_id=%d user_id=%d 新增=%d 更新=%d 删除=%d 跳过=%d",
 			job.ID, payload.UserID, outcome.AddCount, outcome.UpdateCount, outcome.DeleteCount, outcome.NoneCount)
+		r.recordJobOutcome(ctx, job, &payload, result.Status, true, nil)
 		return result, nil
 	}
 
@@ -197,6 +231,7 @@ func (r *Runner) RunOnce(ctx context.Context) (*RunOnceResult, error) {
 		failReason := fmt.Sprintf("记忆落库失败: %v", err)
 		_ = r.jobRepo.MarkFailed(ctx, job.ID, failReason)
 		result.Status = model.MemoryJobStatusFailed
+		r.recordJobOutcome(ctx, job, &payload, result.Status, false, err)
 		return result, nil
 	}
 
@@ -204,6 +239,7 @@ func (r *Runner) RunOnce(ctx context.Context) (*RunOnceResult, error) {
 	result.Facts = len(items)
 	r.syncMemoryVectors(ctx, items)
 	r.logger.Printf("memory worker run once success: job_id=%d extracted_facts=%d", job.ID, len(items))
+	r.recordJobOutcome(ctx, job, &payload, result.Status, true, nil)
 	return result, nil
 }
 
@@ -268,56 +304,10 @@ func buildMemoryItems(job *model.MemoryJob, payload memorymodel.ExtractJobPayloa
 }
 
 func (r *Runner) syncMemoryVectors(ctx context.Context, items []model.MemoryItem) {
-	if r == nil || r.ragRuntime == nil || r.itemRepo == nil || len(items) == 0 {
+	if r == nil || r.vectorSyncer == nil || len(items) == 0 {
 		return
 	}
-
-	requestItems := make([]infrarag.MemoryIngestItem, 0, len(items))
-	for _, item := range items {
-		requestItems = append(requestItems, infrarag.MemoryIngestItem{
-			MemoryID:         item.ID,
-			UserID:           item.UserID,
-			ConversationID:   strValue(item.ConversationID),
-			AssistantID:      strValue(item.AssistantID),
-			RunID:            strValue(item.RunID),
-			MemoryType:       item.MemoryType,
-			Title:            item.Title,
-			Content:          item.Content,
-			Confidence:       item.Confidence,
-			Importance:       item.Importance,
-			SensitivityLevel: item.SensitivityLevel,
-			IsExplicit:       item.IsExplicit,
-			Status:           item.Status,
-			TTLAt:            item.TTLAt,
-			CreatedAt:        item.CreatedAt,
-		})
-	}
-
-	result, err := r.ragRuntime.IngestMemory(ctx, infrarag.MemoryIngestRequest{
-		Action: "add",
-		Items:  requestItems,
-	})
-	if err != nil {
-		r.logger.Printf("[WARN][去重] 记忆向量同步失败: count=%d err=%v", len(items), err)
-		for _, item := range items {
-			_ = r.itemRepo.UpdateVectorStateByID(ctx, item.ID, "failed", nil)
-		}
-		return
-	}
-
-	vectorIDMap := make(map[int64]string, len(result.DocumentIDs))
-	for _, documentID := range result.DocumentIDs {
-		memoryID := parseMemoryID(documentID)
-		if memoryID <= 0 {
-			continue
-		}
-		vectorIDMap[memoryID] = documentID
-	}
-
-	for _, item := range items {
-		vectorID := strPtrOrNil(vectorIDMap[item.ID])
-		_ = r.itemRepo.UpdateVectorStateByID(ctx, item.ID, "synced", vectorID)
-	}
+	r.vectorSyncer.Upsert(ctx, "", items)
 }
 
 // syncVectorDeletes 处理决策层 DELETE 动作产出的向量清理需求。
@@ -327,33 +317,10 @@ func (r *Runner) syncMemoryVectors(ctx context.Context, items []model.MemoryItem
 // 2. 调 Runtime.DeleteMemory 真正从 Milvus 删除对应向量；
 // 3. 更新 MySQL vector_status 标记删除结果。
 func (r *Runner) syncVectorDeletes(ctx context.Context, memoryIDs []int64) {
-	if r == nil || len(memoryIDs) == 0 {
+	if r == nil || r.vectorSyncer == nil || len(memoryIDs) == 0 {
 		return
 	}
-
-	// 1. 构造 documentID 列表。
-	documentIDs := make([]string, 0, len(memoryIDs))
-	for _, id := range memoryIDs {
-		documentIDs = append(documentIDs, fmt.Sprintf("memory:%d", id))
-	}
-
-	// 2. 调 Runtime 删除向量。
-	if r.ragRuntime != nil {
-		if err := r.ragRuntime.DeleteMemory(ctx, documentIDs); err != nil {
-			r.logger.Printf("[WARN][去重] Milvus 向量删除失败，标记为 pending 等待后续清理: count=%d ids=%v err=%v", len(memoryIDs), memoryIDs, err)
-		} else {
-			r.logger.Printf("[去重] Milvus 向量删除完成: count=%d ids=%v", len(memoryIDs), memoryIDs)
-		}
-	}
-
-	// 3. 更新 MySQL vector_status。
-	for _, memoryID := range memoryIDs {
-		if updateErr := r.itemRepo.UpdateVectorStateByID(ctx, memoryID, "deleted", nil); updateErr != nil {
-			if r.logger != nil {
-				r.logger.Printf("[WARN] 向量状态更新失败: memory_id=%d err=%v", memoryID, updateErr)
-			}
-		}
-	}
+	r.vectorSyncer.Delete(ctx, "", memoryIDs)
 }
 
 func resolveMemoryTTLAt(base time.Time, memoryType string) *time.Time {
@@ -395,11 +362,106 @@ func int64PtrOrNil(v int64) *int64 {
 	return &value
 }
 
-func strValue(v *string) string {
-	if v == nil {
-		return ""
+func (r *Runner) recordJobOutcome(
+	ctx context.Context,
+	job *model.MemoryJob,
+	payload *memorymodel.ExtractJobPayload,
+	status string,
+	success bool,
+	err error,
+) {
+	if r == nil {
+		return
 	}
-	return strings.TrimSpace(*v)
+
+	level := memoryobserve.LevelInfo
+	if !success || err != nil {
+		level = memoryobserve.LevelWarn
+	}
+	fields := map[string]any{
+		"job_id":     jobIDValue(job),
+		"status":     strings.TrimSpace(status),
+		"success":    success && err == nil,
+		"error":      err,
+		"error_code": memoryobserve.ClassifyError(err),
+	}
+	if payload != nil {
+		fields["trace_id"] = strings.TrimSpace(payload.TraceID)
+		fields["user_id"] = payload.UserID
+		fields["conversation_id"] = strings.TrimSpace(payload.ConversationID)
+	}
+
+	r.observer.Observe(ctx, memoryobserve.Event{
+		Level:     level,
+		Component: memoryobserve.ComponentWrite,
+		Operation: "job",
+		Fields:    fields,
+	})
+	r.metrics.AddCounter(memoryobserve.MetricJobTotal, 1, map[string]string{
+		"status": strings.TrimSpace(status),
+	})
+}
+
+func (r *Runner) recordDecisionObservation(
+	ctx context.Context,
+	job *model.MemoryJob,
+	payload memorymodel.ExtractJobPayload,
+	fact memorymodel.NormalizedFact,
+	candidateCount int,
+	finalAction string,
+	fallbackMode string,
+	success bool,
+	err error,
+) {
+	if r == nil {
+		return
+	}
+
+	level := memoryobserve.LevelInfo
+	status := "success"
+	if !success || err != nil {
+		level = memoryobserve.LevelWarn
+		status = "error"
+	}
+	fallbackMode = strings.TrimSpace(fallbackMode)
+	if fallbackMode == "" {
+		fallbackMode = "none"
+	}
+
+	r.observer.Observe(ctx, memoryobserve.Event{
+		Level:     level,
+		Component: memoryobserve.ComponentWrite,
+		Operation: memoryobserve.OperationDecision,
+		Fields: map[string]any{
+			"trace_id":        strings.TrimSpace(payload.TraceID),
+			"user_id":         payload.UserID,
+			"conversation_id": strings.TrimSpace(payload.ConversationID),
+			"job_id":          jobIDValue(job),
+			"fact_type":       strings.TrimSpace(fact.MemoryType),
+			"candidate_count": candidateCount,
+			"final_action":    strings.TrimSpace(finalAction),
+			"fallback_mode":   fallbackMode,
+			"success":         success && err == nil,
+			"error":           err,
+			"error_code":      memoryobserve.ClassifyError(err),
+		},
+	})
+	r.metrics.AddCounter(memoryobserve.MetricDecisionTotal, 1, map[string]string{
+		"action": strings.TrimSpace(finalAction),
+		"status": status,
+	})
+	if fallbackMode != "none" && fallbackMode != "hash_exact" && fallbackMode != "rag" {
+		r.metrics.AddCounter(memoryobserve.MetricDecisionFallbackTotal, 1, map[string]string{
+			"mode": fallbackMode,
+		})
+	}
+}
+
+func jobIDValue(job *model.MemoryJob) int64 {
+	if job == nil {
+		return 0
+	}
+	return job.ID
 }
 
 func parseMemoryID(documentID string) int64 {
@@ -411,9 +473,13 @@ func parseMemoryID(documentID string) int64 {
 	if strings.HasPrefix(raw, "uid:") {
 		return 0
 	}
-	memoryID, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return 0
+
+	var value int64
+	for _, ch := range raw {
+		if ch < '0' || ch > '9' {
+			return 0
+		}
+		value = value*10 + int64(ch-'0')
 	}
-	return memoryID
+	return value
 }

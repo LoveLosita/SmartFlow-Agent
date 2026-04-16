@@ -23,41 +23,50 @@ func (s *ReadService) HybridRetrieve(
 	effectiveSetting model.MemoryUserSetting,
 	limit int,
 	now time.Time,
-) ([]memorymodel.ItemDTO, error) {
+) ([]memorymodel.ItemDTO, retrieveTelemetry, error) {
+	telemetry := retrieveTelemetry{}
 	if s == nil || s.itemRepo == nil {
-		return nil, nil
+		return nil, telemetry, nil
 	}
 	if !effectiveSetting.MemoryEnabled {
-		return nil, nil
+		return nil, telemetry, nil
 	}
 
 	pinnedItems, err := s.retrievePinnedCandidates(ctx, req, effectiveSetting, now)
 	if err != nil {
-		return nil, err
+		return nil, telemetry, err
 	}
-	semanticItems, err := s.retrieveSemanticCandidates(ctx, req, effectiveSetting, limit, now)
+	telemetry.PinnedHitCount = len(pinnedItems)
+
+	semanticItems, semanticTelemetry, err := s.retrieveSemanticCandidates(ctx, req, effectiveSetting, limit, now)
 	if err != nil {
-		return nil, err
+		return nil, telemetry, err
 	}
+	telemetry.SemanticHitCount = len(semanticItems)
+	telemetry.Degraded = semanticTelemetry.Degraded
+	telemetry.RAGFallbackUsed = semanticTelemetry.RAGFallbackUsed
 
 	merged := make([]memorymodel.ItemDTO, 0, len(pinnedItems)+len(semanticItems))
 	merged = append(merged, pinnedItems...)
 	merged = append(merged, semanticItems...)
 	if len(merged) == 0 {
-		return nil, nil
+		return nil, telemetry, nil
 	}
 
+	beforeDedupCount := len(merged)
 	merged = dedupByID(merged)
 	merged = dedupByHash(merged)
 	merged = dedupByText(merged)
+	telemetry.DedupDropCount = beforeDedupCount - len(merged)
 	merged = RankItems(merged, now)
 	merged = applyTypeBudget(merged, s.cfg)
 	if len(merged) == 0 {
-		return nil, nil
+		return nil, telemetry, nil
 	}
+	telemetry.FinalCount = len(merged)
 
 	_ = s.itemRepo.TouchLastAccessAt(ctx, collectItemDTOIDs(merged), now)
-	return merged, nil
+	return merged, telemetry, nil
 }
 
 func (s *ReadService) retrievePinnedCandidates(
@@ -81,20 +90,26 @@ func (s *ReadService) retrieveSemanticCandidates(
 	effectiveSetting model.MemoryUserSetting,
 	limit int,
 	now time.Time,
-) ([]memorymodel.ItemDTO, error) {
+) ([]memorymodel.ItemDTO, semanticRetrieveTelemetry, error) {
+	telemetry := semanticRetrieveTelemetry{}
 	queryText := strings.TrimSpace(req.Query)
 	if queryText == "" {
-		return nil, nil
+		return nil, telemetry, nil
 	}
 
 	candidateLimit := hybridSemanticTopK(s.cfg, limit)
 	if s.cfg.RAGEnabled && s.ragRuntime != nil {
 		items, err := s.retrieveSemanticCandidatesByRAG(ctx, req, effectiveSetting, candidateLimit, now)
 		if shouldReturnSemanticRAGResult(items, err) {
-			return items, nil
+			telemetry.HitCount = len(items)
+			return items, telemetry, nil
 		}
+		telemetry.Degraded = true
+		telemetry.RAGFallbackUsed = true
 	}
-	return s.retrieveSemanticCandidatesByMySQL(ctx, req, effectiveSetting, candidateLimit, now)
+	items, err := s.retrieveSemanticCandidatesByMySQL(ctx, req, effectiveSetting, candidateLimit, now)
+	telemetry.HitCount = len(items)
+	return items, telemetry, err
 }
 
 func (s *ReadService) retrieveSemanticCandidatesByRAG(

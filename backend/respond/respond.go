@@ -339,6 +339,21 @@ var ( //请求相关的响应
 		Info:   "conversation_id is required when confirm_action is present",
 	}
 
+	MemoryItemNotFound = Response{ //记忆条目不存在
+		Status: "40055",
+		Info:   "memory item not found",
+	}
+
+	MemoryInvalidType = Response{ //记忆类型不合法
+		Status: "40056",
+		Info:   "invalid memory type",
+	}
+
+	MemoryInvalidContent = Response{ //记忆内容为空或不合法
+		Status: "40057",
+		Info:   "invalid memory content",
+	}
+
 	RouteControlInternalError = Response{ //路由控制码内部错误
 		Status: "50001",
 		Info:   "route control failed",
