@@ -1,3 +1,9 @@
+# 许可证
+
+本项目采用 **GNU Affero General Public License v3.0 (AGPL-3.0)** 进行许可。  
+
+详见根目录 [`LICENSE`](./LICENSE) 文件。
+
 # 时伴 SmartMate
 
 > 越用越懂你的成长型 AI 排程伙伴 · 面向大学生的陪伴式日程管理平台

@@ -60,3 +60,22 @@ func FilterItemsBySetting(items []model.MemoryItem, setting model.MemoryUserSett
 	}
 	return result
 }
+
+// FilterFactsByConfidence 按置信度阈值过滤候选事实。
+//
+// 说明：
+// 1. minConfidence <= 0 时不做过滤，保持向后兼容；
+// 2. 过滤在 FilterFactsBySetting 之后执行，是写入链路的第二道程序化门槛；
+// 3. 阈值由 memory.write.minConfidence 配置控制，默认 0.5。
+func FilterFactsByConfidence(facts []memorymodel.NormalizedFact, minConfidence float64) []memorymodel.NormalizedFact {
+	if minConfidence <= 0 || len(facts) == 0 {
+		return facts
+	}
+	result := make([]memorymodel.NormalizedFact, 0, len(facts))
+	for _, fact := range facts {
+		if fact.Confidence >= minConfidence {
+			result = append(result, fact)
+		}
+	}
+	return result
+}

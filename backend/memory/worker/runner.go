@@ -163,6 +163,7 @@ func (r *Runner) RunOnce(ctx context.Context) (*RunOnceResult, error) {
 		return result, nil
 	}
 	facts = memoryutils.FilterFactsBySetting(facts, effectiveSetting)
+	facts = memoryutils.FilterFactsByConfidence(facts, r.cfg.WriteMinConfidence)
 
 	if len(facts) == 0 {
 		if err = r.jobRepo.MarkSuccess(ctx, job.ID); err != nil {

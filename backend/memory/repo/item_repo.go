@@ -258,7 +258,7 @@ func (r *ItemRepo) UpdateStatusByIDAt(
 	}
 
 	return r.db.WithContext(ctx).
-		Model(&model.MemoryItem{}).
+		Model(&model.MemoryItem{UserID: userID}).
 		Where("id = ? AND user_id = ?", memoryID, userID).
 		Updates(map[string]any{
 			"status":     status,
@@ -401,7 +401,7 @@ func (r *ItemRepo) UpdateManagedFieldsByIDAt(
 	}
 
 	return r.db.WithContext(ctx).
-		Model(&model.MemoryItem{}).
+		Model(&model.MemoryItem{UserID: userID}).
 		Where("id = ? AND user_id = ?", memoryID, userID).
 		Updates(map[string]any{
 			"memory_type":        fields.MemoryType,
@@ -434,7 +434,7 @@ func (r *ItemRepo) SoftDeleteByID(ctx context.Context, userID int, memoryID int6
 	}
 
 	return r.db.WithContext(ctx).
-		Model(&model.MemoryItem{}).
+		Model(&model.MemoryItem{UserID: userID}).
 		Where("id = ? AND user_id = ?", memoryID, userID).
 		Updates(map[string]any{
 			"status":        model.MemoryItemStatusDeleted,
@@ -466,7 +466,7 @@ func (r *ItemRepo) RestoreByIDAt(ctx context.Context, userID int, memoryID int64
 	}
 
 	return r.db.WithContext(ctx).
-		Model(&model.MemoryItem{}).
+		Model(&model.MemoryItem{UserID: userID}).
 		Where("id = ? AND user_id = ?", memoryID, userID).
 		Updates(map[string]any{
 			"status":        model.MemoryItemStatusActive,

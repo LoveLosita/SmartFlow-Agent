@@ -285,6 +285,12 @@ func (api *AgentHandler) GetContextStats(c *gin.Context) {
 	}
 
 	// 直接透传 JSON 字符串，避免二次序列化。
+	// 当会话尚未产生 compaction 统计时，LoadContextTokenStats 返回空字符串，
+	// 此时 json.RawMessage("") 在 MarshalJSON 时会报 "unexpected end of JSON input"，
+	// 所以空值时需要替换为 "null"，保证序列化安全。
+	if strings.TrimSpace(statsJSON) == "" {
+		statsJSON = "null"
+	}
 	var raw json.RawMessage = json.RawMessage(statsJSON)
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, raw))
 }

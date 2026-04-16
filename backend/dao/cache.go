@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+
 	"fmt"
+	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
 	"strings"
 	"time"
 
@@ -603,4 +605,108 @@ func (d *CacheDAO) DeleteAgentState(ctx context.Context, conversationID string) 
 		return errors.New("conversation_id is empty")
 	}
 	return d.client.Del(ctx, d.agentStateKey(normalizedID)).Err()
+}
+
+// --- 记忆预取缓存 ---
+
+const (
+	memoryPrefetchTTL = 30 * time.Minute
+)
+
+// memoryPrefetchKey 生成用户+会话维度的记忆预取缓存 key。
+//
+// 1. 格式：smartflow:memory_prefetch:u:{userID}:c:{chatID}，与 conversationHistoryKey / schedulePreviewKey 命名风格一致；
+// 2. chatID 为空时 key 为 smartflow:memory_prefetch:u:5:c:，仍然合法且唯一，不会与其他会话 key 冲突；
+// 3. 加 chatID 隔离后，不同会话各自维护独立的预取缓存，避免会话间记忆上下文互相覆盖。
+func (d *CacheDAO) memoryPrefetchKey(userID int, chatID string) string {
+	return fmt.Sprintf("smartflow:memory_prefetch:u:%d:c:%s", userID, chatID)
+}
+
+// GetMemoryPrefetchCache 读取用户记忆预取缓存。
+//
+// 输入输出语义：
+// 1. 命中时返回 ItemDTO 切片与 nil error；
+// 2. 未命中时返回 nil, nil；
+// 3. Redis 异常或反序列化失败时返回 error。
+func (d *CacheDAO) GetMemoryPrefetchCache(ctx context.Context, userID int, chatID string) ([]memorymodel.ItemDTO, error) {
+	if d == nil || d.client == nil {
+		return nil, errors.New("cache dao is not initialized")
+	}
+	if userID <= 0 {
+		return nil, nil
+	}
+
+	key := d.memoryPrefetchKey(userID, chatID)
+	raw, err := d.client.Get(ctx, key).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var items []memorymodel.ItemDTO
+	if err = json.Unmarshal([]byte(raw), &items); err != nil {
+		return nil, fmt.Errorf("unmarshal memory prefetch cache failed: %w", err)
+	}
+	return items, nil
+}
+
+// SetMemoryPrefetchCache 写入用户记忆预取缓存。
+//
+// 职责边界：
+// 1. 负责将检索后的记忆 DTO 写入 Redis，供下一轮 Chat 节点即时消费；
+// 2. TTL 30 分钟，靠自然过期淘汰，不需要显式 Invalidate；
+// 3. items 为空或 nil 时直接返回，避免写入无效数据。
+func (d *CacheDAO) SetMemoryPrefetchCache(ctx context.Context, userID int, chatID string, items []memorymodel.ItemDTO) error {
+	if d == nil || d.client == nil {
+		return errors.New("cache dao is not initialized")
+	}
+	if userID <= 0 || len(items) == 0 {
+		return nil
+	}
+
+	data, err := json.Marshal(items)
+	if err != nil {
+		return fmt.Errorf("marshal memory prefetch cache failed: %w", err)
+	}
+	key := d.memoryPrefetchKey(userID, chatID)
+	return d.client.Set(ctx, key, data, memoryPrefetchTTL).Err()
+}
+
+// DeleteMemoryPrefetchCacheByUser 删除指定用户所有会话的记忆预取缓存。
+//
+// 步骤化说明：
+// 1. 用 SCAN 遍历 smartflow:memory_prefetch:u:{userID}:c:* 匹配的所有 key；
+// 2. 用 UNLINK 异步删除，避免阻塞 Redis 主线程；
+// 3. 复用 DeleteUserRecentCompletedSchedulesFromCache 的 SCAN+UNLINK 模式；
+// 4. 该方法被 GORM cache deleter 和空检索清理两条链路共同调用，保证缓存一致性。
+func (d *CacheDAO) DeleteMemoryPrefetchCacheByUser(ctx context.Context, userID int) error {
+	if d == nil || d.client == nil {
+		return errors.New("cache dao is not initialized")
+	}
+	if userID <= 0 {
+		return nil
+	}
+
+	pattern := fmt.Sprintf("smartflow:memory_prefetch:u:%d:c:*", userID)
+	var cursor uint64
+	for {
+		keys, next, err := d.client.Scan(ctx, cursor, pattern, 500).Result()
+		if err != nil {
+			return err
+		}
+		if len(keys) > 0 {
+			// 1. UNLINK 是 DEL 的异步版本，不会阻塞 Redis 主线程；
+			// 2. 即使 key 不存在也不会报错，幂等安全。
+			if err := d.client.Unlink(ctx, keys...).Err(); err != nil {
+				return err
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return nil
 }

@@ -170,8 +170,8 @@ memory:
     claimBatch: 1
   decision:
     # 决策层总开关。
-    # 开启后，写入链路会从“直接新增”升级成“召回旧记忆 -> 比对 -> 决策动作”。
-    enabled: false
+    # 开启后，写入链路会从”直接新增”升级成”召回旧记忆 -> 比对 -> 决策动作”。
+    enabled: true
     # 决策层语义候选数上限。
     candidateTopK: 5
     # 决策层语义候选最低相似度阈值。
@@ -186,6 +186,8 @@ memory:
     # decision：启用决策式写入
     # 注意：只有 decision.enabled=true 时，这个值才真正生效。
     mode: legacy
+    # 写入最低置信度阈值，抽取结果 confidence 低于此值直接丢弃。
+    minConfidence: 0.5
 
 # 联网搜索能力配置。
 websearch:

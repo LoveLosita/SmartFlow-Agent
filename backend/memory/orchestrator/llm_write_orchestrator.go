@@ -92,7 +92,8 @@ func (o *LLMWriteOrchestrator) ExtractFacts(ctx context.Context, payload memorym
 }
 
 type memoryExtractResponse struct {
-	Facts []memoryExtractFact `json:"facts"`
+	MessageIntent string              `json:"message_intent"`
+	Facts         []memoryExtractFact `json:"facts"`
 }
 
 type memoryExtractFact struct {
@@ -123,33 +124,43 @@ func buildMemoryExtractSystemPrompt(override string) string {
 		return override
 	}
 
-	return strings.TrimSpace(`你是一个“记忆抽取器”。
-你的任务是从单条用户消息中抽取值得长期记住的事实、偏好、约束、待办线索。
+	return strings.TrimSpace(`你是一个”记忆守门员”。
+你的任务是判断用户消息是否包含值得长期记住的信息，如有则提取。
 请只输出 JSON 对象，不要输出解释、不要输出 markdown。
 
 输出格式：
 {
-  "facts": [
+  “message_intent”: “chitchat|task_request|knowledge_qa|preference|personal_fact|standing_instruction”,
+  “facts”: [
     {
-      "memory_type": "preference|constraint|fact|todo_hint",
-      "title": "短标题",
-      "content": "完整事实内容",
-      "confidence": 0.0,
-      "importance": 0.0,
-      "sensitivity_level": 0,
-      "is_explicit": false
+      “memory_type”: “preference|constraint|fact|todo_hint”,
+      “title”: “短标题”,
+      “content”: “完整事实内容”,
+      “confidence”: 0.0,
+      “importance”: 0.0,
+      “sensitivity_level”: 0,
+      “is_explicit”: false
     }
   ]
 }
 
+意图分类规则：
+- chitchat：闲聊、寒暄、情绪表达（”你好””谢谢””我今天好累””嗯嗯”）
+- task_request：一次性任务请求（”帮我查天气””定个闹钟””帮我写个邮件”）
+- knowledge_qa：知识问答、信息查询（”什么是量子力学””北京明天多少度”）
+- preference：用户偏好、习惯、口味（”我喜欢吃辣””别用简称””我习惯用微信”）
+- personal_fact：个人事实（”我有两个孩子””我在上海工作””我老婆对花生过敏”）
+- standing_instruction：持久指令（”以后都用英文回复我””记住我的生日是3月5号”）
+
 规则：
-1. 最多输出 5 条事实。
-2. 只保留稳定、未来可能复用的信息，闲聊、寒暄、一次性噪声不要记。
-3. 用户明确说“记住”或“以后提醒我”时，is_explicit 设为 true。
-4. confidence 表示这条事实是否真的值得记，取 0 到 1。
-5. importance 表示对后续提醒/陪伴的价值，取 0 到 1。
+1. 先判断 message_intent。chitchat / task_request / knowledge_qa 三类，facts 输出空数组。
+2. 只有 preference / personal_fact / standing_instruction 才提取 facts，最多 3 条。
+3. 一条消息可能同时包含任务和偏好（如”帮我查天气，记住我喜欢晴天”），此时 intent 取偏好类型，facts 只保留偏好部分。
+4. confidence 表示这条事实是否真的值得长期记，取 0 到 1。低于 0.5 的不要输出。
+5. importance 表示对后续陪伴的价值，取 0 到 1。
 6. sensitivity_level 取 0 到 2，数字越大越敏感。
-7. 不确定就少记，不要编造。`)
+7. 用户明确说”记住”或”以后提醒我”时，is_explicit 设为 true。
+8. 宁可漏记也不要滥记。大多数消息不应该产生任何 facts。`)
 }
 
 func buildMemoryExtractUserPrompt(payload memorymodel.ExtractJobPayload) string {
@@ -167,15 +178,27 @@ func buildMemoryExtractUserPrompt(payload memorymodel.ExtractJobPayload) string 
 
 	raw, err := json.MarshalIndent(request, "", "  ")
 	if err != nil {
-		return fmt.Sprintf("请从这条消息中抽取可长期记住的信息：%s", payload.SourceText)
+		return fmt.Sprintf("请分析这条用户消息，判断是否需要写入长期记忆：%s", payload.SourceText)
 	}
 
-	return fmt.Sprintf("请从下面这条用户消息中抽取可长期记住的信息，最多 %d 条。\n输入：\n%s",
-		defaultMemoryExtractMaxFacts, string(raw))
+	return fmt.Sprintf("请分析下面这条用户消息，判断 message_intent，如包含值得长期记住的信息则提取 facts。\n输入：\n%s",
+		string(raw))
 }
 
 func convertExtractResponse(resp *memoryExtractResponse) []memorymodel.FactCandidate {
-	if resp == nil || len(resp.Facts) == 0 {
+	if resp == nil {
+		return nil
+	}
+
+	// 意图过滤：跳过不需要记忆的消息类型。
+	// 兼容自定义 prompt（不返回 message_intent 时跳过此检查，保持向后兼容）。
+	if intent := strings.TrimSpace(resp.MessageIntent); intent != "" {
+		if isSkipIntent(intent) {
+			return nil
+		}
+	}
+
+	if len(resp.Facts) == 0 {
 		return nil
 	}
 
@@ -225,7 +248,7 @@ func fallbackNormalizedFacts(payload memorymodel.ExtractJobPayload) []memorymode
 			MemoryType:       memorymodel.MemoryTypeFact,
 			Title:            buildFallbackTitle(sourceText),
 			Content:          sourceText,
-			Confidence:       0.55,
+			Confidence:       0.45,
 			Importance:       defaultImportanceByType(memorymodel.MemoryTypeFact),
 			SensitivityLevel: 0,
 			IsExplicit:       false,
@@ -284,6 +307,17 @@ func defaultImportanceByType(memoryType string) float64 {
 		return 0.8
 	default:
 		return 0.6
+	}
+}
+
+// isSkipIntent 判断意图是否属于"不需要记忆"的类别。
+// chitchat / task_request / knowledge_qa 三类直接跳过，不产出任何候选事实。
+func isSkipIntent(intent string) bool {
+	switch strings.ToLower(strings.TrimSpace(intent)) {
+	case "chitchat", "task_request", "knowledge_qa":
+		return true
+	default:
+		return false
 	}
 }
 

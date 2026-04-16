@@ -108,10 +108,11 @@ func (s *AgentService) runNewAgentGraph(
 	} else {
 		conversationContext = s.loadConversationContext(requestCtx, chatID, userMessage)
 	}
-	// 5.1. 在 graph 执行前统一补充与当前输入相关的记忆上下文。
-	// 5.1.1 这里采用 pinned block 注入，这样 chat / plan / execute / deliver 各阶段都能自动复用。
-	// 5.1.2 检索失败只降级为“本轮不注入记忆”，不阻断主链路。
-	s.injectMemoryContext(requestCtx, conversationContext, userID, chatID, userMessage)
+	// 5.1. 在 graph 执行前统一补充与当前输入相关的记忆上下文（预取管线模式）。
+	// 5.1.1 先读 Redis 预取缓存注入到 ConversationContext，再启动后台 goroutine 做完整检索；
+	// 5.1.2 返回的 channel 传入 Deps，供 Execute/Plan 节点在启动前消费最新记忆；
+	// 5.1.3 检索失败只降级为”本轮不注入记忆”，不阻断主链路。
+	memoryFuture := s.injectMemoryContext(requestCtx, conversationContext, userID, chatID, userMessage)
 
 	// 5.5 将前端传入的 thinkingMode 写入 CommonState，供 ChatNode 及下游节点读取。
 	cs := runtimeState.EnsureCommonState()
@@ -171,6 +172,7 @@ func (s *AgentService) runNewAgentGraph(
 		CompactionStore:      s.compactionStore,
 		RoughBuildFunc:       s.makeRoughBuildFunc(),
 		WriteSchedulePreview: s.makeWriteSchedulePreviewFunc(),
+		MemoryFuture:         memoryFuture,
 	}
 
 	// 10. 构造 AgentGraphRunInput 并运行 graph。

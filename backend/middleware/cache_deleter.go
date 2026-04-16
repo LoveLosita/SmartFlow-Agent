@@ -78,11 +78,16 @@ func (p *GormCachePlugin) dispatchCacheLogic(modelObj interface{}) {
 		p.invalidConversationHistoryCache(m.UserID, m.ChatID)
 	case model.AgentChat:
 		p.invalidConversationHistoryCache(m.UserID, m.ChatID)
+	case model.MemoryItem:
+		// 1. 管理面删除/修改/恢复/新增记忆时，自动失效该用户所有会话的预取缓存；
+		// 2. repo 方法通过 Model(&model.MemoryItem{UserID: userID}) 携带 userID，
+		//    此处从模型实例中提取 UserID 进行精准失效；
+		// 3. 若 UserID 为 0（无 userID 参数的 repo 方法），invalidMemoryPrefetchCache 内部守卫会直接跳过。
+		p.invalidMemoryPrefetchCache(m.UserID)
 	case model.AgentOutboxMessage,
 		model.User,
 		model.AgentStateSnapshotRecord,
 		model.MemoryJob,
-		model.MemoryItem,
 		model.MemoryAuditLog,
 		model.MemoryUserSetting:
 		// 这些模型当前没有前台缓存读取链路依赖，故意静默忽略。
@@ -161,5 +166,25 @@ func (p *GormCachePlugin) invalidConversationHistoryCache(userID int, conversati
 			return
 		}
 		log.Printf("[GORM-Cache] Invalidated conversation history cache for user %d conversation %s", userID, normalizedConversationID)
+	}()
+}
+
+// invalidMemoryPrefetchCache 失效指定用户所有会话的记忆预取缓存。
+//
+// 步骤化说明：
+// 1. 先守卫 userID==0，无 userID 的 repo 方法（如 UpdateContentByID）触发 callback 时直接跳过；
+// 2. 异步调用 DeleteMemoryPrefetchCacheByUser，按模式 smartflow:memory_prefetch:u:{userID}:c:* 批量删除；
+// 3. 失败只记日志，不阻塞主事务，30 分钟 TTL 自然过期兜底。
+func (p *GormCachePlugin) invalidMemoryPrefetchCache(userID int) {
+	if userID == 0 {
+		return
+	}
+
+	go func() {
+		if err := p.cacheDAO.DeleteMemoryPrefetchCacheByUser(context.Background(), userID); err != nil {
+			log.Printf("[GORM-Cache] Failed to invalidate memory prefetch cache for user %d: %v", userID, err)
+			return
+		}
+		log.Printf("[GORM-Cache] Invalidated memory prefetch cache for user %d", userID)
 	}()
 }

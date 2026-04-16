@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
+	"time"
 
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	"github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
@@ -104,6 +106,9 @@ func (n *AgentNodes) Plan(ctx context.Context, st *newagentmodel.AgentGraphState
 	if st == nil {
 		return nil, errors.New("plan node: state is nil")
 	}
+
+	// 等待后台记忆检索完成，注入最新记忆后再启动 Plan。
+	ensureFreshMemory(st)
 
 	if err := RunPlanNode(
 		ctx,
@@ -206,6 +211,9 @@ func (n *AgentNodes) Execute(ctx context.Context, st *newagentmodel.AgentGraphSt
 		st.EnsureConversationContext().SetToolSchemas(toolSchemas)
 	}
 
+	// 等待后台记忆检索完成，注入最新记忆后再启动 Execute。
+	ensureFreshMemory(st)
+
 	if err := RunExecuteNode(
 		ctx,
 		ExecuteNodeInput{
@@ -290,6 +298,34 @@ func (n *AgentNodes) Deliver(ctx context.Context, st *newagentmodel.AgentGraphSt
 
 	saveAgentState(ctx, st)
 	return st, nil
+}
+
+// --- 记忆预取消费辅助 ---
+
+// ensureFreshMemory 等待后台记忆检索完成，将最新结果注入 ConversationContext。
+//
+// 设计说明：
+// 1. 只在首次调用时等待 channel（最多 500ms），后续调用直接跳过；
+// 2. 覆盖 ConversationContext 中已有的缓存记忆（UpsertPinnedBlock 按 key 覆盖）；
+// 3. timeout 后保留缓存记忆不替换，保证 Execute ReAct 循环不会因超时丢失记忆。
+func ensureFreshMemory(st *newagentmodel.AgentGraphState) {
+	if st == nil || st.Deps.MemoryConsumed || st.Deps.MemoryFuture == nil {
+		return
+	}
+	st.Deps.MemoryConsumed = true // 标记已消费，后续调用直接跳过
+
+	select {
+	case content := <-st.Deps.MemoryFuture:
+		if strings.TrimSpace(content) != "" {
+			st.EnsureConversationContext().UpsertPinnedBlock(newagentmodel.ContextBlock{
+				Key:     newagentmodel.MemoryContextBlockKey,
+				Title:   newagentmodel.MemoryContextBlockTitle,
+				Content: content,
+			})
+		}
+	case <-time.After(newagentmodel.MemoryFreshTimeout):
+		// timeout：保留 ConversationContext 中已有的缓存记忆，不做额外操作
+	}
 }
 
 // --- 持久化辅助 ---

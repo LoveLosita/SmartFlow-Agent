@@ -65,6 +65,13 @@ type Config struct {
 	DecisionCandidateMinScore float64 // Milvus 语义召回最低相似度
 	DecisionFallbackMode      string  // "legacy_add"（退回旧路径直接新增）/ "drop"（丢弃）
 	WriteMode                 string  // "legacy"（旧路径）/ "decision"（决策流程），仅 DecisionEnabled=true 时生效
+
+	// 写入置信度阈值。
+	// 说明：
+	// 1. 抽取结果 confidence 低于此值直接丢弃，不做入库；
+	// 2. 默认 0.5，与"守门员"prompt 的 confidence>=0.5 输出规则配合；
+	// 3. fallback 路径 confidence 设为 0.45，低于默认阈值，LLM 不可用时不写入。
+	WriteMinConfidence float64
 }
 
 // NormalizeReadMode 统一读取模式字符串。

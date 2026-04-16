@@ -39,6 +39,7 @@ func LoadConfigFromViper() memorymodel.Config {
 		DecisionCandidateMinScore: viper.GetFloat64("memory.decision.candidateMinScore"),
 		DecisionFallbackMode:      viper.GetString("memory.decision.fallbackMode"),
 		WriteMode:                 viper.GetString("memory.write.mode"),
+		WriteMinConfidence:        viper.GetFloat64("memory.write.minConfidence"),
 	}
 
 	if cfg.Threshold <= 0 {
@@ -82,6 +83,9 @@ func LoadConfigFromViper() memorymodel.Config {
 	}
 	if cfg.WriteMode == "" {
 		cfg.WriteMode = "legacy"
+	}
+	if cfg.WriteMinConfidence <= 0 {
+		cfg.WriteMinConfidence = 0.5
 	}
 
 	return cfg

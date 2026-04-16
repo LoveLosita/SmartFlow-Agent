@@ -10,12 +10,12 @@ import (
 	"github.com/LoveLosita/smartflow/backend/model"
 )
 
-// HybridRetrieve 统一承接读取侧混合召回链路。
+// HybridRetrieve 统一承接读取侧 RAG-first 召回链路。
 //
 // 步骤化说明：
-// 1. 结构化路由先取 constraint / 高置信 preference，给模型一份稳定“硬约束底座”；
-// 2. 再补语义候选，优先走 RAG；RAG 报错或 0 命中时都回退 MySQL，保证链路韧性；
-// 3. 两路结果统一做三级去重、排序与类型预算裁剪，只对最终真正注入的条目刷新 last_access_at；
+// 1. 优先走 RAG 语义搜索，按 query 相关性召回候选记忆；
+// 2. RAG 报错或 0 命中时回退 MySQL，保证链路韧性；
+// 3. 召回结果做三级去重、排序与类型预算裁剪（总量不超过调用方 limit）；
 // 4. 旧 legacy 链路完全保留，方便通过配置快速回滚。
 func (s *ReadService) HybridRetrieve(
 	ctx context.Context,
@@ -32,41 +32,33 @@ func (s *ReadService) HybridRetrieve(
 		return nil, telemetry, nil
 	}
 
-	pinnedItems, err := s.retrievePinnedCandidates(ctx, req, effectiveSetting, now)
+	// RAG-first：只走语义召回，不再全量拉 MySQL pinned。
+	items, semanticTelemetry, err := s.retrieveSemanticCandidates(ctx, req, effectiveSetting, limit, now)
 	if err != nil {
 		return nil, telemetry, err
 	}
-	telemetry.PinnedHitCount = len(pinnedItems)
-
-	semanticItems, semanticTelemetry, err := s.retrieveSemanticCandidates(ctx, req, effectiveSetting, limit, now)
-	if err != nil {
-		return nil, telemetry, err
-	}
-	telemetry.SemanticHitCount = len(semanticItems)
+	telemetry.SemanticHitCount = semanticTelemetry.HitCount
 	telemetry.Degraded = semanticTelemetry.Degraded
 	telemetry.RAGFallbackUsed = semanticTelemetry.RAGFallbackUsed
 
-	merged := make([]memorymodel.ItemDTO, 0, len(pinnedItems)+len(semanticItems))
-	merged = append(merged, pinnedItems...)
-	merged = append(merged, semanticItems...)
-	if len(merged) == 0 {
+	if len(items) == 0 {
 		return nil, telemetry, nil
 	}
 
-	beforeDedupCount := len(merged)
-	merged = dedupByID(merged)
-	merged = dedupByHash(merged)
-	merged = dedupByText(merged)
-	telemetry.DedupDropCount = beforeDedupCount - len(merged)
-	merged = RankItems(merged, now)
-	merged = applyTypeBudget(merged, s.cfg)
-	if len(merged) == 0 {
+	beforeDedupCount := len(items)
+	items = dedupByID(items)
+	items = dedupByHash(items)
+	items = dedupByText(items)
+	telemetry.DedupDropCount = beforeDedupCount - len(items)
+	items = RankItems(items, now)
+	items = applyTypeBudget(items, s.cfg, limit)
+	if len(items) == 0 {
 		return nil, telemetry, nil
 	}
-	telemetry.FinalCount = len(merged)
+	telemetry.FinalCount = len(items)
 
-	_ = s.itemRepo.TouchLastAccessAt(ctx, collectItemDTOIDs(merged), now)
-	return merged, telemetry, nil
+	_ = s.itemRepo.TouchLastAccessAt(ctx, collectItemDTOIDs(items), now)
+	return items, telemetry, nil
 }
 
 func (s *ReadService) retrievePinnedCandidates(
@@ -155,7 +147,7 @@ func (s *ReadService) retrieveSemanticCandidatesByMySQL(
 		req,
 		now,
 		[]string{model.MemoryItemStatusActive},
-		normalizeLimit(candidateLimit*3, candidateLimit*3, maxRetrieveLimit*3),
+		normalizeLimit(candidateLimit, candidateLimit, maxRetrieveLimit),
 	)
 
 	items, err := s.itemRepo.FindByQuery(ctx, query)
@@ -255,15 +247,20 @@ func preferCurrentItem(previous memorymodel.ItemDTO, current memorymodel.ItemDTO
 	return true
 }
 
-// applyTypeBudget 在排序结果上应用四类记忆预算。
+// applyTypeBudget 在排序结果上应用四类记忆预算，并以 callerLimit 作为总量硬上限。
 //
 // 说明：
 // 1. 每种类型先保底自己的预算上限，避免 fact 抢掉 constraint 的位置；
 // 2. 裁剪时保持当前排序顺序，不在这里重新打分；
-// 3. 最终总量由四类预算之和共同决定，默认 18 条。
-func applyTypeBudget(items []memorymodel.ItemDTO, cfg memorymodel.Config) []memorymodel.ItemDTO {
+// 3. 最终总量不超过 min(callerLimit, cfg.TotalReadBudget())。
+func applyTypeBudget(items []memorymodel.ItemDTO, cfg memorymodel.Config, callerLimit int) []memorymodel.ItemDTO {
 	if len(items) == 0 {
 		return nil
+	}
+
+	hardCap := cfg.TotalReadBudget()
+	if callerLimit > 0 && callerLimit < hardCap {
+		hardCap = callerLimit
 	}
 
 	budgetByType := map[string]int{
@@ -273,9 +270,9 @@ func applyTypeBudget(items []memorymodel.ItemDTO, cfg memorymodel.Config) []memo
 		memorymodel.MemoryTypeTodoHint:   cfg.EffectiveReadTodoHintLimit(),
 	}
 	usedByType := make(map[string]int, len(budgetByType))
-	result := make([]memorymodel.ItemDTO, 0, minInt(len(items), cfg.TotalReadBudget()))
+	result := make([]memorymodel.ItemDTO, 0, minInt(len(items), hardCap))
 	for _, item := range items {
-		if len(result) >= cfg.TotalReadBudget() {
+		if len(result) >= hardCap {
 			break
 		}
 
@@ -289,11 +286,10 @@ func applyTypeBudget(items []memorymodel.ItemDTO, cfg memorymodel.Config) []memo
 	return result
 }
 
+// hybridSemanticTopK 计算语义召回的候选集大小。
+// 使用 callerLimit 的 2 倍作为 TopK，保证去重后仍有足够结果填充预算。
 func hybridSemanticTopK(cfg memorymodel.Config, limit int) int {
-	if cfg.TotalReadBudget() > limit {
-		return cfg.TotalReadBudget()
-	}
-	return limit
+	return limit * 2
 }
 
 func resolveBudgetMemoryType(memoryType string) string {

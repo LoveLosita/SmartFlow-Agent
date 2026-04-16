@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"strings"
+	"time"
 
 	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
@@ -13,7 +14,7 @@ import (
 // AgentGraphRequest 描述一次 agent graph 运行的请求级输入。
 //
 // 职责边界：
-// 1. 这里只放“当前这次请求”天然携带的轻量数据，例如用户本轮输入；
+// 1. 这里只放"当前这次请求"天然携带的轻量数据，例如用户本轮输入；
 // 2. 不负责承载可持久化流程状态，流程状态仍归 AgentRuntimeState；
 // 3. 不负责承载 LLM / emitter / store 等依赖，这些统一放进 AgentGraphDeps。
 type AgentGraphRequest struct {
@@ -54,7 +55,7 @@ type WriteSchedulePreviewFunc func(ctx context.Context, state *schedule.Schedule
 // AgentGraphDeps 描述 graph/node 层运行时真正依赖的可插拔能力。
 //
 // 设计目的：
-// 1. 让 graph 不再只拿到”裸状态”，而是能拿到上下文、模型和输出能力；
+// 1. 让 graph 不再只拿到"裸状态"，而是能拿到上下文、模型和输出能力；
 // 2. Chat/Plan/Execute/Deliver 允许分别挂不同 client，但也允许先复用同一个 client；
 // 3. ChunkEmitter 统一承接阶段提示、正文、工具事件、确认请求等 SSE 输出。
 type AgentGraphDeps struct {
@@ -70,13 +71,29 @@ type AgentGraphDeps struct {
 	CompactionStore      CompactionStore          // 按 DAO 注入，用于 Execute 上下文压缩持久化
 	RoughBuildFunc       RoughBuildFunc           // 按 Service 注入，粗排算法入口
 	WriteSchedulePreview WriteSchedulePreviewFunc // 按 Service 注入，排程预览写入入口
+
+	// 记忆预取管线：由 service 层启动的后台检索 goroutine 写入。
+	// channel 携带已渲染的文本内容（非原始 ItemDTO），节点直接写入 pinned block。
+	MemoryFuture   chan string // buffered(1)，携带 renderMemoryPinnedContentByMode 的输出
+	MemoryConsumed bool        // 保证 channel 只读一次，后续 Execute ReAct 循环跳过等待
 }
+
+// --- 记忆 pinned block 常量（供 agentsvc 和 node 层共享） ---
+
+const (
+	// MemoryContextBlockKey 记忆上下文在 ConversationContext PinnedBlock 中的唯一 key。
+	MemoryContextBlockKey = "memory_context"
+	// MemoryContextBlockTitle 记忆上下文 pinned block 的标题，用于 prompt 渲染。
+	MemoryContextBlockTitle = "相关记忆"
+	// MemoryFreshTimeout 是 Execute/Plan 节点等待后台记忆检索完成的最大时长。
+	MemoryFreshTimeout = 500 * time.Millisecond
+)
 
 // EnsureChunkEmitter 保证 graph 运行时始终有一个可用的 chunk 发射器。
 //
 // 步骤说明：
 // 1. 依赖为空时回退到 Noop emitter，避免骨架期因为没接前端而到处判空；
-// 2. 这里只兜底“能安全调用”，不负责填充真实 request_id / model_name；
+// 2. 这里只兜底"能安全调用"，不负责填充真实 request_id / model_name；
 // 3. 后续 service 层一旦接上真实 emitter，会自然覆盖这里的空实现。
 func (d *AgentGraphDeps) EnsureChunkEmitter() *newagentstream.ChunkEmitter {
 	if d == nil {
@@ -250,7 +267,7 @@ func (s *AgentGraphState) EnsureScheduleState(ctx context.Context) (*schedule.Sc
 		if s.OriginalScheduleState == nil {
 			// 1. 兼容老快照：历史 Redis 快照里可能还没带 original_state。
 			// 2. 当前阶段虽然已经不落库，但后续若重新接回 diff 链，仍需要稳定的原始快照。
-			// 3. 因此这里在“已恢复出 ScheduleState、但缺 original”时补一份克隆兜底。
+			// 3. 因此这里在"已恢复出 ScheduleState、但缺 original"时补一份克隆兜底。
 			s.OriginalScheduleState = s.ScheduleState.Clone()
 		}
 		schedule.FilterScheduleStateForTaskClassScope(s.ScheduleState, flowState.TaskClassIDs)
@@ -266,7 +283,7 @@ func (s *AgentGraphState) EnsureScheduleState(ctx context.Context) (*schedule.Sc
 		err   error
 	)
 	// 1. 若 provider 支持按 task_class_ids 精确加载，则优先走 scoped 入口。
-	// 2. 这样可以让 DayMapping 与粗排算法使用同一批任务类窗口，避免“全量任务类脏日期污染本轮窗口”。
+	// 2. 这样可以让 DayMapping 与粗排算法使用同一批任务类窗口，避免"全量任务类脏日期污染本轮窗口"。
 	// 3. 若当前实现尚未支持 scoped 加载，则回退到旧入口，并继续复用后面的 scope 裁剪。
 	if scopedProvider, ok := s.Deps.ScheduleProvider.(ScopedScheduleStateProvider); ok && len(flowState.TaskClassIDs) > 0 {
 		state, err = scopedProvider.LoadScheduleStateForTaskClasses(ctx, userID, flowState.TaskClassIDs)
