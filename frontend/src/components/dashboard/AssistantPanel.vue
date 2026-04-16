@@ -1,8 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 
+import ContextWindowMeter from '@/components/assistant/ContextWindowMeter.vue'
+import TaskClassPlanningPicker from '@/components/assistant/TaskClassPlanningPicker.vue'
 import {
+  getContextStats,
   getConversationHistory,
   getConversationList,
   getConversationMeta,
@@ -12,9 +15,12 @@ import { refreshToken } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 import type {
   AssistantMessage,
+  ChatRequestExtra,
   ChatStreamRequest,
+  ConversationContextStats,
   ConversationListItem,
   ConversationMeta,
+  ThinkingModeType,
 } from '@/types/dashboard'
 import { formatConversationTime, formatMessageTime } from '@/utils/date'
 import { renderMarkdown } from '@/utils/markdown'
@@ -73,6 +79,7 @@ const authStore = useAuthStore()
 
 const assistantBodyRef = ref<HTMLElement | null>(null)
 const messageViewportRef = ref<HTMLElement | null>(null)
+const historyContentRef = ref<HTMLElement | null>(null)
 
 const conversationLoading = ref(false)
 const conversationLoadingMore = ref(false)
@@ -80,13 +87,14 @@ const chatLoading = ref(false)
 const historyExpanded = ref(true)
 const selectedConversationId = ref('')
 const selectedModel = ref<ModelType>('worker')
-const thinkingEnabled = ref(false)
+const selectedThinkingMode = ref<ThinkingModeType>('auto')
 const messageInput = ref('')
 const historyPanelWidth = ref(props.initialHistoryWidth)
 const activeStreamingMessageId = ref('')
 const editingUserMessageId = ref('')
 const editingUserMessageDraft = ref('')
 const retryVisiblePageMap = reactive<Record<string, number>>({})
+const pendingPlanningTaskClassIds = ref<number[]>([])
 
 const conversationPage = ref(1)
 const conversationPageSize = 12
@@ -101,6 +109,9 @@ const thinkingMessageMap = reactive<Record<string, boolean>>({})
 const reasoningCollapsedMap = reactive<Record<string, boolean>>({})
 const reasoningStartedAtMap = reactive<Record<string, number>>({})
 const reasoningDurationMap = reactive<Record<string, number>>({})
+const conversationContextStatsMap = reactive<Record<string, ConversationContextStats | null>>({})
+const conversationContextStatsLoadingMap = reactive<Record<string, boolean>>({})
+const conversationContextStatsReadyMap = reactive<Record<string, boolean>>({})
 
 const quickActions = [
   '帮我梳理今天最重要的三件事',
@@ -110,6 +121,7 @@ const quickActions = [
 ]
 
 const MODEL_PREFERENCE_STORAGE_KEY = 'smartflow.assistant.model.byConversation.v1'
+const DEFAULT_PLANNING_PROMPT = '请基于这些任务类帮我做一版智能编排。'
 
 let messageScrollRaf = 0
 let messageScrollReleaseRaf = 0
@@ -302,6 +314,26 @@ const shouldShowHistoryFallback = computed(() => {
     rawSelectedMessages.value.length === 0 &&
     (selectedConversation.value?.message_count ?? 0) > 0
   )
+})
+
+const selectedConversationContextStats = computed(() => {
+  const conversationId = selectedConversationId.value
+  if (!conversationId || isDraftConversationId(conversationId)) {
+    return null
+  }
+  return conversationContextStatsMap[conversationId] ?? null
+})
+
+const contextStatsLoading = computed(() => {
+  const conversationId = selectedConversationId.value
+  if (!conversationId) {
+    return false
+  }
+  return conversationContextStatsLoadingMap[conversationId] === true
+})
+
+const contextStatsDisabled = computed(() => {
+  return !selectedConversationId.value || isDraftConversationId(selectedConversationId.value)
 })
 
 function isModelType(value: unknown): value is ModelType {
@@ -1054,6 +1086,8 @@ async function ensureSelectedConversationAfterListLoad() {
 // 2. reset=false 时只在还有更多数据且当前不在加载时继续拉下一页，避免重复请求。
 // 3. 接口失败时保留现有列表，不清空本地草稿会话，防止用户当前上下文丢失。
 async function loadConversationListData(reset = false) {
+  let loadSucceeded = false
+
   if (reset) {
     conversationPage.value = 1
     conversationHasMore.value = false
@@ -1082,12 +1116,38 @@ async function loadConversationListData(reset = false) {
     conversationPage.value += 1
     conversationListReady.value = true
     await ensureSelectedConversationAfterListLoad()
+    loadSucceeded = true
   } catch (error) {
     ElMessage.warning(error instanceof Error ? error.message : '会话列表加载失败，请稍后重试')
   } finally {
     conversationLoading.value = false
     conversationLoadingMore.value = false
   }
+
+  if (loadSucceeded) {
+    await ensureHistoryPanelCanScroll()
+  }
+}
+
+// ensureHistoryPanelCanScroll 负责在“首屏列表不足以形成滚动条”时自动补拉后续分页。
+// 职责边界：
+// 1. 只处理左侧历史列表的可滚动性，不参与会话选中、标题计算等业务逻辑。
+// 2. 仅当容器已经渲染完成、且当前内容高度仍未超过可视高度时才继续拉下一页，避免无意义请求。
+// 3. 若已经到底、容器不存在，或当前正在加载，则直接停止，防止递归触发形成请求风暴。
+async function ensureHistoryPanelCanScroll() {
+  await nextTick()
+
+  const container = historyContentRef.value
+  if (!container || conversationLoading.value || conversationLoadingMore.value || !conversationHasMore.value) {
+    return
+  }
+
+  const canScroll = container.scrollHeight - container.clientHeight > 1
+  if (canScroll) {
+    return
+  }
+
+  await loadConversationListData(false)
 }
 
 function handleHistoryScroll(event: Event) {
@@ -1212,11 +1272,39 @@ async function ensureConversationMeta(conversationId: string) {
   }
 }
 
+async function loadConversationContextStats(conversationId: string, forceReload = false) {
+  // 1. draft 会话还没有稳定 chat_id，直接请求只会得到无意义的空结果，因此这里提前短路。
+  // 2. 已经读过且本轮没有强制刷新时复用本地缓存，避免切换同一会话时重复打点接口。
+  // 3. 接口失败时统一回退为 null 占位，不在切会话时弹错误，避免把增强信息做成高频打扰。
+  if (!conversationId || isDraftConversationId(conversationId)) {
+    return
+  }
+
+  if (!forceReload && conversationContextStatsReadyMap[conversationId] === true) {
+    return
+  }
+
+  conversationContextStatsLoadingMap[conversationId] = true
+  try {
+    conversationContextStatsMap[conversationId] = await getContextStats(conversationId)
+    conversationContextStatsReadyMap[conversationId] = true
+  } catch {
+    delete conversationContextStatsMap[conversationId]
+    conversationContextStatsReadyMap[conversationId] = false
+  } finally {
+    conversationContextStatsLoadingMap[conversationId] = false
+  }
+}
+
 async function selectConversation(conversationId: string) {
   cancelEditUserMessage()
   selectedConversationId.value = conversationId
   applyPreferredModelForConversation(conversationId)
-  await Promise.allSettled([loadConversationMessages(conversationId), ensureConversationMeta(conversationId)])
+  await Promise.allSettled([
+    loadConversationMessages(conversationId),
+    ensureConversationMeta(conversationId),
+    loadConversationContextStats(conversationId),
+  ])
   scheduleScrollMessagesToBottom(false, true)
 }
 
@@ -1226,6 +1314,48 @@ function startNewConversation() {
   messageInput.value = ''
   activeStreamingMessageId.value = ''
   shouldAutoFollowMessages.value = true
+}
+
+interface RetryRequestExtra {
+  retryGroupId: string
+  retryFromUserMessageId: string | number
+  retryFromAssistantMessageId: string | number
+}
+
+function isManualThinkingEnabled(mode: ThinkingModeType) {
+  return mode === 'true'
+}
+
+function buildChatRequestExtra(
+  planningTaskClassIds: number[] = [],
+  retryExtra?: RetryRequestExtra,
+): ChatRequestExtra | undefined {
+  // 1. retry 与“新一轮智能编排”属于互斥语义：retry 必须严格指向既有历史消息，不应再混入新的任务类上下文。
+  // 2. 因此只有普通发送链路才透传 task_class_ids，避免 regenerate 时把当前输入区的临时选择误带进历史重试。
+  // 3. 若本轮没有任何附加上下文，则返回 undefined，保持请求体尽量精简。
+  if (retryExtra) {
+    return {
+      request_mode: 'retry',
+      retry_group_id: retryExtra.retryGroupId,
+      retry_from_user_message_id: retryExtra.retryFromUserMessageId,
+      retry_from_assistant_message_id: retryExtra.retryFromAssistantMessageId,
+    }
+  }
+
+  if (planningTaskClassIds.length <= 0) {
+    return undefined
+  }
+
+  return {
+    task_class_ids: [...planningTaskClassIds],
+  }
+}
+
+function handlePlanningSelectionApplied(taskClassIds: number[]) {
+  if (taskClassIds.length <= 0 || messageInput.value.trim()) {
+    return
+  }
+  messageInput.value = DEFAULT_PLANNING_PROMPT
 }
 
 // fetchChatStream 负责以 fetch 方式发起聊天请求，并处理一次 refresh token 自动重试。
@@ -1279,7 +1409,7 @@ function prepareAssistantMessageForStreaming(message: AssistantMessage, createdA
   message.content = ''
   message.reasoning = ''
   message.createdAt = createdAt
-  thinkingMessageMap[message.id] = thinkingEnabled.value
+  thinkingMessageMap[message.id] = isManualThinkingEnabled(selectedThinkingMode.value)
   reasoningCollapsedMap[message.id] = false
   delete reasoningStartedAtMap[message.id]
   delete reasoningDurationMap[message.id]
@@ -1367,25 +1497,14 @@ async function streamAssistantReply(
   assistantMessage: AssistantMessage,
   createdAt: string,
   refreshPreview: boolean,
-  retryExtra?: {
-    retryGroupId: string
-    retryFromUserMessageId: string | number
-    retryFromAssistantMessageId: string | number
-  },
+  requestExtra?: ChatRequestExtra,
 ) : Promise<string> {
   const response = await fetchChatStream({
     conversation_id: isDraftConversationId(draftConversationId) ? undefined : draftConversationId,
     message: text,
     model: selectedModel.value,
-    thinking: thinkingEnabled.value,
-    extra: retryExtra
-      ? {
-          request_mode: 'retry',
-          retry_group_id: retryExtra.retryGroupId,
-          retry_from_user_message_id: retryExtra.retryFromUserMessageId,
-          retry_from_assistant_message_id: retryExtra.retryFromAssistantMessageId,
-        }
-      : undefined,
+    thinking: selectedThinkingMode.value,
+    extra: requestExtra,
   })
 
   const responseConversationId = response.headers.get('X-Conversation-ID')?.trim()
@@ -1449,8 +1568,13 @@ async function sendMessage(preset?: string) {
 
   chatLoading.value = true
 
-  const draftConversationId = selectedConversationId.value || createDraftConversationId()
-  if (!selectedConversationId.value) {
+  const planningTaskClassIdsForRequest = [...pendingPlanningTaskClassIds.value]
+  const shouldStartFreshPlanningConversation = planningTaskClassIdsForRequest.length > 0
+  const draftConversationId = shouldStartFreshPlanningConversation
+    ? createDraftConversationId()
+    : (selectedConversationId.value || createDraftConversationId())
+
+  if (!selectedConversationId.value || shouldStartFreshPlanningConversation) {
     selectedConversationId.value = draftConversationId
   }
   savePreferredModel(draftConversationId, selectedModel.value)
@@ -1474,7 +1598,7 @@ async function sendMessage(preset?: string) {
     reasoning: '',
   })
 
-  thinkingMessageMap[assistantMessage.id] = thinkingEnabled.value
+  thinkingMessageMap[assistantMessage.id] = isManualThinkingEnabled(selectedThinkingMode.value)
   reasoningCollapsedMap[assistantMessage.id] = false
   activeStreamingMessageId.value = assistantMessage.id
 
@@ -1483,8 +1607,21 @@ async function sendMessage(preset?: string) {
   scheduleScrollMessagesToBottom(false, true)
 
   try {
-    const actualConversationId = await streamAssistantReply(draftConversationId, text, assistantMessage, now, true)
-    await loadConversationMessages(actualConversationId, true)
+    const actualConversationId = await streamAssistantReply(
+      draftConversationId,
+      text,
+      assistantMessage,
+      now,
+      true,
+      buildChatRequestExtra(planningTaskClassIdsForRequest),
+    )
+    if (planningTaskClassIdsForRequest.length > 0) {
+      pendingPlanningTaskClassIds.value = []
+    }
+    await Promise.allSettled([
+      loadConversationMessages(actualConversationId, true),
+      loadConversationContextStats(actualConversationId, true),
+    ])
   } catch (error) {
     if (!assistantMessage.content.trim()) {
       assistantMessage.content = '本次回复已中断，请稍后重试。'
@@ -1562,12 +1699,22 @@ async function regenerateAssistantMessage(message: AssistantMessage) {
   scheduleScrollMessagesToBottom(false, true)
 
   try {
-    const actualConversationId = await streamAssistantReply(conversationId, text, retryAssistantMessage, now, true, {
-      retryGroupId,
-      retryFromUserMessageId: retrySource.persistedUserMessageId,
-      retryFromAssistantMessageId: retrySource.persistedAssistantMessageId,
-    })
-    await loadConversationMessages(actualConversationId, true)
+    const actualConversationId = await streamAssistantReply(
+      conversationId,
+      text,
+      retryAssistantMessage,
+      now,
+      true,
+      buildChatRequestExtra([], {
+        retryGroupId,
+        retryFromUserMessageId: retrySource.persistedUserMessageId,
+        retryFromAssistantMessageId: retrySource.persistedAssistantMessageId,
+      }),
+    )
+    await Promise.allSettled([
+      loadConversationMessages(actualConversationId, true),
+      loadConversationContextStats(actualConversationId, true),
+    ])
   } catch (error) {
     if (!retryAssistantMessage.content.trim()) {
       retryAssistantMessage.content = '重新生成失败，请稍后重试。'
@@ -1675,7 +1822,7 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <div class="assistant-history__content" @scroll="handleHistoryScroll">
+          <div ref="historyContentRef" class="assistant-history__content" @scroll="handleHistoryScroll">
             <button type="button" class="assistant-history__new" @click="startNewConversation">
               <span class="assistant-history__new-icon" aria-hidden="true">
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -1945,6 +2092,12 @@ onBeforeUnmount(() => {
           <div class="aaff8b8f">
             <div class="_77cefa5 _9996a53">
               <div class="_020ab5b">
+                <TaskClassPlanningPicker
+                  v-model="pendingPlanningTaskClassIds"
+                  :disabled="chatLoading"
+                  @applied="handlePlanningSelectionApplied"
+                />
+
                 <div class="_24fad49">
                   <textarea
                     v-model="messageInput"
@@ -1957,20 +2110,21 @@ onBeforeUnmount(() => {
                 </div>
 
                 <div class="ec4f5d61">
-                  <button
-                    type="button"
-                    class="ds-atom-button f79352dc ds-toggle-button ds-toggle-button--md"
-                    :class="{ 'ds-toggle-button--selected': thinkingEnabled }"
-                    @click="thinkingEnabled = !thinkingEnabled"
-                  >
-                    <div class="ds-icon ds-atom-button__icon">
-                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M7.06428 5.93342C7.6876 5.93342 8.19304 6.43904 8.19319 7.06233C8.19319 7.68573 7.68769 8.19123 7.06428 8.19123C6.44096 8.19113 5.93537 7.68567 5.93537 7.06233C5.93552 6.43911 6.44105 5.93353 7.06428 5.93342Z" fill="currentColor" />
-                        <path fill-rule="evenodd" clip-rule="evenodd" d="M8.68147 0.963693C10.1168 0.447019 11.6266 0.374829 12.5633 1.31135C13.5 2.24805 13.4276 3.75776 12.911 5.19319C12.7126 5.74431 12.4385 6.31796 12.0965 6.89729C12.4969 7.54638 12.8141 8.19018 13.036 8.80647C13.5527 10.2419 13.625 11.7516 12.6883 12.6883C11.7516 13.625 10.2419 13.5527 8.80647 13.036C8.19019 12.8141 7.54638 12.4969 6.89729 12.0965C6.31794 12.4386 5.74432 12.7125 5.19319 12.911C3.75774 13.4276 2.24807 13.5 1.31135 12.5633C0.374829 11.6266 0.447019 10.1168 0.963693 8.68147C1.17182 8.10338 1.46318 7.50063 1.82893 6.8924C1.52179 6.35711 1.27232 5.82825 1.08869 5.31819C0.572038 3.88278 0.499683 2.37306 1.43635 1.43635C2.37304 0.499655 3.88277 0.572044 5.31819 1.08869C5.82825 1.27232 6.35712 1.5218 6.8924 1.82893C7.50063 1.46318 8.10338 1.17181 8.68147 0.963693ZM11.3572 8.01154C10.9083 8.62253 10.3901 9.22873 9.8094 9.8094C9.22874 10.3901 8.62252 10.9083 8.01154 11.3572C8.42567 11.5841 8.82867 11.7688 9.21272 11.9071C10.5455 12.3868 11.4246 12.2547 11.8397 11.8397C12.2547 11.4246 12.3869 10.5456 11.9071 9.21272C11.7688 8.82866 11.5841 8.42568 11.3572 8.01154ZM2.56526 8.02912C2.3734 8.39322 2.21492 8.74796 2.0926 9.08772C1.61288 10.4204 1.74509 11.2995 2.15998 11.7147C2.57502 12.1297 3.45412 12.2618 4.78694 11.7821C5.11053 11.6656 5.44783 11.5164 5.79377 11.3367C5.24897 10.9223 4.70919 10.4533 4.19026 9.9344C3.57575 9.31987 3.03166 8.67633 2.56526 8.02912ZM6.90705 3.2469C6.24062 3.70479 5.56457 4.26321 4.91389 4.91389C4.26322 5.56456 3.70479 6.24063 3.2469 6.90705C3.72671 7.63325 4.32774 8.37459 5.03889 9.08576C5.6494 9.69627 6.2818 10.2265 6.90803 10.6678C7.59365 10.2025 8.29077 9.63076 8.96076 8.96076C9.63077 8.29075 10.2025 7.59366 10.6678 6.90803C10.2265 6.2818 9.69628 5.6494 9.08576 5.03889C8.37459 4.32773 7.63325 3.72672 6.90705 3.2469ZM11.7147 2.15998C11.2995 1.74509 10.4204 1.61288 9.08772 2.0926C8.74832 2.21479 8.39379 2.37271 8.0301 2.56428C8.67725 3.03065 9.31992 3.5758 9.9344 4.19026C10.4533 4.7092 10.9223 5.24896 11.3367 5.79377C11.5164 5.44785 11.6656 5.11052 11.7821 4.78694C12.2618 3.45416 12.1297 2.57502 11.7147 2.15998ZM4.91194 2.2176C3.57918 1.73788 2.70001 1.86995 2.28498 2.28498C1.86998 2.70003 1.73788 3.5792 2.2176 4.91194C2.31706 5.18822 2.44109 5.47427 2.58674 5.7674C3.01928 5.1887 3.51471 4.6158 4.06526 4.06526C4.61581 3.5147 5.18869 3.01928 5.7674 2.58674C5.47428 2.4411 5.18821 2.31706 4.91194 2.2176Z" fill="currentColor" />
-                      </svg>
-                    </div>
-                    <span><span class="_6dbc175">深度思考</span></span>
-                  </button>
+                  <div class="assistant-toolbar__pill assistant-toolbar__pill--select assistant-toolbar__pill--ds-thinking">
+                    <span class="assistant-toolbar__select-label">思考</span>
+                    <el-select
+                      v-model="selectedThinkingMode"
+                      class="assistant-toolbar__select-box assistant-toolbar__select-box--thinking"
+                      size="small"
+                      popper-class="assistant-thinking-select-panel"
+                      placement="top-start"
+                      :teleported="true"
+                    >
+                      <el-option value="auto" label="自动" />
+                      <el-option value="true" label="开启" />
+                      <el-option value="false" label="关闭" />
+                    </el-select>
+                  </div>
 
                   <div class="assistant-toolbar__pill assistant-toolbar__pill--select assistant-toolbar__pill--ds-model">
                     <span class="assistant-toolbar__select-label">模型</span>
@@ -1986,6 +2140,13 @@ onBeforeUnmount(() => {
                       <el-option value="strategist" label="策略" />
                     </el-select>
                   </div>
+
+                  <ContextWindowMeter
+                    class="assistant-toolbar__context-meter"
+                    :stats="selectedConversationContextStats"
+                    :loading="contextStatsLoading"
+                    :disabled="contextStatsDisabled"
+                  />
 
                   <label class="f02f0e25 ds-icon-button ds-icon-button--l ds-icon-button--sizing-container" role="button" aria-disabled="false">
                     <div class="ds-icon-button__hover-bg" />
@@ -2977,6 +3138,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   padding: 8px 10px 10px;
 }
 
@@ -3021,7 +3183,8 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
-.assistant-toolbar__pill--ds-model {
+.assistant-toolbar__pill--ds-model,
+.assistant-toolbar__pill--ds-thinking {
   height: 32px;
   padding: 0 8px 0 10px;
   border: 1px solid rgba(15, 23, 42, 0.1);
@@ -3030,9 +3193,22 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  margin-right: auto;
-  min-width: 144px;
   flex: 0 0 auto;
+}
+
+.assistant-toolbar__pill--ds-thinking {
+  min-width: 138px;
+}
+
+.assistant-toolbar__pill--ds-model {
+  min-width: 144px;
+}
+
+.assistant-toolbar__context-meter {
+  width: 144px;
+  min-width: 144px;
+  flex: 0 0 144px;
+  margin-right: auto;
 }
 
 .assistant-toolbar__select-label {
@@ -3049,6 +3225,11 @@ onBeforeUnmount(() => {
 .assistant-toolbar__select-box {
   min-width: 96px;
   flex: 0 0 96px;
+}
+
+.assistant-toolbar__select-box--thinking {
+  min-width: 86px;
+  flex: 0 0 86px;
 }
 
 .assistant-toolbar__select-box :deep(.el-select__wrapper) {
@@ -3187,6 +3368,18 @@ onBeforeUnmount(() => {
   .assistant-composer-ds {
     padding-left: 18px;
     padding-right: 18px;
+  }
+
+  .ec4f5d61 {
+    flex-wrap: wrap;
+  }
+
+  .assistant-toolbar__context-meter {
+    width: 144px;
+    min-width: 144px;
+    flex-basis: 144px;
+    margin-right: 0;
+    order: 3;
   }
 }
 

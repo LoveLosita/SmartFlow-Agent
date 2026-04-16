@@ -7,7 +7,7 @@ const (
 	// 1. 负责把自然语言转成结构化 JSON，供后端节点分流与执行；
 	// 2. 负责抽取 task_class_ids / strategy / task_tags 等关键字段；
 	// 3. 不负责做排程计算，不负责做工具调用。
-	SchedulePlanIntentPrompt = `你是 SmartFlow 的排程意图分析器。
+	SchedulePlanIntentPrompt = `你是 SmartMate 的排程意图分析器。
 请根据用户输入，提取排程意图与约束条件。
 
 必须完成以下任务：
@@ -52,7 +52,7 @@ const (
 	// 1. 只处理“单天”数据，避免跨天决策污染；
 	// 2. 通过工具调用做小步调整；
 	// 3. 不负责周级配平，不负责最终总结。
-	SchedulePlanDailyReactPrompt = `你是 SmartFlow 日内排程优化器。
+	SchedulePlanDailyReactPrompt = `你是 SmartMate 日内排程优化器。
 
 你将收到一天内的日程安排（JSON 数组），其中：
 - status="existing"：已确定的课程或任务，不可移动
@@ -96,7 +96,7 @@ const (
 	// 2. 显式区分总预算与有效预算，避免模型对“次数扣减”产生困惑；
 	// 3. 明确“输入数据已过后端硬校验”，避免模型把合法嵌入误判为冲突；
 	// 4. 工具失败结果会回传到下一轮，模型只需“走一步看一步”。
-	SchedulePlanWeeklyReactPrompt = `你是 SmartFlow 周级排程配平器。
+	SchedulePlanWeeklyReactPrompt = `你是 SmartMate 周级排程配平器。
 
 单日内的排程已优化完毕，你当前只负责“单周微调”。
 
@@ -159,7 +159,7 @@ const (
 	// 1. 只做读数据总结，不参与工具调用与状态修改；
 	// 2. 输出面向用户的自然语言；
 	// 3. 失败由上层兜底文案处理。
-	SchedulePlanFinalCheckPrompt = `你是 SmartFlow 排程方案总结专家。
+	SchedulePlanFinalCheckPrompt = `你是 SmartMate 排程方案总结专家。
 你的任务是为用户生成一段友好、自然的排程总结。
 
 要求：

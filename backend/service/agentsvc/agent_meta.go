@@ -38,7 +38,7 @@ const (
 	conversationTitleTokenAdjustReason = "conversation_title_async"
 )
 
-const conversationTitlePrompt = `你是 SmartFlow 的会话标题生成器。
+const conversationTitlePrompt = `你是 SmartMate 的会话标题生成器。
 请基于给定对话内容，生成一个简短中文标题。
 
 要求：

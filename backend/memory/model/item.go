@@ -16,6 +16,7 @@ type ItemDTO struct {
 	MemoryType       string
 	Title            string
 	Content          string
+	ContentHash      string
 	Confidence       float64
 	Importance       float64
 	SensitivityLevel int

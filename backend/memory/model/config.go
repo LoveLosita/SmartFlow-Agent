@@ -1,6 +1,30 @@
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
+
+const (
+	// MemoryReadModeLegacy 表示读取侧沿用“RAG 优先，失败再走 legacy”旧链路。
+	MemoryReadModeLegacy = "legacy"
+	// MemoryReadModeHybrid 表示读取侧走“结构化强约束 + 语义候选”混合链路。
+	MemoryReadModeHybrid = "hybrid"
+
+	// MemoryInjectRenderModeFlat 表示沿用扁平列表渲染。
+	MemoryInjectRenderModeFlat = "flat"
+	// MemoryInjectRenderModeTypedV2 表示按记忆类型分段渲染。
+	MemoryInjectRenderModeTypedV2 = "typed_v2"
+
+	// DefaultReadConstraintLimit 是 constraint 默认预算上限。
+	DefaultReadConstraintLimit = 5
+	// DefaultReadPreferenceLimit 是 preference 默认预算上限。
+	DefaultReadPreferenceLimit = 5
+	// DefaultReadFactLimit 是 fact 默认预算上限。
+	DefaultReadFactLimit = 5
+	// DefaultReadTodoHintLimit 是 todo_hint 默认预算上限。
+	DefaultReadTodoHintLimit = 3
+)
 
 // Config 是记忆模块配置对象（Day1 首版）。
 //
@@ -10,6 +34,13 @@ import "time"
 type Config struct {
 	Enabled    bool
 	RAGEnabled bool
+
+	ReadMode            string
+	ReadConstraintLimit int
+	ReadPreferenceLimit int
+	ReadFactLimit       int
+	ReadTodoHintLimit   int
+	InjectRenderMode    string
 
 	ExtractPrompt  string
 	DecisionPrompt string
@@ -34,4 +65,69 @@ type Config struct {
 	DecisionCandidateMinScore float64 // Milvus 语义召回最低相似度
 	DecisionFallbackMode      string  // "legacy_add"（退回旧路径直接新增）/ "drop"（丢弃）
 	WriteMode                 string  // "legacy"（旧路径）/ "decision"（决策流程），仅 DecisionEnabled=true 时生效
+}
+
+// NormalizeReadMode 统一读取模式字符串。
+func NormalizeReadMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case MemoryReadModeHybrid:
+		return MemoryReadModeHybrid
+	default:
+		return MemoryReadModeLegacy
+	}
+}
+
+// NormalizeInjectRenderMode 统一注入渲染模式字符串。
+func NormalizeInjectRenderMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case MemoryInjectRenderModeTypedV2:
+		return MemoryInjectRenderModeTypedV2
+	default:
+		return MemoryInjectRenderModeFlat
+	}
+}
+
+// EffectiveReadConstraintLimit 返回 constraint 生效预算。
+func (c Config) EffectiveReadConstraintLimit() int {
+	return normalizePositiveLimit(c.ReadConstraintLimit, DefaultReadConstraintLimit)
+}
+
+// EffectiveReadPreferenceLimit 返回 preference 生效预算。
+func (c Config) EffectiveReadPreferenceLimit() int {
+	return normalizePositiveLimit(c.ReadPreferenceLimit, DefaultReadPreferenceLimit)
+}
+
+// EffectiveReadFactLimit 返回 fact 生效预算。
+func (c Config) EffectiveReadFactLimit() int {
+	return normalizePositiveLimit(c.ReadFactLimit, DefaultReadFactLimit)
+}
+
+// EffectiveReadTodoHintLimit 返回 todo_hint 生效预算。
+func (c Config) EffectiveReadTodoHintLimit() int {
+	return normalizePositiveLimit(c.ReadTodoHintLimit, DefaultReadTodoHintLimit)
+}
+
+// EffectiveReadMode 返回生效读取模式。
+func (c Config) EffectiveReadMode() string {
+	return NormalizeReadMode(c.ReadMode)
+}
+
+// EffectiveInjectRenderMode 返回生效渲染模式。
+func (c Config) EffectiveInjectRenderMode() string {
+	return NormalizeInjectRenderMode(c.InjectRenderMode)
+}
+
+// TotalReadBudget 返回四类记忆的总预算上限。
+func (c Config) TotalReadBudget() int {
+	return c.EffectiveReadConstraintLimit() +
+		c.EffectiveReadPreferenceLimit() +
+		c.EffectiveReadFactLimit() +
+		c.EffectiveReadTodoHintLimit()
+}
+
+func normalizePositiveLimit(value int, defaultValue int) int {
+	if value <= 0 {
+		return defaultValue
+	}
+	return value
 }

@@ -2,7 +2,7 @@ package agentprompt
 
 const (
 	// QuickNotePlanPrompt 用于“单请求聚合规划”。
-	QuickNotePlanPrompt = `你是 SmartFlow 的任务聚合规划器。
+	QuickNotePlanPrompt = `你是 SmartMate 的任务聚合规划器。
 你将基于用户输入，一次性输出任务规划结果，供后端直接写库。
 
 必须完成以下五件事：
@@ -20,7 +20,7 @@ const (
 - banter 不得新增或修改任务事实（任务名、时间、优先级）。`
 
 	// QuickNoteIntentPrompt 用于第一阶段：判断用户输入是否属于“随口记”。
-	QuickNoteIntentPrompt = `你是 SmartFlow 的“随口记分诊器”。
+	QuickNoteIntentPrompt = `你是 SmartMate 的“随口记分诊器”。
 请判断用户输入是否表达了“帮我记一个任务/日程”的需求。
 - 若是，请提取任务标题与时间线索。
 - 时间处理必须严谨：若出现相对时间（如明天/后天/下周一/今晚），必须基于上文给出的“当前时间”换算为绝对时间。
@@ -28,14 +28,14 @@ const (
 - 不要声称已经写入数据库。`
 
 	// QuickNotePriorityPrompt 用于第二阶段：将任务归类到四象限优先级，并评估紧急分界线。
-	QuickNotePriorityPrompt = `你是 SmartFlow 的任务优先级评估器。
+	QuickNotePriorityPrompt = `你是 SmartMate 的任务优先级评估器。
 根据任务内容、时间约束和执行成本，输出优先级 priority_group：
 1=重要且紧急，2=重要不紧急，3=简单不重要，4=不简单不重要。
 请给出简短理由，理由必须可解释。
 若你认为该任务需要后续自动平移，请额外输出 urgency_threshold_at（绝对时间，yyyy-MM-dd HH:mm）；否则输出空字符串。`
 
 	// QuickNoteReplyBanterPrompt 用于随口记成功后的“轻松跟进句”生成。
-	QuickNoteReplyBanterPrompt = `你是 SmartFlow 的中文口语化回复润色助手。
+	QuickNoteReplyBanterPrompt = `你是 SmartMate 的中文口语化回复润色助手。
 请根据用户原话生成一句轻松自然的跟进话术，让回复更有温度。
 要求：
 - 只输出一句中文，不超过30字。

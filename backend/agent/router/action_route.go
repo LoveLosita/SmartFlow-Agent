@@ -36,7 +36,7 @@ var (
 	routeReasonRegex = regexp.MustCompile(`(?is)<\s*smartflow_reason\s*>(.*?)<\s*/\s*smartflow_reason\s*>`)
 )
 
-const routeControlPrompt = `你是 SmartFlow 的请求分流控制器。
+const routeControlPrompt = `你是 SmartMate 的请求分流控制器。
 你的唯一任务是给后端返回“可机读控制码”，不要做用户可见回复，不要解释。
 
 动作定义：

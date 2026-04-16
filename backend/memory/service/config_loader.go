@@ -15,17 +15,23 @@ import (
 // 3. 轮询与重试参数给出保守默认值，避免对主链路造成压力。
 func LoadConfigFromViper() memorymodel.Config {
 	cfg := memorymodel.Config{
-		Enabled:          viper.GetBool("memory.enabled"),
-		RAGEnabled:       viper.GetBool("memory.rag.enabled"),
-		ExtractPrompt:    viper.GetString("memory.prompt.extract"),
-		DecisionPrompt:   viper.GetString("memory.prompt.decision"),
-		Threshold:        viper.GetFloat64("memory.threshold"),
-		EnableReranker:   viper.GetBool("memory.enableReranker"),
-		LLMTemperature:   viper.GetFloat64("memory.llm.temperature"),
-		LLMTopP:          viper.GetFloat64("memory.llm.topP"),
-		JobMaxRetry:      viper.GetInt("memory.job.maxRetry"),
-		WorkerPollEvery:  viper.GetDuration("memory.worker.pollEvery"),
-		WorkerClaimBatch: viper.GetInt("memory.worker.claimBatch"),
+		Enabled:             viper.GetBool("memory.enabled"),
+		RAGEnabled:          viper.GetBool("memory.rag.enabled"),
+		ReadMode:            memorymodel.NormalizeReadMode(viper.GetString("memory.read.mode")),
+		InjectRenderMode:    memorymodel.NormalizeInjectRenderMode(viper.GetString("memory.inject.renderMode")),
+		ExtractPrompt:       viper.GetString("memory.prompt.extract"),
+		DecisionPrompt:      viper.GetString("memory.prompt.decision"),
+		Threshold:           viper.GetFloat64("memory.threshold"),
+		EnableReranker:      viper.GetBool("memory.enableReranker"),
+		LLMTemperature:      viper.GetFloat64("memory.llm.temperature"),
+		LLMTopP:             viper.GetFloat64("memory.llm.topP"),
+		JobMaxRetry:         viper.GetInt("memory.job.maxRetry"),
+		WorkerPollEvery:     viper.GetDuration("memory.worker.pollEvery"),
+		WorkerClaimBatch:    viper.GetInt("memory.worker.claimBatch"),
+		ReadConstraintLimit: viper.GetInt("memory.read.constraintLimit"),
+		ReadPreferenceLimit: viper.GetInt("memory.read.preferenceLimit"),
+		ReadFactLimit:       viper.GetInt("memory.read.factLimit"),
+		ReadTodoHintLimit:   viper.GetInt("memory.read.todoHintLimit"),
 
 		// 决策层配置：默认关闭，灰度开启后才会生效。
 		DecisionEnabled:           viper.GetBool("memory.decision.enabled"),
@@ -53,6 +59,12 @@ func LoadConfigFromViper() memorymodel.Config {
 	if cfg.WorkerClaimBatch <= 0 {
 		cfg.WorkerClaimBatch = 1
 	}
+	cfg.ReadConstraintLimit = cfg.EffectiveReadConstraintLimit()
+	cfg.ReadPreferenceLimit = cfg.EffectiveReadPreferenceLimit()
+	cfg.ReadFactLimit = cfg.EffectiveReadFactLimit()
+	cfg.ReadTodoHintLimit = cfg.EffectiveReadTodoHintLimit()
+	cfg.ReadMode = cfg.EffectiveReadMode()
+	cfg.InjectRenderMode = cfg.EffectiveInjectRenderMode()
 
 	// 决策层配置默认值兜底。
 	// 说明：

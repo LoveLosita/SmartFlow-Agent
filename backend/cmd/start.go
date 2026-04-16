@@ -171,7 +171,7 @@ func Start() {
 	agentService.SetScheduleProvider(newagentconv.NewScheduleProvider(scheduleRepo, taskClassRepo))
 	agentService.SetSchedulePersistor(newagentconv.NewSchedulePersistorAdapter(manager))
 	agentService.SetCompactionStore(agentRepo)
-	agentService.SetMemoryReader(memoryModule)
+	agentService.SetMemoryReader(memoryModule, memoryCfg)
 
 	// API 层初始化。
 	userApi := api.NewUserHandler(userService)

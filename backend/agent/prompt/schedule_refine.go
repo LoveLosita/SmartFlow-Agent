@@ -2,7 +2,7 @@ package agentprompt
 
 const (
 	// ScheduleRefineContractPrompt 负责把用户自然语言微调请求抽取为结构化契约。
-	ScheduleRefineContractPrompt = `你是 SmartFlow 的排程微调契约分析器。
+	ScheduleRefineContractPrompt = `你是 SmartMate 的排程微调契约分析器。
 你会收到：当前时间、用户请求、已有排程摘要。
 请只输出 JSON，不要 Markdown，不要解释，不要代码块：
 {
@@ -32,7 +32,7 @@ const (
 5. hard_assertions 必须尽量结构化，避免只给自然语言目标。`
 
 	// ScheduleRefinePlannerPrompt 只负责生成“执行路径”，不直接执行动作。
-	ScheduleRefinePlannerPrompt = `你是 SmartFlow 的排程微调 Planner。
+	ScheduleRefinePlannerPrompt = `你是 SmartMate 的排程微调 Planner。
 你会收到：用户请求、契约、最近动作观察。
 请只输出 JSON，不要 Markdown，不要解释，不要代码块：
 {
@@ -48,7 +48,7 @@ const (
 5. 不要输出半截 JSON。`
 
 	// ScheduleRefineReactPrompt 用于“单任务微步 ReAct”执行器。
-	ScheduleRefineReactPrompt = `你是 SmartFlow 的单任务微步 ReAct 执行器。
+	ScheduleRefineReactPrompt = `你是 SmartMate 的单任务微步 ReAct 执行器。
 当前只处理一个任务（CURRENT_TASK），不能发散到其它任务的主动改动。
 你每轮只能做两件事之一：
 1) 调用一个工具（基础工具或复合工具）
@@ -122,7 +122,7 @@ const (
 18. 为保证解析稳定：goal_check<=50字，decision<=90字，summary<=60字。`
 
 	// ScheduleRefinePostReflectPrompt 要求模型基于真实工具结果做复盘，不允许“脑补成功”。
-	ScheduleRefinePostReflectPrompt = `你是 SmartFlow 的 ReAct 复盘器。
+	ScheduleRefinePostReflectPrompt = `你是 SmartMate 的 ReAct 复盘器。
 你会收到：本轮工具参数、后端真实执行结果、上一轮上下文。
 请只输出 JSON，不要 Markdown，不要解释：
 {
@@ -137,7 +137,7 @@ const (
 3. should_stop=true 仅用于“目标已满足”或“继续收益很低”。`
 
 	// ScheduleRefineReviewPrompt 用于终审语义校验。
-	ScheduleRefineReviewPrompt = `你是 SmartFlow 的终审校验器。
+	ScheduleRefineReviewPrompt = `你是 SmartMate 的终审校验器。
 请判断“当前排程”是否满足“本轮用户微调请求 + 契约硬要求”。
 只输出 JSON：
 {
@@ -151,7 +151,7 @@ const (
 2. pass=false 时 reason 必须给出核心差距。`
 
 	// ScheduleRefineSummaryPrompt 用于最终面向用户的自然语言总结。
-	ScheduleRefineSummaryPrompt = `你是 SmartFlow 的排程结果解读助手。
+	ScheduleRefineSummaryPrompt = `你是 SmartMate 的排程结果解读助手。
 请基于输入输出 2~4 句中文总结：
 1) 先说明本轮改了什么；
 2) 再说明改动收益；
@@ -159,7 +159,7 @@ const (
 不要输出 JSON。`
 
 	// ScheduleRefineRepairPrompt 用于终审失败后的单次修复动作。
-	ScheduleRefineRepairPrompt = `你是 SmartFlow 的修复执行器。
+	ScheduleRefineRepairPrompt = `你是 SmartMate 的修复执行器。
 当前方案未通过终审，请根据“未满足点”只做一次修复动作。
 只允许输出一个 tool_call（Move 或 Swap），不允许 done。
 

@@ -91,6 +91,72 @@ func (r *ItemRepo) FindByQuery(ctx context.Context, query memorymodel.ItemQuery)
 	return items, err
 }
 
+// FindPinnedByUser 读取“应优先注入”的结构化记忆。
+//
+// 步骤化说明：
+// 1. 先在同一组 user/conversation/assistant/run 作用域下查 constraint，保证硬约束不会因语义召回波动丢失；
+// 2. 再查高置信 preference，并按 importance 降序裁到预算，避免偏好噪声过多；
+// 3. 两路结果按“constraint 在前、preference 在后”拼接，后续由 service 层统一去重、排序和预算裁剪；
+// 4. 这里不直接做最终预算，是因为读取侧还要和语义候选合并后统一重排。
+func (r *ItemRepo) FindPinnedByUser(
+	ctx context.Context,
+	query memorymodel.ItemQuery,
+	preferenceLimit int,
+) ([]model.MemoryItem, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("memory item repo is nil")
+	}
+	if query.UserID <= 0 {
+		return nil, errors.New("memory item query user_id is invalid")
+	}
+
+	includeConstraint := allowPinnedMemoryType(query.MemoryTypes, memorymodel.MemoryTypeConstraint)
+	includePreference := allowPinnedMemoryType(query.MemoryTypes, memorymodel.MemoryTypePreference)
+	if !includeConstraint && !includePreference {
+		return nil, nil
+	}
+
+	base := r.db.WithContext(ctx).Model(&model.MemoryItem{}).Where("user_id = ?", query.UserID)
+	base = applyScopedEquality(base, "conversation_id", query.ConversationID, query.IncludeGlobal)
+	base = applyScopedEquality(base, "assistant_id", query.AssistantID, query.IncludeGlobal)
+	base = applyScopedEquality(base, "run_id", query.RunID, query.IncludeGlobal)
+	base = applyPinnedUnexpiredScope(base, query)
+
+	result := make([]model.MemoryItem, 0, preferenceLimit+4)
+	if includeConstraint {
+		var constraints []model.MemoryItem
+		err := base.Session(&gorm.Session{}).
+			Where("memory_type = ? AND status = ?", memorymodel.MemoryTypeConstraint, model.MemoryItemStatusActive).
+			Order("importance DESC").
+			Order("updated_at DESC").
+			Find(&constraints).Error
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, constraints...)
+	}
+
+	if includePreference {
+		if preferenceLimit <= 0 {
+			preferenceLimit = memorymodel.DefaultReadPreferenceLimit
+		}
+
+		var preferences []model.MemoryItem
+		err := base.Session(&gorm.Session{}).
+			Where("memory_type = ? AND confidence >= ? AND status = ?", memorymodel.MemoryTypePreference, 0.8, model.MemoryItemStatusActive).
+			Order("importance DESC").
+			Order("updated_at DESC").
+			Limit(preferenceLimit).
+			Find(&preferences).Error
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, preferences...)
+	}
+
+	return result, nil
+}
+
 // GetByIDForUser 读取某个用户的一条记忆条目。
 func (r *ItemRepo) GetByIDForUser(ctx context.Context, userID int, memoryID int64) (*model.MemoryItem, error) {
 	if r == nil || r.db == nil {
@@ -291,4 +357,28 @@ func applyScopedEquality(db *gorm.DB, column, value string, includeGlobal bool) 
 		return db.Where("("+column+" = ? OR "+column+" IS NULL)", value)
 	}
 	return db.Where(column+" = ?", value)
+}
+
+func applyPinnedUnexpiredScope(db *gorm.DB, query memorymodel.ItemQuery) *gorm.DB {
+	if db == nil || !query.OnlyUnexpired {
+		return db
+	}
+	now := query.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return db.Where("(ttl_at IS NULL OR ttl_at > ?)", now)
+}
+
+func allowPinnedMemoryType(memoryTypes []string, target string) bool {
+	if len(memoryTypes) == 0 {
+		return true
+	}
+	target = memorymodel.NormalizeMemoryType(target)
+	for _, item := range memoryTypes {
+		if memorymodel.NormalizeMemoryType(item) == target {
+			return true
+		}
+	}
+	return false
 }

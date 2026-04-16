@@ -6,7 +6,7 @@ import (
 )
 
 const routeSystemPrompt = `
-你是 SmartFlow 的一级路由助手。
+你是 SmartMate 的一级路由助手。
 你的职责不是回答用户，而是判断这条消息更适合走哪条能力链路。
 
 当前 Agent 仍在逐批迁移阶段，因此这里只先保留 prompt 落点与职责说明。

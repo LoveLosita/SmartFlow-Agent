@@ -71,6 +71,9 @@ func (s *ReadService) Retrieve(ctx context.Context, req memorymodel.RetrieveRequ
 	}
 
 	limit := normalizeLimit(req.Limit, defaultRetrieveLimit, maxRetrieveLimit)
+	if s.cfg.EffectiveReadMode() == memorymodel.MemoryReadModeHybrid {
+		return s.HybridRetrieve(ctx, req, effectiveSetting, limit, now)
+	}
 	if s.cfg.RAGEnabled && s.ragRuntime != nil && strings.TrimSpace(req.Query) != "" {
 		items, ragErr := s.retrieveByRAG(ctx, req, effectiveSetting, limit, now)
 		if ragErr == nil && len(items) > 0 {
@@ -91,18 +94,12 @@ func (s *ReadService) retrieveByLegacy(
 	if !effectiveSetting.MemoryEnabled {
 		return nil, nil
 	}
-	query := memorymodel.ItemQuery{
-		UserID:         req.UserID,
-		ConversationID: req.ConversationID,
-		AssistantID:    req.AssistantID,
-		RunID:          req.RunID,
-		Statuses:       []string{model.MemoryItemStatusActive},
-		MemoryTypes:    normalizeRetrieveMemoryTypes(req.MemoryTypes),
-		IncludeGlobal:  true,
-		OnlyUnexpired:  true,
-		Limit:          normalizeLimit(limit*3, limit*3, maxRetrieveLimit*3),
-		Now:            now,
-	}
+	query := buildReadScopedItemQuery(
+		req,
+		now,
+		[]string{model.MemoryItemStatusActive},
+		normalizeLimit(limit*3, limit*3, maxRetrieveLimit*3),
+	)
 
 	items, err := s.itemRepo.FindByQuery(ctx, query)
 	if err != nil {
@@ -114,8 +111,8 @@ func (s *ReadService) retrieveByLegacy(
 	}
 
 	sort.SliceStable(items, func(i, j int) bool {
-		left := scoreRetrievedItem(items[i], now, req.ConversationID)
-		right := scoreRetrievedItem(items[j], now, req.ConversationID)
+		left := scoreRetrievedItem(items[i], now)
+		right := scoreRetrievedItem(items[j], now)
 		if left == right {
 			return items[i].ID > items[j].ID
 		}
@@ -140,17 +137,7 @@ func (s *ReadService) retrieveByRAG(
 		return nil, nil
 	}
 
-	result, err := s.ragRuntime.RetrieveMemory(ctx, infrarag.MemoryRetrieveRequest{
-		Query:          req.Query,
-		TopK:           limit,
-		Threshold:      s.cfg.Threshold,
-		Action:         "search",
-		UserID:         req.UserID,
-		ConversationID: req.ConversationID,
-		AssistantID:    req.AssistantID,
-		RunID:          req.RunID,
-		MemoryTypes:    normalizeRetrieveMemoryTypes(req.MemoryTypes),
-	})
+	result, err := s.ragRuntime.RetrieveMemory(ctx, buildReadScopedRAGRequest(req, limit, s.cfg.Threshold))
 	if err != nil || result == nil || len(result.Items) == 0 {
 		return nil, err
 	}
@@ -193,13 +180,16 @@ func normalizeRetrieveMemoryTypes(raw []string) []string {
 	}
 }
 
-func scoreRetrievedItem(item model.MemoryItem, now time.Time, conversationID string) float64 {
+// scoreRetrievedItem 计算 legacy 读链路的确定性排序分数。
+//
+// 说明：
+// 1. 这里只保留 importance / confidence / recency / explicit / type 这些稳定特征；
+// 2. conversation_id 已不再参与读侧打分，因为同对话信息本就已经在上下文窗口内；
+// 3. 若后续需要引入语义分或 reranker，应在 DTO 层补齐对应字段后再统一并入。
+func scoreRetrievedItem(item model.MemoryItem, now time.Time) float64 {
 	score := 0.35*clamp01(item.Importance) + 0.3*clamp01(item.Confidence) + 0.2*recencyScore(item, now)
 	if item.IsExplicit {
 		score += 0.1
-	}
-	if strValue(item.ConversationID) != "" && strValue(item.ConversationID) == conversationID {
-		score += 0.08
 	}
 	switch item.MemoryType {
 	case memorymodel.MemoryTypeConstraint:
@@ -262,15 +252,18 @@ func collectMemoryIDs(items []model.MemoryItem) []int64 {
 func buildMemoryDTOFromRetrieveHit(hit infrarag.RetrieveHit) (memorymodel.ItemDTO, int64) {
 	memoryID := parseMemoryIDFromDocumentID(hit.DocumentID)
 	metadata := hit.Metadata
+	content := strings.TrimSpace(hit.Text)
+	memoryType := readString(metadata["memory_type"])
 	dto := memorymodel.ItemDTO{
 		ID:               memoryID,
 		UserID:           int(readFloatLike(metadata["user_id"])),
 		ConversationID:   readString(metadata["conversation_id"]),
 		AssistantID:      readString(metadata["assistant_id"]),
 		RunID:            readString(metadata["run_id"]),
-		MemoryType:       readString(metadata["memory_type"]),
+		MemoryType:       memoryType,
 		Title:            readString(metadata["title"]),
-		Content:          strings.TrimSpace(hit.Text),
+		Content:          content,
+		ContentHash:      fallbackContentHash(memoryType, content, readString(metadata["content_hash"])),
 		Confidence:       readFloatLike(metadata["confidence"]),
 		Importance:       readFloatLike(metadata["importance"]),
 		SensitivityLevel: int(readFloatLike(metadata["sensitivity_level"])),

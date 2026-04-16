@@ -48,7 +48,7 @@ const executeMessage1MaxRunes = 1400
 // 1. message[0] 固定 prompt（规则 + 微调硬引导 + 输出约束 + 工具简表）
 // 2. message[1] 历史上下文（真实对话流 + 早期 ReAct 摘要）
 // 3. message[2] 当轮 ReAct Loop 窗口（thought/reason + tool_call + observation 绑定展示）
-// 4. message[3] 当前执行状态（轮次、模式、plan 步骤、任务类等）
+// 4. message[3] 当前执行状态（轮次、模式、plan 步骤、任务类、相关记忆等）
 func buildExecuteStageMessages(
 	stageSystemPrompt string,
 	state *newagentmodel.CommonState,
@@ -72,7 +72,7 @@ func buildExecuteStageMessages(
 func buildExecuteMessage0(stageSystemPrompt string, ctx *newagentmodel.ConversationContext) string {
 	base := strings.TrimSpace(mergeSystemPrompts(ctx, stageSystemPrompt))
 	if base == "" {
-		base = "你是 SmartFlow NewAgent 执行器，请继续 execute 阶段。"
+		base = "你是 SmartMate 执行器，请继续 execute 阶段。"
 	}
 
 	toolCatalog := renderExecuteToolCatalogCompact(ctx)
@@ -289,6 +289,10 @@ func buildExecuteMessage3(state *newagentmodel.CommonState, ctx *newagentmodel.C
 		} else {
 			lines = append(lines, "- 顺序策略：默认保持 suggested 相对顺序，禁止调用 min_context_switch。")
 		}
+	}
+	if memoryText := renderExecuteMemoryContext(ctx); memoryText != "" {
+		lines = append(lines, "相关记忆（仅在确有帮助时参考，不要机械复述）：")
+		lines = append(lines, memoryText)
 	}
 
 	// 兼容上层传入的执行指令；若为空则使用固定收口指令。

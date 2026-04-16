@@ -9,7 +9,7 @@ import (
 )
 
 const deliverSystemPrompt = `
-你是 SmartFlow NewAgent 的交付器。
+你是 SmartMate 的交付器。
 你的职责是基于原始计划和执行历史，生成一份简洁、诚实的任务完成总结。
 
 请遵守以下规则：

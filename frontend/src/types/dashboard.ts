@@ -93,10 +93,32 @@ export interface AssistantMessage {
   retryTotal?: number
 }
 
+export type ThinkingModeType = 'auto' | 'true' | 'false'
+
+export interface ChatRequestExtra {
+  task_class_ids?: number[]
+  request_mode?: 'retry'
+  retry_group_id?: string
+  retry_from_user_message_id?: string | number
+  retry_from_assistant_message_id?: string | number
+  confirm_action?: string
+  always_execute?: boolean
+  resume?: Record<string, unknown>
+}
+
+export interface ConversationContextStats {
+  msg0: number
+  msg1: number
+  msg2: number
+  msg3: number
+  total: number
+  budget: number
+}
+
 export interface ChatStreamRequest {
   conversation_id?: string
   message: string
   model?: string
-  thinking?: boolean
-  extra?: Record<string, unknown>
+  thinking?: ThinkingModeType
+  extra?: ChatRequestExtra
 }

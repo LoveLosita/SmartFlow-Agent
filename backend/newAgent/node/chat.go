@@ -217,7 +217,7 @@ func streamAndDispatch(
 		)
 
 		flowState.AllowReorder = resolveAllowReorder(input.UserInput, decision.AllowReorder)
-		effectiveThinking := resolveEffectiveThinking(flowState.ThinkingMode, decision.Thinking)
+		effectiveThinking := resolveEffectiveThinking(flowState.ThinkingMode, decision.Route, decision.Thinking)
 
 		switch decision.Route {
 		case newagentmodel.ChatRouteDirectReply:
@@ -243,16 +243,22 @@ func streamAndDispatch(
 // resolveEffectiveThinking 根据前端 ThinkingMode 和路由决策合并出最终 thinking 状态。
 //
 // 规则：
-// - "true" 强制开启；
-// - "false" 强制关闭；
-// - "auto"/"" 交给路由决策的 decisionThinking。
-func resolveEffectiveThinking(mode string, decisionThinking bool) bool {
+// 1. "true"：前端强制开启，所有路由统一开；
+// 2. "false"：前端强制关闭，所有路由统一关；
+// 3. "auto"/""：按路由语义兜底；
+// 3.1 deep_answer 的语义本身就是"复杂问答 + 原地深度思考"，因此默认开启；
+// 3.2 execute 继续沿用路由模型给出的 decisionThinking；
+// 3.3 其余路由默认关闭，避免把轻量闲聊误升成高成本推理。
+func resolveEffectiveThinking(mode string, route newagentmodel.ChatRoute, decisionThinking bool) bool {
 	switch strings.TrimSpace(strings.ToLower(mode)) {
 	case "true":
 		return true
 	case "false":
 		return false
 	default:
+		if route == newagentmodel.ChatRouteDeepAnswer {
+			return true
+		}
 		return decisionThinking
 	}
 }

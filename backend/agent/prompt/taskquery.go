@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-const TaskQueryPlanPrompt = `你是 SmartFlow 的任务查询规划器。请根据用户原话，输出结构化查询计划 JSON，供后端直接执行。
+const TaskQueryPlanPrompt = `你是 SmartMate 的任务查询规划器。请根据用户原话，输出结构化查询计划 JSON，供后端直接执行。
 只允许输出 JSON，不要输出解释、代码块或多余文字。
 
 输出字段：
@@ -30,7 +30,7 @@ const TaskQueryPlanPrompt = `你是 SmartFlow 的任务查询规划器。请根�
 6. 如果用户语义更偏向“来点事做做”“给我点轻松的任务”，优先考虑 3、4 象限。
 7. 允许多选象限。`
 
-const TaskQueryReflectPrompt = `你是 SmartFlow 的任务查询结果审阅器。你会看到：用户原话、当前查询计划、查询结果摘要、当前重试次数。
+const TaskQueryReflectPrompt = `你是 SmartMate 的任务查询结果审阅器。你会看到：用户原话、当前查询计划、查询结果摘要、当前重试次数。
 请只输出 JSON，不要输出解释、代码块或多余文字。
 
 输出字段：

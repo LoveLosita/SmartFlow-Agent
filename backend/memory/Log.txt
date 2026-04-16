@@ -1,43 +1,78 @@
-2026/04/16 11:24:55 D:/SmartFlow-Agent/backend/dao/agent.go:306 record not found
-[44.328ms] [rows:0] SELECT * FROM `agent_chats` WHERE user_id = 1 AND chat_id = 'df7ce26d-6952-493d-ac7f-3bfe98cbc338' ORDER BY `agent_chats`.`id` LIMIT 1
-2026/04/16 11:24:55 [DEBUG] loadOrCreateRuntimeState chatID=df7ce26d-6952-493d-ac7f-3bfe98cbc338 ok=false err=<nil> hasRuntime=false hasPending=false hasCtx=false hasSchedule=false hasOriginal=false
-2026/04/16 11:24:55 [GORM-Cache] Invalidated conversation history cache for user 1 conversation df7ce26d-6952-493d-ac7f-3bfe98cbc338
-2026/04/16 11:24:56 rag level=info component=store operation=ensure_collection action=search collection=smartflow_rag_chunks corpus=memory latency_ms=40 metric_type=COSINE status=created store=milvus vector_dim=1024
-2026/04/16 11:24:57 rag level=error component=store operation=search action=search collection=smartflow_rag_chunks corpus=memory error=Post "http://localhost:19530/v2/vectordb/entities/search": context deadline exceeded error_code=DEADLINE_EXCEEDED filter_count=3 latency_ms=1304 status=failed store=milvus top_k=5 vector_dim=1024
-2026/04/16 11:24:57 rag level=error component=runtime operation=retrieve action=search corpus=memory error=Post "http://localhost:19530/v2/vectordb/entities/search": context deadline exceeded error_code=DEADLINE_EXCEEDED latency_ms=1500 query_len=48 status=failed threshold=0.55 top_k=5
-2026/04/16 11:25:03 [DEBUG] chat routing chat=df7ce26d-6952-493d-ac7f-3bfe98cbc338 route=direct_reply needs_rough_build=false needs_refine_after_rough_build=false allow_reorder=false thinking=false has_rough_build_done=false task_class_count=0 raw=<SMARTFLOW_ROUTE nonce="84656bca-1aa3-4308-bb7d-5127badf9d47" route="direct_reply"/>
-[GIN] 2026/04/16 - 11:25:04 | 200 |    9.3560115s |       127.0.0.1 | POST     "/api/v1/agent/chat"
-2026/04/16 11:25:05 outbox due messages=3, start dispatch
-2026/04/16 11:25:06 [GORM-Cache] Invalidated conversation history cache for user 1 conversation df7ce26d-6952-493d-ac7f-3bfe98cbc338
-2026/04/16 11:25:07 [GORM-Cache] Invalidated conversation history cache for user 1 conversation df7ce26d-6952-493d-ac7f-3bfe98cbc338
-2026/04/16 11:25:08 outbox due messages=1, start dispatch
-2026/04/16 11:25:09 outbox due messages=1, start dispatch
-2026/04/16 11:25:18 rag level=info component=store operation=search action=search collection=smartflow_rag_chunks corpus=memory filter_count=3 latency_ms=7 result_count=0 status=success store=milvus top_k=5 vector_dim=1024
-2026/04/16 11:25:18 rag level=info component=runtime operation=retrieve action=search corpus=memory fallback_used=false hit_count=0 latency_ms=100 query_len=21 raw_count=0 status=success threshold=0.6 top_k=5
-2026/04/16 11:25:18 [DEBUG][去重] 语义召回候选: job_id=18 user_id=1 memory_type=preference candidate_count=0
-2026/04/16 11:25:18 [DEBUG][去重] 汇总决策: job_id=18 action=ADD target_id=0 reason="无相关旧记忆，直接新增"
-2026/04/16 11:25:19 rag level=info component=store operation=upsert action=add collection=smartflow_rag_chunks corpus=memory latency_ms=53 row_count=1 status=success store=milvus vector_dim=1024
-2026/04/16 11:25:19 rag level=info component=runtime operation=ingest action=add chunk_count=1 corpus=memory document_count=1 latency_ms=158 status=success
-2026/04/16 11:25:19 [去重] 决策流程完成: job_id=18 user_id=1 新增=1 更新=0 删除=0 跳过=0
+GOROOT=C:\Program Files\Go #gosetup
+GOPATH=C:\Users\Dev\go #gosetup
+"C:\Program Files\Go\bin\go.exe" build -o C:\Users\Dev\AppData\Local\JetBrains\GoLand2025.3\tmp\GoLand\___7go_build_main_go.exe D:\SmartFlow-Agent\backend\main.go #gosetup
+C:\Users\Dev\AppData\Local\JetBrains\GoLand2025.3\tmp\GoLand\___7go_build_main_go.exe #gosetup
+2026/04/16 16:00:27 Config loaded successfully
+2026/04/16 16:00:36 Database connected successfully
+2026/04/16 16:00:36 Database auto migration completed
+2026/04/16 16:00:36 RAG runtime initialized: store=milvus embed=eino reranker=noop
+2026/04/16 16:00:36 outbox engine starting: topic=smartflow.agent.outbox brokers=[localhost:9092] retry_scan=1s batch=100
+2026/04/16 16:00:36 Kafka topic is ready: smartflow.agent.outbox
+2026/04/16 16:00:36 Outbox event bus started
+2026/04/16 16:00:36 Memory worker started
+2026/04/16 16:00:36 WebSearch provider: bocha
+2026/04/16 16:00:36 Routes setup completed
+2026/04/16 16:00:36 Server starting on port 8080...
+[GIN-debug] [WARNING] Creating an Engine instance with the Logger and Recovery middleware already attached.
 
-2026/04/16 11:25:44 D:/SmartFlow-Agent/backend/dao/agent.go:306 record not found
-[2.018ms] [rows:0] SELECT * FROM `agent_chats` WHERE user_id = 1 AND chat_id = '6279c9f0-0685-4484-bb33-d4216ef6107c' ORDER BY `agent_chats`.`id` LIMIT 1
-2026/04/16 11:25:44 [GORM-Cache] Invalidated conversation history cache for user 1 conversation 6279c9f0-0685-4484-bb33-d4216ef6107c
-2026/04/16 11:25:44 [DEBUG] loadOrCreateRuntimeState chatID=6279c9f0-0685-4484-bb33-d4216ef6107c ok=false err=<nil> hasRuntime=false hasPending=false hasCtx=false hasSchedule=false hasOriginal=false
-2026/04/16 11:25:44 rag level=info component=store operation=search action=search collection=smartflow_rag_chunks corpus=memory filter_count=3 latency_ms=46 result_count=0 status=success store=milvus top_k=5 vector_dim=1024
-2026/04/16 11:25:44 rag level=info component=runtime operation=retrieve action=search corpus=memory fallback_used=false hit_count=0 latency_ms=145 query_len=45 raw_count=0 status=success threshold=0.55 top_k=5
-2026/04/16 11:25:48 [DEBUG] chat routing chat=6279c9f0-0685-4484-bb33-d4216ef6107c route=direct_reply needs_rough_build=false needs_refine_after_rough_build=false allow_reorder=false thinking=false has_rough_build_done=false task_class_count=0 raw=<SMARTFLOW_ROUTE nonce="a868c365-4f8c-4d56-ac90-a8504842f81c" route="direct_reply"/>
-[GIN] 2026/04/16 - 11:25:49 | 200 |    5.3825319s |       127.0.0.1 | POST     "/api/v1/agent/chat"
-2026/04/16 11:25:50 outbox due messages=3, start dispatch
-2026/04/16 11:25:51 [GORM-Cache] Invalidated conversation history cache for user 1 conversation 6279c9f0-0685-4484-bb33-d4216ef6107c
-2026/04/16 11:25:52 [GORM-Cache] Invalidated conversation history cache for user 1 conversation 6279c9f0-0685-4484-bb33-d4216ef6107c
-2026/04/16 11:25:53 outbox due messages=2, start dispatch
-2026/04/16 11:25:58 rag level=info component=store operation=search action=search collection=smartflow_rag_chunks corpus=memory filter_count=3 latency_ms=53 result_count=1 status=success store=milvus top_k=5 vector_dim=1024
-2026/04/16 11:25:58 rag level=info component=runtime operation=retrieve action=search corpus=memory fallback_used=false hit_count=1 latency_ms=143 query_len=18 raw_count=1 status=success threshold=0.6 top_k=5
-2026/04/16 11:25:58 [WARN][去重] DocumentID 解析失败，跳过候选: document_id="memory:uid:1:6bf14130e4dfc8bd"
-2026/04/16 11:25:58 [WARN][去重] Milvus 返回 1 条结果但 DocumentID 全部解析失败，降级到 MySQL: user_id=1 memory_type=preference
-2026/04/16 11:25:58 [DEBUG][去重] 语义召回候选: job_id=19 user_id=1 memory_type=preference candidate_count=1
-2026/04/16 11:25:58 [DEBUG][去重] 候选详情: memory_id=17 score=0.0000 content="用户喜欢听音乐"
-2026/04/16 11:26:04 [DEBUG][去重] LLM 比对结果: candidate_id=17 score=0.0000 relation=duplicate reason="听歌和听音乐表达相同意思" candidate_content="用户喜欢听音乐"
-2026/04/16 11:26:04 [DEBUG][去重] 汇总决策: job_id=19 action=NONE target_id=0 reason="存在完全重复的旧记忆，跳过写入"
-2026/04/16 11:26:04 [去重] 决策流程完成: job_id=19 user_id=1 新增=0 更新=0 删除=0 跳过=1
+[GIN-debug] [WARNING] Running in "debug" mode. Switch to "release" mode in production.
+ - using env:	export GIN_MODE=release
+ - using code:	gin.SetMode(gin.ReleaseMode)
+
+[GIN-debug] GET    /api/v1/health            --> github.com/LoveLosita/smartflow/backend/routers.RegisterRouters.func1 (3 handlers)
+[GIN-debug] POST   /api/v1/user/register     --> github.com/LoveLosita/smartflow/backend/api.(*UserHandler).UserRegister-fm (3 handlers)
+[GIN-debug] POST   /api/v1/user/login        --> github.com/LoveLosita/smartflow/backend/api.(*UserHandler).UserLogin-fm (3 handlers)
+[GIN-debug] POST   /api/v1/user/refresh-token --> github.com/LoveLosita/smartflow/backend/api.(*UserHandler).RefreshTokenHandler-fm (3 handlers)
+[GIN-debug] POST   /api/v1/user/logout       --> github.com/LoveLosita/smartflow/backend/api.(*UserHandler).UserLogout-fm (5 handlers)
+[GIN-debug] POST   /api/v1/task/create       --> github.com/LoveLosita/smartflow/backend/api.(*TaskHandler).AddTask-fm (6 handlers)
+[GIN-debug] PUT    /api/v1/task/complete     --> github.com/LoveLosita/smartflow/backend/api.(*TaskHandler).CompleteTask-fm (6 handlers)
+[GIN-debug] PUT    /api/v1/task/undo-complete --> github.com/LoveLosita/smartflow/backend/api.(*TaskHandler).UndoCompleteTask-fm (6 handlers)
+[GIN-debug] GET    /api/v1/task/get          --> github.com/LoveLosita/smartflow/backend/api.(*TaskHandler).GetUserTasks-fm (5 handlers)
+[GIN-debug] POST   /api/v1/course/validate   --> github.com/LoveLosita/smartflow/backend/api.(*CourseHandler).CheckUserCourse-fm (5 handlers)
+[GIN-debug] POST   /api/v1/course/import     --> github.com/LoveLosita/smartflow/backend/api.(*CourseHandler).AddUserCourses-fm (6 handlers)
+[GIN-debug] POST   /api/v1/task-class/add    --> github.com/LoveLosita/smartflow/backend/api.(*TaskClassHandler).UserAddTaskClass-fm (6 handlers)
+[GIN-debug] GET    /api/v1/task-class/list   --> github.com/LoveLosita/smartflow/backend/api.(*TaskClassHandler).UserGetTaskClassInfos-fm (5 handlers)
+[GIN-debug] GET    /api/v1/task-class/get    --> github.com/LoveLosita/smartflow/backend/api.(*TaskClassHandler).UserGetCompleteTaskClass-fm (5 handlers)
+[GIN-debug] PUT    /api/v1/task-class/update --> github.com/LoveLosita/smartflow/backend/api.(*TaskClassHandler).UserUpdateTaskClass-fm (6 handlers)
+[GIN-debug] POST   /api/v1/task-class/insert-into-schedule --> github.com/LoveLosita/smartflow/backend/api.(*TaskClassHandler).UserAddTaskClassItemIntoSchedule-fm (6 handlers)
+[GIN-debug] DELETE /api/v1/task-class/delete-item --> github.com/LoveLosita/smartflow/backend/api.(*TaskClassHandler).DeleteTaskClassItem-fm (6 handlers)
+[GIN-debug] DELETE /api/v1/task-class/delete-class --> github.com/LoveLosita/smartflow/backend/api.(*TaskClassHandler).DeleteTaskClass-fm (6 handlers)
+[GIN-debug] PUT    /api/v1/task-class/apply-batch-into-schedule --> github.com/LoveLosita/smartflow/backend/api.(*TaskClassHandler).UserInsertBatchTaskClassItemsIntoSchedule-fm (6 handlers)
+[GIN-debug] GET    /api/v1/schedule/today    --> github.com/LoveLosita/smartflow/backend/api.(*ScheduleAPI).GetUserTodaySchedule-fm (5 handlers)
+[GIN-debug] GET    /api/v1/schedule/week     --> github.com/LoveLosita/smartflow/backend/api.(*ScheduleAPI).GetUserWeeklySchedule-fm (5 handlers)
+[GIN-debug] DELETE /api/v1/schedule/delete   --> github.com/LoveLosita/smartflow/backend/api.(*ScheduleAPI).DeleteScheduleEvent-fm (6 handlers)
+[GIN-debug] GET    /api/v1/schedule/recent-completed --> github.com/LoveLosita/smartflow/backend/api.(*ScheduleAPI).GetUserRecentCompletedSchedules-fm (5 handlers)
+[GIN-debug] GET    /api/v1/schedule/current  --> github.com/LoveLosita/smartflow/backend/api.(*ScheduleAPI).GetUserOngoingSchedule-fm (5 handlers)
+[GIN-debug] DELETE /api/v1/schedule/undo-task-item --> github.com/LoveLosita/smartflow/backend/api.(*ScheduleAPI).UserRevocateTaskItemFromSchedule-fm (6 handlers)
+[GIN-debug] GET    /api/v1/schedule/smart-planning --> github.com/LoveLosita/smartflow/backend/api.(*ScheduleAPI).SmartPlanning-fm (5 handlers)
+[GIN-debug] POST   /api/v1/schedule/smart-planning-multi --> github.com/LoveLosita/smartflow/backend/api.(*ScheduleAPI).SmartPlanningMulti-fm (5 handlers)
+[GIN-debug] POST   /api/v1/agent/chat        --> github.com/LoveLosita/smartflow/backend/api.(*AgentHandler).ChatAgent-fm (6 handlers)
+[GIN-debug] GET    /api/v1/agent/conversation-meta --> github.com/LoveLosita/smartflow/backend/api.(*AgentHandler).GetConversationMeta-fm (5 handlers)
+[GIN-debug] GET    /api/v1/agent/conversation-list --> github.com/LoveLosita/smartflow/backend/api.(*AgentHandler).GetConversationList-fm (5 handlers)
+[GIN-debug] GET    /api/v1/agent/conversation-history --> github.com/LoveLosita/smartflow/backend/api.(*AgentHandler).GetConversationHistory-fm (5 handlers)
+[GIN-debug] GET    /api/v1/agent/schedule-preview --> github.com/LoveLosita/smartflow/backend/api.(*AgentHandler).GetSchedulePlanPreview-fm (5 handlers)
+[GIN-debug] GET    /api/v1/agent/context-stats --> github.com/LoveLosita/smartflow/backend/api.(*AgentHandler).GetContextStats-fm (5 handlers)
+[GIN-debug] [WARNING] You trusted all proxies, this is NOT safe. We recommend you to set a value.
+Please check https://github.com/gin-gonic/gin/blob/master/docs/doc.md#dont-trust-all-proxies for details.
+[GIN-debug] Listening and serving HTTP on :8080
+[GIN] 2026/04/16 - 16:00:38 | 200 |     47.9273ms |       127.0.0.1 | GET      "/api/v1/agent/conversation-list?page=1&page_size=12&limit=12&status=active"
+[GIN] 2026/04/16 - 16:00:38 | 200 |     12.4182ms |       127.0.0.1 | GET      "/api/v1/agent/conversation-meta?conversation_id=d1dda8e1-b7f0-4721-ad84-529ecad5d637"
+[GIN] 2026/04/16 - 16:00:38 | 200 |     88.1335ms |       127.0.0.1 | GET      "/api/v1/agent/conversation-history?conversation_id=d1dda8e1-b7f0-4721-ad84-529ecad5d637"
+
+2026/04/16 16:01:07 D:/SmartFlow-Agent/backend/dao/agent.go:306 record not found
+[42.474ms] [rows:0] SELECT * FROM `agent_chats` WHERE user_id = 1 AND chat_id = '284c4b76-d6cc-40a6-b3de-fa4c8288022b' ORDER BY `agent_chats`.`id` LIMIT 1
+2026/04/16 16:01:07 [GORM-Cache] Invalidated conversation history cache for user 1 conversation 284c4b76-d6cc-40a6-b3de-fa4c8288022b
+2026/04/16 16:01:07 [DEBUG] loadOrCreateRuntimeState chatID=284c4b76-d6cc-40a6-b3de-fa4c8288022b ok=false err=<nil> hasRuntime=false hasPending=false hasCtx=false hasSchedule=false hasOriginal=false
+2026/04/16 16:01:08 rag level=info component=store operation=ensure_collection action=search collection=smartflow_rag_chunks corpus=memory latency_ms=4 metric_type=COSINE status=already_exists store=milvus vector_dim=1024
+2026/04/16 16:01:08 rag level=info component=store operation=search action=search collection=smartflow_rag_chunks corpus=memory filter_count=3 latency_ms=51 result_count=0 status=success store=milvus top_k=18 vector_dim=1024
+2026/04/16 16:01:08 rag level=info component=runtime operation=retrieve action=search corpus=memory fallback_used=false hit_count=0 latency_ms=255 query_len=51 raw_count=0 status=success threshold=0.55 top_k=18
+2026/04/16 16:01:26 [DEBUG] chat routing chat=284c4b76-d6cc-40a6-b3de-fa4c8288022b route=direct_reply needs_rough_build=false needs_refine_after_rough_build=false allow_reorder=false thinking=false has_rough_build_done=false task_class_count=0 raw=<SMARTFLOW_ROUTE nonce="9b04f5df-3452-4a15-a39f-0449c1851729" route="direct_reply"/>
+[GIN] 2026/04/16 - 16:01:27 | 200 |   19.3318195s |       127.0.0.1 | POST     "/api/v1/agent/chat"
+[GIN] 2026/04/16 - 16:01:27 | 200 |     84.0901ms |       127.0.0.1 | GET      "/api/v1/agent/conversation-list?page=1&page_size=12&limit=12&status=active"
+2026/04/16 16:01:27 outbox due messages=3, start dispatch
+[GIN] 2026/04/16 - 16:01:27 | 200 |        2.24ms |       127.0.0.1 | GET      "/api/v1/agent/conversation-meta?conversation_id=284c4b76-d6cc-40a6-b3de-fa4c8288022b"
+[GIN] 2026/04/16 - 16:01:27 | 200 |     46.4062ms |       127.0.0.1 | GET      "/api/v1/agent/conversation-history?conversation_id=284c4b76-d6cc-40a6-b3de-fa4c8288022b"
+2026/04/16 16:01:28 [GORM-Cache] Invalidated conversation history cache for user 1 conversation 284c4b76-d6cc-40a6-b3de-fa4c8288022b
+2026/04/16 16:01:29 [GORM-Cache] Invalidated conversation history cache for user 1 conversation 284c4b76-d6cc-40a6-b3de-fa4c8288022b
+2026/04/16 16:01:30 outbox due messages=1, start dispatch
+2026/04/16 16:01:31 异步生成会话标题失败(模型生成失败) chat=284c4b76-d6cc-40a6-b3de-fa4c8288022b err=failed to create chat completion: context deadline exceeded

@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
+	memoryutils "github.com/LoveLosita/smartflow/backend/memory/utils"
 	"github.com/LoveLosita/smartflow/backend/model"
 )
 
@@ -17,6 +18,7 @@ func toItemDTO(item model.MemoryItem) memorymodel.ItemDTO {
 		MemoryType:       item.MemoryType,
 		Title:            item.Title,
 		Content:          item.Content,
+		ContentHash:      fallbackContentHash(item.MemoryType, item.Content, strValue(item.ContentHash)),
 		Confidence:       item.Confidence,
 		Importance:       item.Importance,
 		SensitivityLevel: item.SensitivityLevel,
@@ -116,4 +118,32 @@ func strValue(v *string) string {
 		return ""
 	}
 	return strings.TrimSpace(*v)
+}
+
+// fallbackContentHash 返回条目可用于服务级去重的内容哈希。
+//
+// 说明：
+// 1. 优先复用库内已落表的 content_hash，避免同一条数据多套算法口径不一致；
+// 2. 若历史数据或 RAG metadata 没带 hash，则按“类型 + 规范化内容”补算；
+// 3. 若类型非法或正文为空，则返回空字符串，让上游继续走文本兜底去重。
+func fallbackContentHash(memoryType, content, currentHash string) string {
+	currentHash = strings.TrimSpace(currentHash)
+	if currentHash != "" {
+		return currentHash
+	}
+
+	normalizedType := memorymodel.NormalizeMemoryType(memoryType)
+	normalizedContent := normalizeContentForHash(content)
+	if normalizedType == "" || normalizedContent == "" {
+		return ""
+	}
+	return memoryutils.HashContent(normalizedType, normalizedContent)
+}
+
+func normalizeContentForHash(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	return strings.ToLower(strings.Join(strings.Fields(content), " "))
 }

@@ -2,7 +2,6 @@ package agentsvc
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -28,9 +27,10 @@ type MemoryReader interface {
 	Retrieve(ctx context.Context, req memorymodel.RetrieveRequest) ([]memorymodel.ItemDTO, error)
 }
 
-// SetMemoryReader 注入 newAgent 主链路读取记忆所需的薄接口。
-func (s *AgentService) SetMemoryReader(reader MemoryReader) {
+// SetMemoryReader 注入 newAgent 主链路读取记忆所需的薄接口与渲染配置。
+func (s *AgentService) SetMemoryReader(reader MemoryReader, cfg memorymodel.Config) {
 	s.memoryReader = reader
+	s.memoryCfg = cfg
 }
 
 // injectMemoryContext 在 graph 执行前，把本轮相关记忆写入 ConversationContext 的 pinned block。
@@ -68,7 +68,7 @@ func (s *AgentService) injectMemoryContext(
 		return
 	}
 
-	content := renderMemoryPinnedContent(items)
+	content := renderMemoryPinnedContentByMode(items, s.memoryCfg.EffectiveInjectRenderMode())
 	if content == "" {
 		conversationContext.RemovePinnedBlock(newAgentMemoryBlockKey)
 		return
@@ -98,64 +98,5 @@ func shouldInjectMemoryForInput(userMessage string) bool {
 		return false
 	default:
 		return true
-	}
-}
-
-// renderMemoryPinnedContent 把召回结果转成一段稳定、紧凑、适合 prompt 注入的自然语言文本。
-func renderMemoryPinnedContent(items []memorymodel.ItemDTO) string {
-	if len(items) == 0 {
-		return ""
-	}
-
-	var sb strings.Builder
-	sb.WriteString(newAgentMemoryIntroLine)
-
-	seen := make(map[string]struct{}, len(items))
-	written := 0
-	for _, item := range items {
-		line := buildMemoryPinnedLine(item)
-		if line == "" {
-			continue
-		}
-		if _, exists := seen[line]; exists {
-			continue
-		}
-		seen[line] = struct{}{}
-		sb.WriteString("\n- ")
-		sb.WriteString(line)
-		written++
-	}
-
-	if written == 0 {
-		return ""
-	}
-	return strings.TrimSpace(sb.String())
-}
-
-// buildMemoryPinnedLine 把单条记忆渲染成“[类型] 内容”的简洁格式。
-func buildMemoryPinnedLine(item memorymodel.ItemDTO) string {
-	text := strings.TrimSpace(item.Content)
-	if text == "" {
-		text = strings.TrimSpace(item.Title)
-	}
-	if text == "" {
-		return ""
-	}
-	return fmt.Sprintf("[%s] %s", localizeMemoryType(item.MemoryType), text)
-}
-
-// localizeMemoryType 把 memory 类型映射成 prompt 里更自然的中文标签。
-func localizeMemoryType(memoryType string) string {
-	switch strings.TrimSpace(memoryType) {
-	case memorymodel.MemoryTypePreference:
-		return "偏好"
-	case memorymodel.MemoryTypeConstraint:
-		return "约束"
-	case memorymodel.MemoryTypeTodoHint:
-		return "待办线索"
-	case memorymodel.MemoryTypeFact:
-		return "事实"
-	default:
-		return "记忆"
 	}
 }
