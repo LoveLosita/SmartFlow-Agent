@@ -280,6 +280,14 @@ func (p *Pipeline) Retrieve(
 	return result, nil
 }
 
+// Delete 删除指定 ID 的向量。
+func (p *Pipeline) Delete(ctx context.Context, ids []string) error {
+	if p == nil || p.store == nil {
+		return nil
+	}
+	return p.store.Delete(ctx, ids)
+}
+
 func (p *Pipeline) recoverExecutionPanic(ctx context.Context, operation string, errPtr *error) {
 	recovered := recover()
 	if recovered == nil || errPtr == nil {

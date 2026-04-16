@@ -210,6 +210,78 @@ func (r *ItemRepo) UpdateVectorStateByID(
 		}).Error
 }
 
+// FindActiveByHash 按用户和内容哈希精确查找活跃记忆。
+//
+// 用途：
+// 1. 决策层 Step 1 的 Hash 精确命中检查；
+// 2. 利用 idx_memory_items_user_type_hash 联合索引，避免全表扫描；
+// 3. 只返回 status=active 的记录，软删除记录不参与去重。
+func (r *ItemRepo) FindActiveByHash(ctx context.Context, userID int, contentHash string) ([]model.MemoryItem, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("memory item repo is nil")
+	}
+	if userID <= 0 || strings.TrimSpace(contentHash) == "" {
+		return nil, errors.New("memory item find by hash params is invalid")
+	}
+
+	var items []model.MemoryItem
+	err := r.db.WithContext(ctx).
+		Where("user_id = ? AND content_hash = ? AND status = ?", userID, contentHash, model.MemoryItemStatusActive).
+		Find(&items).Error
+	return items, err
+}
+
+// UpdateContentByID 更新指定记忆的内容相关字段。
+//
+// 步骤化说明：
+// 1. 只改 title/content/normalized_content/content_hash/confidence/importance 六个字段；
+// 2. 不改 status/user_id/memory_type 等身份字段，保证更新操作不改变记忆归属；
+// 3. updated_at 由 GORM AutoUpdateTime 自动维护。
+func (r *ItemRepo) UpdateContentByID(ctx context.Context, memoryID int64, fields memorymodel.UpdateContentFields) error {
+	if r == nil || r.db == nil {
+		return errors.New("memory item repo is nil")
+	}
+	if memoryID <= 0 {
+		return errors.New("memory item update content id is invalid")
+	}
+
+	return r.db.WithContext(ctx).
+		Model(&model.MemoryItem{}).
+		Where("id = ?", memoryID).
+		Updates(map[string]any{
+			"title":              fields.Title,
+			"content":            fields.Content,
+			"normalized_content": fields.NormalizedContent,
+			"content_hash":       fields.ContentHash,
+			"confidence":         fields.Confidence,
+			"importance":         fields.Importance,
+		}).Error
+}
+
+// SoftDeleteByID 软删除指定用户的某条记忆。
+//
+// 说明：
+// 1. 复用 UpdateStatusByIDAt 的逻辑模式，把 status 改为 deleted；
+// 2. 同时把 vector_status 重置为 pending，确保向量侧也能感知删除；
+// 3. 必须带 user_id 条件，避免跨用户误删。
+func (r *ItemRepo) SoftDeleteByID(ctx context.Context, userID int, memoryID int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("memory item repo is nil")
+	}
+	if userID <= 0 || memoryID <= 0 {
+		return errors.New("memory item soft delete params is invalid")
+	}
+
+	return r.db.WithContext(ctx).
+		Model(&model.MemoryItem{}).
+		Where("id = ? AND user_id = ?", memoryID, userID).
+		Updates(map[string]any{
+			"status":        model.MemoryItemStatusDeleted,
+			"vector_status": "pending",
+			"updated_at":    time.Now(),
+		}).Error
+}
+
 func applyScopedEquality(db *gorm.DB, column, value string, includeGlobal bool) *gorm.DB {
 	value = strings.TrimSpace(value)
 	if value == "" {

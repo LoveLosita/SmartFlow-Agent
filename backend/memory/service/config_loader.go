@@ -26,6 +26,13 @@ func LoadConfigFromViper() memorymodel.Config {
 		JobMaxRetry:      viper.GetInt("memory.job.maxRetry"),
 		WorkerPollEvery:  viper.GetDuration("memory.worker.pollEvery"),
 		WorkerClaimBatch: viper.GetInt("memory.worker.claimBatch"),
+
+		// 决策层配置：默认关闭，灰度开启后才会生效。
+		DecisionEnabled:           viper.GetBool("memory.decision.enabled"),
+		DecisionCandidateTopK:     viper.GetInt("memory.decision.candidateTopK"),
+		DecisionCandidateMinScore: viper.GetFloat64("memory.decision.candidateMinScore"),
+		DecisionFallbackMode:      viper.GetString("memory.decision.fallbackMode"),
+		WriteMode:                 viper.GetString("memory.write.mode"),
 	}
 
 	if cfg.Threshold <= 0 {
@@ -46,5 +53,24 @@ func LoadConfigFromViper() memorymodel.Config {
 	if cfg.WorkerClaimBatch <= 0 {
 		cfg.WorkerClaimBatch = 1
 	}
+
+	// 决策层配置默认值兜底。
+	// 说明：
+	// 1. TopK 和 MinScore 是 Milvus 召回参数，需要保守默认值避免召回过多噪声候选；
+	// 2. FallbackMode 默认退回旧路径新增，保证决策流程异常时不丢数据；
+	// 3. WriteMode 由 DecisionEnabled 隐式决定，这里不做强制联动。
+	if cfg.DecisionCandidateTopK <= 0 {
+		cfg.DecisionCandidateTopK = 5
+	}
+	if cfg.DecisionCandidateMinScore <= 0 {
+		cfg.DecisionCandidateMinScore = 0.6
+	}
+	if cfg.DecisionFallbackMode == "" {
+		cfg.DecisionFallbackMode = "legacy_add"
+	}
+	if cfg.WriteMode == "" {
+		cfg.WriteMode = "legacy"
+	}
+
 	return cfg
 }

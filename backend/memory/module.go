@@ -152,7 +152,16 @@ func wireModule(db *gorm.DB, llmClient *infrallm.Client, ragRuntime infrarag.Run
 	readService := memoryservice.NewReadService(itemRepo, settingsRepo, ragRuntime, cfg)
 	manageService := memoryservice.NewManageService(db, itemRepo, auditRepo, settingsRepo)
 	extractor := memoryorchestrator.NewLLMWriteOrchestrator(llmClient, cfg)
-	runner := memoryworker.NewRunner(db, jobRepo, itemRepo, auditRepo, settingsRepo, extractor, ragRuntime)
+
+	// 决策编排器：仅在 DecisionEnabled 时才创建有效实例。
+	// 原因：cfg.DecisionEnabled=false 时，Runner 不走决策路径，编排器不会使用，
+	// 但仍然创建以保持构造签名统一，避免上层调用方感知条件逻辑。
+	var decisionOrchestrator *memoryorchestrator.LLMDecisionOrchestrator
+	if cfg.DecisionEnabled && llmClient != nil {
+		decisionOrchestrator = memoryorchestrator.NewLLMDecisionOrchestrator(llmClient, cfg)
+	}
+
+	runner := memoryworker.NewRunner(db, jobRepo, itemRepo, auditRepo, settingsRepo, extractor, ragRuntime, cfg, decisionOrchestrator)
 
 	return &Module{
 		db:             db,

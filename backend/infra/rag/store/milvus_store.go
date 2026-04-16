@@ -813,7 +813,9 @@ func isMilvusAlreadyExists(err error) bool {
 		return false
 	}
 	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "already exist") || strings.Contains(text, "already exists")
+	return strings.Contains(text, "already exist") ||
+		strings.Contains(text, "already exists") ||
+		strings.Contains(text, "duplicate collection")
 }
 
 func isMilvusCollectionMissing(err error) bool {

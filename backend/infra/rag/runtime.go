@@ -117,6 +117,16 @@ func (r *runtime) RetrieveMemory(ctx context.Context, req MemoryRetrieveRequest)
 	return result, nil
 }
 
+// DeleteMemory 删除记忆语料中的指定向量。
+func (r *runtime) DeleteMemory(ctx context.Context, documentIDs []string) (err error) {
+	defer r.recoverPublicPanic(ctx, "", "memory", "delete", "delete", &err)
+
+	if r == nil || r.pipeline == nil || len(documentIDs) == 0 {
+		return nil
+	}
+	return r.pipeline.Delete(ctx, documentIDs)
+}
+
 // IngestWeb 统一承接网页语料入库。
 func (r *runtime) IngestWeb(ctx context.Context, req WebIngestRequest) (result *IngestResult, err error) {
 	defer r.recoverPublicPanic(ctx, req.TraceID, "web", normalizeAction(req.Action, "add"), "ingest", &err)

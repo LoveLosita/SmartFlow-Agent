@@ -10,6 +10,8 @@ import (
 const (
 	// AuditOperationCreate 表示系统新建一条记忆。
 	AuditOperationCreate = "create"
+	// AuditOperationUpdate 表示决策层更新已有记忆的内容。
+	AuditOperationUpdate = "update"
 	// AuditOperationDelete 表示对已有记忆做软删除。
 	AuditOperationDelete = "delete"
 )

@@ -99,6 +99,13 @@ memory:
   worker:
     pollEvery: 2s
     claimBatch: 1
+  decision:
+    enabled: false            # 决策层总开关，默认关闭。开启后写入链路走"召回→比对→汇总"流程
+    candidateTopK: 5          # Milvus 语义召回候选数上限
+    candidateMinScore: 0.6    # Milvus 语义召回最低相似度阈值
+    fallbackMode: legacy_add  # 决策流程整体失败时的降级策略：legacy_add（退回旧路径）/ drop（丢弃）
+  write:
+    mode: legacy              # 写入模式：legacy（旧路径）/ decision（决策流程），仅 decision.enabled=true 时生效
 
 websearch:
   provider: bocha         # 可选：mock | bocha（mock 为空实现，跑通链路用）

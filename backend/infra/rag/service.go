@@ -14,6 +14,7 @@ import (
 type Runtime interface {
 	IngestMemory(ctx context.Context, req MemoryIngestRequest) (*IngestResult, error)
 	RetrieveMemory(ctx context.Context, req MemoryRetrieveRequest) (*RetrieveResult, error)
+	DeleteMemory(ctx context.Context, documentIDs []string) error
 
 	IngestWeb(ctx context.Context, req WebIngestRequest) (*IngestResult, error)
 	RetrieveWeb(ctx context.Context, req WebRetrieveRequest) (*RetrieveResult, error)

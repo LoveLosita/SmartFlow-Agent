@@ -12,6 +12,7 @@ import (
 
 	infrarag "github.com/LoveLosita/smartflow/backend/infra/rag"
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
+	memoryorchestrator "github.com/LoveLosita/smartflow/backend/memory/orchestrator"
 	memoryrepo "github.com/LoveLosita/smartflow/backend/memory/repo"
 	memoryutils "github.com/LoveLosita/smartflow/backend/memory/utils"
 	"github.com/LoveLosita/smartflow/backend/model"
@@ -41,6 +42,13 @@ type Runner struct {
 	extractor    Extractor
 	ragRuntime   infrarag.Runtime
 	logger       *log.Logger
+
+	// 决策层依赖。
+	// 说明：
+	// 1. cfg 提供决策层配置（是否启用、TopK、MinScore、FallbackMode）；
+	// 2. decisionOrchestrator 在决策启用时负责 LLM 逐对比较，为 nil 时走旧路径。
+	cfg                  memorymodel.Config
+	decisionOrchestrator *memoryorchestrator.LLMDecisionOrchestrator
 }
 
 // NewRunner 构造记忆 worker 执行器。
@@ -52,16 +60,20 @@ func NewRunner(
 	settingsRepo *memoryrepo.SettingsRepo,
 	extractor Extractor,
 	ragRuntime infrarag.Runtime,
+	cfg memorymodel.Config,
+	decisionOrchestrator *memoryorchestrator.LLMDecisionOrchestrator,
 ) *Runner {
 	return &Runner{
-		db:           db,
-		jobRepo:      jobRepo,
-		itemRepo:     itemRepo,
-		auditRepo:    auditRepo,
-		settingsRepo: settingsRepo,
-		extractor:    extractor,
-		ragRuntime:   ragRuntime,
-		logger:       log.Default(),
+		db:                   db,
+		jobRepo:              jobRepo,
+		itemRepo:             itemRepo,
+		auditRepo:            auditRepo,
+		settingsRepo:         settingsRepo,
+		extractor:            extractor,
+		ragRuntime:           ragRuntime,
+		logger:               log.Default(),
+		cfg:                  cfg,
+		decisionOrchestrator: decisionOrchestrator,
 	}
 }
 
@@ -145,7 +157,42 @@ func (r *Runner) RunOnce(ctx context.Context) (*RunOnceResult, error) {
 		return result, nil
 	}
 
-	// 5. 先在事务里写入记忆条目和审计日志，再统一确认 job 成功。
+	// 5. 根据配置选择写入路径：决策层 or 旧路径。
+	if r.cfg.DecisionEnabled && r.decisionOrchestrator != nil {
+		// 5a. 决策路径：召回→比对→汇总→执行。
+		outcome, decisionErr := r.executeDecisionFlow(ctx, job, payload, facts)
+		if decisionErr != nil {
+			// 决策流程整体失败，根据 FallbackMode 决定是否退回旧路径。
+			r.logger.Printf("[WARN][去重] 决策流程整体失败: job_id=%d user_id=%d facts_count=%d fallback=%s err=%v", job.ID, payload.UserID, len(facts), r.cfg.DecisionFallbackMode, decisionErr)
+			if r.cfg.DecisionFallbackMode == "legacy_add" {
+				if err = r.persistMemoryWrite(ctx, job.ID, items); err != nil {
+					failReason := fmt.Sprintf("决策降级后记忆落库失败: %v", err)
+					_ = r.jobRepo.MarkFailed(ctx, job.ID, failReason)
+					result.Status = model.MemoryJobStatusFailed
+					return result, nil
+				}
+				result.Status = model.MemoryJobStatusSuccess
+				result.Facts = len(items)
+				r.syncMemoryVectors(ctx, items)
+				return result, nil
+			}
+			// FallbackMode=drop：丢弃本轮抽取结果，直接标记 job 成功。
+			_ = r.jobRepo.MarkSuccess(ctx, job.ID)
+			result.Status = model.MemoryJobStatusSuccess
+			return result, nil
+		}
+
+		// 5b. 决策成功：同步向量（新增/更新）和删除过期向量。
+		result.Status = model.MemoryJobStatusSuccess
+		result.Facts = outcome.AddCount + outcome.UpdateCount + outcome.DeleteCount
+		r.syncMemoryVectors(ctx, outcome.ItemsToSync)
+		r.syncVectorDeletes(ctx, outcome.VectorDeletes)
+		r.logger.Printf("[去重] 决策流程完成: job_id=%d user_id=%d 新增=%d 更新=%d 删除=%d 跳过=%d",
+			job.ID, payload.UserID, outcome.AddCount, outcome.UpdateCount, outcome.DeleteCount, outcome.NoneCount)
+		return result, nil
+	}
+
+	// 5c. 旧路径：和现在完全一样 — 先在事务里写入记忆条目和审计日志，再统一确认 job 成功。
 	if err = r.persistMemoryWrite(ctx, job.ID, items); err != nil {
 		failReason := fmt.Sprintf("记忆落库失败: %v", err)
 		_ = r.jobRepo.MarkFailed(ctx, job.ID, failReason)
@@ -251,7 +298,7 @@ func (r *Runner) syncMemoryVectors(ctx context.Context, items []model.MemoryItem
 		Items:  requestItems,
 	})
 	if err != nil {
-		r.logger.Printf("memory vector sync failed: err=%v", err)
+		r.logger.Printf("[WARN][去重] 记忆向量同步失败: count=%d err=%v", len(items), err)
 		for _, item := range items {
 			_ = r.itemRepo.UpdateVectorStateByID(ctx, item.ID, "failed", nil)
 		}
@@ -270,6 +317,42 @@ func (r *Runner) syncMemoryVectors(ctx context.Context, items []model.MemoryItem
 	for _, item := range items {
 		vectorID := strPtrOrNil(vectorIDMap[item.ID])
 		_ = r.itemRepo.UpdateVectorStateByID(ctx, item.ID, "synced", vectorID)
+	}
+}
+
+// syncVectorDeletes 处理决策层 DELETE 动作产出的向量清理需求。
+//
+// 步骤：
+// 1. 将 memoryID 转为 Milvus documentID（"memory:{id}" 格式）；
+// 2. 调 Runtime.DeleteMemory 真正从 Milvus 删除对应向量；
+// 3. 更新 MySQL vector_status 标记删除结果。
+func (r *Runner) syncVectorDeletes(ctx context.Context, memoryIDs []int64) {
+	if r == nil || len(memoryIDs) == 0 {
+		return
+	}
+
+	// 1. 构造 documentID 列表。
+	documentIDs := make([]string, 0, len(memoryIDs))
+	for _, id := range memoryIDs {
+		documentIDs = append(documentIDs, fmt.Sprintf("memory:%d", id))
+	}
+
+	// 2. 调 Runtime 删除向量。
+	if r.ragRuntime != nil {
+		if err := r.ragRuntime.DeleteMemory(ctx, documentIDs); err != nil {
+			r.logger.Printf("[WARN][去重] Milvus 向量删除失败，标记为 pending 等待后续清理: count=%d ids=%v err=%v", len(memoryIDs), memoryIDs, err)
+		} else {
+			r.logger.Printf("[去重] Milvus 向量删除完成: count=%d ids=%v", len(memoryIDs), memoryIDs)
+		}
+	}
+
+	// 3. 更新 MySQL vector_status。
+	for _, memoryID := range memoryIDs {
+		if updateErr := r.itemRepo.UpdateVectorStateByID(ctx, memoryID, "deleted", nil); updateErr != nil {
+			if r.logger != nil {
+				r.logger.Printf("[WARN] 向量状态更新失败: memory_id=%d err=%v", memoryID, updateErr)
+			}
+		}
 	}
 }
 

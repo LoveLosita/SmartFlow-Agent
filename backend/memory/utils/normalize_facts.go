@@ -56,7 +56,7 @@ func NormalizeFacts(candidates []memorymodel.FactCandidate) []memorymodel.Normal
 		sensitivityLevel := clampInt(candidate.SensitivityLevel, 0, 2)
 
 		normalizedContent := strings.ToLower(content)
-		contentHash := hashContent(memoryType, normalizedContent)
+		contentHash := HashContent(memoryType, normalizedContent)
 		dedupKey := fmt.Sprintf("%s:%s", memoryType, contentHash)
 		if _, exists := seen[dedupKey]; exists {
 			continue
@@ -126,7 +126,10 @@ func defaultImportanceByType(memoryType string) float64 {
 	}
 }
 
-func hashContent(memoryType, normalizedContent string) string {
+// HashContent 计算记忆内容的去重哈希。
+// 算法：sha256(memoryType + "::" + normalizedContent)
+// 说明：导出此函数是为了让决策层 apply_actions 也能复用同一算法，避免哈希不一致导致去重失效。
+func HashContent(memoryType, normalizedContent string) string {
 	sum := sha256.Sum256([]byte(memoryType + "::" + normalizedContent))
 	return hex.EncodeToString(sum[:])
 }
