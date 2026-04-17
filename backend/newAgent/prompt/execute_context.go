@@ -12,20 +12,11 @@ import (
 )
 
 const (
+	// executeHistoryKindKey 用于在 history 中打运行态标记，供 prompt 分层识别。
+	// 说明：loop_closed / step_advanced 等边界标记仍由节点层写入，但 prompt 层已不再消费它们——
+	// 因为 msg1/msg2 已经按"真实对话流 + 当前活跃 ReAct 记录"重构，不再做 msg2→msg1 的归档搬运。
 	executeHistoryKindKey            = "newagent_history_kind"
 	executeHistoryKindCorrectionUser = "llm_correction_prompt"
-	executeHistoryKindLoopClosed     = "execute_loop_closed"
-	executeHistoryKindStepAdvanced   = "execute_step_advanced"
-
-	// executeLoopWindowLimit 控制当轮 ReAct Loop 窗口最多保留多少条记录。
-	executeLoopWindowLimit = 8
-
-	// executeTrimmedObservationText 是重复工具压缩后的 observation 占位文案。
-	executeTrimmedObservationText = "当前工具调用结果已经被使用过，当前无需使用，为节省上下文空间，已折叠"
-
-	// executeConversationTurnLimit 控制 msg1 注入的最大对话轮数（user + assistant speak）。
-	// 超出时保留最近的条目，早期部分由 ReAct 摘要兜底。
-	executeConversationTurnLimit = 30
 )
 
 type executeToolSchemaDoc struct {
@@ -39,8 +30,6 @@ type executeLoopRecord struct {
 	ToolArgs    string
 	Observation string
 }
-
-const executeMessage1MaxRunes = 1400
 
 // buildExecuteStageMessages 组装 execute 阶段 4 条消息骨架。
 //
@@ -82,87 +71,24 @@ func buildExecuteMessage0(stageSystemPrompt string, ctx *newagentmodel.Conversat
 	return base + "\n\n" + toolCatalog
 }
 
-// splitExecuteLoopRecordsByBoundary 按已收口标记拆分归档/活跃 ReAct 记录。
-//
-// 规则：
-// 1. 标记之前的记录归档到 msg1；
-// 2. 标记之后的记录作为活跃 loop 进入 msg2；
-// 3. 若没有标记，则全部视为活跃记录（兼容旧会话快照）。
-func splitExecuteLoopRecordsByBoundary(history []*schema.Message) (archived []executeLoopRecord, active []executeLoopRecord) {
-	if len(history) == 0 {
-		return nil, nil
-	}
-
-	boundary := findLatestExecuteBoundaryMarker(history)
-	if boundary < 0 {
-		return nil, collectExecuteLoopRecords(history)
-	}
-
-	if boundary > 0 {
-		archived = collectExecuteLoopRecords(history[:boundary])
-	}
-	if boundary+1 < len(history) {
-		active = collectExecuteLoopRecords(history[boundary+1:])
-	}
-	return archived, active
-}
-
-func findLatestExecuteBoundaryMarker(history []*schema.Message) int {
-	for i := len(history) - 1; i >= 0; i-- {
-		msg := history[i]
-		if msg == nil || msg.Extra == nil {
-			continue
-		}
-		kind, ok := msg.Extra[executeHistoryKindKey].(string)
-		if !ok {
-			continue
-		}
-		switch strings.TrimSpace(kind) {
-		case executeHistoryKindLoopClosed, executeHistoryKindStepAdvanced:
-			return i
-		}
-	}
-	return -1
-}
-
-func trimExecuteMessage1ByBudget(content string) string {
-	content = strings.TrimSpace(content)
-	if content == "" {
-		return ""
-	}
-	runes := []rune(content)
-	if len(runes) <= executeMessage1MaxRunes {
-		return content
-	}
-	if executeMessage1MaxRunes <= 3 {
-		return string(runes[:executeMessage1MaxRunes])
-	}
-	return string(runes[:executeMessage1MaxRunes-3]) + "..."
-}
-
-// buildExecuteMessage1V3 负责把真实对话流 + 上一轮 loop 归档并入 msg1，并统一做长度裁剪。
+// buildExecuteMessage1V3 只渲染"真实对话流 + 阶段锚点"。
 //
 // 改造说明：
-// 1. msg1 从人工提炼的摘要变为真实对话流，只注入 user + assistant speak；
-// 2. tool_call / observation 不在 msg1 中重复（已由 msg2 承载）；
-// 3. 超出 executeConversationTurnLimit 的早期对话不注入，由 ReAct 摘要兜底。
+// 1. msg1 只保留 user + assistant speak 组成的真实对话历史，全量注入；
+// 2. tool_call / observation 一律由 msg2 承载，这里不再重复；
+// 3. 不再从历史中"归档"上一轮 ReAct 结果到 msg1——归档搬运逻辑已随 splitExecuteLoopRecordsByBoundary 一并移除；
+// 4. token 预算由统一压缩层兜底，prompt 层不做提前裁剪。
 func buildExecuteMessage1V3(ctx *newagentmodel.ConversationContext) string {
 	lines := []string{"历史上下文："}
 	if ctx == nil {
 		lines = append(lines,
 			"- 对话历史：暂无。",
 			"- 阶段锚点：按当前工具事实推进执行。",
-			"- 历史归档 ReAct 摘要：暂无。",
-			"- 历史归档 ReAct 窗口：暂无。",
-			"- 当前循环早期摘要：暂无。",
 		)
 		return strings.Join(lines, "\n")
 	}
 
-	history := ctx.HistorySnapshot()
-
-	// 注入真实对话流（user + assistant speak），全量放入，不再限制轮数和单条长度。
-	turns := collectExecuteConversationTurns(history)
+	turns := collectExecuteConversationTurns(ctx.HistorySnapshot())
 	if len(turns) == 0 {
 		lines = append(lines, "- 对话历史：暂无。")
 	} else {
@@ -180,16 +106,15 @@ func buildExecuteMessage1V3(ctx *newagentmodel.ConversationContext) string {
 		lines = append(lines, "- 阶段锚点：按当前工具事实推进，不做无依据操作。")
 	}
 
-	archivedLoops, activeLoops := splitExecuteLoopRecordsByBoundary(history)
-	lines = append(lines, "- 历史归档 ReAct 摘要："+buildEarlyExecuteReactSummary(archivedLoops, executeLoopWindowLimit))
-	lines = append(lines, renderArchivedExecuteLoopWindowForMessage1V3(archivedLoops))
-	lines = append(lines, "- 当前循环早期摘要："+buildEarlyExecuteReactSummary(activeLoops, executeLoopWindowLimit))
 	return strings.Join(lines, "\n")
 }
 
-// buildExecuteMessage2V3 承载当前活跃 loop 的全部记录。
-// 若是新一轮刚开始（活跃 loop 为空），明确返回已清空状态。
-// 不再限制窗口大小，token 预算由 execute 层统一管理。
+// buildExecuteMessage2V3 承载当前会话中全部 ReAct Loop 记录。
+//
+// 改造说明：
+// 1. 不再按 execute_loop_closed / execute_step_advanced 边界切分"归档/活跃"两段；
+// 2. 直接从 history 提取全部 assistant tool_call + 对应 observation 作为当前 Loop 视图；
+// 3. 新一轮刚开始（尚未产生 tool_call）时返回明确占位，方便模型识别"干净起点"。
 func buildExecuteMessage2V3(ctx *newagentmodel.ConversationContext) string {
 	lines := []string{"当轮 ReAct Loop 记录："}
 	if ctx == nil {
@@ -197,31 +122,13 @@ func buildExecuteMessage2V3(ctx *newagentmodel.ConversationContext) string {
 		return strings.Join(lines, "\n")
 	}
 
-	_, activeLoops := splitExecuteLoopRecordsByBoundary(ctx.HistorySnapshot())
-	if len(activeLoops) == 0 {
+	loops := collectExecuteLoopRecords(ctx.HistorySnapshot())
+	if len(loops) == 0 {
 		lines = append(lines, "- 已清空（新一轮 loop 准备中）。")
 		return strings.Join(lines, "\n")
 	}
 
-	// 全量放入，不再限制窗口大小
-	for i, loop := range activeLoops {
-		lines = append(lines, fmt.Sprintf("%d) thought/reason：%s", i+1, loop.Thought))
-		lines = append(lines, fmt.Sprintf("   tool_call：%s", renderExecuteToolCallText(loop.ToolName, loop.ToolArgs)))
-		lines = append(lines, fmt.Sprintf("   observation：%s", loop.Observation))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func renderArchivedExecuteLoopWindowForMessage1V3(records []executeLoopRecord) string {
-	if len(records) == 0 {
-		return "- 历史归档 ReAct 窗口：暂无。"
-	}
-
-	windowLoops := tailExecuteLoops(records, executeLoopWindowLimit)
-	windowLoops = compressExecuteLoopObservationsByTool(windowLoops)
-
-	lines := []string{"历史归档 ReAct 窗口（由上一轮 msg2 并入）："}
-	for i, loop := range windowLoops {
+	for i, loop := range loops {
 		lines = append(lines, fmt.Sprintf("%d) thought/reason：%s", i+1, loop.Thought))
 		lines = append(lines, fmt.Sprintf("   tool_call：%s", renderExecuteToolCallText(loop.ToolName, loop.ToolArgs)))
 		lines = append(lines, fmt.Sprintf("   observation：%s", loop.Observation))
@@ -525,51 +432,6 @@ func findExecuteThoughtBefore(history []*schema.Message, index int) string {
 	return "（未记录）"
 }
 
-func tailExecuteLoops(records []executeLoopRecord, limit int) []executeLoopRecord {
-	if len(records) == 0 {
-		return nil
-	}
-	if limit <= 0 || len(records) <= limit {
-		result := make([]executeLoopRecord, len(records))
-		copy(result, records)
-		return result
-	}
-	result := make([]executeLoopRecord, limit)
-	copy(result, records[len(records)-limit:])
-	return result
-}
-
-// compressExecuteLoopObservationsByTool 对窗口内重复工具做 observation 压缩。
-func compressExecuteLoopObservationsByTool(records []executeLoopRecord) []executeLoopRecord {
-	if len(records) == 0 {
-		return records
-	}
-
-	latestIndexByTool := make(map[string]int, len(records))
-	for i := len(records) - 1; i >= 0; i-- {
-		key := strings.ToLower(strings.TrimSpace(records[i].ToolName))
-		if key == "" {
-			key = "unknown_tool"
-		}
-		if _, exists := latestIndexByTool[key]; !exists {
-			latestIndexByTool[key] = i
-		}
-	}
-
-	result := make([]executeLoopRecord, len(records))
-	copy(result, records)
-	for i := range result {
-		key := strings.ToLower(strings.TrimSpace(result[i].ToolName))
-		if key == "" {
-			key = "unknown_tool"
-		}
-		if latestIndexByTool[key] != i {
-			result[i].Observation = executeTrimmedObservationText
-		}
-	}
-	return result
-}
-
 func renderExecuteToolCallText(toolName, toolArgs string) string {
 	toolName = strings.TrimSpace(toolName)
 	if toolName == "" {
@@ -580,38 +442,6 @@ func renderExecuteToolCallText(toolName, toolArgs string) string {
 		toolArgs = "{}"
 	}
 	return toolName + "(" + toolArgs + ")"
-}
-
-func buildEarlyExecuteReactSummary(records []executeLoopRecord, windowLimit int) string {
-	if len(records) == 0 {
-		return "暂无。"
-	}
-	if len(records) <= windowLimit {
-		return "无（当前窗口已覆盖全部 ReAct 记录）。"
-	}
-
-	early := records[:len(records)-windowLimit]
-	toolCounts := make(map[string]int, len(early))
-	for _, record := range early {
-		key := strings.TrimSpace(record.ToolName)
-		if key == "" {
-			key = "unknown_tool"
-		}
-		toolCounts[key]++
-	}
-
-	names := make([]string, 0, len(toolCounts))
-	for name := range toolCounts {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	parts := make([]string, 0, len(names))
-	for _, name := range names {
-		parts = append(parts, fmt.Sprintf("%s×%d", name, toolCounts[name]))
-	}
-
-	return fmt.Sprintf("已折叠 %d 条旧记录，涉及：%s。", len(early), strings.Join(parts, "、"))
 }
 
 func hasExecuteRoughBuildDone(ctx *newagentmodel.ConversationContext) bool {
@@ -724,4 +554,13 @@ func renderExecuteTaskClassIDs(state *newagentmodel.CommonState) string {
 		parts[i] = strconv.Itoa(id)
 	}
 	return fmt.Sprintf("task_class_ids=[%s]", strings.Join(parts, ","))
+}
+
+// renderExecuteMemoryContext 提取 execute 阶段要注入 msg3 的记忆文本。
+//
+// 1. 只读取统一的 memory_context，避免把其他 pinned block 误塞进 prompt。
+// 2. 为空时直接返回空串，保持 msg3 干净。
+// 3. 复用统一记忆渲染逻辑，保证各阶段记忆入口一致。
+func renderExecuteMemoryContext(ctx *newagentmodel.ConversationContext) string {
+	return renderUnifiedMemoryContext(ctx)
 }

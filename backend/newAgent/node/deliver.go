@@ -28,11 +28,13 @@ const (
 // 3. ConversationContext 提供执行阶段的对话历史；
 // 4. 交付完成后标记流程结束。
 type DeliverNodeInput struct {
-	RuntimeState        *newagentmodel.AgentRuntimeState
-	ConversationContext *newagentmodel.ConversationContext
-	Client              *infrallm.Client
-	ChunkEmitter        *newagentstream.ChunkEmitter
-	ThinkingEnabled     bool // 是否开启 thinking，由 config.yaml 的 agent.thinking.deliver 注入
+	RuntimeState          *newagentmodel.AgentRuntimeState
+	ConversationContext   *newagentmodel.ConversationContext
+	Client                *infrallm.Client
+	ChunkEmitter          *newagentstream.ChunkEmitter
+	ThinkingEnabled       bool                          // 是否开启 thinking，由 config.yaml 的 agent.thinking.deliver 注入
+	CompactionStore       newagentmodel.CompactionStore // 上下文压缩持久化
+	PersistVisibleMessage newagentmodel.PersistVisibleMessageFunc
 }
 
 // RunDeliverNode 执行一轮交付节点逻辑。
@@ -65,10 +67,11 @@ func RunDeliverNode(ctx context.Context, input DeliverNodeInput) error {
 	}
 
 	// 2. 调 LLM 生成交付总结。
-	summary := generateDeliverSummary(ctx, input.Client, flowState, conversationContext, input.ThinkingEnabled)
+	summary := generateDeliverSummary(ctx, input.Client, flowState, conversationContext, input.ThinkingEnabled, input.CompactionStore, emitter)
 
 	// 3. 伪流式推送总结。
 	if strings.TrimSpace(summary) != "" {
+		msg := schema.AssistantMessage(summary, nil)
 		if err := emitter.EmitPseudoAssistantText(
 			ctx,
 			deliverSpeakBlockID,
@@ -78,7 +81,8 @@ func RunDeliverNode(ctx context.Context, input DeliverNodeInput) error {
 		); err != nil {
 			return fmt.Errorf("交付总结推送失败: %w", err)
 		}
-		conversationContext.AppendHistory(schema.AssistantMessage(summary, nil))
+		conversationContext.AppendHistory(msg)
+		persistVisibleAssistantMessage(ctx, input.PersistVisibleMessage, flowState, msg)
 	}
 
 	// 4. 推送最终完成状态。
@@ -100,6 +104,8 @@ func generateDeliverSummary(
 	flowState *newagentmodel.CommonState,
 	conversationContext *newagentmodel.ConversationContext,
 	thinkingEnabled bool,
+	compactionStore newagentmodel.CompactionStore,
+	emitter *newagentstream.ChunkEmitter,
 ) string {
 	if flowState != nil {
 		switch {
@@ -115,6 +121,15 @@ func generateDeliverSummary(
 	}
 
 	messages := newagentprompt.BuildDeliverMessages(flowState, conversationContext)
+	messages = compactUnifiedMessagesIfNeeded(ctx, messages, UnifiedCompactInput{
+		Client:          client,
+		CompactionStore: compactionStore,
+		FlowState:       flowState,
+		Emitter:         emitter,
+		StageName:       deliverStageName,
+		StatusBlockID:   deliverStatusBlockID,
+	})
+	logNodeLLMContext(deliverStageName, "summarizing", flowState, messages)
 	result, err := client.GenerateText(
 		ctx,
 		messages,

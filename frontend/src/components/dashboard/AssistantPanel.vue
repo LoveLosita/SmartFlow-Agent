@@ -55,12 +55,21 @@ interface ConversationGroup {
   items: ConversationListItem[]
 }
 
-interface RetryPageGroup {
-  groupId: string
-  total: number
-  latestIndex: number
-  visibleIndex: number
-  pages: Map<number, { user?: AssistantMessage; assistant?: AssistantMessage }>
+// 展示用消息：合并连续 assistant 消息后的视图模型
+interface DisplayMessage {
+  /** 第一条源消息的 id，用作 Vue key */
+  id: string
+  role: 'user' | 'assistant'
+  /** 合并后的正文内容 */
+  content: string
+  /** 最后一条源消息的时间 */
+  createdAt: string
+  /** 合并后的推理内容 */
+  reasoning?: string
+  /** 原始消息引用列表 */
+  sources: AssistantMessage[]
+  /** 是否为多条合并 */
+  merged: boolean
 }
 
 const props = withDefaults(
@@ -92,7 +101,6 @@ const historyPanelWidth = ref(props.initialHistoryWidth)
 const activeStreamingMessageId = ref('')
 const editingUserMessageId = ref('')
 const editingUserMessageDraft = ref('')
-const retryVisiblePageMap = reactive<Record<string, number>>({})
 const pendingPlanningTaskClassIds = ref<number[]>([])
 
 const conversationPage = ref(1)
@@ -125,6 +133,7 @@ const DEFAULT_PLANNING_PROMPT = '请基于这些任务类帮我做一版智能�
 let messageScrollRaf = 0
 let messageScrollReleaseRaf = 0
 let reasoningTicker = 0
+let historyResizeCleanup: (() => void) | null = null
 const reasoningDisplayNow = ref(Date.now())
 const shouldAutoFollowMessages = ref(true)
 const messageBottomTolerancePx = 24
@@ -149,75 +158,48 @@ const rawSelectedMessages = computed(() => {
   return conversationMessagesMap[selectedConversationId.value] ?? []
 })
 
-const retryPageGroups = computed<Map<string, RetryPageGroup>>(() => {
-  const grouped = new Map<string, RetryPageGroup>()
+// retry 机制已整体下线：selectedMessages 直接回退到原始消息流，不再做分组/翻页。
+const selectedMessages = computed(() => rawSelectedMessages.value)
 
-  for (const message of rawSelectedMessages.value) {
-    if (!message.retryGroupId || !message.retryIndex || !message.retryTotal || message.retryTotal <= 1) {
+// 1. 将连续 assistant 消息合并为一条展示消息。
+// 2. ReAct 循环中 plan/execute/deliver 各节点都会产生 assistant speak，
+//    合并后用户看到的是一段连续的 AI 回复，而非多段割裂输出。
+const displayMessages = computed<DisplayMessage[]>(() => {
+  const result: DisplayMessage[] = []
+  const src = selectedMessages.value
+  let i = 0
+  while (i < src.length) {
+    const msg = src[i]
+    if (msg.role !== 'assistant') {
+      result.push({
+        id: msg.id,
+        role: msg.role,
+        content: msg.content,
+        createdAt: msg.createdAt,
+        reasoning: msg.reasoning,
+        sources: [msg],
+        merged: false,
+      })
+      i++
       continue
     }
-
-    const existed = grouped.get(message.retryGroupId) ?? {
-      groupId: message.retryGroupId,
-      total: message.retryTotal,
-      latestIndex: message.retryIndex,
-      visibleIndex: retryVisiblePageMap[message.retryGroupId] ?? message.retryTotal,
-      pages: new Map<number, { user?: AssistantMessage; assistant?: AssistantMessage }>(),
+    // 收集连续 assistant 消息并合并
+    const group: AssistantMessage[] = []
+    while (i < src.length && src[i].role === 'assistant') {
+      group.push(src[i])
+      i++
     }
-
-    existed.total = Math.max(existed.total, message.retryTotal)
-    existed.latestIndex = Math.max(existed.latestIndex, message.retryIndex)
-    existed.visibleIndex = retryVisiblePageMap[message.retryGroupId] ?? existed.latestIndex
-
-    const page = existed.pages.get(message.retryIndex) ?? {}
-    if (message.role === 'user') {
-      page.user = message
-    }
-    if (message.role === 'assistant') {
-      page.assistant = message
-    }
-    existed.pages.set(message.retryIndex, page)
-    grouped.set(message.retryGroupId, existed)
+    result.push({
+      id: group[0].id,
+      role: 'assistant',
+      content: group.map(m => m.content).filter(Boolean).join('\n\n'),
+      createdAt: group[group.length - 1].createdAt,
+      reasoning: group.map(m => m.reasoning).filter(Boolean).join('\n\n') || undefined,
+      sources: group,
+      merged: group.length > 1,
+    })
   }
-
-  return grouped
-})
-
-const selectedMessages = computed(() => {
-  const visible: AssistantMessage[] = []
-  const insertedRetryGroups = new Set<string>()
-
-  for (const message of rawSelectedMessages.value) {
-    if (!message.retryGroupId) {
-      visible.push(message)
-      continue
-    }
-
-    const retryGroup = retryPageGroups.value.get(message.retryGroupId)
-    if (!retryGroup || retryGroup.total <= 1 || !message.retryIndex) {
-      visible.push(message)
-      continue
-    }
-
-    if (insertedRetryGroups.has(message.retryGroupId)) {
-      continue
-    }
-
-    insertedRetryGroups.add(message.retryGroupId)
-    const nextPage =
-      retryGroup.pages.get(retryGroup.visibleIndex) ??
-      retryGroup.pages.get(retryGroup.latestIndex) ??
-      retryGroup.pages.get(1)
-
-    if (nextPage?.user) {
-      visible.push(nextPage.user)
-    }
-    if (nextPage?.assistant) {
-      visible.push(nextPage.assistant)
-    }
-  }
-
-  return visible
+  return result
 })
 
 function resolveConversationGroupLabel(timeText?: string | null) {
@@ -475,9 +457,6 @@ function normalizeHistoryMessage(message: ConversationHistoryMessage, index: num
     content: message.content,
     createdAt: message.created_at ?? new Date().toISOString(),
     reasoning: reasoningText || undefined,
-    retryGroupId: typeof message.retry_group_id === 'string' ? message.retry_group_id : undefined,
-    retryIndex: typeof message.retry_index === 'number' ? message.retry_index : undefined,
-    retryTotal: typeof message.retry_total === 'number' ? message.retry_total : undefined,
   }
 
   // 1. 历史消息优先使用后端持久化的思考时长，避免刷新后重新按“当前时间 - 创建时间”误算。
@@ -495,57 +474,76 @@ function normalizeHistoryMessage(message: ConversationHistoryMessage, index: num
   return normalized
 }
 
-function resolveMessageTimestamp(message: AssistantMessage) {
-  const parsed = Date.parse(message.createdAt)
-  return Number.isFinite(parsed) ? parsed : 0
-}
-
 function isSameLogicalMessage(left: AssistantMessage, right: AssistantMessage) {
   return (
     left.role === right.role &&
     left.content === right.content &&
-    (left.reasoning || '') === (right.reasoning || '') &&
-    (left.retryGroupId || '') === (right.retryGroupId || '') &&
-    (left.retryIndex || 0) === (right.retryIndex || 0)
+    (left.reasoning || '') === (right.reasoning || '')
   )
 }
 
+// mergeServerHistoryWithLocalState 将服务端历史与本地乐观消息合并为最终消息流。
+//
+// 核心策略：保留本地消息的原始顺序，用服务端数据"就地替换"匹配到的本地消息。
+//
+// 为什么不按时间戳排序？
+// 1. 聊天历史通过 Kafka 异步持久化，数据库 created_at 是消费者落库时刻，
+//    而非消息产生时刻。Kafka 消费顺序不保证与发布顺序一致，
+//    导致 assistant 消息可能比 user 消息先落库，created_at 反而更早。
+// 2. 本地消息按"用户发送 → 占位 → 流式填充"的顺序 append，天然是正确时序，
+//    任何基于时间戳的排序都会被异步落库的时钟偏差破坏。
+// 3. 因此：本地顺序权威，服务端数据用于刷新字段（如 reasoning_duration_seconds），
+//    新增的服务端消息（其他端产生）追加到尾部。
 function mergeServerHistoryWithLocalState(
   conversationId: string,
   history: ConversationHistoryMessage[],
 ) {
   const existingBucket = conversationMessagesMap[conversationId] ?? []
   const normalizedHistory = history.map(normalizeHistoryMessage)
-  const existingById = new Map(existingBucket.map((message) => [message.id, message]))
 
-  const mergedHistory = normalizedHistory.map((serverMessage) => {
-    const localMessage = existingById.get(serverMessage.id)
-    if (!localMessage) {
-      return serverMessage
+  // 1. 构建服务端消息的快速查找索引：按 ID 和按角色+内容两种方式。
+  const serverById = new Map(normalizedHistory.map((m) => [m.id, m]))
+  const usedServerIds = new Set<string>()
+
+  // 2. 按本地消息的原始顺序逐一处理：
+  //    - ID 精确命中 → 用服务端数据替换，保持当前位置；
+  //    - 临时 ID 按语义匹配 → 同样替换，保持当前位置；
+  //    - 无法匹配 → 保留为乐观消息，保持当前位置。
+  const result: AssistantMessage[] = []
+  for (const localMsg of existingBucket) {
+    // 2.1 先按 ID 精确匹配（非临时 ID 的消息，如历史加载过的服务端消息）。
+    const exactMatch = serverById.get(localMsg.id)
+    if (exactMatch && !usedServerIds.has(exactMatch.id)) {
+      result.push(exactMatch)
+      usedServerIds.add(exactMatch.id)
+      continue
     }
 
-    return {
-      ...serverMessage,
-      retryGroupId: serverMessage.retryGroupId ?? localMessage.retryGroupId,
-      retryIndex: serverMessage.retryIndex ?? localMessage.retryIndex,
-      retryTotal: serverMessage.retryTotal ?? localMessage.retryTotal,
-    }
-  })
-
-  const mergedIds = new Set(mergedHistory.map((message) => message.id))
-  const optimisticMessages = existingBucket.filter((message) => {
-    if (mergedIds.has(message.id)) {
-      return false
-    }
-
-    if (!isLocalEphemeralMessageId(message.id)) {
-      return true
+    // 2.2 临时 ID（如 user-1700000000000-abc）走语义匹配：
+    //     同一角色 + 同一内容的消息视为同一条逻辑消息。
+    if (isLocalEphemeralMessageId(localMsg.id)) {
+      const logicalMatch = normalizedHistory.find(
+        (sm) => !usedServerIds.has(sm.id) && isSameLogicalMessage(sm, localMsg),
+      )
+      if (logicalMatch) {
+        result.push(logicalMatch)
+        usedServerIds.add(logicalMatch.id)
+        continue
+      }
     }
 
-    return !mergedHistory.some((serverMessage) => isSameLogicalMessage(serverMessage, message))
-  })
+    // 2.3 无法匹配服务端消息时保留本地乐观消息（流式中的占位 / 网络延迟未落库）。
+    result.push(localMsg)
+  }
 
-  return [...mergedHistory, ...optimisticMessages].sort((left, right) => resolveMessageTimestamp(left) - resolveMessageTimestamp(right))
+  // 3. 本地不存在的服务端消息（如其他设备发送的）追加到尾部，按服务端返回顺序排列。
+  for (const serverMsg of normalizedHistory) {
+    if (!usedServerIds.has(serverMsg.id)) {
+      result.push(serverMsg)
+    }
+  }
+
+  return result
 }
 
 function renderMessageMarkdown(content: string) {
@@ -573,197 +571,8 @@ function isLatestAssistantMessage(messageId: string) {
   return lastAssistant?.id === messageId
 }
 
-function resolveRetryPageGroup(message: AssistantMessage) {
-  if (!message.retryGroupId) {
-    return null
-  }
-  return retryPageGroups.value.get(message.retryGroupId) ?? null
-}
-
-function shouldShowRetryPager(message: AssistantMessage) {
-  if (message.role !== 'assistant') {
-    return false
-  }
-
-  const retryGroup = resolveRetryPageGroup(message)
-  return Boolean(retryGroup && retryGroup.total > 1)
-}
-
-function changeRetryPage(message: AssistantMessage, delta: number) {
-  const retryGroup = resolveRetryPageGroup(message)
-  if (!retryGroup) {
-    return
-  }
-
-  const nextPage = Math.min(Math.max(1, retryGroup.visibleIndex + delta), retryGroup.total)
-  if (nextPage === retryGroup.visibleIndex) {
-    return
-  }
-
-  retryVisiblePageMap[retryGroup.groupId] = nextPage
-}
-
-function resolveVisibleUserMessageBeforeAssistant(messageId: string) {
-  const index = findMessageIndex(messageId)
-  if (index <= 0) {
-    return null
-  }
-
-  for (let current = index - 1; current >= 0; current -= 1) {
-    const candidate = selectedMessages.value[current]
-    if (candidate?.role === 'user') {
-      return candidate
-    }
-  }
-
-  return null
-}
-
-function findMessageIndexInList(messages: AssistantMessage[], messageId: string) {
-  return messages.findIndex((message) => message.id === messageId)
-}
-
-function resolveUserMessageBeforeAssistantInBucket(conversationId: string, assistantMessageId: string) {
-  const bucket = conversationMessagesMap[conversationId] ?? []
-  const index = findMessageIndexInList(bucket, assistantMessageId)
-  if (index <= 0) {
-    return null
-  }
-
-  for (let current = index - 1; current >= 0; current -= 1) {
-    const candidate = bucket[current]
-    if (candidate?.role === 'user') {
-      return candidate
-    }
-  }
-
-  return null
-}
-
 function isLocalEphemeralMessageId(id: string) {
   return /^(user|assistant|system)-\d{13}-[a-z0-9]+$/i.test(id)
-}
-
-function resolvePersistedMessageId(message: AssistantMessage | null) {
-  if (!message) {
-    return null
-  }
-
-  if (isLocalEphemeralMessageId(message.id)) {
-    return null
-  }
-
-  if (/^\d+$/.test(message.id)) {
-    return Number(message.id)
-  }
-
-  return message.id
-}
-
-function resolveBestMatchedMessageFromBucket(conversationId: string, targetMessage: AssistantMessage) {
-  const bucket = conversationMessagesMap[conversationId] ?? []
-  const directMatchedMessage = bucket.find((message) => message.id === targetMessage.id)
-  if (directMatchedMessage) {
-    return directMatchedMessage
-  }
-
-  const targetTimestamp = resolveMessageTimestamp(targetMessage)
-  const logicalMatchedMessages = bucket
-    .filter((message) => isSameLogicalMessage(message, targetMessage))
-    .sort((left, right) => {
-      // 1. 优先命中已经拿到后端稳定主键的消息，避免继续引用本地占位态。
-      // 2. 若候选状态一致，则优先选择时间更接近原消息的那条。
-      // 3. 时间也一致时再按较新的记录兜底，降低重复文案时误命中旧消息的概率。
-      const persistedScoreDiff =
-        Number(!isLocalEphemeralMessageId(right.id)) - Number(!isLocalEphemeralMessageId(left.id))
-      if (persistedScoreDiff !== 0) {
-        return persistedScoreDiff
-      }
-
-      const leftGap = Math.abs(resolveMessageTimestamp(left) - targetTimestamp)
-      const rightGap = Math.abs(resolveMessageTimestamp(right) - targetTimestamp)
-      if (leftGap !== rightGap) {
-        return leftGap - rightGap
-      }
-
-      return resolveMessageTimestamp(right) - resolveMessageTimestamp(left)
-    })
-
-  return logicalMatchedMessages[0] ?? null
-}
-
-async function resolveRetrySourceMessages(
-  conversationId: string,
-  sourceUserMessage: AssistantMessage,
-  sourceAssistantMessage: AssistantMessage,
-) {
-  let resolvedUserMessage: AssistantMessage | null = sourceUserMessage
-  let resolvedAssistantMessage: AssistantMessage | null = sourceAssistantMessage
-
-  let persistedUserMessageId = resolvePersistedMessageId(resolvedUserMessage)
-  let persistedAssistantMessageId = resolvePersistedMessageId(resolvedAssistantMessage)
-
-  if (persistedUserMessageId && persistedAssistantMessageId) {
-    return {
-      sourceUserMessage: resolvedUserMessage,
-      sourceAssistantMessage: resolvedAssistantMessage,
-      persistedUserMessageId,
-      persistedAssistantMessageId,
-    }
-  }
-
-  // 1. 若当前点击时仍是本地占位消息，先静默拉一次权威历史，尽量把真实 ID 补回来。
-  // 2. 这里复用现有 history 接口即可，避免为了一次重试再新增额外查询接口。
-  // 3. 若静默刷新后依然拿不到稳定 ID，则说明消息大概率仍处于异步持久化窗口期。
-  await loadConversationMessages(conversationId, true)
-
-  resolvedAssistantMessage =
-    resolveBestMatchedMessageFromBucket(conversationId, sourceAssistantMessage) ?? sourceAssistantMessage
-  resolvedUserMessage =
-    resolveUserMessageBeforeAssistantInBucket(conversationId, resolvedAssistantMessage.id) ??
-    resolveBestMatchedMessageFromBucket(conversationId, sourceUserMessage) ??
-    sourceUserMessage
-
-  persistedUserMessageId = resolvePersistedMessageId(resolvedUserMessage)
-  persistedAssistantMessageId = resolvePersistedMessageId(resolvedAssistantMessage)
-
-  return {
-    sourceUserMessage: resolvedUserMessage,
-    sourceAssistantMessage: resolvedAssistantMessage,
-    persistedUserMessageId,
-    persistedAssistantMessageId,
-  }
-}
-
-function createRetryGroupId() {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return `retry-${crypto.randomUUID()}`
-  }
-
-  return `retry-${Date.now()}-${Math.random().toString(16).slice(2)}`
-}
-
-function applyRetryGroupToExistingMessages(groupId: string, total: number, userMessageId: string, assistantMessageId: string) {
-  const conversationId = selectedConversationId.value
-  if (!conversationId) {
-    return
-  }
-
-  const bucket = conversationMessagesMap[conversationId] ?? []
-  for (const message of bucket) {
-    if (message.id === userMessageId || message.id === assistantMessageId || message.retryGroupId === groupId) {
-      message.retryGroupId = groupId
-      message.retryTotal = total
-      if (message.id === userMessageId || (message.retryGroupId === groupId && message.role === 'user' && !message.retryIndex)) {
-        message.retryIndex = 1
-      }
-      if (message.id === assistantMessageId || (message.retryGroupId === groupId && message.role === 'assistant' && !message.retryIndex)) {
-        message.retryIndex = 1
-      }
-    }
-  }
-
-  retryVisiblePageMap[groupId] = total
 }
 
 function resolvePromptBeforeAssistantMessage(messageId: string) {
@@ -893,6 +702,47 @@ function shouldShowReasoningBox(message: AssistantMessage) {
 
 function shouldShowAnsweringIndicator(message: AssistantMessage) {
   return isStreamingMessage(message) && !isThinkingMessage(message) && !message.content.trim()
+}
+
+// ---------- DisplayMessage 适配函数 ----------
+// 合并后的 DisplayMessage 包含多条源消息，以下函数统一处理
+// 流式状态、推理框、折叠等在合并场景下的语义。
+
+function isDisplayStreaming(dm: DisplayMessage): boolean {
+  return dm.sources.some(m => m.id === activeStreamingMessageId.value)
+}
+
+function shouldShowDisplayReasoningBox(dm: DisplayMessage): boolean {
+  if (dm.role !== 'assistant') return false
+  return dm.sources.some(m =>
+    Boolean(m.reasoning?.trim()) ||
+    (m.id === activeStreamingMessageId.value && thinkingMessageMap[m.id] === true),
+  )
+}
+
+function shouldShowDisplayAnsweringIndicator(dm: DisplayMessage): boolean {
+  if (dm.content) return false
+  return isDisplayStreaming(dm) && dm.sources.every(m => thinkingMessageMap[m.id] !== true)
+}
+
+function isDisplayReasoningCollapsed(dm: DisplayMessage): boolean {
+  return dm.sources.every(m => reasoningCollapsedMap[m.id] === true)
+}
+
+function toggleDisplayReasoningCollapse(dm: DisplayMessage): void {
+  const newCollapsed = !isDisplayReasoningCollapsed(dm)
+  dm.sources.forEach(m => { reasoningCollapsedMap[m.id] = newCollapsed })
+}
+
+function getDisplayReasoningStatusLabel(dm: DisplayMessage): string {
+  const totalSeconds = dm.sources.reduce(
+    (sum, m) => sum + (reasoningDurationMap[m.id] ?? 0), 0,
+  )
+  if (totalSeconds > 0) return `已思考（用时 ${totalSeconds} 秒）`
+  const hasActiveThinking = dm.sources.some(
+    m => m.id === activeStreamingMessageId.value && thinkingMessageMap[m.id] === true,
+  )
+  return hasActiveThinking ? '思考中' : '已思考'
 }
 
 function isMessageViewportAtBottom(viewport: HTMLElement) {
@@ -1103,6 +953,15 @@ function syncHistoryPanelWidthForViewport() {
   )
 }
 
+function releaseHistoryResizeListeners() {
+  if (!historyResizeCleanup) {
+    return
+  }
+
+  historyResizeCleanup()
+  historyResizeCleanup = null
+}
+
 // startResizeHistoryPanel 负责处理会话列表与聊天主区之间的横向拖拽。
 // 职责边界：
 // 1. 只负责更新助手面板内部的历史区宽度，不修改外层 Dashboard 的左右二分布局。
@@ -1124,6 +983,9 @@ function startResizeHistoryPanel(event: PointerEvent) {
   const startX = event.clientX
   const startWidth = historyPanelWidth.value
   const bounds = getHistoryPanelWidthBounds(rect.width)
+  // 1. 先清理上一次拖拽遗留的监听器，避免重复绑定导致的光标残留和状态错乱。
+  // 2. 再注册本次拖拽监听，并把清理函数保存起来，方便 pointerup / pointercancel / 卸载时统一回收。
+  releaseHistoryResizeListeners()
 
   const handlePointerMove = (moveEvent: PointerEvent) => {
     const deltaX = moveEvent.clientX - startX
@@ -1134,14 +996,22 @@ function startResizeHistoryPanel(event: PointerEvent) {
   }
 
   const stopResize = () => {
+    releaseHistoryResizeListeners()
+  }
+
+  historyResizeCleanup = () => {
     window.removeEventListener('pointermove', handlePointerMove)
     window.removeEventListener('pointerup', stopResize)
+    window.removeEventListener('pointercancel', stopResize)
+    window.removeEventListener('blur', stopResize)
     document.body.classList.remove('dashboard-resizing')
   }
 
   document.body.classList.add('dashboard-resizing')
   window.addEventListener('pointermove', handlePointerMove)
   window.addEventListener('pointerup', stopResize)
+  window.addEventListener('pointercancel', stopResize)
+  window.addEventListener('blur', stopResize)
 }
 
 function toggleHistoryPanel() {
@@ -1225,32 +1095,14 @@ function startNewConversation() {
   shouldAutoFollowMessages.value = true
 }
 
-interface RetryRequestExtra {
-  retryGroupId: string
-  retryFromUserMessageId: string | number
-  retryFromAssistantMessageId: string | number
-}
-
 function isManualThinkingEnabled(mode: ThinkingModeType) {
   return mode === 'true'
 }
 
 function buildChatRequestExtra(
   planningTaskClassIds: number[] = [],
-  retryExtra?: RetryRequestExtra,
 ): ChatRequestExtra | undefined {
-  // 1. retry 与“新一轮智能编排”属于互斥语义：retry 必须严格指向既有历史消息，不应再混入新的任务类上下文。
-  // 2. 因此只有普通发送链路才透传 task_class_ids，避免 regenerate 时把当前输入区的临时选择误带进历史重试。
-  // 3. 若本轮没有任何附加上下文，则返回 undefined，保持请求体尽量精简。
-  if (retryExtra) {
-    return {
-      request_mode: 'retry',
-      retry_group_id: retryExtra.retryGroupId,
-      retry_from_user_message_id: retryExtra.retryFromUserMessageId,
-      retry_from_assistant_message_id: retryExtra.retryFromAssistantMessageId,
-    }
-  }
-
+  // retry 机制已整体下线，这里只负责把智能编排所需的 task_class_ids 透传给后端。
   if (planningTaskClassIds.length <= 0) {
     return undefined
   }
@@ -1541,99 +1393,6 @@ async function sendMessage(preset?: string) {
   }
 }
 
-async function regenerateAssistantMessage(message: AssistantMessage) {
-  if (chatLoading.value) {
-    return
-  }
-
-  const sourceUserMessage = resolveVisibleUserMessageBeforeAssistant(message.id)
-  const conversationId = selectedConversationId.value
-  if (!conversationId || !sourceUserMessage) {
-    ElMessage.warning('没有找到可用于重试的用户消息')
-    return
-  }
-
-  const retrySource = await resolveRetrySourceMessages(conversationId, sourceUserMessage, message)
-  const text = retrySource.sourceUserMessage?.content.trim() || sourceUserMessage.content.trim()
-  if (!text) {
-    ElMessage.warning('没有找到可用于重试的用户消息')
-    return
-  }
-
-  if (!retrySource.persistedUserMessageId || !retrySource.persistedAssistantMessageId) {
-    ElMessage.info('消息正在处理，请稍后再重试，或者直接复制消息重新发送')
-    return
-  }
-
-  chatLoading.value = true
-  cancelEditUserMessage()
-
-  const retryGroup = resolveRetryPageGroup(retrySource.sourceAssistantMessage)
-  const retryGroupId = retryGroup?.groupId || createRetryGroupId()
-  const nextRetryIndex = (retryGroup?.total ?? 1) + 1
-  applyRetryGroupToExistingMessages(
-    retryGroupId,
-    nextRetryIndex,
-    retrySource.sourceUserMessage.id,
-    retrySource.sourceAssistantMessage.id,
-  )
-
-  const now = new Date().toISOString()
-  appendConversationMessage(conversationId, {
-    id: createMessageId('user'),
-    role: 'user',
-    content: text,
-    createdAt: now,
-    retryGroupId,
-    retryIndex: nextRetryIndex,
-    retryTotal: nextRetryIndex,
-  })
-  const retryAssistantMessage = appendConversationMessage(conversationId, {
-    id: createMessageId('assistant'),
-    role: 'assistant',
-    content: '',
-    createdAt: now,
-    reasoning: '',
-    retryGroupId,
-    retryIndex: nextRetryIndex,
-    retryTotal: nextRetryIndex,
-  })
-
-  retryVisiblePageMap[retryGroupId] = nextRetryIndex
-  prependConversationPreview(conversationId, text, now)
-  prepareAssistantMessageForStreaming(retryAssistantMessage, now)
-  activeStreamingMessageId.value = retryAssistantMessage.id
-  scheduleScrollMessagesToBottom(false, true)
-
-  try {
-    const actualConversationId = await streamAssistantReply(
-      conversationId,
-      text,
-      retryAssistantMessage,
-      now,
-      true,
-      buildChatRequestExtra([], {
-        retryGroupId,
-        retryFromUserMessageId: retrySource.persistedUserMessageId,
-        retryFromAssistantMessageId: retrySource.persistedAssistantMessageId,
-      }),
-    )
-    await Promise.allSettled([
-      loadConversationMessages(actualConversationId, true),
-      loadConversationContextStats(actualConversationId, true),
-    ])
-  } catch (error) {
-    if (!retryAssistantMessage.content.trim()) {
-      retryAssistantMessage.content = '重新生成失败，请稍后重试。'
-    }
-    reasoningCollapsedMap[retryAssistantMessage.id] = false
-    ElMessage.error(error instanceof Error ? error.message : '重新生成失败，请稍后重试')
-  } finally {
-    activeStreamingMessageId.value = ''
-    chatLoading.value = false
-  }
-}
-
 watch(
   () => selectedMessages.value.length,
   () => {
@@ -1663,8 +1422,8 @@ onBeforeUnmount(() => {
     window.clearInterval(reasoningTicker)
     reasoningTicker = 0
   }
+  releaseHistoryResizeListeners()
   window.removeEventListener('resize', syncHistoryPanelWidthForViewport)
-  document.body.classList.remove('dashboard-resizing')
 })
 </script>
 
@@ -1791,14 +1550,14 @@ onBeforeUnmount(() => {
           </div>
 
           <article
-            v-for="message in selectedMessages"
-            :key="message.id"
+            v-for="dm in displayMessages"
+            :key="dm.id"
             class="chat-message"
-            :class="`chat-message--${message.role}`"
+            :class="`chat-message--${dm.role}`"
           >
-            <div v-if="message.role === 'user'" class="chat-message__user-row">
+            <div v-if="dm.role === 'user'" class="chat-message__user-row">
               <div class="chat-message__user-bubble">
-                <template v-if="isEditingUserMessage(message.id)">
+                <template v-if="isEditingUserMessage(dm.id)">
                   <div class="chat-message__editor">
                     <textarea
                       v-model="editingUserMessageDraft"
@@ -1809,20 +1568,20 @@ onBeforeUnmount(() => {
                       <button type="button" class="chat-message__editor-button chat-message__editor-button--ghost" @click="cancelEditUserMessage()">
                         取消
                       </button>
-                      <button type="button" class="chat-message__editor-button chat-message__editor-button--primary" @click="submitEditedUserMessage(message)">
+                      <button type="button" class="chat-message__editor-button chat-message__editor-button--primary" @click="submitEditedUserMessage(dm.sources[0])">
                         发送
                       </button>
                     </div>
                   </div>
                 </template>
-                <div v-else class="chat-message__markdown" v-html="renderMessageMarkdown(message.content)" />
+                <div v-else class="chat-message__markdown" v-html="renderMessageMarkdown(dm.content)" />
               </div>
-              <div v-if="!isEditingUserMessage(message.id)" class="chat-message__action-bar chat-message__action-bar--user">
+              <div v-if="!isEditingUserMessage(dm.id)" class="chat-message__action-bar chat-message__action-bar--user">
                 <button
                   type="button"
                   class="chat-message__icon-button"
                   aria-label="复制消息"
-                  @click="copyText(message.content, '已复制用户消息')"
+                  @click="copyText(dm.content, '已复制用户消息')"
                 >
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <path d="M6.14923 4.02032C7.11191 4.02032 7.87977 4.02017 8.49591 4.07599C9.12122 4.1327 9.65786 4.25188 10.1414 4.53107C10.7201 4.8653 11.2008 5.34591 11.535 5.92462C11.8142 6.40818 11.9333 6.94482 11.9901 7.57013C12.0459 8.18625 12.0457 8.9542 12.0457 9.91681C12.0457 10.8795 12.0459 11.6474 11.9901 12.2635C11.9333 12.8888 11.8142 13.4254 11.535 13.909C11.2008 14.4877 10.7201 14.9683 10.1414 15.3026C9.65786 15.5817 9.12122 15.7009 8.49591 15.7576C7.87977 15.8134 7.1119 15.8133 6.14923 15.8133C5.18661 15.8133 4.41868 15.8134 3.80255 15.7576C3.17724 15.7009 2.6406 15.5817 2.15704 15.3026C1.57834 14.9684 1.09772 14.4877 0.763489 13.909C0.484305 13.4254 0.365123 12.8888 0.308411 12.2635C0.252587 11.6474 0.252747 10.8795 0.252747 9.91681C0.252747 8.95419 0.252603 8.18625 0.308411 7.57013C0.365123 6.94482 0.484305 6.40818 0.763489 5.92462C1.09771 5.3459 1.57833 4.86529 2.15704 4.53107C2.6406 4.25188 3.17724 4.1327 3.80255 4.07599C4.41868 4.02018 5.1866 4.02032 6.14923 4.02032Z" fill="currentColor" />
@@ -1833,7 +1592,7 @@ onBeforeUnmount(() => {
                   type="button"
                   class="chat-message__icon-button"
                   aria-label="修改消息"
-                  @click="startEditUserMessage(message)"
+                  @click="startEditUserMessage(dm.sources[0])"
                 >
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <path d="M9.94073 1.34942C10.7047 0.902314 11.6503 0.902418 12.4143 1.34942C12.706 1.52016 12.9687 1.79118 13.3104 2.13284C13.652 2.47448 13.9231 2.73721 14.0938 3.02894C14.5408 3.79295 14.5409 4.73856 14.0938 5.50251C13.9231 5.79415 13.652 6.05704 13.3104 6.39861L6.65929 13.0497C6.28065 13.4284 6.00692 13.7108 5.6654 13.9097C5.32388 14.1085 4.94312 14.2074 4.42702 14.3498L3.24391 14.6761C2.77524 14.8054 2.34535 14.9262 2.00128 14.9684C1.65193 15.0112 1.17961 15.0013 0.810733 14.6325C0.44189 14.2637 0.432076 13.7913 0.474829 13.442C0.517004 13.0979 0.63787 12.668 0.767151 12.1993L1.09349 11.0162C1.23585 10.5001 1.33478 10.1194 1.53356 9.77785C1.73246 9.43633 2.01487 9.1626 2.39352 8.78395L9.04463 2.13284C9.38622 1.79126 9.64908 1.52017 9.94073 1.34942Z" fill="currentColor" />
@@ -1841,11 +1600,11 @@ onBeforeUnmount(() => {
                   </svg>
                 </button>
               </div>
-              <span class="chat-message__time chat-message__time--user">{{ formatMessageTime(message.createdAt) }}</span>
+              <span class="chat-message__time chat-message__time--user">{{ formatMessageTime(dm.createdAt) }}</span>
             </div>
 
             <div v-else class="chat-message__assistant-flow">
-              <div v-if="shouldShowReasoningBox(message)" class="chat-message__reasoning">
+              <div v-if="shouldShowDisplayReasoningBox(dm)" class="chat-message__reasoning">
                 <div class="chat-message__reasoning-head">
                   <div class="chat-message__reasoning-title">
                     <span class="chat-message__reasoning-icon">
@@ -1868,18 +1627,18 @@ onBeforeUnmount(() => {
                         />
                       </svg>
                     </span>
-                    <span class="chat-message__reasoning-status">{{ getReasoningStatusLabel(message) }}</span>
+                    <span class="chat-message__reasoning-status">{{ getDisplayReasoningStatusLabel(dm) }}</span>
                   </div>
                   <button
                     type="button"
                     class="chat-message__reasoning-toggle"
-                    :aria-label="isReasoningCollapsed(message.id) ? '展开深度思考' : '折叠深度思考'"
-                    @click="toggleReasoningCollapse(message.id)"
+                    :aria-label="isDisplayReasoningCollapsed(dm) ? '展开深度思考' : '折叠深度思考'"
+                    @click="toggleDisplayReasoningCollapse(dm)"
                   >
                     <span class="chat-message__reasoning-chevron">
                       <svg
                         class="chat-message__reasoning-chevron-icon"
-                        :class="{ 'chat-message__reasoning-chevron-icon--expanded': !isReasoningCollapsed(message.id) }"
+                        :class="{ 'chat-message__reasoning-chevron-icon--expanded': !isDisplayReasoningCollapsed(dm) }"
                         width="14"
                         height="14"
                         viewBox="0 0 14 14"
@@ -1896,11 +1655,11 @@ onBeforeUnmount(() => {
                   </button>
                 </div>
 
-                <div v-if="!isReasoningCollapsed(message.id)" class="chat-message__reasoning-body">
+                <div v-if="!isDisplayReasoningCollapsed(dm)" class="chat-message__reasoning-body">
                   <div
-                    v-if="message.reasoning"
+                    v-if="dm.reasoning"
                     class="chat-message__markdown chat-message__markdown--reasoning"
-                    v-html="renderMessageMarkdown(message.reasoning)"
+                    v-html="renderMessageMarkdown(dm.reasoning)"
                   />
                   <div v-else class="chat-message__streaming chat-message__streaming--reasoning">
                     <div class="typing-indicator">
@@ -1912,10 +1671,10 @@ onBeforeUnmount(() => {
                 </div>
               </div>
 
-              <div v-if="message.content" class="chat-message__assistant-content">
-                <div class="chat-message__markdown chat-message__markdown--assistant" v-html="renderMessageMarkdown(message.content)" />
+              <div v-if="dm.content" class="chat-message__assistant-content">
+                <div class="chat-message__markdown chat-message__markdown--assistant" v-html="renderMessageMarkdown(dm.content)" />
               </div>
-              <div v-else-if="shouldShowAnsweringIndicator(message)" class="chat-message__streaming chat-message__streaming--plain">
+              <div v-else-if="shouldShowDisplayAnsweringIndicator(dm)" class="chat-message__streaming chat-message__streaming--plain">
                 <div class="typing-indicator">
                   <span />
                   <span />
@@ -1923,52 +1682,20 @@ onBeforeUnmount(() => {
                 </div>
               </div>
 
-              <div v-if="message.content" class="chat-message__action-bar">
+              <div v-if="dm.content" class="chat-message__action-bar">
                 <button
                   type="button"
                   class="chat-message__icon-button"
                   aria-label="复制回复"
-                  @click="copyText(message.content, '已复制回复内容')"
+                  @click="copyText(dm.content, '已复制回复内容')"
                 >
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <path d="M6.14923 4.02032C7.11191 4.02032 7.87977 4.02017 8.49591 4.07599C9.12122 4.1327 9.65786 4.25188 10.1414 4.53107C10.7201 4.8653 11.2008 5.34591 11.535 5.92462C11.8142 6.40818 11.9333 6.94482 11.9901 7.57013C12.0459 8.18625 12.0457 8.9542 12.0457 9.91681C12.0457 10.8795 12.0459 11.6474 11.9901 12.2635C11.9333 12.8888 11.8142 13.4254 11.535 13.909C11.2008 14.4877 10.7201 14.9683 10.1414 15.3026C9.65786 15.5817 9.12122 15.7009 8.49591 15.7576C7.87977 15.8134 7.1119 15.8133 6.14923 15.8133C5.18661 15.8133 4.41868 15.8134 3.80255 15.7576C3.17724 15.7009 2.6406 15.5817 2.15704 15.3026C1.57834 14.9684 1.09772 14.4877 0.763489 13.909C0.484305 13.4254 0.365123 12.8888 0.308411 12.2635C0.252587 11.6474 0.252747 10.8795 0.252747 9.91681C0.252747 8.95419 0.252603 8.18625 0.308411 7.57013C0.365123 6.94482 0.484305 6.40818 0.763489 5.92462C1.09771 5.3459 1.57833 4.86529 2.15704 4.53107C2.6406 4.25188 3.17724 4.1327 3.80255 4.07599C4.41868 4.02018 5.1866 4.02032 6.14923 4.02032Z" fill="currentColor" />
                     <path d="M9.80157 0.367981C10.7637 0.367981 11.5313 0.367886 12.1473 0.423645C12.7725 0.480313 13.3093 0.598765 13.7928 0.877747C14.3716 1.21192 14.852 1.69355 15.1863 2.27228C15.4655 2.75575 15.5857 3.29165 15.6424 3.91681C15.6982 4.53301 15.6971 5.30161 15.6971 6.26447V7.8299C15.6971 8.29265 15.6989 8.58994 15.6649 8.84845C15.4667 10.3525 14.4009 11.5738 12.9832 11.9988V10.5467C13.6973 10.1903 14.2104 9.49662 14.3192 8.67169C14.3387 8.52348 14.3406 8.3358 14.3406 7.8299V6.26447C14.3406 5.27707 14.3398 4.58149 14.2908 4.04083C14.2427 3.50969 14.1526 3.19373 14.0125 2.95099C13.7974 2.5785 13.4875 2.2687 13.1151 2.05353C12.8723 1.91347 12.5563 1.82237 12.0252 1.77423C11.4846 1.72528 10.7888 1.7254 9.80157 1.7254H7.71466C6.75614 1.72559 5.92659 2.27697 5.52325 3.07892H4.07013C4.54215 1.51132 5.99314 0.368192 7.71466 0.367981H9.80157Z" fill="currentColor" />
                   </svg>
                 </button>
-                <button
-                  type="button"
-                  class="chat-message__icon-button"
-                  aria-label="重新生成"
-                  :disabled="chatLoading"
-                  @click="regenerateAssistantMessage(message)"
-                >
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M7.92139 0.349152C10.3744 0.349234 12.5564 1.5052 13.9558 3.29894L15.1281 2.12759C15.3304 1.92546 15.6767 2.06943 15.6767 2.35538V5.53923C15.6766 5.71626 15.5329 5.85976 15.3559 5.86002H12.171C11.8855 5.8597 11.7426 5.51465 11.9443 5.31249L12.9641 4.29056C11.8237 2.74305 9.98911 1.74106 7.92139 1.74097C4.46439 1.74097 1.66236 4.543 1.66236 8C1.66236 11.457 4.46439 14.259 7.92139 14.259C11.3783 14.2589 14.1804 11.4569 14.1804 8H15.5722C15.5722 12.2251 12.1465 15.6507 7.92139 15.6508C3.69617 15.6508 0.270538 12.2252 0.270538 8C0.270538 3.77478 3.69617 0.349152 7.92139 0.349152Z" fill="currentColor" />
-                  </svg>
-                </button>
-                <div v-if="shouldShowRetryPager(message)" class="chat-message__retry-pager">
-                  <button
-                    type="button"
-                    class="chat-message__retry-pager-button"
-                    :disabled="resolveRetryPageGroup(message)?.visibleIndex === 1"
-                    @click="changeRetryPage(message, -1)"
-                  >
-                    &lt;
-                  </button>
-                  <span class="chat-message__retry-pager-label">
-                    {{ resolveRetryPageGroup(message)?.visibleIndex }}/{{ resolveRetryPageGroup(message)?.total }}
-                  </span>
-                  <button
-                    type="button"
-                    class="chat-message__retry-pager-button"
-                    :disabled="resolveRetryPageGroup(message)?.visibleIndex === resolveRetryPageGroup(message)?.total"
-                    @click="changeRetryPage(message, 1)"
-                  >
-                    &gt;
-                  </button>
-                </div>
               </div>
-              <span class="chat-message__time">{{ formatMessageTime(message.createdAt) }}</span>
+              <span class="chat-message__time">{{ formatMessageTime(dm.createdAt) }}</span>
             </div>
           </article>
         </div>
@@ -1979,6 +1706,7 @@ onBeforeUnmount(() => {
             :key="action"
             type="button"
             class="assistant-actions__chip"
+            :disabled="chatLoading"
             @click="sendMessage(action)"
           >
             {{ action }}
@@ -2255,6 +1983,7 @@ onBeforeUnmount(() => {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior: contain;
   display: grid;
   align-content: start;
   gap: 12px;
@@ -2510,6 +2239,7 @@ onBeforeUnmount(() => {
   min-height: 0;
   overflow-y: auto;
   padding: 24px 28px 18px;
+  overscroll-behavior: contain;
   display: grid;
   gap: 20px;
   align-content: start;
@@ -2624,44 +2354,6 @@ onBeforeUnmount(() => {
 .chat-message__icon-button:disabled {
   opacity: 0.38;
   cursor: not-allowed;
-}
-
-.chat-message__retry-pager {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: 2px;
-}
-
-.chat-message__retry-pager-button {
-  width: 24px;
-  height: 24px;
-  border: none;
-  border-radius: 999px;
-  background: transparent;
-  color: #7b8798;
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease;
-}
-
-.chat-message__retry-pager-button:hover {
-  background: rgba(79, 118, 234, 0.1);
-  color: #3f69d3;
-}
-
-.chat-message__retry-pager-button:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-}
-
-.chat-message__retry-pager-label {
-  min-width: 34px;
-  text-align: center;
-  color: #6f7b8e;
-  font-size: 12px;
-  font-weight: 600;
 }
 
 .chat-message__editor {
@@ -2970,6 +2662,23 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
+.assistant-actions__chip:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.assistant-history__toggle:focus-visible,
+.assistant-history__new:focus-visible,
+.assistant-history__item:focus-visible,
+.assistant-actions__chip:focus-visible,
+.chat-message__icon-button:focus-visible,
+.chat-message__editor-button:focus-visible,
+.chat-message__reasoning-toggle:focus-visible,
+.ds-icon-button:focus-visible {
+  outline: 2px solid rgba(37, 99, 235, 0.36);
+  outline-offset: 2px;
+}
+
 .assistant-composer-ds {
   --dsw-alias-brand-text: #3357c2;
   --dsw-alias-label-primary: #1f2430;
@@ -3083,9 +2792,9 @@ onBeforeUnmount(() => {
 }
 
 .assistant-toolbar__context-meter {
-  width: 144px;
-  min-width: 144px;
-  flex: 0 0 144px;
+  width: 188px;
+  min-width: 188px;
+  flex: 0 0 188px;
   margin-right: auto;
 }
 
@@ -3253,9 +2962,9 @@ onBeforeUnmount(() => {
   }
 
   .assistant-toolbar__context-meter {
-    width: 144px;
-    min-width: 144px;
-    flex-basis: 144px;
+    width: 188px;
+    min-width: 188px;
+    flex-basis: 188px;
     margin-right: 0;
     order: 3;
   }

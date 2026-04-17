@@ -2,6 +2,7 @@ package dao
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -23,18 +24,23 @@ func (r *AgentDAO) WithTx(tx *gorm.DB) *AgentDAO {
 	return &AgentDAO{db: tx}
 }
 
-// saveChatHistoryCore 鏄€滆亰澶╂秷鎭惤搴?+ 浼氳瘽缁熻鏇存柊鈥濈殑鏍稿績瀹炵幇銆?
+// saveChatHistoryCore 是"聊天消息落库 + 会话统计更新"的核心实现。
 //
-// 鑱岃矗杈圭晫锛?
-// 1. 鍙墽琛屽綋鍓?DAO 鍙ユ焺涓婄殑鏁版嵁搴撳啓鍏ュ姩浣滐紱
-// 2. 涓嶄富鍔ㄥ紑鍚簨鍔★紙浜嬪姟鐢辫皟鐢ㄦ柟鍐冲畾锛夛紱
-// 3. 淇濊瘉 chat_histories 涓?agent_chats.message_count 鐨勪竴鑷存€у彛寰勩€?
+// 职责边界：
+// 1. 只执行当前 DAO 句柄上的数据库写入动作；
+// 2. 不主动开启事务（事务由调用方决定）；
+// 3. 保证 chat_histories 与 agent_chats.message_count 的一致性口径。
 //
-// 澶辫触澶勭悊锛?
-// 1. 浠讳竴姝ラ澶辫触閮借繑鍥?error锛?
-// 2. 鑻ヨ皟鐢ㄦ柟澶勪簬浜嬪姟涓紝杩斿洖 error 浼氳Е鍙戜簨鍔″洖婊氥€?
-func (a *AgentDAO) saveChatHistoryCore(ctx context.Context, userID int, conversationID string, role, message, reasoningContent string, reasoningDurationSeconds int, retryGroupID *string, retryIndex *int, retryFromUserMessageID *int, retryFromAssistantMessageID *int, tokensConsumed int) error {
-	// 0. token 鍏ュ簱鍓嶅厹搴曪細璐熸暟缁熶竴褰掗浂锛岄伩鍏嶅紓甯稿€兼薄鏌撶疮璁＄粺璁°€?
+// 失败处理：
+// 1. 任一步骤失败都返回 error；
+// 2. 若调用方处于事务中，返回 error 会触发事务回滚。
+//
+// 关于 retry 字段：
+// 1. retry 机制已整体下线，本函数不再写入 retry_group_id / retry_index / retry_from_* 四列；
+// 2. 这些列在 GORM ChatHistory 模型上暂时保留，列本身可空，历史数据不受影响；
+// 3. Step B 会做 DROP COLUMN 的 migration。
+func (a *AgentDAO) saveChatHistoryCore(ctx context.Context, userID int, conversationID string, role, message, reasoningContent string, reasoningDurationSeconds int, tokensConsumed int) error {
+	// 0. token 入库前兜底：负数统一归零，避免异常值污染累计统计。
 	if tokensConsumed < 0 {
 		tokensConsumed = 0
 	}
@@ -43,32 +49,28 @@ func (a *AgentDAO) saveChatHistoryCore(ctx context.Context, userID int, conversa
 		reasoningDurationSeconds = 0
 	}
 
-	// 1. 鍏堝啓 chat_histories 鍘熷娑堟伅銆?
+	// 1. 先写 chat_histories 原始消息。
 	var reasoningContentPtr *string
 	if reasoningContent != "" {
 		reasoningContentPtr = &reasoningContent
 	}
 	userChat := model.ChatHistory{
-		UserID:                      userID,
-		MessageContent:              &message,
-		ReasoningContent:            reasoningContentPtr,
-		ReasoningDurationSeconds:    reasoningDurationSeconds,
-		RetryGroupID:                retryGroupID,
-		RetryIndex:                  retryIndex,
-		RetryFromUserMessageID:      retryFromUserMessageID,
-		RetryFromAssistantMessageID: retryFromAssistantMessageID,
-		Role:                        &role,
-		ChatID:                      conversationID,
-		TokensConsumed:              tokensConsumed,
+		UserID:                   userID,
+		MessageContent:           &message,
+		ReasoningContent:         reasoningContentPtr,
+		ReasoningDurationSeconds: reasoningDurationSeconds,
+		Role:                     &role,
+		ChatID:                   conversationID,
+		TokensConsumed:           tokensConsumed,
 	}
 	if err := a.db.WithContext(ctx).Create(&userChat).Error; err != nil {
 		return err
 	}
 
-	// 2. 鍐嶆洿鏂颁細璇濈粺璁★細
-	// 2.1 message_count +1锛屼繚鎸佸拰 chat_histories 琛屾暟鍙ｅ緞涓€鑷达紱
-	// 2.2 tokens_total 绱姞鏈潯娑堟伅 token锛?
-	// 2.3 last_message_at 鍒锋柊涓哄綋鍓嶆椂闂达紝渚涗細璇濇帓搴忎娇鐢ㄣ€?
+	// 2. 再更新会话统计：
+	// 2.1 message_count +1，保持和 chat_histories 行数口径一致；
+	// 2.2 tokens_total 累加本条消息 token；
+	// 2.3 last_message_at 刷新为当前时间，供会话排序使用。
 	now := time.Now()
 	updates := map[string]interface{}{
 		"message_count":   gorm.Expr("message_count + ?", 1),
@@ -82,14 +84,14 @@ func (a *AgentDAO) saveChatHistoryCore(ctx context.Context, userID int, conversa
 		return result.Error
 	}
 	if result.RowsAffected == 0 {
-		// 浼氳瘽涓嶅瓨鍦ㄦ椂鐩存帴澶辫触锛岄伩鍏嶅嚭鐜扳€滃鍎垮巻鍙叉秷鎭€濄€?
+		// 会话不存在时直接失败，避免出现"孤儿历史消息"。
 		return fmt.Errorf("conversation not found when updating stats: user_id=%d chat_id=%s", userID, conversationID)
 	}
 
-	// 3. 鏈€鍚庢洿鏂?users.token_usage锛堝悓涓€浜嬪姟鍐咃級锛?
-	// 3.1 鍙湪 tokensConsumed>0 鏃舵墽琛岋紝閬垮厤鏃犳剰涔夊啓鍏ワ紱
-	// 3.2 鍜?chat_histories/agent_chats 鏀惧湪鍚屼竴浜嬪姟閲岋紝淇濊瘉缁熻鍙ｅ緞鍘熷瓙涓€鑷达紱
-	// 3.3 鑻ョ敤鎴疯涓嶅瓨鍦ㄥ垯杩斿洖閿欒锛岃Е鍙戜簨鍔″洖婊氾紝闃叉鍑虹幇鈥滀細璇濈粺璁℃垚鍔熶絾鐢ㄦ埛缁熻涓㈠け鈥濄€?
+	// 3. 最后更新 users.token_usage（同一事务内）：
+	// 3.1 只在 tokensConsumed>0 时执行，避免无意义写入；
+	// 3.2 和 chat_histories/agent_chats 放在同一事务里，保证统计口径原子一致；
+	// 3.3 若用户行不存在则返回错误，触发事务回滚，防止出现"会话统计成功但用户统计丢失"。
 	if tokensConsumed > 0 {
 		userUpdate := a.db.WithContext(ctx).
 			Model(&model.User{}).
@@ -105,38 +107,38 @@ func (a *AgentDAO) saveChatHistoryCore(ctx context.Context, userID int, conversa
 	return nil
 }
 
-// SaveChatHistoryInTx 鍦ㄨ皟鐢ㄦ柟鈥滃凡寮€鍚簨鍔♀€濈殑鍦烘櫙涓嬪啓鍏ヨ亰澶╁巻鍙层€?
+// SaveChatHistoryInTx 在调用方"已开启事务"的场景下写入聊天历史。
 //
-// 璁捐鐩殑锛?
-// 1. 缁欐湇鍔″眰缁勫悎澶氫釜 DAO 鎿嶄綔鏃跺鐢紝閬垮厤宓屽浜嬪姟锛?
-// 2. 璁?outbox 娑堣垂澶勭悊鍣ㄥ彲浠ュ拰涓氬姟鍐欏叆鍏变韩鍚屼竴涓?tx銆?
-func (a *AgentDAO) SaveChatHistoryInTx(ctx context.Context, userID int, conversationID string, role, message, reasoningContent string, reasoningDurationSeconds int, retryGroupID *string, retryIndex *int, retryFromUserMessageID *int, retryFromAssistantMessageID *int, tokensConsumed int) error {
-	return a.saveChatHistoryCore(ctx, userID, conversationID, role, message, reasoningContent, reasoningDurationSeconds, retryGroupID, retryIndex, retryFromUserMessageID, retryFromAssistantMessageID, tokensConsumed)
+// 设计目的：
+// 1. 给服务层组合多个 DAO 操作时复用，避免嵌套事务；
+// 2. 让 outbox 消费处理器可以和业务写入共享同一个 tx。
+func (a *AgentDAO) SaveChatHistoryInTx(ctx context.Context, userID int, conversationID string, role, message, reasoningContent string, reasoningDurationSeconds int, tokensConsumed int) error {
+	return a.saveChatHistoryCore(ctx, userID, conversationID, role, message, reasoningContent, reasoningDurationSeconds, tokensConsumed)
 }
 
-// SaveChatHistory 鍦ㄥ悓姝ョ洿鍐欒矾寰勪笅鍐欏叆鑱婂ぉ鍘嗗彶銆?
+// SaveChatHistory 在同步直写路径下写入聊天历史。
 //
-// 璇存槑锛?
-// 1. 璇ユ柟娉曚細鑷寮€鍚簨鍔★紱
-// 2. 鍐呴儴澶嶇敤 saveChatHistoryCore锛岀‘淇濆拰 SaveChatHistoryInTx 鐨勪笟鍔″彛寰勫畬鍏ㄤ竴鑷淬€?
-func (a *AgentDAO) SaveChatHistory(ctx context.Context, userID int, conversationID string, role, message, reasoningContent string, reasoningDurationSeconds int, retryGroupID *string, retryIndex *int, retryFromUserMessageID *int, retryFromAssistantMessageID *int, tokensConsumed int) error {
+// 说明：
+// 1. 该方法会自行开启事务；
+// 2. 内部复用 saveChatHistoryCore，确保和 SaveChatHistoryInTx 的业务口径完全一致。
+func (a *AgentDAO) SaveChatHistory(ctx context.Context, userID int, conversationID string, role, message, reasoningContent string, reasoningDurationSeconds int, tokensConsumed int) error {
 	return a.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return a.WithTx(tx).saveChatHistoryCore(ctx, userID, conversationID, role, message, reasoningContent, reasoningDurationSeconds, retryGroupID, retryIndex, retryFromUserMessageID, retryFromAssistantMessageID, tokensConsumed)
+		return a.WithTx(tx).saveChatHistoryCore(ctx, userID, conversationID, role, message, reasoningContent, reasoningDurationSeconds, tokensConsumed)
 	})
 }
 
-// adjustTokenUsageCore 鍦ㄥ悓涓€浜嬪姟璇箟涓嬪仛鈥滀細璇?鐢ㄦ埛鈥漷oken 璐︽湰澧為噺璋冩暣銆?
+// adjustTokenUsageCore 在同一事务语义下做"会话/用户"token 账本增量调整。
 //
-// 鑱岃矗杈圭晫锛?
-// 1. 鍙洿鏂?agent_chats.tokens_total 涓?users.token_usage锛?
-// 2. 涓嶅啓 chat_histories锛堟秷鎭惤搴撶敱 SaveChatHistory* 璺緞璐熻矗锛夛紱
-// 3. deltaTokens<=0 鏃惰涓烘棤鎿嶄綔锛岀洿鎺ヨ繑鍥炪€?
+// 职责边界：
+// 1. 只更新 agent_chats.tokens_total 与 users.token_usage；
+// 2. 不写 chat_histories（消息落库由 SaveChatHistory* 路径负责）；
+// 3. deltaTokens<=0 时视为无操作，直接返回。
 func (a *AgentDAO) adjustTokenUsageCore(ctx context.Context, userID int, conversationID string, deltaTokens int) error {
 	if deltaTokens <= 0 {
 		return nil
 	}
 
-	// 1. 鍏堟洿鏂颁細璇濈疮璁?token銆?
+	// 1. 先更新会话累计 token。
 	chatUpdate := a.db.WithContext(ctx).
 		Model(&model.AgentChat{}).
 		Where("user_id = ? AND chat_id = ?", userID, conversationID).
@@ -148,7 +150,7 @@ func (a *AgentDAO) adjustTokenUsageCore(ctx context.Context, userID int, convers
 		return fmt.Errorf("conversation not found when adjusting tokens: user_id=%d chat_id=%s", userID, conversationID)
 	}
 
-	// 2. 鍐嶆洿鏂扮敤鎴风疮璁?token銆?
+	// 2. 再更新用户累计 token。
 	userUpdate := a.db.WithContext(ctx).
 		Model(&model.User{}).
 		Where("id = ?", userID).
@@ -162,12 +164,12 @@ func (a *AgentDAO) adjustTokenUsageCore(ctx context.Context, userID int, convers
 	return nil
 }
 
-// AdjustTokenUsageInTx 鍦ㄨ皟鐢ㄦ柟宸插紑鍚簨鍔℃椂鎵ц token 璐︽湰澧為噺璋冩暣銆?
+// AdjustTokenUsageInTx 在调用方已开启事务时执行 token 账本增量调整。
 func (a *AgentDAO) AdjustTokenUsageInTx(ctx context.Context, userID int, conversationID string, deltaTokens int) error {
 	return a.adjustTokenUsageCore(ctx, userID, conversationID, deltaTokens)
 }
 
-// AdjustTokenUsage 鍦ㄥ悓姝ヨ矾寰勪笅鎵ц token 璐︽湰澧為噺璋冩暣锛堝唴閮ㄨ嚜甯︿簨鍔★級銆?
+// AdjustTokenUsage 在同步路径下执行 token 账本增量调整（内部自带事务）。
 func (a *AgentDAO) AdjustTokenUsage(ctx context.Context, userID int, conversationID string, deltaTokens int) error {
 	return a.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return a.WithTx(tx).adjustTokenUsageCore(ctx, userID, conversationID, deltaTokens)
@@ -197,108 +199,11 @@ func (a *AgentDAO) GetUserChatHistories(ctx context.Context, userID, limit int, 
 	if err != nil {
 		return nil, err
 	}
-	// 淇濈暀鈥滄渶杩?N 鏉♀€濆悗锛屽弽杞垚鏃堕棿姝ｅ簭锛屾柟渚挎ā鍨嬫秷璐广€?
+	// 保留"最近 N 条"后，反转成时间正序，方便模型消费。
 	for i, j := 0, len(histories)-1; i < j; i, j = i+1, j-1 {
 		histories[i], histories[j] = histories[j], histories[i]
 	}
 	return histories, nil
-}
-
-func (a *AgentDAO) EnsureRetryGroupSeed(ctx context.Context, userID int, chatID, retryGroupID string, sourceUserMessageID, sourceAssistantMessageID int) error {
-	normalizedGroupID := strings.TrimSpace(retryGroupID)
-	if normalizedGroupID == "" {
-		return nil
-	}
-
-	indexOne := 1
-	ids := make([]int, 0, 2)
-	if sourceUserMessageID > 0 {
-		ids = append(ids, sourceUserMessageID)
-	}
-	if sourceAssistantMessageID > 0 {
-		ids = append(ids, sourceAssistantMessageID)
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-
-	return a.db.WithContext(ctx).
-		Model(&model.ChatHistory{
-			UserID: userID,
-			ChatID: chatID,
-		}).
-		Where("user_id = ? AND chat_id = ? AND id IN ?", userID, chatID, ids).
-		Where("(retry_group_id IS NULL OR retry_group_id = '')").
-		Updates(map[string]any{
-			"retry_group_id": normalizedGroupID,
-			"retry_index":    indexOne,
-		}).Error
-}
-
-// ValidateRetrySourceMessages 校验重试父消息是否真实存在且角色匹配。
-//
-// 职责边界：
-// 1. 负责校验 retry 请求引用的父 user/assistant 消息是否属于当前用户、当前会话。
-// 2. 负责校验两条父消息的角色语义，避免把占位 id、串号 id 或交换角色的 id 写进数据库。
-// 3. 不负责补种 retry_group_id；分组补种仍由 EnsureRetryGroupSeed 负责。
-func (a *AgentDAO) ValidateRetrySourceMessages(ctx context.Context, userID int, chatID string, sourceUserMessageID, sourceAssistantMessageID int) error {
-	// 1. retry 是“基于既有一问一答重新生成”，因此两条父消息 id 必须同时有效。
-	// 2. 只要任意一个缺失，就直接返回错误，禁止继续写出 index=1 的脏重试数据。
-	if sourceUserMessageID <= 0 || sourceAssistantMessageID <= 0 {
-		return errors.New("retry source message ids are invalid")
-	}
-
-	type retrySourceRow struct {
-		ID   int
-		Role *string
-	}
-
-	ids := []int{sourceUserMessageID, sourceAssistantMessageID}
-	rows := make([]retrySourceRow, 0, len(ids))
-	if err := a.db.WithContext(ctx).
-		Model(&model.ChatHistory{}).
-		Select("id", "role").
-		Where("user_id = ? AND chat_id = ? AND id IN ?", userID, chatID, ids).
-		Find(&rows).Error; err != nil {
-		return err
-	}
-	if len(rows) != len(ids) {
-		return errors.New("retry source messages not found in current conversation")
-	}
-
-	roleByID := make(map[int]string, len(rows))
-	for _, row := range rows {
-		if row.Role == nil {
-			roleByID[row.ID] = ""
-			continue
-		}
-		roleByID[row.ID] = strings.ToLower(strings.TrimSpace(*row.Role))
-	}
-
-	if roleByID[sourceUserMessageID] != "user" {
-		return errors.New("retry source user message is invalid")
-	}
-	if roleByID[sourceAssistantMessageID] != "assistant" {
-		return errors.New("retry source assistant message is invalid")
-	}
-	return nil
-}
-
-func (a *AgentDAO) GetRetryGroupNextIndex(ctx context.Context, userID int, chatID, retryGroupID string) (int, error) {
-	normalizedGroupID := strings.TrimSpace(retryGroupID)
-	if normalizedGroupID == "" {
-		return 0, errors.New("retry_group_id is empty")
-	}
-
-	var maxIndex int
-	if err := a.db.WithContext(ctx).
-		Model(&model.ChatHistory{}).
-		Where("user_id = ? AND chat_id = ? AND retry_group_id = ?", userID, chatID, normalizedGroupID).
-		Select("COALESCE(MAX(retry_index), 0)").
-		Scan(&maxIndex).Error; err != nil {
-		return 0, err
-	}
-	return maxIndex + 1, nil
 }
 
 func (a *AgentDAO) IfChatExists(ctx context.Context, userID int, chatID string) (bool, error) {
@@ -313,7 +218,7 @@ func (a *AgentDAO) IfChatExists(ctx context.Context, userID int, chatID string) 
 	return true, nil
 }
 
-// GetConversationMeta 鏌ヨ鍗曚釜浼氳瘽鍏冧俊鎭€?
+// GetConversationMeta 查询单个会话元信息。
 func (a *AgentDAO) GetConversationMeta(ctx context.Context, userID int, chatID string) (*model.AgentChat, error) {
 	var chat model.AgentChat
 	err := a.db.WithContext(ctx).
@@ -326,7 +231,7 @@ func (a *AgentDAO) GetConversationMeta(ctx context.Context, userID int, chatID s
 	return &chat, nil
 }
 
-// GetConversationTitle 璇诲彇褰撳墠浼氳瘽鏍囬銆?
+// GetConversationTitle 读取当前会话标题。
 func (a *AgentDAO) GetConversationTitle(ctx context.Context, userID int, chatID string) (title string, exists bool, err error) {
 	var chat model.AgentChat
 	queryErr := a.db.WithContext(ctx).
@@ -345,7 +250,7 @@ func (a *AgentDAO) GetConversationTitle(ctx context.Context, userID int, chatID 
 	return strings.TrimSpace(*chat.Title), true, nil
 }
 
-// UpdateConversationTitleIfEmpty 浠呭湪鏍囬涓虹┖鏃舵洿鏂颁細璇濇爣棰樸€?
+// UpdateConversationTitleIfEmpty 仅在标题为空时更新会话标题。
 func (a *AgentDAO) UpdateConversationTitleIfEmpty(ctx context.Context, userID int, chatID, title string) error {
 	normalized := strings.TrimSpace(title)
 	if normalized == "" {
@@ -357,20 +262,20 @@ func (a *AgentDAO) UpdateConversationTitleIfEmpty(ctx context.Context, userID in
 		Update("title", normalized).Error
 }
 
-// GetConversationList 鎸夊垎椤垫煡璇㈡寚瀹氱敤鎴风殑浼氳瘽鍒楄〃銆?
+// GetConversationList 按分页查询指定用户的会话列表。
 //
-// 鑱岃矗杈圭晫锛?
-// 1. 鍙礋璐ｈ搴擄紝涓嶈礋璐ｇ紦瀛橈紱
-// 2. 鍙礋璐?user_id 鏁版嵁闅旂锛屼笉璐熻矗鍙傛暟鍚堟硶鎬у厹搴曪紙鐢?service 璐熻矗锛夛紱
-// 3. 杩斿洖鎬绘暟 total 渚涗笂灞傝绠?has_more銆?
+// 职责边界：
+// 1. 只负责读库，不负责缓存；
+// 2. 只负责 user_id 数据隔离，不负责参数合法性兜底（由 service 负责）；
+// 3. 返回总数 total 供上层计算 has_more。
 func (a *AgentDAO) GetConversationList(ctx context.Context, userID, page, pageSize int, status string) ([]model.AgentChat, int64, error) {
-	// 1. 鍏堟瀯閫犵粺涓€杩囨护鏉′欢锛屼繚璇?total 涓?list 鐨勭粺璁″彛寰勪竴鑷淬€?
+	// 1. 先构造统一过滤条件，保证 total 与 list 的统计口径一致。
 	baseQuery := a.db.WithContext(ctx).Model(&model.AgentChat{}).Where("user_id = ?", userID)
 	if strings.TrimSpace(status) != "" {
 		baseQuery = baseQuery.Where("status = ?", status)
 	}
 
-	// 2. 鍏堟煡鎬绘潯鏁帮紝缁欏墠绔垎椤靛櫒鎻愪緵瀹屾暣鍏冧俊鎭€?
+	// 2. 先查总条数，给前端分页器提供完整元信息。
 	var total int64
 	if err := baseQuery.Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -379,9 +284,9 @@ func (a *AgentDAO) GetConversationList(ctx context.Context, userID, page, pageSi
 		return make([]model.AgentChat, 0), 0, nil
 	}
 
-	// 3. 鍐嶆煡褰撳墠椤垫暟鎹細
-	// 3.1 鎸夋渶杩戞秷鎭椂闂村€掑簭锛屼繚璇佲€滄渶杩戞椿璺冣€濅紭鍏堝睍绀猴紱
-	// 3.2 鍚屾椂闂存埑涓嬫寜 id 鍊掑簭锛岄伩鍏嶇炕椤垫椂椤哄簭鎶栧姩銆?
+	// 3. 再查当前页数据：
+	// 3.1 按最近消息时间倒序，保证"最近活跃"优先展示；
+	// 3.2 同时间戳下按 id 倒序，避免翻页时顺序抖动。
 	offset := (page - 1) * pageSize
 	var chats []model.AgentChat
 	query := a.db.WithContext(ctx).
@@ -402,34 +307,17 @@ func (a *AgentDAO) GetConversationList(ctx context.Context, userID, page, pageSi
 	return chats, total, nil
 }
 
-// ---- Compaction 相关 ----
-
-// SaveCompaction 保存压缩摘要和水位线。
+// ---- 压缩摘要持久化 ----
+//
+// 1. 旧接口 SaveCompaction / LoadCompaction 继续保留，默认只读写 execute 阶段。
+// 2. 新接口按 stageKey 分桶读写，数据仍然落在 agent_chats.compaction_summary。
+// 3. 为兼容历史数据，若 compaction_summary 仍是旧字符串格式，则自动回退读取。
 func (a *AgentDAO) SaveCompaction(ctx context.Context, userID int, chatID string, summary string, watermark int) error {
-	return a.db.WithContext(ctx).
-		Model(&model.AgentChat{}).
-		Where("user_id = ? AND chat_id = ?", userID, chatID).
-		Updates(map[string]any{
-			"compaction_summary":   summary,
-			"compaction_watermark": watermark,
-		}).Error
+	return a.SaveStageCompaction(ctx, userID, chatID, "execute", summary, watermark)
 }
 
-// LoadCompaction 读取压缩摘要和水位线。
 func (a *AgentDAO) LoadCompaction(ctx context.Context, userID int, chatID string) (summary string, watermark int, err error) {
-	var chat model.AgentChat
-	err = a.db.WithContext(ctx).
-		Select("compaction_summary", "compaction_watermark").
-		Where("user_id = ? AND chat_id = ?", userID, chatID).
-		First(&chat).Error
-	if err != nil {
-		return "", 0, err
-	}
-	if chat.CompactionSummary != nil {
-		summary = *chat.CompactionSummary
-	}
-	watermark = chat.CompactionWatermark
-	return
+	return a.LoadStageCompaction(ctx, userID, chatID, "execute")
 }
 
 // SaveContextTokenStats 保存上下文窗口 token 分布统计。
@@ -454,4 +342,133 @@ func (a *AgentDAO) LoadContextTokenStats(ctx context.Context, userID int, chatID
 		return *chat.ContextTokenStats, nil
 	}
 	return "", nil
+}
+
+type stageCompactionRecord struct {
+	Summary   string `json:"summary"`
+	Watermark int    `json:"watermark"`
+}
+
+type stageCompactionEnvelope struct {
+	Version int                              `json:"version"`
+	Stages  map[string]stageCompactionRecord `json:"stages"`
+}
+
+// normalizeCompactionStageKey 统一 stageKey 的写法，避免 "Execute" 和 "execute" 被当成两个键。
+func normalizeCompactionStageKey(stageKey string) string {
+	key := strings.ToLower(strings.TrimSpace(stageKey))
+	if key == "" {
+		return "execute"
+	}
+	return key
+}
+
+// loadStageCompactionStages 负责把数据库里的压缩摘要统一解包成 stage -> record。
+//
+// 1. 先处理空值，避免后续逻辑误判。
+// 2. 如果已经是 JSON envelope，就按 stage 逐项读取。
+// 3. 如果还是旧版纯字符串，就把它当作 execute 阶段的兼容数据。
+func loadStageCompactionStages(summary *string, watermark int) map[string]stageCompactionRecord {
+	stages := map[string]stageCompactionRecord{}
+	if summary == nil {
+		return stages
+	}
+
+	raw := strings.TrimSpace(*summary)
+	if raw == "" {
+		return stages
+	}
+
+	var env stageCompactionEnvelope
+	if err := json.Unmarshal([]byte(raw), &env); err == nil && len(env.Stages) > 0 {
+		for key, record := range env.Stages {
+			stages[normalizeCompactionStageKey(key)] = stageCompactionRecord{
+				Summary:   strings.TrimSpace(record.Summary),
+				Watermark: record.Watermark,
+			}
+		}
+		return stages
+	}
+
+	stages["execute"] = stageCompactionRecord{
+		Summary:   raw,
+		Watermark: watermark,
+	}
+	return stages
+}
+
+// marshalStageCompactionStages 负责把按阶段分桶后的摘要重新编码为 JSON envelope。
+func marshalStageCompactionStages(stages map[string]stageCompactionRecord) (string, error) {
+	env := stageCompactionEnvelope{
+		Version: 1,
+		Stages:  stages,
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// LoadStageCompaction 按 stageKey 读取压缩摘要和水位线。
+func (a *AgentDAO) LoadStageCompaction(ctx context.Context, userID int, chatID string, stageKey string) (summary string, watermark int, err error) {
+	stageKey = normalizeCompactionStageKey(stageKey)
+
+	var chat model.AgentChat
+	err = a.db.WithContext(ctx).
+		Select("compaction_summary", "compaction_watermark").
+		Where("user_id = ? AND chat_id = ?", userID, chatID).
+		First(&chat).Error
+	if err != nil {
+		return "", 0, err
+	}
+
+	stages := loadStageCompactionStages(chat.CompactionSummary, chat.CompactionWatermark)
+	if record, ok := stages[stageKey]; ok {
+		return record.Summary, record.Watermark, nil
+	}
+
+	return "", 0, nil
+}
+
+// SaveStageCompaction 按 stageKey 保存压缩摘要和水位线。
+//
+// 1. 先读取现有摘要，避免覆盖其他阶段已经写入的数据。
+// 2. 再更新当前阶段对应的分桶内容。
+// 3. 最后整体回写 JSON envelope，并保留 execute 阶段的 legacy watermark 兼容字段。
+func (a *AgentDAO) SaveStageCompaction(ctx context.Context, userID int, chatID string, stageKey string, summary string, watermark int) error {
+	stageKey = normalizeCompactionStageKey(stageKey)
+
+	var chat model.AgentChat
+	err := a.db.WithContext(ctx).
+		Select("compaction_summary", "compaction_watermark").
+		Where("user_id = ? AND chat_id = ?", userID, chatID).
+		First(&chat).Error
+	if err != nil {
+		return err
+	}
+
+	stages := loadStageCompactionStages(chat.CompactionSummary, chat.CompactionWatermark)
+	stages[stageKey] = stageCompactionRecord{
+		Summary:   strings.TrimSpace(summary),
+		Watermark: watermark,
+	}
+
+	payload, err := marshalStageCompactionStages(stages)
+	if err != nil {
+		return err
+	}
+
+	legacyWatermark := watermark
+	if executeRecord, ok := stages["execute"]; ok {
+		legacyWatermark = executeRecord.Watermark
+	}
+
+	return a.db.WithContext(ctx).
+		Model(&model.AgentChat{}).
+		Where("user_id = ? AND chat_id = ?", userID, chatID).
+		Updates(map[string]any{
+			"compaction_summary":   payload,
+			"compaction_watermark": legacyWatermark,
+		}).Error
 }

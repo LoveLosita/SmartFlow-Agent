@@ -45,12 +45,14 @@ const (
 // 3. ConversationContext 提供历史对话；
 // 4. ConfirmAction 仅在 confirm 恢复场景下由前端传入 "accept" / "reject"。
 type ChatNodeInput struct {
-	RuntimeState        *newagentmodel.AgentRuntimeState
-	ConversationContext *newagentmodel.ConversationContext
-	UserInput           string
-	ConfirmAction       string
-	Client              *infrallm.Client
-	ChunkEmitter        *newagentstream.ChunkEmitter
+	RuntimeState          *newagentmodel.AgentRuntimeState
+	ConversationContext   *newagentmodel.ConversationContext
+	UserInput             string
+	ConfirmAction         string
+	Client                *infrallm.Client
+	ChunkEmitter          *newagentstream.ChunkEmitter
+	CompactionStore       newagentmodel.CompactionStore // 上下文压缩持久化
+	PersistVisibleMessage newagentmodel.PersistVisibleMessageFunc
 }
 
 // RunChatNode 执行一轮聊天节点逻辑。
@@ -94,6 +96,15 @@ func RunChatNode(ctx context.Context, input ChatNodeInput) error {
 	}
 	nonce := uuid.NewString()
 	messages := newagentprompt.BuildChatRoutingMessages(conversationContext, input.UserInput, flowState, nonce)
+	messages = compactUnifiedMessagesIfNeeded(ctx, messages, UnifiedCompactInput{
+		Client:          input.Client,
+		CompactionStore: input.CompactionStore,
+		FlowState:       flowState,
+		Emitter:         emitter,
+		StageName:       chatStageName,
+		StatusBlockID:   chatStatusBlockID,
+	})
+	logNodeLLMContext(chatStageName, "routing", flowState, messages)
 
 	reader, err := input.Client.Stream(ctx, messages, infrallm.GenerateOptions{
 		Temperature: 0.7,
@@ -281,7 +292,7 @@ func handleDirectReplyStream(
 	if effectiveThinking {
 		return handleThinkingReplyStream(ctx, reader, input, emitter, conversationContext, flowState)
 	}
-	return handleDirectReplyContinueStream(ctx, reader, emitter, conversationContext, flowState, firstVisible)
+	return handleDirectReplyContinueStream(ctx, reader, input, emitter, conversationContext, flowState, firstVisible)
 }
 
 // handleThinkingReplyStream 处理需要思考的回复：关闭路由流 → 第二次 thinking 流式调用。
@@ -295,7 +306,16 @@ func handleThinkingReplyStream(
 ) error {
 	_ = reader.Close()
 
-	deepMessages := newagentprompt.BuildDeepAnswerMessages(conversationContext, input.UserInput)
+	deepMessages := newagentprompt.BuildDeepAnswerMessages(flowState, conversationContext, input.UserInput)
+	deepMessages = compactUnifiedMessagesIfNeeded(ctx, deepMessages, UnifiedCompactInput{
+		Client:          input.Client,
+		CompactionStore: input.CompactionStore,
+		FlowState:       flowState,
+		Emitter:         emitter,
+		StageName:       chatStageName,
+		StatusBlockID:   chatStatusBlockID,
+	})
+	logNodeLLMContext(chatStageName, "direct_reply_thinking", flowState, deepMessages)
 	deepReader, err := input.Client.Stream(ctx, deepMessages, infrallm.GenerateOptions{
 		Temperature: 0.5,
 		MaxTokens:   2000,
@@ -322,6 +342,7 @@ func handleThinkingReplyStream(
 	deepText = strings.TrimSpace(deepText)
 	if deepText != "" {
 		conversationContext.AppendHistory(schema.AssistantMessage(deepText, nil))
+		persistVisibleAssistantMessage(ctx, input.PersistVisibleMessage, flowState, schema.AssistantMessage(deepText, nil))
 	}
 
 	flowState.Phase = newagentmodel.PhaseChatting
@@ -332,6 +353,7 @@ func handleThinkingReplyStream(
 func handleDirectReplyContinueStream(
 	ctx context.Context,
 	reader infrallm.StreamReader,
+	input ChatNodeInput,
 	emitter *newagentstream.ChunkEmitter,
 	conversationContext *newagentmodel.ConversationContext,
 	flowState *newagentmodel.CommonState,
@@ -370,7 +392,9 @@ func handleDirectReplyContinueStream(
 
 	text := fullText.String()
 	if strings.TrimSpace(text) != "" {
-		conversationContext.AppendHistory(schema.AssistantMessage(text, nil))
+		msg := schema.AssistantMessage(text, nil)
+		conversationContext.AppendHistory(msg)
+		persistVisibleAssistantMessage(ctx, input.PersistVisibleMessage, flowState, msg)
 	}
 
 	flowState.Phase = newagentmodel.PhaseChatting
@@ -568,7 +592,16 @@ func handleDeepAnswerStream(
 	if effectiveThinking {
 		thinkingOpt = infrallm.ThinkingModeEnabled
 	}
-	deepMessages := newagentprompt.BuildDeepAnswerMessages(conversationContext, input.UserInput)
+	deepMessages := newagentprompt.BuildDeepAnswerMessages(flowState, conversationContext, input.UserInput)
+	deepMessages = compactUnifiedMessagesIfNeeded(ctx, deepMessages, UnifiedCompactInput{
+		Client:          input.Client,
+		CompactionStore: input.CompactionStore,
+		FlowState:       flowState,
+		Emitter:         emitter,
+		StageName:       chatStageName,
+		StatusBlockID:   chatStatusBlockID,
+	})
+	logNodeLLMContext(chatStageName, "deep_answer", flowState, deepMessages)
 	deepReader, err := input.Client.Stream(ctx, deepMessages, infrallm.GenerateOptions{
 		Temperature: 0.5,
 		MaxTokens:   2000,
@@ -601,7 +634,9 @@ func handleDeepAnswerStream(
 	}
 
 	// 4. 完整回复写入 history。
-	conversationContext.AppendHistory(schema.AssistantMessage(deepText, nil))
+	msg := schema.AssistantMessage(deepText, nil)
+	conversationContext.AppendHistory(msg)
+	persistVisibleAssistantMessage(ctx, input.PersistVisibleMessage, flowState, msg)
 
 	flowState.Phase = newagentmodel.PhaseChatting
 	return nil

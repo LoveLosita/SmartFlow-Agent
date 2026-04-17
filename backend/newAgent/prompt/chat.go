@@ -25,7 +25,7 @@ const chatRoutingSystemPrompt = `
 - route=direct_reply 时，控制码后的可见内容应直接回应用户问题，而不是先讲能力边界。
 - route=deep_answer 时，只输出控制码即可，不要补“让我想想”“这是个好问题”之类的占位话术。
 
-粗排判断：当用户意图包含"批量安排/排课/把任务类排进日程"，且上下文中有任务类 ID 时，设置 rough_build=true。
+粗排判断：当用户意图包含"批量安排/排课/把任务类排进日程"等批量调度需求时，可设置 rough_build=true；后端会结合真实请求范围决定是否真正进入粗排。
 二次粗排约束（强约束）：
 - 若上下文已出现 rough_build_done，且用户未明确要求"重新粗排/从头重排"，必须设置 rough_build=false。
 - "移动/微调/优化/均匀化/调顺序"等请求默认视为 refine，不得再次触发 rough build。
@@ -83,40 +83,25 @@ func BuildChatRoutingSystemPrompt() string {
 
 // BuildChatRoutingMessages 组装路由阶段的 messages。
 func BuildChatRoutingMessages(ctx *newagentmodel.ConversationContext, userInput string, state *newagentmodel.CommonState, nonce string) []*schema.Message {
-	return buildStageMessages(
-		BuildChatRoutingSystemPrompt(),
+	return buildUnifiedStageMessages(
 		ctx,
-		BuildChatRoutingUserPrompt(ctx, userInput, state, nonce),
+		StageMessagesConfig{
+			SystemPrompt: BuildChatRoutingSystemPrompt(),
+			Msg1Content:  buildChatConversationMessage(ctx),
+			Msg2Content:  buildChatRoutingWorkspace(ctx),
+			Msg3Suffix:   BuildChatRoutingUserPrompt(userInput, nonce),
+			Msg3Role:     schema.User,
+		},
 	)
 }
 
 // BuildChatRoutingUserPrompt 构造路由阶段的用户提示词。
-func BuildChatRoutingUserPrompt(ctx *newagentmodel.ConversationContext, userInput string, state *newagentmodel.CommonState, nonce string) string {
+func BuildChatRoutingUserPrompt(userInput string, nonce string) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("nonce=%s\n", nonce))
 	sb.WriteString(fmt.Sprintf("当前时间=%s\n", time.Now().In(time.Local).Format("2006-01-02 15:04")))
-	sb.WriteString("\n请判断用户本轮意图的复杂度，选择最合适的路由，并输出控制码和对应内容。\n")
-
-	// 注入任务类上下文（供粗排判断参考）。
-	if state != nil && len(state.TaskClassIDs) > 0 {
-		parts := make([]string, len(state.TaskClassIDs))
-		for i, id := range state.TaskClassIDs {
-			parts[i] = fmt.Sprintf("%d", id)
-		}
-		sb.WriteString(fmt.Sprintf("\n本次请求涉及的任务类 ID：[%s]\n", strings.Join(parts, ", ")))
-	}
-
-	if state != nil && len(state.TaskClasses) > 0 {
-		sb.WriteString("任务类约束：\n")
-		for _, tc := range state.TaskClasses {
-			line := fmt.Sprintf("- [ID=%d] %s：策略=%s，总时段预算=%d", tc.ID, tc.Name, tc.Strategy, tc.TotalSlots)
-			if tc.StartDate != "" || tc.EndDate != "" {
-				line += fmt.Sprintf("，日期范围=%s ~ %s", tc.StartDate, tc.EndDate)
-			}
-			sb.WriteString(line + "\n")
-		}
-	}
+	sb.WriteString("\n请基于最近真实对话和本轮输入选择最合适的路由，并严格按系统约定输出控制码。\n")
 
 	trimmedInput := strings.TrimSpace(userInput)
 	if trimmedInput != "" {
@@ -146,10 +131,23 @@ func BuildDeepAnswerSystemPrompt() string {
 }
 
 // BuildDeepAnswerMessages 组装深度回答阶段的 messages。
-func BuildDeepAnswerMessages(ctx *newagentmodel.ConversationContext, userInput string) []*schema.Message {
-	return buildStageMessages(
-		BuildDeepAnswerSystemPrompt(),
+func BuildDeepAnswerMessages(state *newagentmodel.CommonState, ctx *newagentmodel.ConversationContext, userInput string) []*schema.Message {
+	return buildUnifiedStageMessages(
 		ctx,
-		userInput,
+		StageMessagesConfig{
+			SystemPrompt: BuildDeepAnswerSystemPrompt(),
+			Msg1Content:  buildChatConversationMessage(ctx),
+			Msg2Content:  buildDeepAnswerWorkspace(),
+			Msg3Suffix:   buildDeepAnswerUserPrompt(userInput),
+			Msg3Role:     schema.User,
+		},
 	)
+}
+
+func buildDeepAnswerUserPrompt(userInput string) string {
+	trimmedInput := strings.TrimSpace(userInput)
+	if trimmedInput != "" {
+		return trimmedInput
+	}
+	return "请直接回答用户刚才的问题。"
 }

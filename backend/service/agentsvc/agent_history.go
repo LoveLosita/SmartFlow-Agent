@@ -118,7 +118,6 @@ func (s *AgentService) appendConversationHistoryCacheOptimistically(
 		merged = appendConversationHistoryItemIfMissing(merged, item)
 	}
 	sortConversationHistoryItems(merged)
-	merged = attachConversationRetryTotals(merged)
 
 	if err = s.cacheDAO.SetConversationHistoryToCache(ctx, userID, normalizedChatID, merged); err != nil {
 		log.Printf("乐观追加会话历史视图缓存失败 chat_id=%s: %v", normalizedChatID, err)
@@ -151,11 +150,9 @@ func buildConversationHistoryItemsFromDB(histories []model.ChatHistory) []model.
 			CreatedAt:                history.CreatedAt,
 			ReasoningContent:         strings.TrimSpace(derefConversationHistoryText(history.ReasoningContent)),
 			ReasoningDurationSeconds: history.ReasoningDurationSeconds,
-			RetryGroupID:             cloneConversationStringPointer(history.RetryGroupID),
-			RetryIndex:               cloneConversationIntPointer(history.RetryIndex),
 		})
 	}
-	return attachConversationRetryTotals(items)
+	return items
 }
 
 func derefConversationHistoryText(text *string) string {
@@ -163,58 +160,6 @@ func derefConversationHistoryText(text *string) string {
 		return ""
 	}
 	return *text
-}
-
-func attachConversationRetryTotals(items []model.GetConversationHistoryItem) []model.GetConversationHistoryItem {
-	if len(items) == 0 {
-		return items
-	}
-	groupTotals := make(map[string]int)
-	for _, item := range items {
-		if item.RetryGroupID == nil || item.RetryIndex == nil {
-			continue
-		}
-		groupID := strings.TrimSpace(*item.RetryGroupID)
-		if groupID == "" {
-			continue
-		}
-		if *item.RetryIndex > groupTotals[groupID] {
-			groupTotals[groupID] = *item.RetryIndex
-		}
-	}
-	for idx := range items {
-		groupIDPtr := items[idx].RetryGroupID
-		if groupIDPtr == nil {
-			continue
-		}
-		groupID := strings.TrimSpace(*groupIDPtr)
-		total := groupTotals[groupID]
-		if total <= 0 {
-			continue
-		}
-		totalCopy := total
-		items[idx].RetryTotal = &totalCopy
-	}
-	return items
-}
-
-func cloneConversationStringPointer(src *string) *string {
-	if src == nil {
-		return nil
-	}
-	text := strings.TrimSpace(*src)
-	if text == "" {
-		return nil
-	}
-	return &text
-}
-
-func cloneConversationIntPointer(src *int) *int {
-	if src == nil || *src <= 0 {
-		return nil
-	}
-	value := *src
-	return &value
 }
 
 func normalizeConversationHistoryRole(role string) string {
@@ -245,7 +190,6 @@ func buildOptimisticConversationHistoryItem(
 	content string,
 	reasoningContent string,
 	reasoningDurationSeconds int,
-	retryMeta *chatRetryMeta,
 	createdAt time.Time,
 ) model.GetConversationHistoryItem {
 	item := model.GetConversationHistoryItem{
@@ -257,11 +201,6 @@ func buildOptimisticConversationHistoryItem(
 	if !createdAt.IsZero() {
 		t := createdAt
 		item.CreatedAt = &t
-	}
-	if retryMeta != nil {
-		item.RetryGroupID = retryMeta.GroupIDPtr()
-		item.RetryIndex = retryMeta.IndexPtr()
-		item.RetryTotal = retryMeta.IndexPtr()
 	}
 	return item
 }
@@ -284,26 +223,16 @@ func conversationHistoryItemSignature(item model.GetConversationHistoryItem) str
 		return fmt.Sprintf("id:%d", item.ID)
 	}
 
-	groupID := ""
-	if item.RetryGroupID != nil {
-		groupID = strings.TrimSpace(*item.RetryGroupID)
-	}
-	retryIndex := 0
-	if item.RetryIndex != nil {
-		retryIndex = *item.RetryIndex
-	}
 	createdAt := ""
 	if item.CreatedAt != nil {
 		createdAt = item.CreatedAt.UTC().Format(time.RFC3339Nano)
 	}
 
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%d|%d|%s",
+		"%s|%s|%s|%d|%s",
 		strings.TrimSpace(item.Role),
 		strings.TrimSpace(item.Content),
 		strings.TrimSpace(item.ReasoningContent),
-		groupID,
-		retryIndex,
 		item.ReasoningDurationSeconds,
 		createdAt,
 	)

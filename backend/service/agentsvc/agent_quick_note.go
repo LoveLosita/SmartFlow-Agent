@@ -15,7 +15,6 @@ import (
 	agentstream "github.com/LoveLosita/smartflow/backend/agent/stream"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/cloudwego/eino-ext/components/model/ark"
-	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 )
 
@@ -301,110 +300,4 @@ func (s *AgentService) decideQuickNoteRouting(ctx context.Context, selectedModel
 	// 同时避免上层调用方直接依赖 Agent/router，降低耦合。
 	_ = s
 	return agentrouter.DecideQuickNoteRouting(ctx, selectedModel, userMessage)
-}
-
-// persistChatAfterReply 在“随口记 graph”返回后，复用当前项目的后置持久化策略：
-// 1) 用户消息写 Redis + outbox/DB；
-// 2) 助手消息写 Redis + outbox/DB。
-func (s *AgentService) persistChatAfterReply(
-	ctx context.Context,
-	userID int,
-	chatID string,
-	userMessage string,
-	assistantReply string,
-	assistantReasoning string,
-	assistantReasoningDurationSeconds int,
-	retryMeta *chatRetryMeta,
-	userTokens int,
-	assistantTokens int,
-	errChan chan error,
-) {
-	// 1. 先把用户消息写入 Redis，保证会话上下文“马上可见”。
-	userMsg := &schema.Message{Role: schema.User, Content: userMessage}
-	if retryExtra := retryMeta.CacheExtra(); len(retryExtra) > 0 {
-		userMsg.Extra = retryExtra
-	}
-	if err := s.agentCache.PushMessage(ctx, chatID, userMsg); err != nil {
-		log.Printf("写入用户消息到 Redis 失败: %v", err)
-	}
-
-	// 2. 再把用户消息写入可靠持久化通道（outbox 或同步 DB）。
-	if err := s.PersistChatHistory(ctx, model.ChatHistoryPersistPayload{
-		UserID:                      userID,
-		ConversationID:              chatID,
-		Role:                        "user",
-		Message:                     userMessage,
-		ReasoningContent:            "",
-		ReasoningDurationSeconds:    0,
-		RetryGroupID:                retryMeta.GroupIDPtr(),
-		RetryIndex:                  retryMeta.IndexPtr(),
-		RetryFromUserMessageID:      retryMeta.FromUserMessageIDPtr(),
-		RetryFromAssistantMessageID: retryMeta.FromAssistantMessageIDPtr(),
-		TokensConsumed:              userTokens,
-	}); err != nil {
-		pushErrNonBlocking(errChan, err)
-		return
-	}
-	userCreatedAt := time.Now()
-	s.appendConversationHistoryCacheOptimistically(
-		context.Background(),
-		userID,
-		chatID,
-		buildOptimisticConversationHistoryItem(
-			"user",
-			userMessage,
-			"",
-			0,
-			retryMeta,
-			userCreatedAt,
-		),
-	)
-
-	// 3. 助手消息同样遵循“Redis 先行 + 可靠持久化补齐”策略。
-	assistantMsg := &schema.Message{Role: schema.Assistant, Content: assistantReply, ReasoningContent: assistantReasoning}
-	if assistantReasoningDurationSeconds > 0 {
-		assistantMsg.Extra = map[string]any{"reasoning_duration_seconds": assistantReasoningDurationSeconds}
-	}
-	if retryExtra := retryMeta.CacheExtra(); len(retryExtra) > 0 {
-		if assistantMsg.Extra == nil {
-			assistantMsg.Extra = make(map[string]any, len(retryExtra))
-		}
-		for key, value := range retryExtra {
-			assistantMsg.Extra[key] = value
-		}
-	}
-	if err := s.agentCache.PushMessage(context.Background(), chatID, assistantMsg); err != nil {
-		log.Printf("写入助手消息到 Redis 失败: %v", err)
-	}
-
-	// 4. 助手消息持久化失败不阻断主流程，通过 errChan 异步上报。
-	if err := s.PersistChatHistory(context.Background(), model.ChatHistoryPersistPayload{
-		UserID:                      userID,
-		ConversationID:              chatID,
-		Role:                        "assistant",
-		Message:                     assistantReply,
-		ReasoningContent:            assistantReasoning,
-		ReasoningDurationSeconds:    assistantReasoningDurationSeconds,
-		RetryGroupID:                retryMeta.GroupIDPtr(),
-		RetryIndex:                  retryMeta.IndexPtr(),
-		RetryFromUserMessageID:      retryMeta.FromUserMessageIDPtr(),
-		RetryFromAssistantMessageID: retryMeta.FromAssistantMessageIDPtr(),
-		TokensConsumed:              assistantTokens,
-	}); err != nil {
-		pushErrNonBlocking(errChan, err)
-		return
-	}
-	s.appendConversationHistoryCacheOptimistically(
-		context.Background(),
-		userID,
-		chatID,
-		buildOptimisticConversationHistoryItem(
-			"assistant",
-			assistantReply,
-			assistantReasoning,
-			assistantReasoningDurationSeconds,
-			retryMeta,
-			userCreatedAt.Add(time.Millisecond),
-		),
-	)
 }

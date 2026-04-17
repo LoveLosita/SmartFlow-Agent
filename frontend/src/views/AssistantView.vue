@@ -75,14 +75,20 @@ function handleSidebarNavigate(item: SidebarItem) {
 
 <style scoped>
 .assistant-view {
+  box-sizing: border-box;
   height: 100vh;
+  height: 100dvh;
+  min-height: 100vh;
+  min-height: 100dvh;
   padding: 10px;
   overflow: hidden;
-  background: #f4f7fb;
+  background:
+    radial-gradient(circle at top left, rgba(22, 92, 168, 0.1), transparent 30%),
+    linear-gradient(180deg, #f8fbff 0%, #eef3f9 100%);
 }
 
 .assistant-view__layout {
-  height: calc(100vh - 20px);
+  height: 100%;
   min-height: 0;
   display: grid;
   grid-template-columns: 78px minmax(0, 1fr);
@@ -182,6 +188,8 @@ function handleSidebarNavigate(item: SidebarItem) {
 @media (max-width: 720px) {
   .assistant-view {
     height: auto;
+    min-height: 100vh;
+    min-height: 100svh;
     padding: 8px;
     overflow: visible;
   }

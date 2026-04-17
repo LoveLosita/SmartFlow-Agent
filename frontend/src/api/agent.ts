@@ -12,9 +12,6 @@ export interface ConversationHistoryMessage {
   created_at?: string | null
   reasoning_content?: string | null
   reasoning_duration_seconds?: number | null
-  retry_group_id?: string | null
-  retry_index?: number | null
-  retry_total?: number | null
 }
 
 export interface ConversationListQuery {
@@ -111,9 +108,6 @@ function normalizeConversationHistoryMessage(raw: unknown): ConversationHistoryM
     reasoning_content: normalizedReasoning,
     reasoning_duration_seconds:
       typeof candidate.reasoning_duration_seconds === 'number' ? candidate.reasoning_duration_seconds : null,
-    retry_group_id: typeof candidate.retry_group_id === 'string' ? candidate.retry_group_id : null,
-    retry_index: typeof candidate.retry_index === 'number' ? candidate.retry_index : null,
-    retry_total: typeof candidate.retry_total === 'number' ? candidate.retry_total : null,
   }
 }
 

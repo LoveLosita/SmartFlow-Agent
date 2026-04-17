@@ -81,9 +81,16 @@ type SchedulePersistor interface {
 }
 
 // CompactionStore 定义上下文压缩的持久化接口。
-// 由 Service 层实现（组合 DAO + Redis Cache），注入到 ExecuteNodeInput。
+// 由 Service 层实现（组合 DAO + Redis Cache），注入到各阶段 NodeInput。
 type CompactionStore interface {
 	LoadCompaction(ctx context.Context, userID int, chatID string) (summary string, watermark int, err error)
 	SaveCompaction(ctx context.Context, userID int, chatID string, summary string, watermark int) error
 	SaveContextTokenStats(ctx context.Context, userID int, chatID string, statsJSON string) error
+
+	// LoadStageCompaction 按 stageKey 加载压缩摘要和水位线。
+	// stageKey 区分不同节点（如 "execute"/"plan"/"chat"/"deliver"），
+	// 使各节点可以独立维护各自的压缩状态，互不覆盖。
+	LoadStageCompaction(ctx context.Context, userID int, chatID string, stageKey string) (summary string, watermark int, err error)
+	// SaveStageCompaction 按 stageKey 保存压缩摘要和水位线。
+	SaveStageCompaction(ctx context.Context, userID int, chatID string, stageKey string, summary string, watermark int) error
 }

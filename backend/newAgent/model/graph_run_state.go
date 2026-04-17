@@ -9,6 +9,7 @@ import (
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 	schedule "github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
+	"github.com/cloudwego/eino/schema"
 )
 
 // AgentGraphRequest 描述一次 agent graph 运行的请求级输入。
@@ -52,6 +53,14 @@ type RoughBuildFunc func(ctx context.Context, userID int, taskClassIDs []int) ([
 // 2. deliver 结束时再做最终覆盖写，保障收口状态一致。
 type WriteSchedulePreviewFunc func(ctx context.Context, state *schedule.ScheduleState, userID int, conversationID string, taskClassIDs []int) error
 
+// PersistVisibleMessageFunc 是 newAgent 主循环逐条持久化可见消息的回调签名。
+//
+// 职责边界：
+// 1. 只处理真正对用户可见的 assistant speak，不处理工具结果或内部纠错提示；
+// 2. 由节点在 AppendHistory 之后主动调用，让上层同步把这条消息写入 Redis + MySQL；
+// 3. 执行方可以做无损降级（例如 Redis 写失败只记日志），但应返回 error 便于上层记录。
+type PersistVisibleMessageFunc func(ctx context.Context, state *CommonState, msg *schema.Message) error
+
 // AgentGraphDeps 描述 graph/node 层运行时真正依赖的可插拔能力。
 //
 // 设计目的：
@@ -81,6 +90,10 @@ type AgentGraphDeps struct {
 	// channel 携带已渲染的文本内容（非原始 ItemDTO），节点直接写入 pinned block。
 	MemoryFuture   chan string // buffered(1)，携带 renderMemoryPinnedContentByMode 的输出
 	MemoryConsumed bool        // 保证 channel 只读一次，后续 Execute ReAct 循环跳过等待
+
+	// PersistVisibleMessage 按 Service 注入，newAgent 每个节点产出的可见 speak
+	// 都会在 AppendHistory 之后立刻调用这个回调，把消息同步落到 Redis + MySQL。
+	PersistVisibleMessage PersistVisibleMessageFunc
 }
 
 // --- 记忆 pinned block 常量（供 agentsvc 和 node 层共享） ---

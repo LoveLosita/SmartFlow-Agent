@@ -27,6 +27,8 @@ const (
 	ExecuteTokenBudget = 80000
 	// msg0 + msg3 固定开销 + 安全余量
 	ExecuteReserveTokens = 8000
+	StageTokenBudget     = ExecuteTokenBudget
+	StageReserveTokens   = ExecuteReserveTokens
 )
 
 // MaxContextTokensByModel 返回指定模型的最大上下文 token。
@@ -151,8 +153,8 @@ func isCJK(r rune) bool {
 	return unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r) || unicode.Is(unicode.Hangul, r)
 }
 
-// ExecuteTokenBreakdown 是 Execute 阶段四条消息的 token 分布。
-type ExecuteTokenBreakdown struct {
+// StageTokenBreakdown 记录四条阶段消息的 token 分布。
+type StageTokenBreakdown struct {
 	Msg0   int `json:"msg0"`
 	Msg1   int `json:"msg1"`
 	Msg2   int `json:"msg2"`
@@ -161,31 +163,47 @@ type ExecuteTokenBreakdown struct {
 	Budget int `json:"budget"`
 }
 
-// EstimateExecuteMessagesTokens 估算 Execute 四条消息的 token 分布。
-func EstimateExecuteMessagesTokens(msg0, msg1, msg2, msg3 string) ExecuteTokenBreakdown {
-	b := ExecuteTokenBreakdown{
+// ExecuteTokenBreakdown 保留为历史兼容别名，避免旧调用点改动。
+type ExecuteTokenBreakdown = StageTokenBreakdown
+
+// EstimateStageMessagesTokens 估算四条阶段消息的 token 分布。
+func EstimateStageMessagesTokens(msg0, msg1, msg2, msg3 string) StageTokenBreakdown {
+	b := StageTokenBreakdown{
 		Msg0:   EstimateTextTokens(msg0),
 		Msg1:   EstimateTextTokens(msg1),
 		Msg2:   EstimateTextTokens(msg2),
 		Msg3:   EstimateTextTokens(msg3),
-		Budget: ExecuteTokenBudget,
+		Budget: StageTokenBudget,
 	}
 	b.Total = b.Msg0 + b.Msg1 + b.Msg2 + b.Msg3
 	return b
 }
 
-// CheckExecuteTokenBudget 检查是否超出 token 预算。
-// 返回 breakdown、是否超限、是否需要压缩 msg1、是否需要压缩 msg2。
-func CheckExecuteTokenBudget(msg0, msg1, msg2, msg3 string) (breakdown ExecuteTokenBreakdown, overBudget bool, needCompactMsg1 bool, needCompactMsg2 bool) {
-	breakdown = EstimateExecuteMessagesTokens(msg0, msg1, msg2, msg3)
-	overBudget = breakdown.Total > ExecuteTokenBudget
+// CheckStageTokenBudget 检查是否超出阶段预算，并给出需要压缩的消息标记。
+//
+// 1. 先计算四条消息的 token 分布，便于后续日志和统计。
+// 2. 如果总量没有超预算，直接返回。
+// 3. 如果超预算，则按 msg1 / msg2 的相对占比判断是否需要分别压缩。
+func CheckStageTokenBudget(msg0, msg1, msg2, msg3 string) (breakdown StageTokenBreakdown, overBudget bool, needCompactMsg1 bool, needCompactMsg2 bool) {
+	breakdown = EstimateStageMessagesTokens(msg0, msg1, msg2, msg3)
+	overBudget = breakdown.Total > StageTokenBudget
 	if !overBudget {
 		return
 	}
-	// msg1 超过可用预算的一半时需要压缩
-	available := ExecuteTokenBudget - ExecuteReserveTokens
+	// msg1 过大时，优先压缩历史对话。
+	available := StageTokenBudget - StageReserveTokens
 	needCompactMsg1 = breakdown.Msg1 > available/2
-	// 压缩 msg1 后仍超限，则压缩 msg2
-	needCompactMsg2 = (breakdown.Total - breakdown.Msg1 + available/4) > ExecuteTokenBudget
+	// 若压缩 msg1 后仍然超限，再压缩执行记录区。
+	needCompactMsg2 = (breakdown.Total - breakdown.Msg1 + available/4) > StageTokenBudget
 	return
+}
+
+// EstimateExecuteMessagesTokens 保留旧名称，内部复用阶段预算实现。
+func EstimateExecuteMessagesTokens(msg0, msg1, msg2, msg3 string) StageTokenBreakdown {
+	return EstimateStageMessagesTokens(msg0, msg1, msg2, msg3)
+}
+
+// CheckExecuteTokenBudget 保留旧名称，内部复用阶段预算实现。
+func CheckExecuteTokenBudget(msg0, msg1, msg2, msg3 string) (breakdown StageTokenBreakdown, overBudget bool, needCompactMsg1 bool, needCompactMsg2 bool) {
+	return CheckStageTokenBudget(msg0, msg1, msg2, msg3)
 }

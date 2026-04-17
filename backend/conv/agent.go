@@ -23,22 +23,11 @@ func ToEinoMessages(dbMsgs []model.ChatHistory) []*schema.Message {
 			Content:          safeChatHistoryText(m.MessageContent),
 			ReasoningContent: safeChatHistoryText(m.ReasoningContent),
 		}
+		// retry 机制已整体下线：历史数据里的 retry_* 列不再回灌到运行期上下文。
 		extra := make(map[string]any)
 		extra["history_id"] = m.ID
 		if m.ReasoningDurationSeconds > 0 {
 			extra["reasoning_duration_seconds"] = m.ReasoningDurationSeconds
-		}
-		if m.RetryGroupID != nil && *m.RetryGroupID != "" {
-			extra["retry_group_id"] = *m.RetryGroupID
-		}
-		if m.RetryIndex != nil && *m.RetryIndex > 0 {
-			extra["retry_index"] = *m.RetryIndex
-		}
-		if m.RetryFromUserMessageID != nil && *m.RetryFromUserMessageID > 0 {
-			extra["retry_from_user_message_id"] = *m.RetryFromUserMessageID
-		}
-		if m.RetryFromAssistantMessageID != nil && *m.RetryFromAssistantMessageID > 0 {
-			extra["retry_from_assistant_message_id"] = *m.RetryFromAssistantMessageID
 		}
 		if len(extra) > 0 {
 			msg.Extra = extra

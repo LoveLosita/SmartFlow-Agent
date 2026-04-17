@@ -24,9 +24,10 @@ const (
 // 2. RuntimeState 提供 PendingInteraction；
 // 3. ChunkEmitter 负责推送收尾消息。
 type InterruptNodeInput struct {
-	RuntimeState        *newagentmodel.AgentRuntimeState
-	ConversationContext *newagentmodel.ConversationContext
-	ChunkEmitter        *newagentstream.ChunkEmitter
+	RuntimeState          *newagentmodel.AgentRuntimeState
+	ConversationContext   *newagentmodel.ConversationContext
+	ChunkEmitter          *newagentstream.ChunkEmitter
+	PersistVisibleMessage newagentmodel.PersistVisibleMessageFunc
 }
 
 // RunInterruptNode 执行一轮中断节点逻辑。
@@ -55,7 +56,7 @@ func RunInterruptNode(ctx context.Context, input InterruptNodeInput) error {
 
 	switch pending.Type {
 	case newagentmodel.PendingInteractionTypeAskUser:
-		return handleInterruptAskUser(ctx, pending, conversationContext, emitter)
+		return handleInterruptAskUser(ctx, runtimeState, input.PersistVisibleMessage, pending, conversationContext, emitter)
 	case newagentmodel.PendingInteractionTypeConfirm:
 		return handleInterruptConfirm(pending, emitter)
 	default:
@@ -70,6 +71,8 @@ func RunInterruptNode(ctx context.Context, input InterruptNodeInput) error {
 // 写入历史，然后结束。用户体验和正常对话一样 — 助手问了问题，停下来等回复。
 func handleInterruptAskUser(
 	ctx context.Context,
+	runtimeState *newagentmodel.AgentRuntimeState,
+	persist newagentmodel.PersistVisibleMessageFunc,
 	pending *newagentmodel.PendingInteraction,
 	conversationContext *newagentmodel.ConversationContext,
 	emitter *newagentstream.ChunkEmitter,
@@ -89,7 +92,9 @@ func handleInterruptAskUser(
 	}
 
 	// 写入对话历史，下一轮 resume 时 LLM 能看到这个上下文。
-	conversationContext.AppendHistory(schema.AssistantMessage(text, nil))
+	msg := schema.AssistantMessage(text, nil)
+	conversationContext.AppendHistory(msg)
+	persistVisibleAssistantMessage(ctx, persist, runtimeState.EnsureCommonState(), msg)
 
 	// 状态持久化已由 agent_nodes 层统一处理，此处不再需要自行存快照。
 

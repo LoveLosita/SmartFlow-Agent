@@ -93,7 +93,6 @@ type CommonState struct {
 	// TaskClasses 本次排课涉及的任务类约束元数据（含日期、策略、时段预算等），
 	// 在 Service 层从 DB 加载并注入，供 Plan prompt 直接消费，避免 LLM 因信息不足而追问用户。
 	TaskClasses []schedule.TaskClassMeta `json:"task_classes,omitempty"`
-
 	// NeedsRoughBuild 由 Plan 节点在 plan_done 时写入，标记 Confirm 后是否需要走粗排节点。
 	// 粗排节点执行完毕后会将此字段重置为 false。
 	NeedsRoughBuild bool `json:"needs_rough_build,omitempty"`

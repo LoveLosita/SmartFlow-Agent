@@ -479,23 +479,16 @@ LLM 的一次性文本输出通过 `SplitPseudoStreamText` 拆分成多个 chunk
 
 ### 9.1 prompt 构造模式
 
-所有阶段共享 `buildStageMessages()` 函数：
+所有阶段现在统一共享 `buildUnifiedStageMessages()` 函数：
 
 ```
-System Prompt（节点专属）
-    │
-    v
-Pinned Blocks（置顶上下文块，作为独立 system 消息注入）
-    │
-    v
-Tool Schemas（工具 schema，作为独立 system 消息注入）
-    │
-    v
-History（对话历史，Tool 消息降级为 User 消息以兼容 API）
-    │
-    v
-User Prompt（节点专属用户提示）
+msg0(system)    = 全局 system prompt + 阶段 system prompt + 工具简表
+msg1(assistant) = 对话历史 + 归档摘要
+msg2(assistant) = 阶段工作区
+msg3(system)    = 阶段状态 + 记忆 + 本轮指令
 ```
+
+统一构造由 `StageMessagesConfig` 驱动，具体阶段只负责填充各自的 `Msg2Content`、`Msg3StageState` 和 `UserInstruction`。
 
 ### 9.2 各阶段 prompt 要点
 

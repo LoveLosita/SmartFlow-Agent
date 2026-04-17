@@ -175,17 +175,13 @@ func (r *AgentResumeRequest) IsConnectionRecoverResume() bool {
 }
 
 type ChatHistoryPersistPayload struct {
-	UserID                      int     `json:"user_id"`
-	ConversationID              string  `json:"conversation_id"`
-	Role                        string  `json:"role"`
-	Message                     string  `json:"message"`
-	ReasoningContent            string  `json:"reasoning_content,omitempty"`
-	ReasoningDurationSeconds    int     `json:"reasoning_duration_seconds,omitempty"`
-	RetryGroupID                *string `json:"retry_group_id,omitempty"`
-	RetryIndex                  *int    `json:"retry_index,omitempty"`
-	RetryFromUserMessageID      *int    `json:"retry_from_user_message_id,omitempty"`
-	RetryFromAssistantMessageID *int    `json:"retry_from_assistant_message_id,omitempty"`
-	TokensConsumed              int     `json:"tokens_consumed"`
+	UserID                   int    `json:"user_id"`
+	ConversationID           string `json:"conversation_id"`
+	Role                     string `json:"role"`
+	Message                  string `json:"message"`
+	ReasoningContent         string `json:"reasoning_content,omitempty"`
+	ReasoningDurationSeconds int    `json:"reasoning_duration_seconds,omitempty"`
+	TokensConsumed           int    `json:"tokens_consumed"`
 }
 
 type ChatTokenUsageAdjustPayload struct {
@@ -231,9 +227,6 @@ type GetConversationHistoryItem struct {
 	CreatedAt                *time.Time `json:"created_at,omitempty"`
 	ReasoningContent         string     `json:"reasoning_content,omitempty"`
 	ReasoningDurationSeconds int        `json:"reasoning_duration_seconds,omitempty"`
-	RetryGroupID             *string    `json:"retry_group_id"`
-	RetryIndex               *int       `json:"retry_index"`
-	RetryTotal               *int       `json:"retry_total"`
 }
 
 type SchedulePlanPreviewCache struct {

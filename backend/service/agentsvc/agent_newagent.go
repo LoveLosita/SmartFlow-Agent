@@ -84,12 +84,7 @@ func (s *AgentService) runNewAgentGraph(
 		}
 	}
 
-	// 3. 构建重试元数据。
-	retryMeta, err := s.buildChatRetryMeta(requestCtx, userID, chatID, extra)
-	if err != nil {
-		pushErrNonBlocking(errChan, err)
-		return
-	}
+	// 3. retry 机制已下线，不再构建重试元数据。
 
 	// 4. 从 StateStore 加载或创建 RuntimeState。
 	//    恢复场景（confirm/ask_user）同时拿到快照中保存的 ConversationContext，
@@ -137,6 +132,31 @@ func (s *AgentService) runNewAgentGraph(
 		}
 	}
 
+	cs = runtimeState.EnsureCommonState()
+
+	// 5.7 先把本轮用户输入落库，确保后续可见 assistant 消息按真实时间线追加。
+	userMsg := schema.UserMessage(userMessage)
+	if err := s.persistNewAgentConversationMessage(requestCtx, userID, chatID, userMsg, 0); err != nil {
+		pushErrNonBlocking(errChan, err)
+		return
+	}
+
+	persistVisibleMessage := func(persistCtx context.Context, state *newagentmodel.CommonState, msg *schema.Message) error {
+		targetState := state
+		if targetState == nil {
+			targetState = runtimeState.EnsureCommonState()
+		}
+		if targetState != nil {
+			if targetState.UserID <= 0 {
+				targetState.UserID = userID
+			}
+			if strings.TrimSpace(targetState.ConversationID) == "" {
+				targetState.ConversationID = chatID
+			}
+		}
+		return s.persistNewAgentConversationMessage(persistCtx, userID, chatID, msg, 0)
+	}
+
 	// 6. 构造 AgentGraphRequest。
 	var confirmAction string
 	if len(extra) > 0 {
@@ -163,22 +183,23 @@ func (s *AgentService) runNewAgentGraph(
 
 	// 9. 构造 AgentGraphDeps（由 cmd/start.go 注入的依赖）。
 	deps := newagentmodel.AgentGraphDeps{
-		ChatClient:           chatClient,
-		PlanClient:           planClient,
-		ExecuteClient:        executeClient,
-		DeliverClient:        deliverClient,
-		ChunkEmitter:         chunkEmitter,
-		StateStore:           s.agentStateStore,
-		ToolRegistry:         s.toolRegistry,
-		ScheduleProvider:     s.scheduleProvider,
-		SchedulePersistor:    s.schedulePersistor,
-		CompactionStore:      s.compactionStore,
-		RoughBuildFunc:       s.makeRoughBuildFunc(),
-		WriteSchedulePreview: s.makeWriteSchedulePreviewFunc(),
-		MemoryFuture:         memoryFuture,
-		ThinkingPlan:         viper.GetBool("agent.thinking.plan"),
-		ThinkingExecute:      viper.GetBool("agent.thinking.execute"),
-		ThinkingDeliver:      viper.GetBool("agent.thinking.deliver"),
+		ChatClient:            chatClient,
+		PlanClient:            planClient,
+		ExecuteClient:         executeClient,
+		DeliverClient:         deliverClient,
+		ChunkEmitter:          chunkEmitter,
+		StateStore:            s.agentStateStore,
+		ToolRegistry:          s.toolRegistry,
+		ScheduleProvider:      s.scheduleProvider,
+		SchedulePersistor:     s.schedulePersistor,
+		CompactionStore:       s.compactionStore,
+		RoughBuildFunc:        s.makeRoughBuildFunc(),
+		WriteSchedulePreview:  s.makeWriteSchedulePreviewFunc(),
+		MemoryFuture:          memoryFuture,
+		ThinkingPlan:          viper.GetBool("agent.thinking.plan"),
+		ThinkingExecute:       viper.GetBool("agent.thinking.execute"),
+		ThinkingDeliver:       viper.GetBool("agent.thinking.deliver"),
+		PersistVisibleMessage: persistVisibleMessage,
 	}
 
 	// 10. 构造 AgentGraphRunInput 并运行 graph。
@@ -197,12 +218,13 @@ func (s *AgentService) runNewAgentGraph(
 		pushErrNonBlocking(errChan, fmt.Errorf("graph 执行失败: %w", graphErr))
 
 		// Graph 出错时回退普通聊天，保证可用性。回退使用 Pro 模型。
-		s.runNormalChatFlow(requestCtx, s.AIHub.Pro, resolvedModelName, userMessage, "", nil, retryMeta, thinkingModeToBool(thinkingMode), userID, chatID, traceID, requestStart, outChan, errChan)
+		s.runNormalChatFlow(requestCtx, s.AIHub.Pro, resolvedModelName, userMessage, true, "", nil, thinkingModeToBool(thinkingMode), userID, chatID, traceID, requestStart, outChan, errChan)
 		return
 	}
 
 	// 11. 持久化聊天历史（用户消息 + 助手回复）。
-	s.persistChatAfterGraph(requestCtx, userID, chatID, userMessage, finalState, retryMeta, requestStart, outChan, errChan)
+	requestTotalTokens := snapshotRequestTokenMeter(requestCtx).TotalTokens
+	s.adjustNewAgentRequestTokenUsage(requestCtx, userID, chatID, requestTotalTokens)
 	// 11.5. 将最终状态快照异步写入 MySQL（通过 outbox）。
 	// Deliver 节点已将快照保存到 Redis（2h TTL），此处通过 outbox 异步写入 MySQL 做永久存储。
 	if finalState != nil {
@@ -369,135 +391,89 @@ func (s *AgentService) loadConversationContext(ctx context.Context, chatID, user
 	return conversationContext
 }
 
-// persistChatAfterGraph graph 执行完成后持久化聊天历史。
-func (s *AgentService) persistChatAfterGraph(
+// persistNewAgentConversationMessage 负责把 newAgent 链路里"真正对用户可见"的消息统一落到 Redis + MySQL。
+//
+// 职责边界：
+// 1. 只做单条消息的持久化，不做 graph 流程控制；
+// 2. TokensConsumed 由调用方显式传入，newAgent 逐条可见消息默认写 0；
+// 3. Redis 失败只记日志，DB 失败返回错误，便于调用方决定是否中止当前链路。
+func (s *AgentService) persistNewAgentConversationMessage(
 	ctx context.Context,
 	userID int,
 	chatID string,
-	userMessage string,
-	finalState *newagentmodel.AgentGraphState,
-	retryMeta *chatRetryMeta,
-	requestStart time.Time,
-	outChan chan<- string,
-	errChan chan error,
-) {
-	if finalState == nil {
-		return
+	msg *schema.Message,
+	tokensConsumed int,
+) error {
+	if s == nil || msg == nil {
+		return nil
+	}
+	role := strings.TrimSpace(string(msg.Role))
+	content := strings.TrimSpace(msg.Content)
+	if role == "" || content == "" {
+		return nil
+	}
+	if userID <= 0 || strings.TrimSpace(chatID) == "" {
+		return fmt.Errorf("newAgent visible message persist: invalid conversation identity")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
-	// 1. 持久化用户消息：先写 LLM 上下文 Redis，再落 DB，最后更新 UI 历史缓存。
-	userMsg := &schema.Message{Role: schema.User, Content: userMessage}
-	if retryExtra := retryMeta.CacheExtra(); len(retryExtra) > 0 {
-		userMsg.Extra = retryExtra
+	persistMsg := &schema.Message{
+		Role:             msg.Role,
+		Content:          content,
+		ReasoningContent: strings.TrimSpace(msg.ReasoningContent),
 	}
-	if err := s.agentCache.PushMessage(ctx, chatID, userMsg); err != nil {
-		log.Printf("写入用户消息到 LLM 上下文 Redis 失败 chat=%s: %v", chatID, err)
+	if len(msg.Extra) > 0 {
+		persistMsg.Extra = make(map[string]any, len(msg.Extra))
+		for key, value := range msg.Extra {
+			persistMsg.Extra[key] = value
+		}
 	}
 
-	userPayload := model.ChatHistoryPersistPayload{
-		UserID:                      userID,
-		ConversationID:              chatID,
-		Role:                        "user",
-		Message:                     userMessage,
-		ReasoningContent:            "",
-		ReasoningDurationSeconds:    0,
-		RetryGroupID:                retryMeta.GroupIDPtr(),
-		RetryIndex:                  retryMeta.IndexPtr(),
-		RetryFromUserMessageID:      retryMeta.FromUserMessageIDPtr(),
-		RetryFromAssistantMessageID: retryMeta.FromAssistantMessageIDPtr(),
-		TokensConsumed:              0,
+	if err := s.agentCache.PushMessage(ctx, chatID, persistMsg); err != nil {
+		log.Printf("写入 newAgent 可见消息到 Redis 失败 chat=%s role=%s: %v", chatID, role, err)
 	}
-	if err := s.PersistChatHistory(ctx, userPayload); err != nil {
-		pushErrNonBlocking(errChan, err)
+
+	reasoningDurationSeconds := 0
+	if persistMsg.Extra != nil {
+		switch v := persistMsg.Extra["reasoning_duration_seconds"].(type) {
+		case int:
+			reasoningDurationSeconds = v
+		case int64:
+			reasoningDurationSeconds = int(v)
+		case float64:
+			reasoningDurationSeconds = int(v)
+		}
 	}
-	userCreatedAt := time.Now()
+
+	persistPayload := model.ChatHistoryPersistPayload{
+		UserID:                   userID,
+		ConversationID:           chatID,
+		Role:                     role,
+		Message:                  content,
+		ReasoningContent:         strings.TrimSpace(persistMsg.ReasoningContent),
+		ReasoningDurationSeconds: reasoningDurationSeconds,
+		TokensConsumed:           tokensConsumed,
+	}
+	if err := s.PersistChatHistory(ctx, persistPayload); err != nil {
+		return err
+	}
+
+	now := time.Now()
 	s.appendConversationHistoryCacheOptimistically(
-		context.Background(),
+		ctx,
 		userID,
 		chatID,
-		buildOptimisticConversationHistoryItem("user", userMessage, "", 0, retryMeta, userCreatedAt),
+		buildOptimisticConversationHistoryItem(
+			role,
+			content,
+			persistPayload.ReasoningContent,
+			reasoningDurationSeconds,
+			now,
+		),
 	)
-
-	// 2. 从 ConversationContext 提取助手回复（最后一条 assistant 消息）。
-	conversationContext := finalState.ConversationContext
-	if conversationContext == nil || len(conversationContext.History) == 0 {
-		return
-	}
-
-	var lastAssistantMsg *schema.Message
-	for i := len(conversationContext.History) - 1; i >= 0; i-- {
-		msg := conversationContext.History[i]
-		if msg.Role == schema.Assistant {
-			lastAssistantMsg = msg
-			break
-		}
-	}
-
-	if lastAssistantMsg == nil {
-		return
-	}
-
-	assistantReply := lastAssistantMsg.Content
-	reasoningContent := lastAssistantMsg.ReasoningContent
-	var reasoningDurationSeconds int
-	if lastAssistantMsg.Extra != nil {
-		if dur, ok := lastAssistantMsg.Extra["reasoning_duration_seconds"].(float64); ok {
-			reasoningDurationSeconds = int(dur)
-		}
-	}
-
-	// 3. 持久化助手消息：先写 LLM 上下文 Redis，再落 DB，最后更新 UI 历史缓存。
-	assistantMsg := &schema.Message{
-		Role:             schema.Assistant,
-		Content:          assistantReply,
-		ReasoningContent: reasoningContent,
-	}
-	if reasoningDurationSeconds > 0 {
-		assistantMsg.Extra = map[string]any{"reasoning_duration_seconds": reasoningDurationSeconds}
-	}
-	if retryExtra := retryMeta.CacheExtra(); len(retryExtra) > 0 {
-		if assistantMsg.Extra == nil {
-			assistantMsg.Extra = make(map[string]any)
-		}
-		for k, v := range retryExtra {
-			assistantMsg.Extra[k] = v
-		}
-	}
-	if err := s.agentCache.PushMessage(context.Background(), chatID, assistantMsg); err != nil {
-		log.Printf("写入助手消息到 LLM 上下文 Redis 失败 chat=%s: %v", chatID, err)
-	}
-
-	requestTotalTokens := snapshotRequestTokenMeter(ctx).TotalTokens
-	assistantPayload := model.ChatHistoryPersistPayload{
-		UserID:                      userID,
-		ConversationID:              chatID,
-		Role:                        "assistant",
-		Message:                     assistantReply,
-		ReasoningContent:            reasoningContent,
-		ReasoningDurationSeconds:    reasoningDurationSeconds,
-		RetryGroupID:                retryMeta.GroupIDPtr(),
-		RetryIndex:                  retryMeta.IndexPtr(),
-		RetryFromUserMessageID:      retryMeta.FromUserMessageIDPtr(),
-		RetryFromAssistantMessageID: retryMeta.FromAssistantMessageIDPtr(),
-		TokensConsumed:              requestTotalTokens,
-	}
-	if err := s.PersistChatHistory(ctx, assistantPayload); err != nil {
-		pushErrNonBlocking(errChan, err)
-	} else {
-		s.appendConversationHistoryCacheOptimistically(
-			context.Background(),
-			userID,
-			chatID,
-			buildOptimisticConversationHistoryItem(
-				"assistant",
-				assistantReply,
-				reasoningContent,
-				reasoningDurationSeconds,
-				retryMeta,
-				time.Now(),
-			),
-		)
-	}
+	return nil
 }
 
 // makeRoughBuildFunc 把 AgentService 上的 HybridScheduleWithPlanMultiFunc 封装成
@@ -509,6 +485,38 @@ func (s *AgentService) persistChatAfterGraph(
 // placement，普通时段放置的任务全部被丢弃。
 // 正确做法：使用第一个返回值 []HybridScheduleEntry，过滤 Status="suggested" 且 TaskItemID>0 的条目，
 // 这样嵌入和非嵌入的粗排结果都能正确写入 ScheduleState。
+// adjustNewAgentRequestTokenUsage 负责把本轮 graph 的请求级 token 一次性回写到账本。
+//
+// 说明：
+// 1. newAgent 逐条可见消息都按 0 token 落库，最终统一在这里补记整轮消耗；
+// 2. 如果启用了 outbox，就沿用异步 token 调整事件，保持写账口径一致；
+// 3. 该步骤属于请求收尾，不应反过来打断用户已看到的回复。
+func (s *AgentService) adjustNewAgentRequestTokenUsage(ctx context.Context, userID int, chatID string, deltaTokens int) {
+	if s == nil || userID <= 0 || strings.TrimSpace(chatID) == "" || deltaTokens <= 0 {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if s.eventPublisher != nil {
+		if err := eventsvc.PublishChatTokenUsageAdjustRequested(ctx, s.eventPublisher, model.ChatTokenUsageAdjustPayload{
+			UserID:         userID,
+			ConversationID: chatID,
+			TokensDelta:    deltaTokens,
+			Reason:         "new_agent_request",
+			TriggeredAt:    time.Now(),
+		}); err != nil {
+			log.Printf("写入 newAgent 请求级 token 调整事件失败 chat=%s tokens=%d err=%v", chatID, deltaTokens, err)
+		}
+		return
+	}
+
+	if err := s.repo.AdjustTokenUsage(ctx, userID, chatID, deltaTokens); err != nil {
+		log.Printf("同步写入 newAgent 请求级 token 调整失败 chat=%s tokens=%d err=%v", chatID, deltaTokens, err)
+	}
+}
+
 func (s *AgentService) makeRoughBuildFunc() newagentmodel.RoughBuildFunc {
 	if s.HybridScheduleWithPlanMultiFunc == nil {
 		return nil

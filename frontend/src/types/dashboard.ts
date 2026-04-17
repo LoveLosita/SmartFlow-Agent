@@ -88,19 +88,12 @@ export interface AssistantMessage {
   content: string
   createdAt: string
   reasoning?: string
-  retryGroupId?: string
-  retryIndex?: number
-  retryTotal?: number
 }
 
 export type ThinkingModeType = 'auto' | 'true' | 'false'
 
 export interface ChatRequestExtra {
   task_class_ids?: number[]
-  request_mode?: 'retry'
-  retry_group_id?: string
-  retry_from_user_message_id?: string | number
-  retry_from_assistant_message_id?: string | number
   confirm_action?: string
   always_execute?: boolean
   resume?: Record<string, unknown>

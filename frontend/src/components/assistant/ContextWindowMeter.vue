@@ -18,6 +18,23 @@ const props = withDefaults(
 
 const safeStats = computed(() => props.stats ?? null)
 
+function formatCompactCount(value: number) {
+  if (!Number.isFinite(value)) {
+    return '--'
+  }
+
+  // 1. 千位及以上用 k 单位压缩，避免按钮过宽。
+  // 2. 保留小数点后 1 位；如果刚好是整数千位，则去掉 .0，像 80k 这种展示会更干净。
+  const absoluteValue = Math.abs(value)
+  if (absoluteValue >= 1000) {
+    const compactValue = value / 1000
+    const compactText = compactValue.toFixed(1)
+    return `${compactText.endsWith('.0') ? compactText.slice(0, -2) : compactText}k`
+  }
+
+  return `${Math.round(value)}`
+}
+
 const usagePercent = computed(() => {
   if (!safeStats.value || safeStats.value.budget <= 0) {
     return 0
@@ -29,7 +46,9 @@ const barWidthPercent = computed(() => {
   if (!safeStats.value || safeStats.value.budget <= 0) {
     return 0
   }
-  // 1. 按 total / budget 计算宽度，上限 100%（超预算时撑满进度条）。
+
+  // 1. 进度条只负责表达相对占用率。
+  // 2. 超过预算时只把宽度封顶到 100%，避免条形溢出容器。
   return Math.min(100, (safeStats.value.total / safeStats.value.budget) * 100)
 })
 
@@ -40,16 +59,28 @@ const isOverBudget = computed(() => {
   return safeStats.value.total > safeStats.value.budget
 })
 
-const usageText = computed(() => {
+const usagePercentText = computed(() => {
+  if (props.loading) {
+    return '--'
+  }
+
+  if (!safeStats.value) {
+    return props.disabled ? '--' : '0%'
+  }
+
+  return `${usagePercent.value}%`
+})
+
+const usageSummaryText = computed(() => {
   if (props.loading) {
     return '...'
   }
 
   if (!safeStats.value) {
-    return props.disabled ? '--' : '空'
+    return props.disabled ? '--/--' : '0/0'
   }
 
-  return `${usagePercent.value}%`
+  return `${formatCompactCount(safeStats.value.total)}/${formatCompactCount(safeStats.value.budget)}`
 })
 
 const tooltipText = computed(() => {
@@ -58,10 +89,12 @@ const tooltipText = computed(() => {
   }
 
   if (!safeStats.value) {
-    return props.disabled ? '新会话发送首条消息后展示上下文窗口统计' : '当前会话暂无上下文窗口统计'
+    return props.disabled
+      ? '新会话发送首条消息后展示上下文窗口统计'
+      : '当前会话暂无上下文窗口统计'
   }
 
-  return `总计 ${safeStats.value.total} / 预算 ${safeStats.value.budget}（${usagePercent.value}%）`
+  return `上下文使用 ${usagePercentText.value}（${usageSummaryText.value}）`
 })
 </script>
 
@@ -76,23 +109,29 @@ const tooltipText = computed(() => {
     :title="tooltipText"
   >
     <span class="assistant-context-meter__label">窗口</span>
+    <div class="assistant-context-meter__core">
+      <span class="assistant-context-meter__percent">{{ usagePercentText }}</span>
+      <span class="assistant-context-meter__summary">{{ usageSummaryText }}</span>
 
-    <div class="assistant-context-meter__track" aria-hidden="true">
-      <div v-if="loading" class="assistant-context-meter__loading-bar" />
-      <div v-else-if="barWidthPercent > 0" class="assistant-context-meter__bar" :style="{ width: `${barWidthPercent}%` }" />
+      <div class="assistant-context-meter__track" aria-hidden="true">
+        <div v-if="loading" class="assistant-context-meter__loading-bar" />
+        <div
+          v-else-if="barWidthPercent > 0"
+          class="assistant-context-meter__bar"
+          :style="{ width: `${barWidthPercent}%` }"
+        />
+      </div>
     </div>
-
-    <span class="assistant-context-meter__value">{{ usageText }}</span>
   </div>
 </template>
 
 <style scoped>
 .assistant-context-meter {
-  width: 144px;
-  min-width: 144px;
-  max-width: 144px;
+  width: 188px;
+  min-width: 188px;
+  max-width: 188px;
   height: 32px;
-  padding: 0 9px 0 10px;
+  padding: 0 8px;
   border: 1px solid rgba(15, 23, 42, 0.1);
   border-radius: 999px;
   background: #ffffff;
@@ -120,9 +159,10 @@ const tooltipText = computed(() => {
 }
 
 .assistant-context-meter__label,
-.assistant-context-meter__value {
+.assistant-context-meter__percent,
+.assistant-context-meter__summary {
   flex: 0 0 auto;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1;
   white-space: nowrap;
 }
@@ -132,25 +172,42 @@ const tooltipText = computed(() => {
   font-weight: 600;
 }
 
-.assistant-context-meter__value {
-  width: 28px;
-  min-width: 28px;
-  text-align: right;
-  color: #334155;
-  font-weight: 700;
+.assistant-context-meter__core {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 2px;
 }
 
-.assistant-context-meter--disabled .assistant-context-meter__value {
+.assistant-context-meter__percent {
+  min-width: 24px;
+  color: #334155;
+  font-weight: 700;
+  text-align: right;
+}
+
+.assistant-context-meter__summary {
+  min-width: 52px;
+  color: #667085;
+  font-weight: 600;
+  text-align: right;
+}
+
+.assistant-context-meter--disabled .assistant-context-meter__percent,
+.assistant-context-meter--disabled .assistant-context-meter__summary {
   color: #6b7280;
 }
 
-.assistant-context-meter--danger .assistant-context-meter__value {
+.assistant-context-meter--danger .assistant-context-meter__percent,
+.assistant-context-meter--danger .assistant-context-meter__summary {
   color: #b42318;
 }
 
 .assistant-context-meter__track {
-  flex: 1 1 auto;
   min-width: 0;
+  width: 100%;
   height: 7px;
   overflow: hidden;
   border-radius: 999px;
@@ -189,6 +246,7 @@ const tooltipText = computed(() => {
   0% {
     background-position: 200% 0;
   }
+
   100% {
     background-position: -200% 0;
   }

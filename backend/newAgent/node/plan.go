@@ -28,14 +28,16 @@ const (
 
 // PlanNodeInput 描述单轮规划节点执行所需的最小依赖。
 type PlanNodeInput struct {
-	RuntimeState        *newagentmodel.AgentRuntimeState
-	ConversationContext *newagentmodel.ConversationContext
-	UserInput           string
-	Client              *infrallm.Client
-	ChunkEmitter        *newagentstream.ChunkEmitter
-	ResumeNode          string
-	AlwaysExecute       bool // true 时计划生成后自动确认，不进入 confirm 节点
-	ThinkingEnabled     bool // 是否开启 thinking，由 config.yaml 的 agent.thinking.plan 注入
+	RuntimeState          *newagentmodel.AgentRuntimeState
+	ConversationContext   *newagentmodel.ConversationContext
+	UserInput             string
+	Client                *infrallm.Client
+	ChunkEmitter          *newagentstream.ChunkEmitter
+	ResumeNode            string
+	AlwaysExecute         bool                          // true 时计划生成后自动确认，不进入 confirm 节点
+	ThinkingEnabled       bool                          // 是否开启 thinking，由 config.yaml 的 agent.thinking.plan 注入
+	CompactionStore       newagentmodel.CompactionStore // 上下文压缩持久化
+	PersistVisibleMessage newagentmodel.PersistVisibleMessageFunc
 }
 
 // RunPlanNode 执行一轮规划节点逻辑。
@@ -68,6 +70,15 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 
 	// 2. 构造本轮规划输入。
 	messages := newagentprompt.BuildPlanMessages(flowState, conversationContext, input.UserInput)
+	messages = compactUnifiedMessagesIfNeeded(ctx, messages, UnifiedCompactInput{
+		Client:          input.Client,
+		CompactionStore: input.CompactionStore,
+		FlowState:       flowState,
+		Emitter:         emitter,
+		StageName:       planStageName,
+		StatusBlockID:   planStatusBlockID,
+	})
+	logNodeLLMContext(planStageName, "planning", flowState, messages)
 
 	// 3. 单轮深度规划：由配置决定是否开启 thinking，不做 token 上限约束。
 	decision, rawResult, err := infrallm.GenerateJSON[newagentmodel.PlanDecision](
@@ -95,6 +106,7 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 
 	// 4. 若模型先对用户说了话，且不是 ask_user（ask_user 交给 interrupt 收口），则先以伪流式推送，再写回 history。
 	if strings.TrimSpace(decision.Speak) != "" && decision.Action != newagentmodel.PlanActionAskUser {
+		msg := schema.AssistantMessage(decision.Speak, nil)
 		if err := emitter.EmitPseudoAssistantText(
 			ctx,
 			planSpeakBlockID,
@@ -104,7 +116,8 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 		); err != nil {
 			return fmt.Errorf("规划文案推送失败: %w", err)
 		}
-		conversationContext.AppendHistory(schema.AssistantMessage(decision.Speak, nil))
+		conversationContext.AppendHistory(msg)
+		persistVisibleAssistantMessage(ctx, input.PersistVisibleMessage, flowState, msg)
 	}
 
 	// 5. 按规划动作推进流程状态。
@@ -139,6 +152,7 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 			// 3. 推流后同步写入历史，确保后续 Execute 阶段的上下文也能看到这份计划。
 			summary := strings.TrimSpace(buildPlanSummary(decision.PlanSteps))
 			if summary != "" {
+				msg := schema.AssistantMessage(summary, nil)
 				if err := emitter.EmitPseudoAssistantText(
 					ctx,
 					planSummaryBlockID,
@@ -148,7 +162,8 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 				); err != nil {
 					return fmt.Errorf("自动执行前计划摘要推送失败: %w", err)
 				}
-				conversationContext.AppendHistory(schema.AssistantMessage(summary, nil))
+				conversationContext.AppendHistory(msg)
+				persistVisibleAssistantMessage(ctx, input.PersistVisibleMessage, flowState, msg)
 			}
 
 			flowState.ConfirmPlan()

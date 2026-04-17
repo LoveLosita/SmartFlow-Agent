@@ -2,7 +2,6 @@ package newagentprompt
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
@@ -49,14 +48,19 @@ func BuildPlanSystemPrompt() string {
 // BuildPlanMessages 组装规划阶段的 messages。
 //
 // 职责边界：
-// 1. 负责把 state + context 收敛成规划阶段模型输入；
-// 2. 负责把置顶上下文和工具摘要放在 history 前面，降低模型跑偏概率；
-// 3. 不负责解析模型输出，也不负责判断规划质量。
+// 1. 负责把 state + context 收敛成统一 4 段式规划阶段模型输入；
+// 2. 不负责解析模型输出，也不负责判断规划质量；
+// 3. msg3 中的状态文本由本函数显式传入，确保统一骨架下仍能看到完整计划与阶段信息。
 func BuildPlanMessages(state *newagentmodel.CommonState, ctx *newagentmodel.ConversationContext, userInput string) []*schema.Message {
-	return buildStageMessages(
-		BuildPlanSystemPrompt(),
+	return buildUnifiedStageMessages(
 		ctx,
-		BuildPlanUserPrompt(state, userInput),
+		StageMessagesConfig{
+			SystemPrompt: BuildPlanSystemPrompt(),
+			Msg1Content:  buildPlanConversationMessage(ctx),
+			Msg2Content:  buildPlanWorkspace(state),
+			Msg3Suffix:   BuildPlanUserPrompt(state, userInput),
+			Msg3Role:     schema.User,
+		},
 	)
 }
 
@@ -64,21 +68,9 @@ func BuildPlanMessages(state *newagentmodel.CommonState, ctx *newagentmodel.Conv
 func BuildPlanUserPrompt(state *newagentmodel.CommonState, userInput string) string {
 	var sb strings.Builder
 
-	sb.WriteString("请继续当前任务的规划阶段。\n")
-	sb.WriteString(renderStateSummary(state))
-	sb.WriteString("\n")
-	sb.WriteString("本轮目标：围绕当前任务继续规划，直到形成一份稳定、可执行的自然语言 plan，或在信息不足时明确追问用户。\n\n")
+	sb.WriteString("请继续当前任务的规划阶段，严格输出 JSON。\n")
+	sb.WriteString("目标：围绕最近对话和规划工作区信息，产出一份稳定、可执行的自然语言计划；若关键信息不足，请明确 ask_user。\n\n")
 	sb.WriteString(BuildPlanDecisionContractText())
-	sb.WriteString("\n")
-
-	if state != nil && len(state.TaskClassIDs) > 0 {
-		parts := make([]string, len(state.TaskClassIDs))
-		for i, id := range state.TaskClassIDs {
-			parts[i] = strconv.Itoa(id)
-		}
-		sb.WriteString(fmt.Sprintf("\n本次排课请求涉及的任务类 ID（前端传入）：[%s]\n", strings.Join(parts, ", ")))
-		sb.WriteString("规划时请结合上述任务类 ID 判断是否需要粗排（needs_rough_build），并在 plan_steps 中体现排课意图。\n")
-	}
 
 	trimmedInput := strings.TrimSpace(userInput)
 	if trimmedInput != "" {

@@ -71,10 +71,6 @@ func RegisterChatHistoryPersistHandler(
 				payload.Message,
 				payload.ReasoningContent,
 				payload.ReasoningDurationSeconds,
-				payload.RetryGroupID,
-				payload.RetryIndex,
-				payload.RetryFromUserMessageID,
-				payload.RetryFromAssistantMessageID,
 				payload.TokensConsumed,
 			); err != nil {
 				return err

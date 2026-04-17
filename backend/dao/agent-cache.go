@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/cloudwego/eino/schema"
@@ -164,79 +163,6 @@ func (m *AgentCache) BackfillHistory(ctx context.Context, sessionID string, mess
 	return err
 }
 
-func (m *AgentCache) ApplyRetrySeed(ctx context.Context, sessionID, retryGroupID string, sourceUserMessageID, sourceAssistantMessageID int) error {
-	if m == nil || m.client == nil {
-		return nil
-	}
-	groupID := strings.TrimSpace(retryGroupID)
-	if groupID == "" {
-		return nil
-	}
-
-	vals, err := m.client.LRange(ctx, m.historyKey(sessionID), 0, -1).Result()
-	if err != nil {
-		return err
-	}
-	if len(vals) == 0 {
-		return nil
-	}
-
-	changed := false
-	targets := map[int]struct{}{}
-	if sourceUserMessageID > 0 {
-		targets[sourceUserMessageID] = struct{}{}
-	}
-	if sourceAssistantMessageID > 0 {
-		targets[sourceAssistantMessageID] = struct{}{}
-	}
-	if len(targets) == 0 {
-		return nil
-	}
-
-	indexOne := 1
-	for idx, raw := range vals {
-		var msg schema.Message
-		if err := json.Unmarshal([]byte(raw), &msg); err != nil {
-			return err
-		}
-		historyID := extractMessageHistoryID(&msg)
-		if historyID <= 0 {
-			continue
-		}
-		if _, ok := targets[historyID]; !ok {
-			continue
-		}
-		if msg.Extra == nil {
-			msg.Extra = make(map[string]any)
-		}
-		msg.Extra["retry_group_id"] = groupID
-		msg.Extra["retry_index"] = indexOne
-		updated, err := json.Marshal(&msg)
-		if err != nil {
-			return err
-		}
-		vals[idx] = string(updated)
-		changed = true
-	}
-
-	if !changed {
-		return nil
-	}
-
-	pipe := m.client.Pipeline()
-	key := m.historyKey(sessionID)
-	pipe.Del(ctx, key)
-	values := make([]interface{}, 0, len(vals))
-	for _, item := range vals {
-		values = append(values, item)
-	}
-	pipe.RPush(ctx, key, values...)
-	pipe.LTrim(ctx, key, 0, int64(len(vals)-1))
-	pipe.Expire(ctx, key, m.expiration)
-	_, err = pipe.Exec(ctx)
-	return err
-}
-
 func (m *AgentCache) ClearHistory(ctx context.Context, sessionID string) error {
 	historyKey := m.historyKey(sessionID)
 	windowKey := m.historyWindowKey(sessionID)
@@ -261,49 +187,6 @@ func (m *AgentCache) SetConversationStatus(ctx context.Context, sessionID string
 func (m *AgentCache) DeleteConversationStatus(ctx context.Context, sessionID string) error {
 	key := fmt.Sprintf("smartflow:conversation_status:%s", sessionID)
 	return m.client.Del(ctx, key).Err()
-}
-
-func extractMessageHistoryID(msg *schema.Message) int {
-	if msg == nil || msg.Extra == nil {
-		return 0
-	}
-	raw, ok := msg.Extra["history_id"]
-	if !ok {
-		return 0
-	}
-	// 1. history_id 主要来自 DB 回填，正常情况下是 number。
-	// 2. 但 Redis 往返、灰度期数据修复或手工写入时，仍可能出现字符串数字。
-	// 3. 这里做一次宽松解析，避免重试分组补种时因为类型差异找不到源消息。
-	switch v := raw.(type) {
-	case int:
-		return v
-	case int32:
-		return int(v)
-	case int64:
-		return int(v)
-	case float64:
-		return int(v)
-	case json.Number:
-		if parsed, err := v.Int64(); err == nil {
-			return int(parsed)
-		}
-		if parsed, err := v.Float64(); err == nil {
-			return int(parsed)
-		}
-		return 0
-	case string:
-		trimmed := strings.TrimSpace(v)
-		if trimmed == "" {
-			return 0
-		}
-		parsed, err := strconv.Atoi(trimmed)
-		if err != nil {
-			return 0
-		}
-		return parsed
-	default:
-		return 0
-	}
 }
 
 // ---- Compaction 缓存 ----

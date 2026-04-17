@@ -60,6 +60,7 @@ type ExecuteNodeInput struct {
 	OriginalScheduleState *schedule.ScheduleState
 	AlwaysExecute         bool // true 时写工具跳过确认闸门直接执行
 	ThinkingEnabled       bool // 是否开启 thinking，由 config.yaml 的 agent.thinking.execute 注入
+	PersistVisibleMessage newagentmodel.PersistVisibleMessageFunc
 }
 
 // ExecuteRoundObservation 记录执行阶段每轮的关键观察。
@@ -184,19 +185,16 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 	messages := newagentprompt.BuildExecuteMessages(flowState, conversationContext)
 
 	// 5.1 Token 预算检查 & 上下文压缩。
-	messages = compactExecuteMessagesIfNeeded(
-		ctx, messages, input, flowState, emitter,
-	)
+	messages = compactUnifiedMessagesIfNeeded(ctx, messages, UnifiedCompactInput{
+		Client:          input.Client,
+		CompactionStore: input.CompactionStore,
+		FlowState:       flowState,
+		Emitter:         emitter,
+		StageName:       executeStageName,
+		StatusBlockID:   executeStatusBlockID,
+	})
 
-	log.Printf(
-		"[DEBUG] execute LLM context begin chat=%s round=%d message_count=%d\n%s\n[DEBUG] execute LLM context end chat=%s round=%d",
-		flowState.ConversationID,
-		flowState.RoundUsed,
-		len(messages),
-		formatExecuteLLMMessagesForDebug(messages),
-		flowState.ConversationID,
-		flowState.RoundUsed,
-	)
+	logNodeLLMContext(executeStageName, "decision", flowState, messages)
 	decision, rawResult, err := infrallm.GenerateJSON[newagentmodel.ExecuteDecision](
 		ctx,
 		input.Client,
@@ -337,6 +335,7 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 
 		if !isConfirmWithCard && !isAskUser && !isAbort {
 			// 推流给前端
+			msg := schema.AssistantMessage(speakText, nil)
 			if err := emitter.EmitPseudoAssistantText(
 				ctx,
 				executeSpeakBlockID,
@@ -346,6 +345,7 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 			); err != nil {
 				return fmt.Errorf("执行文案推送失败: %w", err)
 			}
+			persistVisibleAssistantMessage(ctx, input.PersistVisibleMessage, flowState, msg)
 		}
 		// 1. confirm / ask_user 的 speak 仍要写入历史，避免下一轮 LLM 丢失自己的执行上下文。
 		// 2. abort 不在这里写历史，避免先输出中间 speak，再在 deliver 收到第二份终止文案。
@@ -1673,80 +1673,4 @@ func flattenForLog(text string) string {
 	text = strings.ReplaceAll(text, "\n", " ")
 	text = strings.ReplaceAll(text, "\r", " ")
 	return strings.TrimSpace(text)
-}
-
-// formatExecuteLLMMessagesForDebug 将本轮送入 LLM 的完整消息上下文展开成可读多行日志。
-//
-// 说明：
-// 1. 按消息索引逐条输出，便于和上游上下文构造步骤逐项对齐；
-// 2. 完整输出 content / reasoning_content / tool_calls / extra，不做截断；
-// 3. 仅用于调试打点，不参与业务决策。
-func formatExecuteLLMMessagesForDebug(messages []*schema.Message) string {
-	if len(messages) == 0 {
-		return "(empty messages)"
-	}
-
-	var sb strings.Builder
-	for i, msg := range messages {
-		sb.WriteString(fmt.Sprintf("----- message[%d] -----\n", i))
-		if msg == nil {
-			sb.WriteString("role: <nil>\n\n")
-			continue
-		}
-
-		sb.WriteString(fmt.Sprintf("role: %s\n", msg.Role))
-
-		if strings.TrimSpace(msg.ToolCallID) != "" {
-			sb.WriteString(fmt.Sprintf("tool_call_id: %s\n", msg.ToolCallID))
-		}
-		if strings.TrimSpace(msg.ToolName) != "" {
-			sb.WriteString(fmt.Sprintf("tool_name: %s\n", msg.ToolName))
-		}
-
-		if len(msg.ToolCalls) > 0 {
-			sb.WriteString("tool_calls:\n")
-			for j, call := range msg.ToolCalls {
-				sb.WriteString(fmt.Sprintf("  - [%d] id=%s type=%s function=%s\n", j, call.ID, call.Type, call.Function.Name))
-				sb.WriteString("    arguments:\n")
-				sb.WriteString(indentMultilineForDebug(call.Function.Arguments, "      "))
-				sb.WriteString("\n")
-			}
-		}
-
-		if strings.TrimSpace(msg.ReasoningContent) != "" {
-			sb.WriteString("reasoning_content:\n")
-			sb.WriteString(indentMultilineForDebug(msg.ReasoningContent, "  "))
-			sb.WriteString("\n")
-		}
-
-		sb.WriteString("content:\n")
-		sb.WriteString(indentMultilineForDebug(msg.Content, "  "))
-		sb.WriteString("\n")
-
-		if len(msg.Extra) > 0 {
-			sb.WriteString("extra:\n")
-			raw, err := json.MarshalIndent(msg.Extra, "", "  ")
-			if err != nil {
-				sb.WriteString(indentMultilineForDebug("<marshal_error>", "  "))
-			} else {
-				sb.WriteString(indentMultilineForDebug(string(raw), "  "))
-			}
-			sb.WriteString("\n")
-		}
-
-		sb.WriteString("\n")
-	}
-	return sb.String()
-}
-
-// indentMultilineForDebug 为多行文本统一添加前缀缩进，避免日志折行后难以阅读。
-func indentMultilineForDebug(text, prefix string) string {
-	if text == "" {
-		return prefix + "<empty>"
-	}
-	lines := strings.Split(text, "\n")
-	for i := range lines {
-		lines[i] = prefix + lines[i]
-	}
-	return strings.Join(lines, "\n")
 }
