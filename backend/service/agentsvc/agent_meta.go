@@ -278,15 +278,15 @@ func (s *AgentService) generateConversationTitle(ctx context.Context, history []
 }
 
 // pickTitleModel 选择用于标题生成的模型。
-// 优先 worker（成本低、速度快）；worker 不可用时回退 strategist。
+// 优先 Lite（成本低、速度快）；Lite 不可用时回退 Pro。
 func (s *AgentService) pickTitleModel() *ark.ChatModel {
 	if s.AIHub == nil {
 		return nil
 	}
-	if s.AIHub.Worker != nil {
-		return s.AIHub.Worker
+	if s.AIHub.Lite != nil {
+		return s.AIHub.Lite
 	}
-	return s.AIHub.Strategist
+	return s.AIHub.Pro
 }
 
 // buildConversationTitleUserPrompt 把消息历史拼成可读文本供模型总结。

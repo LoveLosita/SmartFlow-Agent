@@ -72,6 +72,9 @@ type Config struct {
 	// 2. 默认 0.5，与"守门员"prompt 的 confidence>=0.5 输出规则配合；
 	// 3. fallback 路径 confidence 设为 0.45，低于默认阈值，LLM 不可用时不写入。
 	WriteMinConfidence float64
+
+	// 记忆模块 LLM 调用是否开启 thinking，由 config.yaml 的 agent.thinking.memory 注入。
+	LLMThinking bool
 }
 
 // NormalizeReadMode 统一读取模式字符串。

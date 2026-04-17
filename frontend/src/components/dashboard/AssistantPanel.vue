@@ -48,7 +48,6 @@ interface StreamEventPayload {
   error?: StreamErrorPayload
 }
 
-type ModelType = 'worker' | 'strategist'
 
 interface ConversationGroup {
   key: string
@@ -86,7 +85,7 @@ const conversationLoadingMore = ref(false)
 const chatLoading = ref(false)
 const historyExpanded = ref(true)
 const selectedConversationId = ref('')
-const selectedModel = ref<ModelType>('worker')
+
 const selectedThinkingMode = ref<ThinkingModeType>('auto')
 const messageInput = ref('')
 const historyPanelWidth = ref(props.initialHistoryWidth)
@@ -120,7 +119,7 @@ const quickActions = [
   '给我一个更稳妥的推进方案',
 ]
 
-const MODEL_PREFERENCE_STORAGE_KEY = 'smartflow.assistant.model.byConversation.v1'
+
 const DEFAULT_PLANNING_PROMPT = '请基于这些任务类帮我做一版智能编排。'
 
 let messageScrollRaf = 0
@@ -336,85 +335,6 @@ const contextStatsDisabled = computed(() => {
   return !selectedConversationId.value || isDraftConversationId(selectedConversationId.value)
 })
 
-function isModelType(value: unknown): value is ModelType {
-  return value === 'worker' || value === 'strategist'
-}
-
-function loadModelPreferenceMap() {
-  if (typeof window === 'undefined') {
-    return {} as Record<string, ModelType>
-  }
-
-  try {
-    const raw = window.localStorage.getItem(MODEL_PREFERENCE_STORAGE_KEY)
-    if (!raw) {
-      return {} as Record<string, ModelType>
-    }
-
-    const parsed = JSON.parse(raw) as unknown
-    const normalized: Record<string, ModelType> = {}
-    const entries = typeof parsed === 'object' && parsed ? Object.entries(parsed) : []
-
-    // 1. 只接收结构合法且值在白名单内的记录，避免脏数据把模型值污染为非法字符串。
-    // 2. 键为空字符串的记录直接丢弃，防止“新建会话未落库”场景写入无效索引。
-    // 3. 解析失败时回退为空对象，不阻塞聊天主流程。
-    for (const [conversationId, model] of entries) {
-      if (!conversationId || !isModelType(model)) {
-        continue
-      }
-      normalized[conversationId] = model
-    }
-
-    return normalized
-  } catch {
-    return {} as Record<string, ModelType>
-  }
-}
-
-const modelPreferenceMap = ref<Record<string, ModelType>>(loadModelPreferenceMap())
-
-function persistModelPreferenceMap() {
-  if (typeof window === 'undefined') {
-    return
-  }
-
-  try {
-    window.localStorage.setItem(MODEL_PREFERENCE_STORAGE_KEY, JSON.stringify(modelPreferenceMap.value))
-  } catch {
-    // 1. 本地存储失败只影响“记忆体验”，不影响消息收发主链路。
-    // 2. 这里静默处理，避免用户每次切模型都被错误提示打断。
-    // 3. 若用户清理缓存或隐私模式限制写入，后续会自动退化为会话内临时选择。
-  }
-}
-
-function savePreferredModel(conversationId: string, model: ModelType) {
-  if (!conversationId || modelPreferenceMap.value[conversationId] === model) {
-    return
-  }
-
-  modelPreferenceMap.value = {
-    ...modelPreferenceMap.value,
-    [conversationId]: model,
-  }
-  persistModelPreferenceMap()
-}
-
-function resolvePreferredModel(conversationId: string) {
-  if (!conversationId) {
-    return null
-  }
-
-  return modelPreferenceMap.value[conversationId] ?? null
-}
-
-function applyPreferredModelForConversation(conversationId: string) {
-  const preferredModel = resolvePreferredModel(conversationId)
-  if (!preferredModel || preferredModel === selectedModel.value) {
-    return
-  }
-
-  selectedModel.value = preferredModel
-}
 
 function ensureConversationBucket(conversationId: string) {
   if (!conversationMessagesMap[conversationId]) {
@@ -474,16 +394,6 @@ function migrateConversationState(fromConversationId: string, toConversationId: 
       conversation_id: toConversationId,
     }
     delete conversationMetaMap[fromConversationId]
-  }
-
-  if (modelPreferenceMap.value[fromConversationId]) {
-    const migratedModelMap = { ...modelPreferenceMap.value }
-    if (!migratedModelMap[toConversationId]) {
-      migratedModelMap[toConversationId] = migratedModelMap[fromConversationId]!
-    }
-    delete migratedModelMap[fromConversationId]
-    modelPreferenceMap.value = migratedModelMap
-    persistModelPreferenceMap()
   }
 
   const latestMap = new Map<string, ConversationListItem>()
@@ -1299,7 +1209,6 @@ async function loadConversationContextStats(conversationId: string, forceReload 
 async function selectConversation(conversationId: string) {
   cancelEditUserMessage()
   selectedConversationId.value = conversationId
-  applyPreferredModelForConversation(conversationId)
   await Promise.allSettled([
     loadConversationMessages(conversationId),
     ensureConversationMeta(conversationId),
@@ -1502,7 +1411,7 @@ async function streamAssistantReply(
   const response = await fetchChatStream({
     conversation_id: isDraftConversationId(draftConversationId) ? undefined : draftConversationId,
     message: text,
-    model: selectedModel.value,
+    model: 'worker',
     thinking: selectedThinkingMode.value,
     extra: requestExtra,
   })
@@ -1577,8 +1486,6 @@ async function sendMessage(preset?: string) {
   if (!selectedConversationId.value || shouldStartFreshPlanningConversation) {
     selectedConversationId.value = draftConversationId
   }
-  savePreferredModel(draftConversationId, selectedModel.value)
-
   ensureConversationBucket(draftConversationId)
   unavailableHistoryMap[draftConversationId] = false
 
@@ -1734,16 +1641,6 @@ watch(
   },
 )
 
-watch(
-  selectedModel,
-  (nextModel) => {
-    const conversationId = selectedConversationId.value
-    if (!conversationId) {
-      return
-    }
-    savePreferredModel(conversationId, nextModel)
-  },
-)
 
 onMounted(async () => {
   reasoningTicker = window.setInterval(() => {
@@ -2126,20 +2023,6 @@ onBeforeUnmount(() => {
                     </el-select>
                   </div>
 
-                  <div class="assistant-toolbar__pill assistant-toolbar__pill--select assistant-toolbar__pill--ds-model">
-                    <span class="assistant-toolbar__select-label">模型</span>
-                    <el-select
-                      v-model="selectedModel"
-                      class="assistant-toolbar__select-box"
-                      size="small"
-                      popper-class="assistant-model-select-panel"
-                      placement="top-start"
-                      :teleported="true"
-                    >
-                      <el-option value="worker" label="标准" />
-                      <el-option value="strategist" label="策略" />
-                    </el-select>
-                  </div>
 
                   <ContextWindowMeter
                     class="assistant-toolbar__context-meter"
@@ -3183,7 +3066,6 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
-.assistant-toolbar__pill--ds-model,
 .assistant-toolbar__pill--ds-thinking {
   height: 32px;
   padding: 0 8px 0 10px;
@@ -3198,10 +3080,6 @@ onBeforeUnmount(() => {
 
 .assistant-toolbar__pill--ds-thinking {
   min-width: 138px;
-}
-
-.assistant-toolbar__pill--ds-model {
-  min-width: 144px;
 }
 
 .assistant-toolbar__context-meter {
@@ -3435,30 +3313,5 @@ onBeforeUnmount(() => {
 }
 </style>
 <style>
-.assistant-model-select-panel.el-popper {
-  border-radius: 12px;
-  border: 1px solid rgba(15, 23, 42, 0.1);
-  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.14);
-  padding: 6px;
-}
 
-.assistant-model-select-panel .el-select-dropdown__item {
-  height: 36px;
-  line-height: 36px;
-  border-radius: 8px;
-  padding: 0 12px;
-  color: #4d5d73;
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.assistant-model-select-panel .el-select-dropdown__item.hover,
-.assistant-model-select-panel .el-select-dropdown__item:hover {
-  background: rgba(51, 95, 194, 0.1);
-}
-
-.assistant-model-select-panel .el-select-dropdown__item.is-selected {
-  color: #2f56b0;
-  background: rgba(51, 95, 194, 0.16);
-}
 </style>

@@ -67,7 +67,7 @@ func (o *LLMWriteOrchestrator) ExtractFacts(ctx context.Context, payload memorym
 		infrallm.GenerateOptions{
 			Temperature: clampTemperature(o.cfg.LLMTemperature),
 			MaxTokens:   defaultMemoryExtractMaxTokens,
-			Thinking:    infrallm.ThinkingModeDisabled,
+			Thinking:    resolveMemoryThinkingMode(o.cfg.LLMThinking),
 			Metadata: map[string]any{
 				"stage":           "memory_extract",
 				"user_id":         payload.UserID,

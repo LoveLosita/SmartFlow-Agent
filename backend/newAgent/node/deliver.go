@@ -32,6 +32,7 @@ type DeliverNodeInput struct {
 	ConversationContext *newagentmodel.ConversationContext
 	Client              *infrallm.Client
 	ChunkEmitter        *newagentstream.ChunkEmitter
+	ThinkingEnabled     bool // 是否开启 thinking，由 config.yaml 的 agent.thinking.deliver 注入
 }
 
 // RunDeliverNode 执行一轮交付节点逻辑。
@@ -64,7 +65,7 @@ func RunDeliverNode(ctx context.Context, input DeliverNodeInput) error {
 	}
 
 	// 2. 调 LLM 生成交付总结。
-	summary := generateDeliverSummary(ctx, input.Client, flowState, conversationContext)
+	summary := generateDeliverSummary(ctx, input.Client, flowState, conversationContext, input.ThinkingEnabled)
 
 	// 3. 伪流式推送总结。
 	if strings.TrimSpace(summary) != "" {
@@ -98,6 +99,7 @@ func generateDeliverSummary(
 	client *infrallm.Client,
 	flowState *newagentmodel.CommonState,
 	conversationContext *newagentmodel.ConversationContext,
+	thinkingEnabled bool,
 ) string {
 	if flowState != nil {
 		switch {
@@ -119,7 +121,7 @@ func generateDeliverSummary(
 		infrallm.GenerateOptions{
 			Temperature: 0.5,
 			MaxTokens:   800,
-			Thinking:    infrallm.ThinkingModeDisabled,
+			Thinking:    resolveThinkingMode(thinkingEnabled),
 			Metadata: map[string]any{
 				"stage": deliverStageName,
 			},

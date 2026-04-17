@@ -59,6 +59,7 @@ type ExecuteNodeInput struct {
 	WriteSchedulePreview  newagentmodel.WriteSchedulePreviewFunc
 	OriginalScheduleState *schedule.ScheduleState
 	AlwaysExecute         bool // true 时写工具跳过确认闸门直接执行
+	ThinkingEnabled       bool // 是否开启 thinking，由 config.yaml 的 agent.thinking.execute 注入
 }
 
 // ExecuteRoundObservation 记录执行阶段每轮的关键观察。
@@ -203,7 +204,7 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		infrallm.GenerateOptions{
 			Temperature: 1.0,   // thinking 模式强制要求 temperature=1
 			MaxTokens:   16000, // 需为 thinking chain 留出足够预算
-			Thinking:    infrallm.ThinkingModeEnabled,
+			Thinking:    resolveThinkingMode(input.ThinkingEnabled),
 			Metadata: map[string]any{
 				"stage":      executeStageName,
 				"step_index": flowState.CurrentStep,

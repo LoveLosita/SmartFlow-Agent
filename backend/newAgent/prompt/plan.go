@@ -21,8 +21,7 @@ const planSystemPrompt = `
 5. plan_steps 必须使用自然语言，便于后端将完整 plan 重新注入到后续上下文顶部。
 6. 只输出 JSON，不要输出 markdown，不要输出额外解释，不要在 JSON 外再补文字。
 7. 每次输出前先评估任务复杂度：simple（简单明确，无复杂依赖）、moderate（多步操作，需要一定推理）、complex（需要深度推理、多方案比较或复杂依赖关系）。
-8. 根据复杂度判断 need_thinking：你是否需要深度思考才能生成高质量计划？当不确定时倾向于 false。
-9. 粗排识别规则：若满足以下两个条件，在 action=plan_done 时附加 needs_rough_build=true 和 task_class_ids：
+8. 粗排识别规则：若满足以下两个条件，在 action=plan_done 时附加 needs_rough_build=true 和 task_class_ids：
    条件1：用户输入中存在"任务类 ID"字段（见上下文"任务类 ID"部分）；
    条件2：用户意图明确是"批量安排/帮我排课/把任务类排进日程"等批量调度需求。
    满足时：后端会在用户确认计划后自动运行粗排算法（硬性约束已由算法保证，无需 LLM 校验）。
@@ -99,7 +98,6 @@ func BuildPlanDecisionContractText() string {
 - action：只能是 %s / %s / %s
 - reason：给后端和日志看的简短说明
 - complexity：任务复杂度，只能是 simple / moderate / complex
-- need_thinking：是否需要深度思考才能生成高质量计划，只能是 true / false
 - plan_steps：仅当 action=%s 时允许返回；返回时必须是完整计划，不是增量
 - plan_steps[].content：步骤正文，必填
 - plan_steps[].done_when：可选，建议写"什么情况下算这一步做完"
@@ -112,7 +110,6 @@ func BuildPlanDecisionContractText() string {
   "action": "%s",
   "reason": "当前信息已足够继续规划",
   "complexity": "moderate",
-  "need_thinking": false
 }
 
 {
@@ -120,7 +117,6 @@ func BuildPlanDecisionContractText() string {
   "action": "%s",
   "reason": "当前时间范围仍不明确",
   "complexity": "simple",
-  "need_thinking": false
 }
 
 {
@@ -128,7 +124,7 @@ func BuildPlanDecisionContractText() string {
   "action": "%s",
   "reason": "当前计划已具备执行条件",
   "complexity": "simple",
-  "need_thinking": false,
+  
   "plan_steps": [
     {
       "content": "先确认本周可用时间范围",

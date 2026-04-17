@@ -40,6 +40,7 @@ func LoadConfigFromViper() memorymodel.Config {
 		DecisionFallbackMode:      viper.GetString("memory.decision.fallbackMode"),
 		WriteMode:                 viper.GetString("memory.write.mode"),
 		WriteMinConfidence:        viper.GetFloat64("memory.write.minConfidence"),
+		LLMThinking:               viper.GetBool("agent.thinking.memory"),
 	}
 
 	if cfg.Threshold <= 0 {

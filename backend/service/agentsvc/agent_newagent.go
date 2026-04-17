@@ -15,6 +15,7 @@ import (
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 	schedule "github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
 	"github.com/cloudwego/eino/schema"
+	"github.com/spf13/viper"
 
 	agentchat "github.com/LoveLosita/smartflow/backend/agent/chat"
 	"github.com/LoveLosita/smartflow/backend/conv"
@@ -149,10 +150,12 @@ func (s *AgentService) runNewAgentGraph(
 	graphRequest.Normalize()
 
 	// 7. 适配 LLM clients（从 AIHub 的 ark.ChatModel 转换为 newAgent LLM Client）。
-	chatClient := infrallm.WrapArkClient(s.AIHub.Worker)
-	planClient := infrallm.WrapArkClient(s.AIHub.Worker)
-	executeClient := infrallm.WrapArkClient(s.AIHub.Worker)
-	deliverClient := infrallm.WrapArkClient(s.AIHub.Worker)
+	// 7.1 Chat/Deliver 使用 Pro 模型：路由分流、闲聊、交付总结属于标准复杂度。
+	// 7.2 Plan/Execute 使用 Max 模型：规划和 ReAct 循环需要深度推理能力。
+	chatClient := infrallm.WrapArkClient(s.AIHub.Pro)
+	planClient := infrallm.WrapArkClient(s.AIHub.Max)
+	executeClient := infrallm.WrapArkClient(s.AIHub.Max)
+	deliverClient := infrallm.WrapArkClient(s.AIHub.Pro)
 
 	// 8. 适配 SSE emitter。
 	sseEmitter := newagentstream.NewSSEPayloadEmitter(outChan)
@@ -173,6 +176,9 @@ func (s *AgentService) runNewAgentGraph(
 		RoughBuildFunc:       s.makeRoughBuildFunc(),
 		WriteSchedulePreview: s.makeWriteSchedulePreviewFunc(),
 		MemoryFuture:         memoryFuture,
+		ThinkingPlan:         viper.GetBool("agent.thinking.plan"),
+		ThinkingExecute:      viper.GetBool("agent.thinking.execute"),
+		ThinkingDeliver:      viper.GetBool("agent.thinking.deliver"),
 	}
 
 	// 10. 构造 AgentGraphRunInput 并运行 graph。
@@ -190,8 +196,8 @@ func (s *AgentService) runNewAgentGraph(
 		log.Printf("[ERROR] newAgent graph 执行失败 trace=%s chat=%s: %v", traceID, chatID, graphErr)
 		pushErrNonBlocking(errChan, fmt.Errorf("graph 执行失败: %w", graphErr))
 
-		// Graph 出错时回退普通聊天，保证可用性。
-		s.runNormalChatFlow(requestCtx, s.AIHub.Worker, resolvedModelName, userMessage, "", nil, retryMeta, thinkingModeToBool(thinkingMode), userID, chatID, traceID, requestStart, outChan, errChan)
+		// Graph 出错时回退普通聊天，保证可用性。回退使用 Pro 模型。
+		s.runNormalChatFlow(requestCtx, s.AIHub.Pro, resolvedModelName, userMessage, "", nil, retryMeta, thinkingModeToBool(thinkingMode), userID, chatID, traceID, requestStart, outChan, errChan)
 		return
 	}
 

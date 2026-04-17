@@ -35,19 +35,19 @@ type PlanNodeInput struct {
 	ChunkEmitter        *newagentstream.ChunkEmitter
 	ResumeNode          string
 	AlwaysExecute       bool // true 时计划生成后自动确认，不进入 confirm 节点
+	ThinkingEnabled     bool // 是否开启 thinking，由 config.yaml 的 agent.thinking.plan 注入
 }
 
 // RunPlanNode 执行一轮规划节点逻辑。
 //
 // 步骤说明：
-//  1. 先校验最小依赖，并推送一条”正在规划”的状态，避免用户空等；
-//  2. Phase 1（快速评估）：不开 thinking，让 LLM 同时产出复杂度评估和规划结果；
-//  3. Phase 2（深度规划）：若 LLM 自评需要深度思考且规划已完成，开 thinking 重跑；
-//  4. 若模型先对用户说了话，则先把 speak 伪流式推给前端，并写回 history；
-//  5. 最后按 action 推进流程：
-//     5.1 continue：继续停留在 planning；
-//     5.2 ask_user：打开 pending interaction，后续交给 interrupt 收口；
-//     5.3 plan_done：固化完整计划，刷新 pinned context，并进入 waiting_confirm。
+//  1. 先校验最小依赖，并推送一条"正在规划"的状态，避免用户空等；
+//  2. 单轮深度规划：开 thinking、无 token 上限，让 LLM 一步到位产出完整计划；
+//  3. 若模型先对用户说了话，则先把 speak 伪流式推给前端，并写回 history；
+//  4. 最后按 action 推进流程：
+//     4.1 continue：继续停留在 planning；
+//     4.2 ask_user：打开 pending interaction，后续交给 interrupt 收口；
+//     4.3 plan_done：固化完整计划，刷新 pinned context，并进入 waiting_confirm。
 func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 	runtimeState, conversationContext, emitter, err := preparePlanNodeInput(input)
 	if err != nil {
@@ -69,68 +69,31 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 	// 2. 构造本轮规划输入。
 	messages := newagentprompt.BuildPlanMessages(flowState, conversationContext, input.UserInput)
 
-	// 3. Phase 1：快速评估（开 thinking），让 LLM 同时产出复杂度评估和规划结果。
+	// 3. 单轮深度规划：由配置决定是否开启 thinking，不做 token 上限约束。
 	decision, rawResult, err := infrallm.GenerateJSON[newagentmodel.PlanDecision](
 		ctx,
 		input.Client,
 		messages,
 		infrallm.GenerateOptions{
 			Temperature: 0.2,
-			MaxTokens:   1600,
-			Thinking:    infrallm.ThinkingModeEnabled,
+			Thinking:    resolveThinkingMode(input.ThinkingEnabled),
 			Metadata: map[string]any{
 				"stage": planStageName,
-				"phase": "assessment",
+				"phase": "planning",
 			},
 		},
 	)
 	if err != nil {
 		if rawResult != nil && strings.TrimSpace(rawResult.Text) != "" {
-			return fmt.Errorf("规划评估解析失败，原始输出=%s，错误=%w", strings.TrimSpace(rawResult.Text), err)
+			return fmt.Errorf("规划解析失败，原始输出=%s，错误=%w", strings.TrimSpace(rawResult.Text), err)
 		}
-		return fmt.Errorf("规划评估阶段模型调用失败: %w", err)
+		return fmt.Errorf("规划阶段模型调用失败: %w", err)
 	}
 	if err := decision.Validate(); err != nil {
-		return fmt.Errorf("规划评估决策不合法: %w", err)
+		return fmt.Errorf("规划决策不合法: %w", err)
 	}
 
-	// 4. Phase 2：若 LLM 自评需要深度思考且本轮规划已完成，则开启 thinking 重跑。
-	//    条件：NeedThinking=true + Action=plan_done → 说明 LLM 认为当前无 thinking 的计划质量不够。
-	//    其他 action（continue / ask_user）不需要 thinking，直接用 Phase 1 结果。
-	if decision.NeedThinking && decision.Action == newagentmodel.PlanActionDone {
-		if err := emitter.EmitStatus(
-			planStatusBlockID,
-			planStageName,
-			"deep_planning",
-			"正在深入思考，生成更完善的计划。",
-			false,
-		); err != nil {
-			return fmt.Errorf("深度规划状态推送失败: %w", err)
-		}
-
-		deepDecision, _, deepErr := infrallm.GenerateJSON[newagentmodel.PlanDecision](
-			ctx,
-			input.Client,
-			messages,
-			infrallm.GenerateOptions{
-				Temperature: 0.2,
-				MaxTokens:   3200,
-				Thinking:    infrallm.ThinkingModeEnabled,
-				Metadata: map[string]any{
-					"stage": planStageName,
-					"phase": "deep_planning",
-				},
-			},
-		)
-		if deepErr == nil && deepDecision != nil {
-			if validateErr := deepDecision.Validate(); validateErr == nil {
-				decision = deepDecision
-			}
-		}
-		// 深度规划失败时静默降级到 Phase 1 结果，不中断流程。
-	}
-
-	// 5. 若模型先对用户说了话，且不是 ask_user（ask_user 交给 interrupt 收口），则先以伪流式推送，再写回 history。
+	// 4. 若模型先对用户说了话，且不是 ask_user（ask_user 交给 interrupt 收口），则先以伪流式推送，再写回 history。
 	if strings.TrimSpace(decision.Speak) != "" && decision.Action != newagentmodel.PlanActionAskUser {
 		if err := emitter.EmitPseudoAssistantText(
 			ctx,
@@ -144,7 +107,7 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 		conversationContext.AppendHistory(schema.AssistantMessage(decision.Speak, nil))
 	}
 
-	// 6. 按规划动作推进流程状态。
+	// 5. 按规划动作推进流程状态。
 	switch decision.Action {
 	case newagentmodel.PlanActionContinue:
 		flowState.Phase = newagentmodel.PhasePlanning
@@ -169,10 +132,10 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 			}
 		}
 		// always_execute 开启时，计划层跳过确认闸门，直接进入执行阶段。
-		// 这样可以与 Execute 节点的“写工具跳过确认”语义保持一致。
+		// 这样可以与 Execute 节点的"写工具跳过确认"语义保持一致。
 		if input.AlwaysExecute {
 			// 1. 自动执行模式不会经过 Confirm 卡片，因此这里先把完整计划明确展示给用户。
-			// 2. 摘要格式复用 Confirm 节点，保证“手动确认”和“自动执行”两条链路文案一致。
+			// 2. 摘要格式复用 Confirm 节点，保证"手动确认"和"自动执行"两条链路文案一致。
 			// 3. 推流后同步写入历史，确保后续 Execute 阶段的上下文也能看到这份计划。
 			summary := strings.TrimSpace(buildPlanSummary(decision.PlanSteps))
 			if summary != "" {
@@ -295,4 +258,13 @@ func buildPinnedPlanText(steps []newagentmodel.PlanStep) string {
 		lines = append(lines, line)
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n\n"))
+}
+
+// resolveThinkingMode 根据配置布尔值返回对应的 ThinkingMode。
+// 供 plan / execute / deliver 节点统一使用。
+func resolveThinkingMode(enabled bool) infrallm.ThinkingMode {
+	if enabled {
+		return infrallm.ThinkingModeEnabled
+	}
+	return infrallm.ThinkingModeDisabled
 }

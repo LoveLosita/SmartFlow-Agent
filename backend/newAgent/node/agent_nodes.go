@@ -120,6 +120,7 @@ func (n *AgentNodes) Plan(ctx context.Context, st *newagentmodel.AgentGraphState
 			ChunkEmitter:        st.EnsureChunkEmitter(),
 			ResumeNode:          "plan",
 			AlwaysExecute:       st.Request.AlwaysExecute,
+			ThinkingEnabled:     st.Deps.ThinkingPlan,
 		},
 	); err != nil {
 		return nil, err
@@ -230,6 +231,7 @@ func (n *AgentNodes) Execute(ctx context.Context, st *newagentmodel.AgentGraphSt
 			WriteSchedulePreview:  st.Deps.WriteSchedulePreview,
 			OriginalScheduleState: st.OriginalScheduleState,
 			AlwaysExecute:         st.Request.AlwaysExecute,
+			ThinkingEnabled:       st.Deps.ThinkingExecute,
 		},
 	); err != nil {
 		return nil, err
@@ -277,6 +279,7 @@ func (n *AgentNodes) Deliver(ctx context.Context, st *newagentmodel.AgentGraphSt
 			ConversationContext: st.EnsureConversationContext(),
 			Client:              st.Deps.ResolveDeliverClient(),
 			ChunkEmitter:        st.EnsureChunkEmitter(),
+			ThinkingEnabled:     st.Deps.ThinkingDeliver,
 		},
 	); err != nil {
 		return nil, err

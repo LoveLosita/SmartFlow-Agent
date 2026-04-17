@@ -104,14 +104,10 @@ func thinkingModeToBool(mode string) bool {
 
 // pickChatModel 根据请求选择模型。
 // 当前约定：
-// - strategist：策略模型；
-// - 其余值默认 worker（包含空字符串场景）。
+// - 旧链路已全面切到 newAgent graph，这里仅作为 runNormalChatFlow 回退时的模型选择入口；
+// - 统一返回 Pro 模型，旧 strategist 参数不再生效。
 func (s *AgentService) pickChatModel(requestModel string) (*ark.ChatModel, string) {
-	modelName := strings.TrimSpace(requestModel)
-	if strings.EqualFold(modelName, "strategist") {
-		return s.AIHub.Strategist, "strategist"
-	}
-	return s.AIHub.Worker, "worker"
+	return s.AIHub.Pro, "pro"
 }
 
 // PersistChatHistory 是 Agent 聊天链路唯一的“消息持久化入口”。

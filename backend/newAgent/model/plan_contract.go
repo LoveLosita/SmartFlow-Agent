@@ -52,7 +52,6 @@ type PlanDecision struct {
 	Action          PlanAction     `json:"action"`
 	Reason          string         `json:"reason,omitempty"`
 	Complexity      PlanComplexity `json:"complexity"`
-	NeedThinking    bool           `json:"need_thinking"`
 	PlanSteps       []PlanStep     `json:"plan_steps,omitempty"`
 	NeedsRoughBuild bool           `json:"needs_rough_build,omitempty"`
 	TaskClassIDs    []int          `json:"task_class_ids,omitempty"`

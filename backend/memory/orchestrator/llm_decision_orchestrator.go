@@ -62,10 +62,7 @@ func (o *LLMDecisionOrchestrator) Compare(
 		infrallm.GenerateOptions{
 			Temperature: 0.1,
 			MaxTokens:   defaultDecisionCompareMaxTokens,
-			Thinking:    infrallm.ThinkingModeDisabled,
-			Metadata: map[string]any{
-				"stage": "memory_decision_compare",
-			},
+			Thinking:    resolveMemoryThinkingMode(o.cfg.LLMThinking),
 		},
 	)
 	if err != nil {
@@ -127,4 +124,12 @@ func buildDecisionCompareUserPrompt(fact memorymodel.NormalizedFact, candidate m
 		fact.MemoryType, fact.Content,
 		candidate.MemoryType, candidate.Content,
 	)
+}
+
+// resolveMemoryThinkingMode 根据配置布尔值返回对应的 ThinkingMode。
+func resolveMemoryThinkingMode(enabled bool) infrallm.ThinkingMode {
+	if enabled {
+		return infrallm.ThinkingModeEnabled
+	}
+	return infrallm.ThinkingModeDisabled
 }

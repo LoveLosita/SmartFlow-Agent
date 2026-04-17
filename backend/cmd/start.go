@@ -83,7 +83,7 @@ func Start() {
 	memoryMetrics := memoryobserve.NewMetricsRegistry()
 	memoryModule := memory.NewModuleWithObserve(
 		db,
-		infrallm.WrapArkClient(aiHub.Worker),
+		infrallm.WrapArkClient(aiHub.Pro),
 		ragRuntime,
 		memoryCfg,
 		memory.ObserveDeps{

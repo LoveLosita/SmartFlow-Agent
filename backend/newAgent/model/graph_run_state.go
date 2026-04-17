@@ -72,6 +72,11 @@ type AgentGraphDeps struct {
 	RoughBuildFunc       RoughBuildFunc           // 按 Service 注入，粗排算法入口
 	WriteSchedulePreview WriteSchedulePreviewFunc // 按 Service 注入，排程预览写入入口
 
+	// thinking 开关：由 config.yaml 的 agent.thinking 段注入，各节点按需读取。
+	ThinkingPlan    bool
+	ThinkingExecute bool
+	ThinkingDeliver bool
+
 	// 记忆预取管线：由 service 层启动的后台检索 goroutine 写入。
 	// channel 携带已渲染的文本内容（非原始 ItemDTO），节点直接写入 pinned block。
 	MemoryFuture   chan string // buffered(1)，携带 renderMemoryPinnedContentByMode 的输出

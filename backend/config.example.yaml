@@ -67,16 +67,27 @@ time:
 
 # 智能体模型与规划参数。
 agent:
-  # 日常执行链路使用的主模型。
-  workerModel: "doubao-seed-2-0-code-preview-260215"
-  # 规划、拆解、策略推导使用的模型。
-  strategistModel: "doubao-seed-2-0-code-preview-260215"
+  # 轻量模型：标题生成等低复杂度、低延迟场景。
+  liteModel: "doubao-seed-2-0-code-preview-260215"
+  # 标准模型：Chat 路由/闲聊/深度回答/Deliver 总结。
+  proModel: "doubao-seed-2-0-code-preview-260215"
+  # 高能力模型：Plan 规划 + Execute ReAct 等深度推理场景。
+  maxModel: "doubao-seed-2-0-code-preview-260215"
   # 模型服务根路径。
   baseURL: "https://ark.cn-beijing.volces.com/api/v3"
   # 日内并发优化并发度，建议按模型配额调整。
   dailyRefineConcurrency: 7
   # 周级跨天配平额度上限，防止过度调整。
   weeklyAdjustBudget: 5
+  thinking:
+    # plan 节点（单轮深度规划），默认开 thinking。
+    plan: true
+    # execute 节点（ReAct 深度推理），默认开 thinking。
+    execute: true
+    # deliver 节点（交付总结），默认关 thinking。
+    deliver: false
+    # 记忆模块（决策比对 + 抽取），默认关 thinking。
+    memory: false
 
 # 通用 RAG 配置。
 rag:
