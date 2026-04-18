@@ -2,6 +2,7 @@ package agentsvc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -214,6 +215,12 @@ func (s *AgentService) runNewAgentGraph(
 
 	finalState, graphErr := newagentgraph.RunAgentGraph(requestCtx, runInput)
 	if graphErr != nil {
+		// 1. 客户端断连导致的 context 取消，属于正常场景，不推错误通道也不跑 fallback。
+		//    否则会刷 "错误通道已满" 日志噪音，且 fallback 在 ctx 已取消时也会失败。
+		if errors.Is(graphErr, context.Canceled) || requestCtx.Err() != nil {
+			log.Printf("[WARN] newAgent graph 因客户端断连中止 trace=%s chat=%s", traceID, chatID)
+			return
+		}
 		log.Printf("[ERROR] newAgent graph 执行失败 trace=%s chat=%s: %v", traceID, chatID, graphErr)
 		pushErrNonBlocking(errChan, fmt.Errorf("graph 执行失败: %w", graphErr))
 

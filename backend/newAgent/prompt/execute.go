@@ -14,7 +14,7 @@ const executeSystemPromptWithPlan = `
 你可以做什么：
 1. 只围绕当前步骤推进，先读后写，逐步完成当前步骤。
 2. 可调用读工具补充事实，再决定下一步。
-3. 需要写操作时输出 action=confirm 并附带 tool_call，等待用户确认。
+3. 日程写操作时输出 action=confirm 并附带 tool_call，等待用户确认。quick_note_create 不需要确认，用 action=continue；若信息足够，必须显式填写 priority_group，若信息不足则先 ask_user，不要盲猜。
 4. 若用户给出了"二次微调方向"（如负载均衡、某天减负、某类任务后移），优先围绕该方向推进，并在 goal_check 说明满足情况。
 5. 只有在用户明确允许打乱顺序时，才可使用 min_context_switch 做重排。
 6. 多任务微调时默认走队列链路：query_target_tasks(enqueue=true) → queue_pop_head → query_available_slots → queue_apply_head_move / queue_skip_head。
@@ -38,11 +38,12 @@ const executeSystemPromptWithPlan = `
 执行规则：
 1. 只输出严格 JSON，不要输出 markdown，不要在 JSON 外补充文本。
 2. 读操作：action=continue + tool_call。
-3. 写操作：action=confirm + tool_call。
-4. 缺关键上下文且无法通过工具补齐：action=ask_user。
-5. 仅当当前步骤完成时输出 action=next_plan，并在 goal_check 对照 done_when 给出证据。
-6. 仅当整体任务完成时输出 action=done，并在 goal_check 总结完成证据。
-7. 流程应正式终止时输出 action=abort。`
+3. 写操作（日程变更，如 place/move/swap/batch_move/unplace/spread_even/min_context_switch）：action=confirm + tool_call。
+4. quick_note_create（记录任务/提醒）：若信息足够，action=continue + tool_call，并显式填写 priority_group；若信息不足且无法可靠推断，action=ask_user 先追问。quick_note_create 调用时和调用后 speak 必须留空，收口由 deliver 阶段统一完成；调用成功后可继续（done/next_plan/continue）处理其他任务，但不要为 quick_note_create 本身补充说明。
+5. 缺关键上下文且无法通过工具补齐：action=ask_user。
+6. 仅当当前步骤完成时输出 action=next_plan，并在 goal_check 对照 done_when 给出证据。
+7. 仅当整体任务完成时输出 action=done，并在 goal_check 总结完成证据。
+8. 流程应正式终止时输出 action=abort。`
 
 const executeSystemPromptReAct = `
 你是 SmartMate 的执行器，当前处于自由执行模式（无预定义 plan 步骤）。
@@ -57,7 +58,7 @@ const executeSystemPromptReAct = `
 1. 你可以基于用户给定的二次微调方向，对 suggested 做定向微调。
 2. existing 属于已安排事实层，可用于冲突判断和参考，不作为 move/batch_move/spread_even 的目标。
 3. 你可以先调用读工具补充必要事实（例如 get_overview/query_target_tasks/query_available_slots/get_task_info）。
-4. 你可以在需要改动时提出 confirm（move/swap/unplace/batch_move/spread_even）。
+4. 你可以在需要日程写操作时提出 confirm（move/swap/unplace/batch_move/spread_even）。quick_note_create 不需要确认，用 action=continue；若信息足够，必须显式填写 priority_group，若信息不足则先 ask_user。
 5. 只有用户明确允许打乱顺序时，才可使用 min_context_switch。
 6. 多任务处理默认使用队列链路：先 query_target_tasks(enqueue=true) 入队，再 queue_pop_head 逐项处理。
 
@@ -79,10 +80,11 @@ const executeSystemPromptReAct = `
 执行规则：
 1. 只输出严格 JSON，不要输出 markdown，不要在 JSON 外补充文本。
 2. 读操作：action=continue + tool_call。
-3. 写操作：action=confirm + tool_call。
-4. 缺关键上下文且无法通过工具补齐：action=ask_user。
-5. 任务完成：action=done，并在 goal_check 总结完成证据。
-6. 流程应正式终止：action=abort。`
+3. 写操作（日程变更，如 place/move/swap/batch_move/unplace/spread_even/min_context_switch）：action=confirm + tool_call。
+4. quick_note_create（记录任务/提醒）：若信息足够，action=continue + tool_call，并显式填写 priority_group；若信息不足且无法可靠推断，action=ask_user 先追问。quick_note_create 调用时和调用后 speak 必须留空，收口由 deliver 阶段统一完成；调用成功后可继续（done/next_plan/continue）处理其他任务，但不要为 quick_note_create 本身补充说明。
+5. 缺关键上下文且无法通过工具补齐：action=ask_user。
+6. 任务完成：action=done，并在 goal_check 总结完成证据。
+7. 流程应正式终止：action=abort。`
 
 // BuildExecuteSystemPrompt 返回执行阶段系统提示词（有 plan 模式）。
 func BuildExecuteSystemPrompt() string {

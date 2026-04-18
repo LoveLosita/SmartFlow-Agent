@@ -215,7 +215,7 @@ func (n *QuickNoteNodes) Intent(ctx context.Context, st *agentmodel.QuickNoteSta
 	// 2.2 先尝试吃模型返回的 deadline_at，用于减少后续重复推理。
 	st.ExtractedDeadlineText = strings.TrimSpace(parsed.DeadlineAt)
 	if st.ExtractedDeadlineText != "" {
-		if deadline, deadlineErr := parseOptionalDeadlineWithNow(st.ExtractedDeadlineText, st.RequestNow); deadlineErr == nil {
+		if deadline, deadlineErr := ParseOptionalDeadlineWithNow(st.ExtractedDeadlineText, st.RequestNow); deadlineErr == nil {
 			st.ExtractedDeadline = deadline
 		}
 	}
@@ -296,7 +296,7 @@ func (n *QuickNoteNodes) Priority(ctx context.Context, st *agentmodel.QuickNoteS
 	st.ExtractedPriority = parsed.PriorityGroup
 	st.ExtractedPriorityReason = strings.TrimSpace(parsed.Reason)
 	if strings.TrimSpace(parsed.UrgencyThresholdAt) != "" {
-		urgencyThreshold, thresholdErr := parseOptionalDeadlineWithNow(strings.TrimSpace(parsed.UrgencyThresholdAt), st.RequestNow)
+		urgencyThreshold, thresholdErr := ParseOptionalDeadlineWithNow(strings.TrimSpace(parsed.UrgencyThresholdAt), st.RequestNow)
 		if thresholdErr == nil {
 			st.ExtractedUrgencyThreshold = normalizeUrgencyThreshold(urgencyThreshold, st.ExtractedDeadline)
 		}
@@ -328,11 +328,11 @@ func (n *QuickNoteNodes) Persist(ctx context.Context, st *agentmodel.QuickNoteSt
 
 	deadlineText := ""
 	if st.ExtractedDeadline != nil {
-		deadlineText = st.ExtractedDeadline.In(quickNoteLocation()).Format(time.RFC3339)
+		deadlineText = st.ExtractedDeadline.In(QuickNoteLocation()).Format(time.RFC3339)
 	}
 	urgencyThresholdText := ""
 	if st.ExtractedUrgencyThreshold != nil {
-		urgencyThresholdText = st.ExtractedUrgencyThreshold.In(quickNoteLocation()).Format(time.RFC3339)
+		urgencyThresholdText = st.ExtractedUrgencyThreshold.In(QuickNoteLocation()).Format(time.RFC3339)
 	}
 
 	toolInput := QuickNoteCreateTaskToolInput{
@@ -430,12 +430,12 @@ func planQuickNoteInSingleCall(ctx context.Context, chatModel *ark.ChatModel, no
 		}
 	}
 	if result.DeadlineText != "" {
-		if deadline, deadlineErr := parseOptionalDeadlineWithNow(result.DeadlineText, now); deadlineErr == nil {
+		if deadline, deadlineErr := ParseOptionalDeadlineWithNow(result.DeadlineText, now); deadlineErr == nil {
 			result.Deadline = deadline
 		}
 	}
 	if result.UrgencyThresholdText != "" {
-		if urgencyThreshold, thresholdErr := parseOptionalDeadlineWithNow(result.UrgencyThresholdText, now); thresholdErr == nil {
+		if urgencyThreshold, thresholdErr := ParseOptionalDeadlineWithNow(result.UrgencyThresholdText, now); thresholdErr == nil {
 			result.UrgencyThreshold = normalizeUrgencyThreshold(urgencyThreshold, result.Deadline)
 		}
 	}

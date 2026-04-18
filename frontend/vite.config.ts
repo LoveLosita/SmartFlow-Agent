@@ -19,6 +19,14 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:8080',
         changeOrigin: true,
+        // SSE 流必须禁用缓冲，否则 Vite proxy 会攒满 buffer 再转发，
+        // 导致前端长时间收不到数据被判定为连接中断。
+        configure: (proxy) => {
+          proxy.on('proxyRes', (proxyRes) => {
+            proxyRes.headers['x-accel-buffering'] = 'no'
+            proxyRes.headers['cache-control'] = 'no-cache'
+          })
+        },
       },
     },
   },

@@ -295,6 +295,25 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 	// speak 后处理：补列表序号换行 + 末尾加 \n 防止连续 speak 在前端粘连。
 	decision.Speak = normalizeSpeak(decision.Speak) // 末尾已含 \n
 
+	// 非写工具的 confirm 动作自动降级为 continue。
+	// 调用目的：quick_note_create 等非写工具不应走确认卡片流程；
+	// 即使 LLM 误输出 action=confirm，也在此处强制修正，
+	// 确保 speak 正常推流和持久化，不会因 confirm 卡片跳过 persistVisibleAssistantMessage。
+	if decision.Action == newagentmodel.ExecuteActionConfirm &&
+		decision.ToolCall != nil &&
+		input.ToolRegistry != nil &&
+		!input.ToolRegistry.IsWriteTool(decision.ToolCall.Name) {
+		decision.Action = newagentmodel.ExecuteActionContinue
+	}
+
+	// 随口记工具 speak 清空：
+	// 1. quick_note_create 是轻量记录操作，不需要 execute 阶段向用户输出任何文案；
+	// 2. 收口统一由 deliver 阶段完成，避免 execute + deliver 重复输出导致废话；
+	// 3. 后端强制清空兜底，即使 LLM 误填了 speak 也不会推流到前端。
+	if decision.ToolCall != nil && strings.EqualFold(decision.ToolCall.Name, "quick_note_create") {
+		decision.Speak = ""
+	}
+
 	// 自省校验：next_plan / done 必须附带 goal_check，否则不推进，追加修正让 LLM 重试。
 	if decision.Action == newagentmodel.ExecuteActionNextPlan ||
 		decision.Action == newagentmodel.ExecuteActionDone {
@@ -1364,8 +1383,8 @@ func executeToolCall(
 	if registry == nil {
 		return fmt.Errorf("工具注册表未注入")
 	}
-	if scheduleState == nil {
-		return fmt.Errorf("日程状态未加载，无法执行工具")
+	if scheduleState == nil && registry.RequiresScheduleState(toolName) {
+		return fmt.Errorf("日程状态未加载，无法执行工具 %q", toolName)
 	}
 	if !registry.HasTool(toolName) {
 		// LLM 拼错或编造了工具名，走 correction 机制给重试机会，而非直接 fatal。
@@ -1410,6 +1429,13 @@ func executeToolCall(
 	}
 
 	beforeDigest := summarizeScheduleStateForDebug(scheduleState)
+	// 调用目的：为不依赖 ScheduleState 的工具注入用户身份，工具层通过 args["_user_id"] 提取。
+	if !registry.RequiresScheduleState(toolName) {
+		if toolCall.Arguments == nil {
+			toolCall.Arguments = make(map[string]any)
+		}
+		toolCall.Arguments["_user_id"] = flowState.UserID
+	}
 	result := registry.Execute(scheduleState, toolName, toolCall.Arguments)
 	afterDigest := summarizeScheduleStateForDebug(scheduleState)
 	log.Printf(
@@ -1514,6 +1540,13 @@ func executePendingTool(
 
 	// 4. 执行工具。
 	beforeDigest := summarizeScheduleStateForDebug(scheduleState)
+	// 调用目的：为不依赖 ScheduleState 的工具注入用户身份，工具层通过 args["_user_id"] 提取。
+	if !registry.RequiresScheduleState(pending.ToolName) {
+		if args == nil {
+			args = make(map[string]any)
+		}
+		args["_user_id"] = flowState.UserID
+	}
 	result := registry.Execute(scheduleState, pending.ToolName, args)
 	afterDigest := summarizeScheduleStateForDebug(scheduleState)
 	log.Printf(

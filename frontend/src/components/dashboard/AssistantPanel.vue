@@ -1223,12 +1223,15 @@ function processSseBlock(block: string, assistantMessage: AssistantMessage) {
 
   if (
     typeof delta?.reasoning_content === 'string' &&
-    delta.reasoning_content &&
-    !assistantMessage.content.trim()
+    delta.reasoning_content
   ) {
-    markReasoningStart(assistantMessage)
+    // 正文回流后仍允许追加 reasoning（工具调用摘要、阶段状态等），
+    // 但不再切换面板状态，避免 UI 闪烁。
+    if (!assistantMessage.content.trim()) {
+      markReasoningStart(assistantMessage)
+      thinkingMessageMap[assistantMessage.id] = true
+    }
     assistantMessage.reasoning = `${assistantMessage.reasoning || ''}${delta.reasoning_content}`
-    thinkingMessageMap[assistantMessage.id] = true
   }
 
   if (typeof delta?.content === 'string' && delta.content) {
@@ -1377,8 +1380,10 @@ async function sendMessage(preset?: string) {
     if (planningTaskClassIdsForRequest.length > 0) {
       pendingPlanningTaskClassIds.value = []
     }
+    // 流式成功后不重新加载历史：流式数据就是当前会话的权威来源，
+    // 过早 reload 会因 persistVisibleMessage 尚未落库导致 merge 产生重复/丢失。
+    // 历史数据在下次切换会话或刷新页面时自然加载。
     await Promise.allSettled([
-      loadConversationMessages(actualConversationId, true),
       loadConversationContextStats(actualConversationId, true),
     ])
   } catch (error) {

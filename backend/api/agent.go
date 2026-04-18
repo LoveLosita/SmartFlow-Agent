@@ -65,6 +65,11 @@ func (api *AgentHandler) ChatAgent(c *gin.Context) {
 	outChan, errChan := api.svc.AgentChat(c.Request.Context(), req.Message, req.Thinking, req.Model, userID, conversationID, req.Extra)
 
 	// 4) 转发 SSE 流
+	// 4.0 心跳保活：LLM thinking 静默期可达 10+ 秒，Vite dev proxy 会判 idle 切断连接。
+	// 每 5 秒发送 SSE 标准注释行 ": ping\n\n"，前端 JSON.parse 失败后丢弃，不污染 UI。
+	heartbeat := time.NewTicker(5 * time.Second)
+	defer heartbeat.Stop()
+
 	c.Stream(func(w io.Writer) bool {
 		select {
 		case err, ok := <-errChan:
@@ -97,6 +102,11 @@ func (api *AgentHandler) ChatAgent(c *gin.Context) {
 			return true
 		case <-c.Request.Context().Done():
 			return false
+		// 心跳分支：LLM thinking 静默期每 5 秒推送 SSE 注释行，防止代理判 idle 断连。
+		case <-heartbeat.C:
+			io.WriteString(w, ": ping\n\n")
+			c.Writer.(http.Flusher).Flush()
+			return true
 		}
 	})
 }

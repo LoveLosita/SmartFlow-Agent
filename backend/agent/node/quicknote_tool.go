@@ -138,11 +138,11 @@ func BuildQuickNoteToolBundle(ctx context.Context, deps QuickNoteToolDeps) (*Qui
 				return nil, fmt.Errorf("priority_group=%d 非法，必须在 1~4", input.PriorityGroup)
 			}
 
-			deadline, err := parseOptionalDeadline(input.DeadlineAt)
+			deadline, err := ParseOptionalDeadline(input.DeadlineAt)
 			if err != nil {
 				return nil, err
 			}
-			urgencyThresholdAt, err := parseOptionalDeadline(input.UrgencyThresholdAt)
+			urgencyThresholdAt, err := ParseOptionalDeadline(input.UrgencyThresholdAt)
 			if err != nil {
 				return nil, err
 			}
@@ -180,9 +180,9 @@ func BuildQuickNoteToolBundle(ctx context.Context, deps QuickNoteToolDeps) (*Qui
 
 			deadlineStr := ""
 			if result.DeadlineAt != nil {
-				deadlineStr = result.DeadlineAt.In(quickNoteLocation()).Format(time.RFC3339)
+				deadlineStr = result.DeadlineAt.In(QuickNoteLocation()).Format(time.RFC3339)
 			} else if deadline != nil {
-				deadlineStr = deadline.In(quickNoteLocation()).Format(time.RFC3339)
+				deadlineStr = deadline.In(QuickNoteLocation()).Format(time.RFC3339)
 			}
 
 			return &QuickNoteCreateTaskToolOutput{
@@ -219,8 +219,9 @@ func GetInvokableToolByName(bundle *QuickNoteToolBundle, name string) (tool.Invo
 	return getInvokableToolByName(bundle.Tools, bundle.ToolInfos, name)
 }
 
-// parseOptionalDeadline 解析工具输入中的可选截止时间。
-func parseOptionalDeadline(raw string) (*time.Time, error) {
+// ParseOptionalDeadline 解析工具输入中的可选截止时间。
+// 调用目的：新链路 quick_note_create 工具复用旧链路成熟的时间解析能力，支持中文相对时间。
+func ParseOptionalDeadline(raw string) (*time.Time, error) {
 	value := normalizeDeadlineInput(raw)
 	if value == "" {
 		return nil, nil
@@ -239,8 +240,9 @@ func parseOptionalDeadline(raw string) (*time.Time, error) {
 	return deadline, nil
 }
 
-// parseOptionalDeadlineWithNow 在给定时间基准下解析 deadline。
-func parseOptionalDeadlineWithNow(raw string, now time.Time) (*time.Time, error) {
+// ParseOptionalDeadlineWithNow 在给定时间基准下解析 deadline。
+// 调用目的：旧链路 intent/priority 节点在已知 now 基准下解析时间，供新链路复用。
+func ParseOptionalDeadlineWithNow(raw string, now time.Time) (*time.Time, error) {
 	value := normalizeDeadlineInput(raw)
 	if value == "" {
 		return nil, nil
@@ -285,7 +287,7 @@ func parseOptionalDeadlineFromText(value string, now time.Time) (*time.Time, boo
 		return nil, false, nil
 	}
 
-	loc := quickNoteLocation()
+	loc := QuickNoteLocation()
 	now = now.In(loc)
 	hasHint := hasDeadlineHint(value)
 
@@ -568,7 +570,9 @@ func resolveWeekdayDate(now time.Time, prefix string, target time.Weekday) time.
 	}
 }
 
-func quickNoteLocation() *time.Location {
+// QuickNoteLocation 返回随口记使用的时区（Asia/Shanghai）。
+// 调用目的：新链路 quick_note_create 工具格式化时间输出时复用。
+func QuickNoteLocation() *time.Location {
 	loc, err := time.LoadLocation(agentmodel.QuickNoteTimezoneName)
 	if err != nil {
 		return time.Local
@@ -581,5 +585,5 @@ func quickNoteNowToMinute() time.Time {
 }
 
 func formatQuickNoteTimeToMinute(t time.Time) string {
-	return agentshared.FormatMinute(t.In(quickNoteLocation()))
+	return agentshared.FormatMinute(t.In(QuickNoteLocation()))
 }

@@ -31,6 +31,9 @@ type DefaultRegistryDeps struct {
 
 	// WebSearchProvider Web 搜索供应商。为 nil 时 web_search / web_fetch 返回"暂未启用"，不阻断主流程。
 	WebSearchProvider web.SearchProvider
+
+	// QuickNote 随口记工具依赖。CreateTask 为 nil 时 quick_note_create 返回错误提示，不阻断主流程。
+	QuickNote QuickNoteDeps
 }
 
 // ToolRegistry 管理工具注册、查找与执行。
@@ -100,6 +103,12 @@ func (r *ToolRegistry) IsWriteTool(name string) bool {
 	return writeTools[name]
 }
 
+// RequiresScheduleState 判断工具是否依赖 ScheduleState。
+// 调用目的：execute 节点据此决定是否允许在 ScheduleState 为 nil 时调用该工具。
+func (r *ToolRegistry) RequiresScheduleState(name string) bool {
+	return !scheduleFreeTools[name]
+}
+
 // ==================== 写工具集合 ====================
 
 var writeTools = map[string]bool{
@@ -111,6 +120,15 @@ var writeTools = map[string]bool{
 	"spread_even":           true,
 	"min_context_switch":    true,
 	"unplace":               true,
+}
+
+// ==================== 不依赖 ScheduleState 的工具集合 ====================
+// 调用目的：这些工具不需要日程状态即可执行，execute 节点在 ScheduleState 为 nil 时允许调用。
+
+var scheduleFreeTools = map[string]bool{
+	"quick_note_create": true,
+	"web_search":        true,
+	"web_fetch":         true,
 }
 
 // ==================== 默认注册表 ====================
@@ -309,6 +327,18 @@ func NewDefaultRegistryWithDeps(deps DefaultRegistryDeps) *ToolRegistry {
 			return schedule.Unplace(state, taskID)
 		},
 	)
+
+	// --- 随口记工具 ---
+	// 调用目的：将"帮我记一下明天开会"等随口任务请求直接写入数据库，无需 ScheduleState。
+	// 不加入 writeTools：随口记是用户明确指令，不需要 confirm 节点二次确认。
+	if deps.QuickNote.CreateTask != nil {
+		quickNoteHandler := NewQuickNoteToolHandler(deps.QuickNote)
+		r.Register("quick_note_create",
+			"记录一条任务/提醒/待办事项到用户的任务列表。支持中文相对时间（如“明天下午3点”、“下周一”）。title 必填。记录成功后，回复时应包含一句与任务内容相关的轻松跟进话术（不超过30字），类似朋友间的友好调侃。",
+			`{"name":"quick_note_create","parameters":{"title":{"type":"string","required":true,"description":"任务标题，简洁明确"},"deadline_at":{"type":"string","description":"可选截止时间，支持 yyyy-MM-dd HH:mm 或中文相对时间（明天/下周一/后天等）"},"priority_group":{"type":"int","description":"优先级(1重要且紧急,2重要不紧急,3简单不重要,4复杂不重要)；信息足够时请显式填写，不确定时可不填，由工具层自动推断"}}}`,
+			quickNoteHandler,
+		)
+	}
 
 	// --- Web 搜索读工具 ---
 	// 1. provider 为 nil 时 handler 返回"暂未启用"的 observation，不会阻断主流程；

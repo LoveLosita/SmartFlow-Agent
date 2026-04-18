@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/LoveLosita/smartflow/backend/api"
 	"github.com/LoveLosita/smartflow/backend/dao"
@@ -16,6 +17,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/memory"
 	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	"github.com/LoveLosita/smartflow/backend/middleware"
+	"github.com/LoveLosita/smartflow/backend/model"
 	newagentconv "github.com/LoveLosita/smartflow/backend/newAgent/conv"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 	"github.com/LoveLosita/smartflow/backend/newAgent/tools/web"
@@ -179,6 +181,22 @@ func Start() {
 	agentService.SetToolRegistry(newagenttools.NewDefaultRegistryWithDeps(newagenttools.DefaultRegistryDeps{
 		RAGRuntime:        ragRuntime,
 		WebSearchProvider: webSearchProvider,
+		QuickNote: newagenttools.QuickNoteDeps{
+			CreateTask: func(userID int, title string, priorityGroup int, deadlineAt *time.Time) (int, error) {
+				// 调用目的：随口记工具通过此闭包写库，捕获 start 层 taskRepo 实例。
+				created, err := taskRepo.AddTask(&model.Task{
+					UserID:      userID,
+					Title:       title,
+					Priority:    priorityGroup,
+					IsCompleted: false,
+					DeadlineAt:  deadlineAt,
+				})
+				if err != nil {
+					return 0, err
+				}
+				return created.ID, nil
+			},
+		},
 	}))
 	agentService.SetScheduleProvider(newagentconv.NewScheduleProvider(scheduleRepo, taskClassRepo))
 	agentService.SetSchedulePersistor(newagentconv.NewSchedulePersistorAdapter(manager))
