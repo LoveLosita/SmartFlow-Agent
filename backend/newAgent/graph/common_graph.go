@@ -298,7 +298,7 @@ func branchAfterExecute(_ context.Context, st *newagentmodel.AgentGraphState) (s
 	// 3. 若此处直接按 RoundUsed>=MaxRounds 跳 Deliver，会绕过 Execute 内的 Exhaust 写入，
 	//    导致 deliver 收口和后续预览落盘语义不一致。
 	if flowState.Phase == newagentmodel.PhaseDone {
-		if flowState.TerminalStatus() == newagentmodel.FlowTerminalStatusCompleted && !flowState.AllowReorder {
+		if flowState.TerminalStatus() == newagentmodel.FlowTerminalStatusCompleted && !flowState.AllowReorder && flowState.HasScheduleWriteOps {
 			return NodeOrderGuard, nil
 		}
 		return NodeDeliver, nil

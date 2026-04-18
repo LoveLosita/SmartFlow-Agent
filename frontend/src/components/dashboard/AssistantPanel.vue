@@ -99,6 +99,8 @@ const selectedThinkingMode = ref<ThinkingModeType>('auto')
 const messageInput = ref('')
 const historyPanelWidth = ref(props.initialHistoryWidth)
 const activeStreamingMessageId = ref('')
+// 流式请求的 AbortController：发送时创建，流结束或用户点击停止时 abort。
+const streamAbortController = ref<AbortController | null>(null)
 const editingUserMessageId = ref('')
 const editingUserMessageDraft = ref('')
 const pendingPlanningTaskClassIds = ref<number[]>([])
@@ -1124,7 +1126,7 @@ function handlePlanningSelectionApplied(taskClassIds: number[]) {
 // 1. 只负责把请求发出去并返回原始 Response，不在这里解析 SSE 数据。
 // 2. 401 时优先尝试用 refresh token 换新 access token，并只重试一次，避免死循环。
 // 3. 若最终仍未通过鉴权，则清空本地登录态，让页面统一回到重新登录的安全状态。
-async function fetchChatStream(body: ChatStreamRequest, attempt = 0): Promise<Response> {
+async function fetchChatStream(body: ChatStreamRequest, signal?: AbortSignal, attempt = 0): Promise<Response> {
   const response = await fetch('/api/v1/agent/chat', {
     method: 'POST',
     headers: {
@@ -1132,6 +1134,7 @@ async function fetchChatStream(body: ChatStreamRequest, attempt = 0): Promise<Re
       Authorization: `Bearer ${authStore.accessToken}`,
     },
     body: JSON.stringify(body),
+    signal,
   })
 
   if (response.status === 401 && attempt === 0 && authStore.refreshToken) {
@@ -1139,7 +1142,7 @@ async function fetchChatStream(body: ChatStreamRequest, attempt = 0): Promise<Re
       old_refresh_token: authStore.refreshToken,
     })
     authStore.applyTokenPair(tokens)
-    return fetchChatStream(body, attempt + 1)
+    return fetchChatStream(body, signal, attempt + 1)
   }
 
   if (response.status === 401) {
@@ -1262,6 +1265,7 @@ async function streamAssistantReply(
   createdAt: string,
   refreshPreview: boolean,
   requestExtra?: ChatRequestExtra,
+  signal?: AbortSignal,
 ) : Promise<string> {
   const response = await fetchChatStream({
     conversation_id: isDraftConversationId(draftConversationId) ? undefined : draftConversationId,
@@ -1269,7 +1273,7 @@ async function streamAssistantReply(
     model: 'worker',
     thinking: selectedThinkingMode.value,
     extra: requestExtra,
-  })
+  }, signal)
 
   const responseConversationId = response.headers.get('X-Conversation-ID')?.trim()
   const actualConversationId = responseConversationId || draftConversationId
@@ -1319,7 +1323,14 @@ async function streamAssistantReply(
   return actualConversationId
 }
 
-// sendMessage 负责执行“本地先上屏，再异步接流”的发送链路。
+// stopStreaming 负责中断正在进行的 SSE 流式请求。
+// 职责边界：只调用 AbortController.abort()，不修改 chatLoading 等状态——
+// 这些状态由 sendMessage 的 finally 块统一清理，避免多处重置导致状态不一致。
+function stopStreaming() {
+  streamAbortController.value?.abort()
+}
+
+// sendMessage 负责执行”本地先上屏，再异步接流”的发送链路。
 // 职责边界：
 // 1. 先创建用户消息和 assistant 占位消息，让发送动作立即反馈到界面，等待建连过程无感化。
 // 2. 若当前是新会话，则先使用 draft 会话承接本地状态，等响应头返回真实 conversation_id 后再整体迁移。
@@ -1333,12 +1344,10 @@ async function sendMessage(preset?: string) {
   chatLoading.value = true
 
   const planningTaskClassIdsForRequest = [...pendingPlanningTaskClassIds.value]
-  const shouldStartFreshPlanningConversation = planningTaskClassIdsForRequest.length > 0
-  const draftConversationId = shouldStartFreshPlanningConversation
-    ? createDraftConversationId()
-    : (selectedConversationId.value || createDraftConversationId())
+  // 智能编排不再强制新开对话：直接沿用当前会话，在原地发送编排请求。
+  const draftConversationId = selectedConversationId.value || createDraftConversationId()
 
-  if (!selectedConversationId.value || shouldStartFreshPlanningConversation) {
+  if (!selectedConversationId.value) {
     selectedConversationId.value = draftConversationId
   }
   ensureConversationBucket(draftConversationId)
@@ -1368,6 +1377,10 @@ async function sendMessage(preset?: string) {
   prependConversationPreview(draftConversationId, text, now)
   scheduleScrollMessagesToBottom(false, true)
 
+  // 1. 创建 AbortController：用户点击停止按钮时可通过 controller.abort() 中断 fetch 请求。
+  const controller = new AbortController()
+  streamAbortController.value = controller
+
   try {
     const actualConversationId = await streamAssistantReply(
       draftConversationId,
@@ -1376,6 +1389,7 @@ async function sendMessage(preset?: string) {
       now,
       true,
       buildChatRequestExtra(planningTaskClassIdsForRequest),
+      controller.signal,
     )
     if (planningTaskClassIdsForRequest.length > 0) {
       pendingPlanningTaskClassIds.value = []
@@ -1387,12 +1401,20 @@ async function sendMessage(preset?: string) {
       loadConversationContextStats(actualConversationId, true),
     ])
   } catch (error) {
-    if (!assistantMessage.content.trim()) {
-      assistantMessage.content = '本次回复已中断，请稍后重试。'
+    // 用户主动中断：不弹出错误提示，只给占位消息补一段中断文案。
+    if (controller.signal.aborted) {
+      if (!assistantMessage.content.trim()) {
+        assistantMessage.content = '本次回复已手动停止。'
+      }
+    } else {
+      if (!assistantMessage.content.trim()) {
+        assistantMessage.content = '本次回复已中断，请稍后重试。'
+      }
+      ElMessage.error(error instanceof Error ? error.message : '发送消息失败，请稍后重试')
     }
     reasoningCollapsedMap[assistantMessage.id] = false
-    ElMessage.error(error instanceof Error ? error.message : '发送消息失败，请稍后重试')
   } finally {
+    streamAbortController.value = null
     activeStreamingMessageId.value = ''
     chatLoading.value = false
   }
@@ -1779,12 +1801,29 @@ onBeforeUnmount(() => {
                     >
                   </label>
 
+                  <!-- 流式期间显示停止按钮，其余时刻显示发送按钮 -->
                   <button
+                    v-if="chatLoading"
+                    type="button"
+                    class="_7436101 bcc55ca1 _52c986b ds-icon-button ds-icon-button--l ds-icon-button--sizing-container"
+                    aria-label="停止生成"
+                    @click="stopStreaming()"
+                  >
+                    <div class="ds-icon-button__hover-bg" />
+                    <div class="ds-icon">
+                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M2 4.88C2 3.68009 2 3.08013 2.30557 2.65954C2.40426 2.52371 2.52371 2.40426 2.65954 2.30557C3.08013 2 3.68009 2 4.88 2H11.12C12.3199 2 12.9199 2 13.3405 2.30557C13.4763 2.40426 13.5957 2.52371 13.6944 2.65954C14 3.08013 14 3.68009 14 4.88V11.12C14 12.3199 14 12.9199 13.6944 13.3405C13.5957 13.4763 13.4763 13.5957 13.3405 13.6944C12.9199 14 12.3199 14 11.12 14H4.88C3.68009 14 3.08013 14 2.65954 13.6944C2.52371 13.5957 2.40426 13.4763 2.30557 13.3405C2 12.9199 2 12.3199 2 11.12V4.88Z" fill="currentColor" />
+                      </svg>
+                    </div>
+                    <div class="ds-focus-ring" style="--ds-focus-ring-offset: -2px;" />
+                  </button>
+                  <button
+                    v-else
                     type="button"
                     class="_7436101 bcc55ca1 ds-icon-button ds-icon-button--l ds-icon-button--sizing-container"
-                    :class="{ 'ds-icon-button--disabled': chatLoading || !messageInput.trim() }"
-                    :disabled="chatLoading || !messageInput.trim()"
-                    :aria-disabled="chatLoading || !messageInput.trim()"
+                    :class="{ 'ds-icon-button--disabled': !messageInput.trim() }"
+                    :disabled="!messageInput.trim()"
+                    :aria-disabled="!messageInput.trim()"
                     @click="sendMessage()"
                   >
                     <div class="ds-icon-button__hover-bg" />
@@ -2318,6 +2357,7 @@ onBeforeUnmount(() => {
 
 .chat-message__assistant-flow {
   max-width: min(92%, 860px);
+  margin: 0 auto;
   display: grid;
   gap: 12px;
 }
@@ -2655,6 +2695,10 @@ onBeforeUnmount(() => {
 .assistant-actions {
   flex-wrap: wrap;
   gap: 8px;
+  /* grid item 需要 width:100% 撑满，再由 max-width 限宽 + margin 居中 */
+  width: 100%;
+  max-width: min(92%, calc(860px + 44px));
+  margin: 0 auto;
   padding: 0 22px 12px;
 }
 
@@ -2687,6 +2731,10 @@ onBeforeUnmount(() => {
 .assistant-composer-ds {
   --dsw-alias-brand-text: #3357c2;
   --dsw-alias-label-primary: #1f2430;
+  /* grid item 需要 width:100% 撑满，再由 max-width 限宽 + margin 居中 */
+  width: 100%;
+  max-width: min(92%, calc(860px + 44px));
+  margin: 0 auto;
   padding: 8px 22px 18px;
   border-top: 1px solid rgba(16, 24, 40, 0.05);
 }
@@ -2880,6 +2928,18 @@ onBeforeUnmount(() => {
 ._7436101.bcc55ca1:not(.ds-icon-button--disabled):hover {
   background: #244ce0;
   border-color: #244ce0;
+}
+
+/* 停止按钮：流式期间替代发送按钮，hover 态加深底色提示可点击 */
+._7436101.bcc55ca1._52c986b {
+  color: #ffffff;
+  background: #dc2626;
+  border-color: #dc2626;
+}
+
+._7436101.bcc55ca1._52c986b:hover {
+  background: #b91c1c;
+  border-color: #b91c1c;
 }
 
 .ds-icon-button--disabled {

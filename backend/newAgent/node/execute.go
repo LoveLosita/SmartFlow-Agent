@@ -1452,6 +1452,11 @@ func executeToolCall(
 	// 3. 以标准 assistant+tool 消息对写回历史，避免消息链断裂。
 	appendToolCallResultHistory(conversationContext, toolName, toolCall.Arguments, result)
 
+	// 3.1 标记本轮执行过日程写工具，graph 分支据此决定是否走 order_guard。
+	if registry.IsWriteTool(toolName) {
+		flowState.HasScheduleWriteOps = true
+	}
+
 	// 4. 写工具实时预览：每次写工具执行后都尝试刷新 Redis 预览，确保前端可见“最新操作结果”。
 	//
 	// 步骤化说明：
@@ -1562,6 +1567,11 @@ func executePendingTool(
 
 	// 5. 将工具调用和结果写回历史，维持标准 tool_call 配对格式。
 	appendToolCallResultHistory(conversationContext, pending.ToolName, args, result)
+
+	// 5.1 标记本轮执行过日程写工具，graph 分支据此决定是否走 order_guard。
+	if registry.IsWriteTool(pending.ToolName) {
+		flowState.HasScheduleWriteOps = true
+	}
 
 	// 5. 写工具实时预览：confirm accept 后真实执行写工具时，立即刷新一次预览缓存。
 	tryWritePreviewAfterWriteTool(ctx, flowState, scheduleState, registry, pending.ToolName, writePreview)

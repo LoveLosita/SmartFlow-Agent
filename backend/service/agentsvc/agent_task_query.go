@@ -38,13 +38,13 @@ func (s *AgentService) runTaskQueryFlow(
 		Deps: agentnode.TaskQueryToolDeps{
 			QueryTasks: func(ctx context.Context, req agentnode.TaskQueryRequest) ([]agentnode.TaskQueryTaskRecord, error) {
 				req.UserID = userID
-				return s.queryTasksForAgent(ctx, req)
+				return s.QueryTasksForTool(ctx, req)
 			},
 		},
 	})
 }
 
-func (s *AgentService) queryTasksForAgent(ctx context.Context, req agentnode.TaskQueryRequest) ([]agentnode.TaskQueryTaskRecord, error) {
+func (s *AgentService) QueryTasksForTool(ctx context.Context, req agentnode.TaskQueryRequest) ([]agentnode.TaskQueryTaskRecord, error) {
 	_ = ctx
 	if req.UserID <= 0 {
 		return nil, errors.New("invalid user_id in task query")

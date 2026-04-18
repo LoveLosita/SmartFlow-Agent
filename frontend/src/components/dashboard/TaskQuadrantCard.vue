@@ -18,7 +18,8 @@ const emit = defineEmits<{
   toggle: [task: TaskItem]
 }>()
 
-const visibleTasks = computed(() => props.tasks.slice(0, 4))
+// 不再硬截断，全部展示；超出的部分通过 quadrant-list 的 max-height + overflow-y 滚动查看。
+const visibleTasks = computed(() => props.tasks)
 </script>
 
 <template>
@@ -125,6 +126,29 @@ const visibleTasks = computed(() => props.tasks.slice(0, 4))
 .quadrant-list {
   display: grid;
   gap: 12px;
+  /* 卡片 header 约 70px，列表区域最多约 320px（约 4 条可见），超出部分滚动 */
+  max-height: 320px;
+  overflow-y: auto;
+  /* 滚动条样式：轨道透明，滑块圆角淡色，hover 加深 */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.32) transparent;
+}
+
+.quadrant-list::-webkit-scrollbar {
+  width: 5px;
+}
+
+.quadrant-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.quadrant-list::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.32);
+}
+
+.quadrant-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.52);
 }
 
 .quadrant-item,

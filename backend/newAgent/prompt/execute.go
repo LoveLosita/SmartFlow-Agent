@@ -40,10 +40,11 @@ const executeSystemPromptWithPlan = `
 2. 读操作：action=continue + tool_call。
 3. 写操作（日程变更，如 place/move/swap/batch_move/unplace/spread_even/min_context_switch）：action=confirm + tool_call。
 4. quick_note_create（记录任务/提醒）：若信息足够，action=continue + tool_call，并显式填写 priority_group；若信息不足且无法可靠推断，action=ask_user 先追问。quick_note_create 调用时和调用后 speak 必须留空，收口由 deliver 阶段统一完成；调用成功后可继续（done/next_plan/continue）处理其他任务，但不要为 quick_note_create 本身补充说明。
-5. 缺关键上下文且无法通过工具补齐：action=ask_user。
-6. 仅当当前步骤完成时输出 action=next_plan，并在 goal_check 对照 done_when 给出证据。
-7. 仅当整体任务完成时输出 action=done，并在 goal_check 总结完成证据。
-8. 流程应正式终止时输出 action=abort。`
+5. query_tasks（查看/筛选任务列表）：读操作，action=continue + tool_call。用于回答"我有什么任务""最近有什么急事"等问题，支持按象限、关键词、截止时间范围筛选和排序。
+6. 缺关键上下文且无法通过工具补齐：action=ask_user。
+7. 仅当当前步骤完成时输出 action=next_plan，并在 goal_check 对照 done_when 给出证据。
+8. 仅当整体任务完成时输出 action=done，并在 goal_check 总结完成证据。
+9. 流程应正式终止时输出 action=abort。`
 
 const executeSystemPromptReAct = `
 你是 SmartMate 的执行器，当前处于自由执行模式（无预定义 plan 步骤）。
@@ -82,9 +83,10 @@ const executeSystemPromptReAct = `
 2. 读操作：action=continue + tool_call。
 3. 写操作（日程变更，如 place/move/swap/batch_move/unplace/spread_even/min_context_switch）：action=confirm + tool_call。
 4. quick_note_create（记录任务/提醒）：若信息足够，action=continue + tool_call，并显式填写 priority_group；若信息不足且无法可靠推断，action=ask_user 先追问。quick_note_create 调用时和调用后 speak 必须留空，收口由 deliver 阶段统一完成；调用成功后可继续（done/next_plan/continue）处理其他任务，但不要为 quick_note_create 本身补充说明。
-5. 缺关键上下文且无法通过工具补齐：action=ask_user。
-6. 任务完成：action=done，并在 goal_check 总结完成证据。
-7. 流程应正式终止：action=abort。`
+5. query_tasks（查看/筛选任务列表）：读操作，action=continue + tool_call。用于回答"我有什么任务""最近有什么急事"等问题，支持按象限、关键词、截止时间范围筛选和排序。
+6. 缺关键上下文且无法通过工具补齐：action=ask_user。
+7. 任务完成：action=done，并在 goal_check 总结完成证据。
+8. 流程应正式终止：action=abort。`
 
 // BuildExecuteSystemPrompt 返回执行阶段系统提示词（有 plan 模式）。
 func BuildExecuteSystemPrompt() string {

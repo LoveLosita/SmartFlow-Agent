@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	agentnode "github.com/LoveLosita/smartflow/backend/agent/node"
 	"github.com/LoveLosita/smartflow/backend/api"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
@@ -195,6 +196,41 @@ func Start() {
 					return 0, err
 				}
 				return created.ID, nil
+			},
+		},
+		TaskQuery: newagenttools.TaskQueryDeps{
+			// 调用目的：桥接新工具参数到旧 service 层查询能力，复用已有的过滤/排序/紧急度提升逻辑。
+			QueryTasks: func(ctx context.Context, userID int, params newagenttools.TaskQueryParams) ([]newagenttools.TaskQueryResult, error) {
+				req := agentnode.TaskQueryRequest{
+					UserID:           userID,
+					Quadrant:         params.Quadrant,
+					SortBy:           params.SortBy,
+					Order:            params.Order,
+					Limit:            params.Limit,
+					IncludeCompleted: params.IncludeCompleted,
+					Keyword:          params.Keyword,
+					DeadlineBefore:   params.DeadlineBefore,
+					DeadlineAfter:    params.DeadlineAfter,
+				}
+				records, err := agentService.QueryTasksForTool(ctx, req)
+				if err != nil {
+					return nil, err
+				}
+				results := make([]newagenttools.TaskQueryResult, 0, len(records))
+				for _, r := range records {
+					deadlineStr := ""
+					if r.DeadlineAt != nil {
+						deadlineStr = r.DeadlineAt.In(time.Local).Format("2006-01-02 15:04")
+					}
+					results = append(results, newagenttools.TaskQueryResult{
+						ID:            r.ID,
+						Title:         r.Title,
+						PriorityGroup: r.PriorityGroup,
+						IsCompleted:   r.IsCompleted,
+						DeadlineAt:    deadlineStr,
+					})
+				}
+				return results, nil
 			},
 		},
 	}))
