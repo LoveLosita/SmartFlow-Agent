@@ -39,6 +39,17 @@ interface StreamErrorPayload {
   message?: string
 }
 
+interface StreamConfirmPayload {
+  interaction_id?: string
+  title?: string
+  summary?: string
+}
+
+interface StreamExtraPayload {
+  kind?: string
+  confirm?: StreamConfirmPayload
+}
+
 interface StreamEventPayload {
   choices?: StreamChoicePayload[]
   delta?: StreamDeltaPayload
@@ -46,6 +57,7 @@ interface StreamEventPayload {
   reasoning_content?: string
   finish_reason?: string | null
   error?: StreamErrorPayload
+  extra?: StreamExtraPayload
 }
 
 
@@ -55,11 +67,29 @@ interface ConversationGroup {
   items: ConversationListItem[]
 }
 
+interface ConfirmOverlayState {
+  visible: boolean
+  manuallyClosed: boolean
+  interactionId: string
+  title: string
+  summary: string
+}
+
+interface ConversationListItemRevealOptions {
+  animate?: boolean
+}
+
+interface EnsureConversationMetaOptions {
+  forceReload?: boolean
+  syncListItem?: boolean
+  listItemReveal?: ConversationListItemRevealOptions
+}
+
 // 展示用消息：合并连续 assistant 消息后的视图模型
 interface DisplayMessage {
   /** 第一条源消息的 id，用作 Vue key */
   id: string
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'system'
   /** 合并后的正文内容 */
   content: string
   /** 最后一条源消息的时间 */
@@ -104,6 +134,14 @@ const streamAbortController = ref<AbortController | null>(null)
 const editingUserMessageId = ref('')
 const editingUserMessageDraft = ref('')
 const pendingPlanningTaskClassIds = ref<number[]>([])
+const confirmRejectDraft = ref('')
+const confirmOverlayState = reactive<ConfirmOverlayState>({
+  visible: false,
+  manuallyClosed: false,
+  interactionId: '',
+  title: '',
+  summary: '',
+})
 
 const conversationPage = ref(1)
 const conversationPageSize = 12
@@ -118,9 +156,12 @@ const thinkingMessageMap = reactive<Record<string, boolean>>({})
 const reasoningCollapsedMap = reactive<Record<string, boolean>>({})
 const reasoningStartedAtMap = reactive<Record<string, number>>({})
 const reasoningDurationMap = reactive<Record<string, number>>({})
+const confirmOnlyStreamMap = reactive<Record<string, boolean>>({})
+const confirmVisiblePrefixMap = reactive<Record<string, boolean>>({})
 const conversationContextStatsMap = reactive<Record<string, ConversationContextStats | null>>({})
 const conversationContextStatsLoadingMap = reactive<Record<string, boolean>>({})
 const conversationContextStatsReadyMap = reactive<Record<string, boolean>>({})
+const conversationListItemRevealMap = reactive<Record<string, boolean>>({})
 
 const quickActions = [
   '帮我梳理今天最重要的三件事',
@@ -136,12 +177,14 @@ let messageScrollRaf = 0
 let messageScrollReleaseRaf = 0
 let reasoningTicker = 0
 let historyResizeCleanup: (() => void) | null = null
+const conversationListItemRevealTimerMap = new Map<string, number>()
 const reasoningDisplayNow = ref(Date.now())
 const shouldAutoFollowMessages = ref(true)
 const messageBottomTolerancePx = 24
 const isProgrammaticMessageScroll = ref(false)
 
 const isStandaloneMode = computed(() => props.viewMode === 'standalone')
+const shouldShowDialogConfirmOverlay = computed(() => confirmOverlayState.visible)
 
 const assistantBodyStyle = computed(() => {
   return {
@@ -335,6 +378,37 @@ function appendConversationMessage(conversationId: string, message: AssistantMes
   return appended
 }
 
+function removeConversationMessage(conversationId: string, messageId: string) {
+  const bucket = conversationMessagesMap[conversationId]
+  if (!bucket || bucket.length <= 0) {
+    return
+  }
+  const targetIndex = bucket.findIndex((item) => item.id === messageId)
+  if (targetIndex < 0) {
+    return
+  }
+  bucket.splice(targetIndex, 1)
+}
+
+function cleanupHiddenAssistantMessageState(messageId: string) {
+  // 1. confirm 事件由卡片消费时，这条 assistant 占位消息会从正文列表移除。
+  // 2. 这里同步清理与消息 ID 绑定的前端状态，避免残留状态影响后续新消息。
+  // 3. 即使某个字段不存在也直接 delete，保证幂等，重复调用不会引入副作用。
+  delete thinkingMessageMap[messageId]
+  delete reasoningCollapsedMap[messageId]
+  delete reasoningStartedAtMap[messageId]
+  delete reasoningDurationMap[messageId]
+  delete confirmOnlyStreamMap[messageId]
+  delete confirmVisiblePrefixMap[messageId]
+}
+
+function clearConfirmStreamFlags(messageId: string) {
+  // 1. confirm 分流结束后，清理该条消息的分流标记，避免后续同 ID 复用时误判。
+  // 2. 只清理 confirm 相关标记，不触碰正文展示状态，确保 confirm 前文本仍可见。
+  delete confirmOnlyStreamMap[messageId]
+  delete confirmVisiblePrefixMap[messageId]
+}
+
 function createDraftConversationId() {
   return `draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
@@ -448,6 +522,63 @@ function prependConversationPreview(conversationId: string, previewText: string,
     nextItem,
     ...conversationList.value.filter((item) => item.conversation_id !== conversationId),
   ]
+}
+
+function isConversationListItemRevealing(conversationId: string) {
+  return conversationListItemRevealMap[conversationId] === true
+}
+
+function triggerConversationListItemReveal(conversationId: string) {
+  if (!conversationId) {
+    return
+  }
+
+  // 1. 相同会话在短时间内可能被连续更新，这里先清理旧定时器，避免动画状态错乱。
+  // 2. 通过 nextTick 让 class 先完成一次“移除 -> 添加”，确保同一元素可重复触发动画。
+  // 3. 动画结束后回收标记，防止无关渲染继续保留高亮状态。
+  const previousTimer = conversationListItemRevealTimerMap.get(conversationId)
+  if (typeof previousTimer === 'number') {
+    window.clearTimeout(previousTimer)
+  }
+
+  conversationListItemRevealMap[conversationId] = false
+  void nextTick(() => {
+    conversationListItemRevealMap[conversationId] = true
+    const nextTimer = window.setTimeout(() => {
+      delete conversationListItemRevealMap[conversationId]
+      conversationListItemRevealTimerMap.delete(conversationId)
+    }, 460)
+    conversationListItemRevealTimerMap.set(conversationId, nextTimer)
+  })
+}
+
+function syncConversationListItemFromMeta(
+  meta: ConversationMeta,
+  options: ConversationListItemRevealOptions = {},
+) {
+  const targetIndex = conversationList.value.findIndex((item) => item.conversation_id === meta.conversation_id)
+  if (targetIndex < 0) {
+    return
+  }
+
+  const current = conversationList.value[targetIndex]!
+  const nextTitle = meta.has_title && meta.title ? meta.title : current.title
+  const titleChanged = nextTitle !== current.title
+
+  const nextItem: ConversationListItem = {
+    ...current,
+    title: nextTitle,
+    has_title: meta.has_title,
+    message_count: meta.message_count,
+    last_message_at: meta.last_message_at ?? current.last_message_at,
+    status: meta.status || current.status,
+  }
+
+  conversationList.value.splice(targetIndex, 1, nextItem)
+
+  if (options.animate && titleChanged) {
+    triggerConversationListItemReveal(meta.conversation_id)
+  }
 }
 
 function normalizeHistoryMessage(message: ConversationHistoryMessage, index: number): AssistantMessage {
@@ -1039,18 +1170,71 @@ async function loadConversationMessages(conversationId: string, forceReload = fa
   }
 }
 
-async function ensureConversationMeta(conversationId: string) {
-  if (!conversationId || isDraftConversationId(conversationId) || conversationMetaMap[conversationId]) {
+async function ensureConversationMeta(
+  conversationId: string,
+  options: EnsureConversationMetaOptions = {},
+) {
+  const { forceReload = false, syncListItem = false, listItemReveal } = options
+  if (!conversationId || isDraftConversationId(conversationId)) {
+    return
+  }
+
+  // 1. 默认复用本地 meta，避免每次发消息都触发重复请求。
+  // 2. 新建会话需要“只更新当前一条标题”时，可通过 syncListItem 将 meta 回写到列表项。
+  // 3. forceReload 仅用于需要强制拉取最新标题/计数的场景，避免改成全列表刷新。
+  if (!forceReload && conversationMetaMap[conversationId]) {
+    if (syncListItem) {
+      syncConversationListItemFromMeta(conversationMetaMap[conversationId], listItemReveal)
+    }
     return
   }
 
   try {
     const meta = await getConversationMeta(conversationId)
     upsertConversationMeta(meta)
+    if (syncListItem) {
+      syncConversationListItemFromMeta(meta, listItemReveal)
+    }
   } catch {
     // 1. 标题和条数属于增强信息，不应阻塞聊天主链路。
     // 2. 即使元信息失败，列表里的回退标题仍可保证界面可用。
     // 3. 后续再次刷新列表或重新进入会话时，还会有机会补齐这些字段。
+  }
+}
+
+// syncNewConversationTitleAfterFirstReply 负责在“新对话首条消息的 SSE 结束后”补齐标题。
+// 职责边界：
+// 1. 只处理首轮新会话标题补齐，不参与老会话每轮消息后的标题刷新策略。
+// 2. 先立即拉一次，再做少量延迟重试，兼容后端“标题异步生成稍晚到达”的场景。
+// 3. 每次都只回写当前会话对应的列表项，不触发整表刷新，避免界面出现“重置式加载”。
+async function syncNewConversationTitleAfterFirstReply(conversationId: string) {
+  if (!conversationId || isDraftConversationId(conversationId)) {
+    return
+  }
+
+  const retryDelaysMs = [0, 420, 980]
+  for (const delayMs of retryDelaysMs) {
+    // 1. 首次 0ms 立即请求，尽量在流结束后第一时间拿到真实标题。
+    // 2. 后续延迟重试只做短时补偿，避免长时间轮询造成多余请求。
+    // 3. 单次请求失败由 ensureConversationMeta 内部兜底吞掉，不阻塞聊天主流程。
+    if (delayMs > 0) {
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, delayMs)
+      })
+    }
+
+    await ensureConversationMeta(conversationId, {
+      forceReload: true,
+      syncListItem: true,
+      listItemReveal: {
+        animate: true,
+      },
+    })
+
+    const meta = conversationMetaMap[conversationId]
+    if (meta?.has_title && meta.title) {
+      return
+    }
   }
 }
 
@@ -1080,6 +1264,7 @@ async function loadConversationContextStats(conversationId: string, forceReload 
 
 async function selectConversation(conversationId: string) {
   cancelEditUserMessage()
+  resetConfirmOverlay()
   selectedConversationId.value = conversationId
   await Promise.allSettled([
     loadConversationMessages(conversationId),
@@ -1091,6 +1276,7 @@ async function selectConversation(conversationId: string) {
 
 function startNewConversation() {
   cancelEditUserMessage()
+  resetConfirmOverlay()
   selectedConversationId.value = ''
   messageInput.value = ''
   activeStreamingMessageId.value = ''
@@ -1099,6 +1285,51 @@ function startNewConversation() {
 
 function isManualThinkingEnabled(mode: ThinkingModeType) {
   return mode === 'true'
+}
+
+function resetConfirmOverlay() {
+  // 1. 会话切换/新建会话时直接重置确认覆盖层，避免把上一个会话的确认状态误带到当前会话。
+  // 2. interactionId 同时清空，确保下一次收到相同 ID 的事件也能被视为新事件并重新拉起卡片。
+  confirmOverlayState.visible = false
+  confirmOverlayState.manuallyClosed = false
+  confirmOverlayState.interactionId = ''
+  confirmOverlayState.title = ''
+  confirmOverlayState.summary = ''
+  confirmRejectDraft.value = ''
+}
+
+function closeConfirmOverlay() {
+  // 1. “手动关闭”与“自动收起”要区分：手动关闭后，本次 interaction 的重复分片不应反复弹层。
+  // 2. 仅恢复对话框可见性，不改后端 pending 状态；真正的确认流转仍由用户点击确认/拒绝触发。
+  confirmOverlayState.visible = false
+  confirmOverlayState.manuallyClosed = true
+  confirmRejectDraft.value = ''
+}
+
+function applyConfirmOverlay(confirmPayload?: StreamConfirmPayload) {
+  if (!confirmPayload) {
+    return
+  }
+
+  const nextInteractionId = `${confirmPayload.interaction_id || ''}`.trim()
+  const isNewInteraction = Boolean(nextInteractionId) && nextInteractionId !== confirmOverlayState.interactionId
+
+  // 1. 同一个 interaction 会被多次分片推送；若用户已经手动关闭，则不重复弹出。
+  // 2. 只有拿到新的 interaction_id，才重置手动关闭标记并重新显示覆盖层。
+  if (isNewInteraction) {
+    confirmOverlayState.manuallyClosed = false
+    confirmRejectDraft.value = ''
+  }
+  if (confirmOverlayState.manuallyClosed && !isNewInteraction) {
+    return
+  }
+
+  if (nextInteractionId) {
+    confirmOverlayState.interactionId = nextInteractionId
+  }
+  confirmOverlayState.title = `${confirmPayload.title || '操作确认'}`.trim() || '操作确认'
+  confirmOverlayState.summary = `${confirmPayload.summary || ''}`.trim()
+  confirmOverlayState.visible = true
 }
 
 function buildChatRequestExtra(
@@ -1220,11 +1451,23 @@ function processSseBlock(block: string, assistantMessage: AssistantMessage) {
     throw new Error(parsed.error.message)
   }
 
+  if (parsed.extra?.kind === 'confirm_request') {
+    // 1. 记录“confirm 到来前是否已存在可见正文/思考”。
+    // 2. 若已有可见前缀，后续流结束时只隐藏 confirm 相关部分，不删除整条消息。
+    if (assistantMessage.content.trim() || `${assistantMessage.reasoning || ''}`.trim()) {
+      confirmVisiblePrefixMap[assistantMessage.id] = true
+    }
+    confirmOnlyStreamMap[assistantMessage.id] = true
+    applyConfirmOverlay(parsed.extra.confirm)
+  }
+
+  const shouldSuppressVisibleDelta = confirmOnlyStreamMap[assistantMessage.id] === true
   const choice = parsed.choices?.[0]
   const delta = choice?.delta ?? parsed.delta ?? parsed
   const finishReason = choice?.finish_reason ?? parsed.finish_reason ?? null
 
   if (
+    !shouldSuppressVisibleDelta &&
     typeof delta?.reasoning_content === 'string' &&
     delta.reasoning_content
   ) {
@@ -1237,7 +1480,7 @@ function processSseBlock(block: string, assistantMessage: AssistantMessage) {
     assistantMessage.reasoning = `${assistantMessage.reasoning || ''}${delta.reasoning_content}`
   }
 
-  if (typeof delta?.content === 'string' && delta.content) {
+  if (!shouldSuppressVisibleDelta && typeof delta?.content === 'string' && delta.content) {
     if (isThinkingMessage(assistantMessage)) {
       // 1. 一旦正文开始回流，立刻结束“思考中”阶段，避免两个等待动画同时出现。
       // 2. 这样视觉上始终保持“先思考，再输出正文”的单阶段感知。
@@ -1255,7 +1498,9 @@ function processSseBlock(block: string, assistantMessage: AssistantMessage) {
     reasoningCollapsedMap[assistantMessage.id] = true
   }
 
-  scheduleScrollMessagesToBottom(false)
+  if (!shouldSuppressVisibleDelta) {
+    scheduleScrollMessagesToBottom(false)
+  }
 }
 
 async function streamAssistantReply(
@@ -1263,7 +1508,7 @@ async function streamAssistantReply(
   text: string,
   assistantMessage: AssistantMessage,
   createdAt: string,
-  refreshPreview: boolean,
+  shouldSyncCurrentConversationMeta: boolean,
   requestExtra?: ChatRequestExtra,
   signal?: AbortSignal,
 ) : Promise<string> {
@@ -1280,7 +1525,7 @@ async function streamAssistantReply(
 
   if (actualConversationId !== draftConversationId) {
     migrateConversationState(draftConversationId, actualConversationId)
-    if (refreshPreview) {
+    if (shouldSyncCurrentConversationMeta) {
       prependConversationPreview(actualConversationId, text, createdAt)
     }
   }
@@ -1309,15 +1554,25 @@ async function streamAssistantReply(
     processSseBlock(buffer, assistantMessage)
   }
 
-  if (!assistantMessage.content.trim()) {
+  const confirmConsumedByCard = confirmOnlyStreamMap[assistantMessage.id] === true
+  const hasVisiblePrefixBeforeConfirm = confirmVisiblePrefixMap[assistantMessage.id] === true
+  if (confirmConsumedByCard && !hasVisiblePrefixBeforeConfirm) {
+    // 1. confirm_request 属于“卡片专属事件”，正文区域不应再显示这条 assistant 占位消息。
+    // 2. 这里直接移除占位消息，避免出现空白气泡、时间戳残留或兜底文案误导。
+    // 3. 同步清理消息状态映射，防止同一 ID 的历史状态污染下一轮发送。
+    removeConversationMessage(actualConversationId, assistantMessage.id)
+    cleanupHiddenAssistantMessageState(assistantMessage.id)
+  } else if (confirmConsumedByCard) {
+    // confirm 前已有正文/思考，保留前缀内容，仅清理 confirm 分流标记。
+    clearConfirmStreamFlags(assistantMessage.id)
+  } else if (!assistantMessage.content.trim()) {
     assistantMessage.content = assistantMessage.reasoning?.trim()
       ? '已完成深度思考，但当前响应未返回正文内容。'
       : '暂未收到回复正文，请稍后重试。'
   }
 
-  if (refreshPreview) {
-    await loadConversationListData(true)
-    await ensureConversationMeta(actualConversationId)
+  if (shouldSyncCurrentConversationMeta) {
+    await syncNewConversationTitleAfterFirstReply(actualConversationId)
   }
 
   return actualConversationId
@@ -1335,16 +1590,39 @@ function stopStreaming() {
 // 1. 先创建用户消息和 assistant 占位消息，让发送动作立即反馈到界面，等待建连过程无感化。
 // 2. 若当前是新会话，则先使用 draft 会话承接本地状态，等响应头返回真实 conversation_id 后再整体迁移。
 // 3. 网络错误只中断当前这轮 assistant 占位，不回滚用户已发送的内容，避免“点了发送却像没发出去”。
-async function sendMessage(preset?: string) {
-  const text = (preset ?? messageInput.value).trim()
+interface SendMessageOptions {
+  preset?: string
+  requestExtra?: ChatRequestExtra
+  resetPlanningSelectionOnSuccess?: boolean
+  bypassConfirmOverlayCheck?: boolean
+}
+
+// sendMessageInternal 负责执行“本地先上屏，再异步接流”的统一发送链路。
+//
+// 职责边界：
+// 1. 统一承接普通发送和 confirm_action 发送，避免两套发送逻辑分叉后状态不一致。
+// 2. 只负责前端本轮状态流转，不负责后端 pending 语义判定。
+// 3. 失败时保留用户已发文本，只补齐占位消息兜底文案，确保交互可感知。
+async function sendMessageInternal(options: SendMessageOptions = {}) {
+  const text = (options.preset ?? messageInput.value).trim()
   if (!text || chatLoading.value) {
+    return
+  }
+
+  // 1. 有 confirm 覆盖层且不是“覆盖层按钮触发”的发送时，阻止误发送。
+  // 2. 覆盖层内确认/拒绝按钮会显式传入 bypass，允许继续发送 confirm_action。
+  if (shouldShowDialogConfirmOverlay.value && !options.bypassConfirmOverlayCheck) {
+    ElMessage.warning('当前有待确认操作，请先处理确认卡片。')
     return
   }
 
   chatLoading.value = true
 
-  const planningTaskClassIdsForRequest = [...pendingPlanningTaskClassIds.value]
-  // 智能编排不再强制新开对话：直接沿用当前会话，在原地发送编排请求。
+  const planningTaskClassIdsForRequest = options.requestExtra ? [] : [...pendingPlanningTaskClassIds.value]
+  const requestExtra = options.requestExtra ?? buildChatRequestExtra(planningTaskClassIdsForRequest)
+  const resetPlanningSelectionOnSuccess =
+    options.resetPlanningSelectionOnSuccess ?? planningTaskClassIdsForRequest.length > 0
+  const isNewConversationRound = !selectedConversationId.value
   const draftConversationId = selectedConversationId.value || createDraftConversationId()
 
   if (!selectedConversationId.value) {
@@ -1377,7 +1655,6 @@ async function sendMessage(preset?: string) {
   prependConversationPreview(draftConversationId, text, now)
   scheduleScrollMessagesToBottom(false, true)
 
-  // 1. 创建 AbortController：用户点击停止按钮时可通过 controller.abort() 中断 fetch 请求。
   const controller = new AbortController()
   streamAbortController.value = controller
 
@@ -1387,21 +1664,32 @@ async function sendMessage(preset?: string) {
       text,
       assistantMessage,
       now,
-      true,
-      buildChatRequestExtra(planningTaskClassIdsForRequest),
+      isNewConversationRound,
+      requestExtra,
       controller.signal,
     )
-    if (planningTaskClassIdsForRequest.length > 0) {
+    if (resetPlanningSelectionOnSuccess) {
       pendingPlanningTaskClassIds.value = []
     }
-    // 流式成功后不重新加载历史：流式数据就是当前会话的权威来源，
-    // 过早 reload 会因 persistVisibleMessage 尚未落库导致 merge 产生重复/丢失。
-    // 历史数据在下次切换会话或刷新页面时自然加载。
     await Promise.allSettled([
       loadConversationContextStats(actualConversationId, true),
     ])
   } catch (error) {
-    // 用户主动中断：不弹出错误提示，只给占位消息补一段中断文案。
+    if (confirmOnlyStreamMap[assistantMessage.id] === true) {
+      // 1. confirm 事件流中断时，正文占位消息同样不应暴露给用户。
+      // 2. 这里按“卡片优先”策略移除占位，并清理消息状态，避免出现半截文本。
+      const hasVisiblePrefixBeforeConfirm = confirmVisiblePrefixMap[assistantMessage.id] === true
+      if (!hasVisiblePrefixBeforeConfirm) {
+        const fallbackConversationId = selectedConversationId.value || draftConversationId
+        removeConversationMessage(fallbackConversationId, assistantMessage.id)
+        cleanupHiddenAssistantMessageState(assistantMessage.id)
+      } else {
+        // confirm 前已有可见内容时，保留前缀文本并只清理分流标记。
+        clearConfirmStreamFlags(assistantMessage.id)
+      }
+      return
+    }
+
     if (controller.signal.aborted) {
       if (!assistantMessage.content.trim()) {
         assistantMessage.content = '本次回复已手动停止。'
@@ -1418,6 +1706,51 @@ async function sendMessage(preset?: string) {
     activeStreamingMessageId.value = ''
     chatLoading.value = false
   }
+}
+
+async function sendMessage(preset?: string) {
+  await sendMessageInternal({ preset })
+}
+
+async function sendConfirmAction(action: 'accept' | 'reject', rejectMessage?: string) {
+  // 1. confirm 是显式人工动作，先关闭覆盖层再发送，让对话框立即恢复可见。
+  // 2. “拒绝”动作允许带上用户自定义要求，后端可据此进行重规划。
+  // 3. 发送完成后清空输入草稿，避免旧要求残留到下一轮确认卡片。
+  const normalizedRejectMessage = `${rejectMessage || ''}`.trim()
+  const presetMessage =
+    action === 'accept'
+      ? '我确认，继续执行。'
+      : normalizedRejectMessage || '先不执行，请重新规划。'
+
+  closeConfirmOverlay()
+  await sendMessageInternal({
+    preset: presetMessage,
+    requestExtra: { confirm_action: action },
+    resetPlanningSelectionOnSuccess: false,
+    bypassConfirmOverlayCheck: true,
+  })
+  confirmRejectDraft.value = ''
+}
+
+async function submitConfirmRejectMessage() {
+  const rejectMessage = confirmRejectDraft.value.trim()
+  if (!rejectMessage) {
+    ElMessage.warning('请输入你的调整要求后再发送。')
+    return
+  }
+
+  await sendConfirmAction('reject', rejectMessage)
+}
+
+function handleConfirmRejectInputEnter(event: KeyboardEvent) {
+  // 1. 中文输入法上屏期间按回车只用于选词，不应误触发发送。
+  // 2. 仅在“非组合输入 + 单独 Enter”时提交，Shift+Enter 仍可换行。
+  if (event.isComposing) {
+    return
+  }
+
+  event.preventDefault()
+  void submitConfirmRejectMessage()
 }
 
 watch(
@@ -1449,6 +1782,10 @@ onBeforeUnmount(() => {
     window.clearInterval(reasoningTicker)
     reasoningTicker = 0
   }
+  for (const timerId of conversationListItemRevealTimerMap.values()) {
+    window.clearTimeout(timerId)
+  }
+  conversationListItemRevealTimerMap.clear()
   releaseHistoryResizeListeners()
   window.removeEventListener('resize', syncHistoryPanelWidthForViewport)
 })
@@ -1527,7 +1864,10 @@ onBeforeUnmount(() => {
                   :key="item.conversation_id"
                   type="button"
                   class="assistant-history__item"
-                  :class="{ 'assistant-history__item--active': item.conversation_id === selectedConversationId }"
+                  :class="{
+                    'assistant-history__item--active': item.conversation_id === selectedConversationId,
+                    'assistant-history__item--reveal': isConversationListItemRevealing(item.conversation_id),
+                  }"
                   @click="selectConversation(item.conversation_id)"
                 >
                   <span class="assistant-history__item-title">
@@ -1740,8 +2080,72 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <div class="_9a2f8e4 assistant-composer-ds">
-          <div class="aaff8b8f">
+        <div class="_9a2f8e4 assistant-composer-ds" :class="{ 'assistant-composer-ds--confirm': shouldShowDialogConfirmOverlay }">
+          <div
+            v-if="shouldShowDialogConfirmOverlay"
+            class="assistant-confirm-composer"
+            role="dialog"
+            aria-modal="true"
+            aria-label="确认操作"
+          >
+            <article class="assistant-confirm-card">
+              <header class="assistant-confirm-card__header">
+                <p class="assistant-confirm-card__eyebrow">待确认操作</p>
+                <h3 class="assistant-confirm-card__title">{{ confirmOverlayState.title || '操作确认' }}</h3>
+              </header>
+
+              <p v-if="confirmOverlayState.summary" class="assistant-confirm-card__summary">
+                {{ confirmOverlayState.summary }}
+              </p>
+              <p class="assistant-confirm-card__hint">
+                该操作需要你的明确确认。点击“关闭卡片”会恢复输入框，不会自动确认。
+              </p>
+
+              <div class="assistant-confirm-card__actions">
+                <button
+                  type="button"
+                  class="assistant-confirm-card__button assistant-confirm-card__button--primary"
+                  :disabled="chatLoading"
+                  @click="sendConfirmAction('accept')"
+                >
+                  确认执行
+                </button>
+
+                <div class="assistant-confirm-card__reject-box">
+                  <label class="assistant-confirm-card__reject-label" for="confirm-reject-input">
+                    拒绝并提出调整要求
+                  </label>
+                  <textarea
+                    id="confirm-reject-input"
+                    v-model="confirmRejectDraft"
+                    class="assistant-confirm-card__reject-input"
+                    rows="3"
+                    :disabled="chatLoading"
+                    placeholder="例如：先不要执行，把学习任务改到周末晚上，课程日只保留复习。按 Enter 发送，Shift+Enter 换行。"
+                    @keydown.enter.exact="handleConfirmRejectInputEnter"
+                  />
+                  <button
+                    type="button"
+                    class="assistant-confirm-card__button assistant-confirm-card__button--ghost"
+                    :disabled="chatLoading || !confirmRejectDraft.trim()"
+                    @click="submitConfirmRejectMessage"
+                  >
+                    发送拒绝要求
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  class="assistant-confirm-card__button assistant-confirm-card__button--plain"
+                  @click="closeConfirmOverlay"
+                >
+                  关闭卡片
+                </button>
+              </div>
+            </article>
+          </div>
+
+          <div v-else class="aaff8b8f">
             <div class="_77cefa5 _9996a53">
               <div class="_020ab5b">
                 <TaskClassPlanningPicker
@@ -2105,6 +2509,25 @@ onBeforeUnmount(() => {
   transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
 }
 
+.assistant-history__item--reveal {
+  position: relative;
+}
+
+.assistant-history__item--reveal::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    rgba(66, 112, 234, 0) 0%,
+    rgba(66, 112, 234, 0.2) 42%,
+    rgba(66, 112, 234, 0) 100%
+  );
+  transform: translateX(-118%);
+  animation: history-item-reveal-sweep 420ms ease-out forwards;
+}
+
 .assistant-history__item:hover {
   border-color: rgba(54, 96, 210, 0.18);
   background: rgba(237, 242, 255, 0.72);
@@ -2119,6 +2542,10 @@ onBeforeUnmount(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.assistant-history__item--reveal .assistant-history__item-title {
+  animation: history-item-title-fade-in 420ms ease-out;
 }
 
 .assistant-history__item-time,
@@ -2279,6 +2706,157 @@ onBeforeUnmount(() => {
   background: #ffffff;
 }
 
+.assistant-composer-ds--confirm {
+  border-top: 1px solid rgba(16, 24, 40, 0.05);
+}
+
+.assistant-confirm-composer {
+  width: 100%;
+  padding: 2px 0;
+}
+
+.assistant-confirm-card {
+  width: 100%;
+  border-radius: 22px;
+  border: 1px solid rgba(42, 72, 145, 0.22);
+  background: linear-gradient(180deg, #ffffff, #f6f9ff);
+  box-shadow: 0 14px 28px rgba(22, 37, 74, 0.16);
+  padding: 24px 24px 18px;
+  display: grid;
+  gap: 14px;
+  animation: confirm-card-enter 220ms ease-out;
+}
+
+.assistant-confirm-card__header {
+  display: grid;
+  gap: 6px;
+}
+
+.assistant-confirm-card__eyebrow {
+  margin: 0;
+  color: #4a5f88;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.assistant-confirm-card__title {
+  margin: 0;
+  color: #17263d;
+  font-size: 26px;
+  line-height: 1.28;
+}
+
+.assistant-confirm-card__summary {
+  margin: 0;
+  color: #22304a;
+  line-height: 1.75;
+  white-space: pre-wrap;
+}
+
+.assistant-confirm-card__hint {
+  margin: 0;
+  color: #5f6f88;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.assistant-confirm-card__actions {
+  margin-top: 6px;
+  display: grid;
+  gap: 12px;
+}
+
+.assistant-confirm-card__button {
+  width: 100%;
+  height: 38px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  padding: 0 14px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+
+.assistant-confirm-card__button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.assistant-confirm-card__button--primary {
+  background: linear-gradient(180deg, #2f62df, #234ec2);
+  color: #ffffff;
+  box-shadow: 0 8px 18px rgba(35, 78, 194, 0.28);
+}
+
+.assistant-confirm-card__button--primary:hover {
+  filter: brightness(1.05);
+}
+
+.assistant-confirm-card__button--ghost {
+  border-color: rgba(25, 48, 98, 0.22);
+  background: #ffffff;
+  color: #2a3c5f;
+}
+
+.assistant-confirm-card__button--ghost:hover {
+  border-color: rgba(25, 48, 98, 0.34);
+  background: #f8fbff;
+}
+
+.assistant-confirm-card__reject-box {
+  display: grid;
+  gap: 8px;
+}
+
+.assistant-confirm-card__reject-label {
+  color: #405173;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.assistant-confirm-card__reject-input {
+  width: 100%;
+  min-height: 88px;
+  border-radius: 12px;
+  border: 1px solid rgba(25, 48, 98, 0.2);
+  background: #ffffff;
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #1f2a3f;
+  resize: vertical;
+  box-sizing: border-box;
+  outline: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.assistant-confirm-card__reject-input:focus {
+  border-color: rgba(47, 98, 223, 0.55);
+  box-shadow: 0 0 0 3px rgba(47, 98, 223, 0.14);
+}
+
+.assistant-confirm-card__reject-input:disabled {
+  background: #f5f7fb;
+  color: #73819b;
+}
+
+.assistant-confirm-card__button--plain {
+  border-color: transparent;
+  background: transparent;
+  color: #6a7791;
+  width: auto;
+  justify-self: end;
+}
+
+.assistant-confirm-card__button--plain:hover {
+  color: #3d4f74;
+  background: rgba(35, 78, 194, 0.07);
+}
+
 .assistant-messages {
   min-height: 0;
   overflow-y: auto;
@@ -2341,6 +2919,9 @@ onBeforeUnmount(() => {
 }
 
 .chat-message__user-row {
+  width: 100%;
+  max-width: min(92%, 860px);
+  margin: 0 auto;
   display: grid;
   justify-items: end;
   gap: 8px;
@@ -2972,6 +3553,11 @@ onBeforeUnmount(() => {
   animation-delay: 0.24s;
 }
 
+@keyframes confirm-card-enter {
+  0% { opacity: 0; transform: translateY(10px) scale(0.985); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 @keyframes typing-bounce {
   0%, 80%, 100% { transform: translateY(0); opacity: 0.5; }
   40% { transform: translateY(-4px); opacity: 1; }
@@ -2991,6 +3577,26 @@ onBeforeUnmount(() => {
 @keyframes history-shimmer {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
+}
+
+@keyframes history-item-title-fade-in {
+  0% {
+    opacity: 0.42;
+    transform: translateX(-8px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes history-item-reveal-sweep {
+  0% {
+    transform: translateX(-118%);
+  }
+  100% {
+    transform: translateX(118%);
+  }
 }
 
 @media (max-width: 960px) {
@@ -3020,6 +3626,19 @@ onBeforeUnmount(() => {
   .assistant-composer-ds {
     padding-left: 18px;
     padding-right: 18px;
+  }
+
+  .assistant-confirm-composer {
+    padding: 0;
+  }
+
+  .assistant-confirm-card {
+    border-radius: 18px;
+    padding: 18px 16px 14px;
+  }
+
+  .assistant-confirm-card__title {
+    font-size: 22px;
   }
 
   .ec4f5d61 {
