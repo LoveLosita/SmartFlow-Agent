@@ -281,11 +281,12 @@ function handlePreviewDragEnd() {
 
         <article
           v-for="header in weekHeaders"
-          :key="`${header.dayOfWeek}-${slot.order}`"
+          :key="`${weekData?.week ?? 0}-${header.dayOfWeek}-${slot.order}`"
           class="planning-board__cell"
           :class="[
             `planning-board__cell--${resolveEventTone(resolveEvent(header.dayOfWeek, slot.order))}`,
             {
+              'board-item-pop': resolveEvent(header.dayOfWeek, slot.order)?.type !== 'empty',
               'planning-board__cell--selectable': scheduleSelectionMode && resolveEvent(header.dayOfWeek, slot.order)?.type !== 'empty',
               'planning-board__cell--selected': resolveEvent(header.dayOfWeek, slot.order) && isSelected(resolveEvent(header.dayOfWeek, slot.order)!.id),
               'planning-board__cell--draggable': isWholeCellDraggable(resolveEvent(header.dayOfWeek, slot.order)),
@@ -293,6 +294,7 @@ function handlePreviewDragEnd() {
               'planning-board__cell--dragover': dragOverCellKey === buildCellKey(header.dayOfWeek, slot.order),
             },
           ]"
+          :style="{ '--anim-delay': (header.dayOfWeek - 1) * 0.035 + (slot.order - 1) * 0.045 + 's' }"
           :draggable="isWholeCellDraggable(resolveEvent(header.dayOfWeek, slot.order))"
           @dragstart="handlePreviewDragStart(header.dayOfWeek, slot.order, $event)"
           @dragover="handlePreviewDragOver(header.dayOfWeek, slot.order, $event)"
@@ -347,29 +349,29 @@ function handlePreviewDragEnd() {
 
 <style scoped>
 .planning-board {
-  --planning-grid-padding-x: 24px;
-  --planning-grid-padding-y: 28px;
-  --planning-grid-gap-x: 12px;
+  --planning-grid-padding-x: 20px;
+  --planning-grid-padding-y: 20px;
+  --planning-grid-gap-x: 10px;
   --planning-grid-gap-y: 10px;
-  --planning-time-column-width: 74px;
+  --planning-time-column-width: 68px;
   --planning-day-column-min: 96px;
   --planning-cell-height: clamp(72px, 9.2vh, 112px);
   min-width: 0;
   min-height: 0;
-  border-radius: 28px;
-  border: 1px solid rgba(214, 223, 236, 0.82);
-  background: linear-gradient(180deg, rgba(252, 253, 255, 0.98), rgba(248, 251, 255, 0.98));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82);
+  border-radius: 20px;
+  border: 1px solid rgba(15, 23, 42, 0.05);
+  background: #ffffff;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
 }
 
 .planning-board__header {
-  padding: 18px 28px 16px;
-  border-bottom: 1px solid rgba(221, 229, 240, 0.86);
-  color: #1f2b42;
-  font-size: 18px;
+  padding: 18px 24px 16px;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.05);
+  color: #0f172a;
+  font-size: 16px;
+  font-weight: 700;
 }
 
 .planning-board__grid {
@@ -391,7 +393,7 @@ function handlePreviewDragEnd() {
   display: grid;
   justify-items: center;
   gap: 4px;
-  color: #8ca0bd;
+  color: #64748b;
 }
 
 .planning-board__day-head span {
@@ -409,13 +411,14 @@ function handlePreviewDragEnd() {
   display: grid;
   align-content: center;
   justify-items: end;
-  color: #9aacbf;
-  padding-right: 8px;
+  color: #94a3b8;
+  padding-right: 12px;
 }
 
 .planning-board__time-cell strong {
-  font-size: 15px;
-  color: #8da0bc;
+  font-size: 14px;
+  color: #64748b;
+  font-weight: 700;
 }
 
 .planning-board__time-cell small {
@@ -428,14 +431,15 @@ function handlePreviewDragEnd() {
 .planning-board__cell {
   position: relative;
   min-height: var(--planning-cell-height);
-  border-radius: 22px;
-  border: 1px solid rgba(228, 234, 243, 0.92);
-  padding: 18px 14px;
+  border-radius: 14px;
+  border: 1px solid transparent;
+  padding: 14px;
   display: flex;
   align-items: center;
   justify-content: center;
   text-align: center;
   overflow: hidden;
+  transition: transform 0.2s, box-shadow 0.2s;
 }
 
 .planning-board__cell-main {
@@ -445,34 +449,34 @@ function handlePreviewDragEnd() {
 }
 
 .planning-board__cell-main strong {
-  color: #7387a3;
-  font-size: 15px;
-  line-height: 1.35;
+  color: #334155;
+  font-size: 14px;
+  line-height: 1.4;
   font-weight: 700;
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
 .planning-board__cell-main span {
-  color: #9badc5;
+  color: #64748b;
   font-size: 12px;
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
 .planning-board__cell--course {
-  background: #acd6f4;
+  background: #e0f2fe;
 }
 
 .planning-board__cell--course-embedded {
-  background: linear-gradient(180deg, rgba(121, 187, 239, 0.96) 0%, rgba(88, 161, 225, 0.96) 100%);
+  background: #b9e6fe;
   align-items: stretch;
-  padding: 9px;
+  padding: 8px;
 }
 
 .planning-board__cell--course .planning-board__cell-main strong,
 .planning-board__cell--course .planning-board__cell-main span {
-  color: #2576cc;
+  color: #0284c7;
 }
 
 .planning-board__embedded-shell {
@@ -498,7 +502,7 @@ function handlePreviewDragEnd() {
 
 .planning-board__embedded-course {
   padding: 6px 4px;
-  color: #ffffff;
+  color: #0369a1;
 }
 
 .planning-board__embedded-course strong,
@@ -522,13 +526,12 @@ function handlePreviewDragEnd() {
 
 .planning-board__embedded-task {
   padding: 6px 8px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.92);
-  box-shadow: 0 10px 18px rgba(31, 82, 145, 0.14);
+  border-radius: 10px;
+  background: #ffffff;
 }
 
 .planning-board__embedded-task strong {
-  color: #1f5db3;
+  color: #0369a1;
   font-size: 11px;
   line-height: 1.24;
   font-weight: 800;
@@ -544,48 +547,59 @@ function handlePreviewDragEnd() {
 }
 
 .planning-board__cell--amber {
-  background: #ffe58b;
+  background: #fef3c7;
 }
 
 .planning-board__cell--amber .planning-board__cell-main strong,
 .planning-board__cell--amber .planning-board__cell-main span {
-  color: #7d6917;
+  color: #d97706;
 }
 
 .planning-board__cell--mint {
-  background: #d7f7a7;
+  background: #dcfce7;
 }
 
 .planning-board__cell--mint .planning-board__cell-main strong,
 .planning-board__cell--mint .planning-board__cell-main span,
 .planning-board__cell--emerald .planning-board__cell-main strong,
 .planning-board__cell--emerald .planning-board__cell-main span {
-  color: #72a91d;
+  color: #059669;
 }
 
 .planning-board__cell--emerald {
-  background: #d3f3ac;
+  background: #d1fae5;
 }
 
 .planning-board__cell--rose {
-  background: #f6dfe2;
+  background: #fee2e2;
 }
 
 .planning-board__cell--rose .planning-board__cell-main strong,
 .planning-board__cell--rose .planning-board__cell-main span {
-  color: #e6696e;
+  color: #e11d48;
 }
 
 .planning-board__cell--violet {
-  background: #e9dcfb;
+  background: #f3e8ff;
+}
+
+.planning-board__cell--violet .planning-board__cell-main strong,
+.planning-board__cell--violet .planning-board__cell-main span {
+  color: #7c3aed;
 }
 
 .planning-board__cell--sky {
-  background: #d8ecfb;
+  background: #e0f2fe;
+}
+
+.planning-board__cell--sky .planning-board__cell-main strong,
+.planning-board__cell--sky .planning-board__cell-main span {
+  color: #0284c7;
 }
 
 .planning-board__cell--empty {
-  background: #f8fbff;
+  background: #f8fafc;
+  border-color: rgba(15, 23, 42, 0.05);
 }
 
 .planning-board__cell--selectable {
@@ -593,11 +607,15 @@ function handlePreviewDragEnd() {
 }
 
 .planning-board__cell--selected {
-  box-shadow: inset 0 0 0 2px rgba(32, 102, 212, 0.52);
+  box-shadow: inset 0 0 0 2px #3b82f6;
 }
 
 .planning-board__cell--draggable {
   cursor: grab;
+}
+.planning-board__cell--draggable:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
 }
 
 .planning-board__cell--dragging {
@@ -606,8 +624,8 @@ function handlePreviewDragEnd() {
 
 .planning-board__cell--dragover {
   box-shadow:
-    inset 0 0 0 2px rgba(20, 92, 192, 0.58),
-    0 0 0 4px rgba(33, 109, 215, 0.1);
+    inset 0 0 0 2px #2563eb,
+    0 0 0 4px rgba(59, 130, 246, 0.15);
 }
 
 .planning-board__checkbox {
@@ -623,9 +641,21 @@ function handlePreviewDragEnd() {
 }
 
 .planning-board__checkbox--active {
-  border-color: #1e66d4;
-  background: #1e66d4;
+  border-color: #3b82f6;
+  background: #3b82f6;
   box-shadow: inset 0 0 0 3px #ffffff;
+}
+
+@keyframes board-item-spring {
+  0% { opacity: 0; transform: scale(0.6) translateY(20px); }
+  60% { opacity: 1; transform: scale(1.05) translateY(-2px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.board-item-pop {
+  animation: board-item-spring 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation-delay: var(--anim-delay, 0s);
+  transform-origin: center center;
 }
 
 @media (max-width: 1560px) {

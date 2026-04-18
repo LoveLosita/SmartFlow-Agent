@@ -32,35 +32,37 @@ const visibleTasks = computed(() => props.tasks)
       <span class="quadrant-card__count">{{ count }}项</span>
     </header>
 
-    <div v-if="loading" class="quadrant-card__skeleton">
-      <div v-for="index in 3" :key="index" class="quadrant-card__skeleton-item" />
-    </div>
+    <transition name="fade-switch" mode="out-in">
+      <div v-if="loading" key="loading" class="quadrant-card__skeleton">
+        <div v-for="index in 3" :key="index" class="quadrant-card__skeleton-item" />
+      </div>
 
-    <div v-else-if="visibleTasks.length === 0" class="quadrant-card__empty">
-      {{ emptyText }}
-    </div>
+      <div v-else-if="visibleTasks.length === 0" key="empty" class="quadrant-card__empty">
+        {{ emptyText }}
+      </div>
 
-    <div v-else class="quadrant-list">
-      <button
-        v-for="task in visibleTasks"
-        :key="task.id"
-        type="button"
-        class="quadrant-item"
-        :class="{ 'quadrant-item--completed': task.is_completed }"
-        @click="emit('toggle', task)"
-      >
-        <span class="quadrant-item__check">
-          {{ task.is_completed ? '✓' : '' }}
-        </span>
-        <span class="quadrant-item__content">
-          <strong>{{ task.title }}</strong>
-          <small>{{ formatDeadline(task.deadline) }}</small>
-        </span>
-        <span class="quadrant-item__status">
-          {{ task.is_completed ? '已完成' : '待处理' }}
-        </span>
-      </button>
-    </div>
+      <TransitionGroup v-else tag="div" name="list-stagger" class="quadrant-list" key="list">
+        <button
+          v-for="task in visibleTasks"
+          :key="task.id"
+          type="button"
+          class="quadrant-item"
+          :class="{ 'quadrant-item--completed': task.is_completed }"
+          @click="emit('toggle', task)"
+        >
+          <span class="quadrant-item__check">
+            {{ task.is_completed ? '✓' : '' }}
+          </span>
+          <span class="quadrant-item__content">
+            <strong>{{ task.title }}</strong>
+            <small>{{ formatDeadline(task.deadline) }}</small>
+          </span>
+          <span class="quadrant-item__status">
+            {{ task.is_completed ? '已完成' : '待处理' }}
+          </span>
+        </button>
+      </TransitionGroup>
+    </transition>
   </section>
 </template>
 
@@ -258,5 +260,39 @@ const visibleTasks = computed(() => props.tasks)
   100% {
     background-position: -200% 0;
   }
+}
+
+.fade-switch-enter-active,
+.fade-switch-leave-active {
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.fade-switch-enter-from {
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+.fade-switch-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+.list-stagger-enter-active,
+.list-stagger-leave-active {
+  transition: all 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.list-stagger-enter-from {
+  opacity: 0;
+  transform: translateY(12px) scale(0.98);
+}
+
+.list-stagger-leave-to {
+  opacity: 0;
+  transform: translateX(12px) scale(0.98);
+}
+
+.list-stagger-leave-active {
+  position: absolute;
 }
 </style>

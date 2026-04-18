@@ -1368,15 +1368,16 @@ func executeToolCall(
 		return fmt.Errorf("工具调用缺少工具名称")
 	}
 
-	// 推送工具调用状态，让前端知道当前在做什么。
-	if err := emitter.EmitStatus(
+	// 推送工具调用开始事件（结构化）。
+	if err := emitter.EmitToolCallStart(
 		executeStatusBlockID,
 		executeStageName,
-		"tool_call",
-		fmt.Sprintf("正在调用工具：%s", toolName),
+		toolName,
+		buildToolCallStartSummary(toolName, toolCall.Arguments),
+		buildToolArgumentsPreviewCN(toolCall.Arguments),
 		false,
 	); err != nil {
-		return fmt.Errorf("工具调用状态推送失败: %w", err)
+		return fmt.Errorf("工具调用开始事件推送失败: %w", err)
 	}
 
 	// 1. 校验依赖。
@@ -1417,11 +1418,13 @@ func executeToolCall(
 			toolName,
 			flowState.AllowReorder,
 		)
-		_ = emitter.EmitStatus(
+		_ = emitter.EmitToolCallResult(
 			executeStatusBlockID,
 			executeStageName,
-			"tool_blocked",
+			toolName,
+			"blocked",
 			blockedResult,
+			buildToolArgumentsPreviewCN(toolCall.Arguments),
 			false,
 		)
 		appendToolCallResultHistory(conversationContext, toolName, toolCall.Arguments, blockedResult)
@@ -1447,6 +1450,15 @@ func executeToolCall(
 		beforeDigest,
 		afterDigest,
 		flattenForLog(result),
+	)
+	_ = emitter.EmitToolCallResult(
+		executeStatusBlockID,
+		executeStageName,
+		toolName,
+		resolveToolEventResultStatus(result),
+		buildToolEventResultSummary(result),
+		buildToolArgumentsPreviewCN(toolCall.Arguments),
+		false,
 	)
 
 	// 3. 以标准 assistant+tool 消息对写回历史，避免消息链断裂。
@@ -1511,15 +1523,16 @@ func executePendingTool(
 		return fmt.Errorf("解析工具参数失败: %w", err)
 	}
 
-	// 2. 推送状态。
-	if err := emitter.EmitStatus(
+	// 2. 推送工具调用开始事件（结构化）。
+	if err := emitter.EmitToolCallStart(
 		executeStatusBlockID,
 		executeStageName,
-		"tool_call",
-		fmt.Sprintf("正在执行工具：%s", pending.ToolName),
+		pending.ToolName,
+		buildToolCallStartSummary(pending.ToolName, args),
+		buildToolArgumentsPreviewCN(args),
 		false,
 	); err != nil {
-		return fmt.Errorf("工具调用状态推送失败: %w", err)
+		return fmt.Errorf("工具调用开始事件推送失败: %w", err)
 	}
 
 	// 3. 校验依赖：写工具必须持有有效的日程状态。
@@ -1531,11 +1544,13 @@ func executePendingTool(
 	// 3.1 顺序护栏在确认执行路径同样生效，避免绕过前置约束。
 	if shouldBlockMinContextSwitch(flowState, pending.ToolName) {
 		blockedResult := "已拒绝执行 min_context_switch：当前未授权打乱顺序。如需使用该工具，请先由用户明确说明“允许打乱顺序”。"
-		_ = emitter.EmitStatus(
+		_ = emitter.EmitToolCallResult(
 			executeStatusBlockID,
 			executeStageName,
-			"tool_blocked",
+			pending.ToolName,
+			"blocked",
 			blockedResult,
+			buildToolArgumentsPreviewCN(args),
 			false,
 		)
 		appendToolCallResultHistory(conversationContext, pending.ToolName, args, blockedResult)
@@ -1563,6 +1578,15 @@ func executePendingTool(
 		beforeDigest,
 		afterDigest,
 		flattenForLog(result),
+	)
+	_ = emitter.EmitToolCallResult(
+		executeStatusBlockID,
+		executeStageName,
+		pending.ToolName,
+		resolveToolEventResultStatus(result),
+		buildToolEventResultSummary(result),
+		buildToolArgumentsPreviewCN(args),
+		false,
 	)
 
 	// 5. 将工具调用和结果写回历史，维持标准 tool_call 配对格式。
@@ -1716,4 +1740,339 @@ func flattenForLog(text string) string {
 	text = strings.ReplaceAll(text, "\n", " ")
 	text = strings.ReplaceAll(text, "\r", " ")
 	return strings.TrimSpace(text)
+}
+
+// resolveToolEventResultStatus 将工具返回文本映射为前端可识别的结果状态。
+//
+// 职责边界：
+// 1. 只做轻量字符串规则判断，不做业务语义推理；
+// 2. 默认归类为 done，只有明显失败关键字才判定 failed；
+// 3. blocked 场景在调用侧显式传入，不由这里推断。
+func resolveToolEventResultStatus(result string) string {
+	normalized := strings.TrimSpace(result)
+	if normalized == "" {
+		return "done"
+	}
+	if strings.Contains(normalized, "失败") {
+		return "failed"
+	}
+	lower := strings.ToLower(normalized)
+	if strings.Contains(lower, "error") || strings.Contains(lower, "failed") {
+		return "failed"
+	}
+	return "done"
+}
+
+// buildToolEventResultSummary 生成用于前端工具行的结果摘要。
+//
+// 职责边界：
+// 1. 优先从 JSON 结果提炼中文结论，避免前端直接看到原始字段；
+// 2. 提炼失败时回退到“压平 + 截断”，保证仍有可读摘要；
+// 3. 空结果给出固定兜底文案，避免前端出现空白行。
+func buildToolEventResultSummary(result string) string {
+	flat := flattenForLog(result)
+	if flat == "" {
+		return "工具已执行完成。"
+	}
+
+	// 1. 工具很多返回 JSON；直接截断 JSON 会把字段名原样暴露到前端，阅读体验差。
+	// 2. 这里优先做结构化提炼，转成一句中文结论（成功/失败/关键结果）。
+	// 3. 仅在无法提炼时才回退到原文截断，保证不会丢失可读信息。
+	if summary, ok := tryExtractToolResultSummaryCN(flat); ok {
+		return summary
+	}
+
+	runes := []rune(flat)
+	if len(runes) <= 48 {
+		return flat
+	}
+	return string(runes[:48]) + "..."
+}
+
+func tryExtractToolResultSummaryCN(raw string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", false
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+		return "", false
+	}
+
+	toolRaw := strings.TrimSpace(readStringAnyFromMap(payload, "tool"))
+	toolName := resolveToolDisplayNameCN(toolRaw)
+
+	if errText := strings.TrimSpace(readStringAnyFromMap(payload, "error", "err")); errText != "" {
+		return truncateToolSummaryCN(fmt.Sprintf("%s失败：%s", toolName, errText)), true
+	}
+
+	if success, exists := payload["success"]; exists {
+		if ok, isBool := success.(bool); isBool && !ok {
+			reason := strings.TrimSpace(readStringAnyFromMap(payload, "reason", "message"))
+			if reason != "" {
+				return truncateToolSummaryCN(fmt.Sprintf("%s失败：%s", toolName, reason)), true
+			}
+			return truncateToolSummaryCN(fmt.Sprintf("%s执行失败。", toolName)), true
+		}
+	}
+
+	if message := strings.TrimSpace(readStringAnyFromMap(payload, "result", "message", "reason")); message != "" {
+		return truncateToolSummaryCN(message), true
+	}
+
+	pending, hasPending := readIntAnyFromMap(payload, "pending_count")
+	completed, hasCompleted := readIntAnyFromMap(payload, "completed_count")
+	if hasPending || hasCompleted {
+		skipped, _ := readIntAnyFromMap(payload, "skipped_count")
+		return fmt.Sprintf("队列状态：待处理 %d，已完成 %d，已跳过 %d。", pending, completed, skipped), true
+	}
+
+	if hasHead, exists := payload["has_head"]; exists {
+		if b, isBool := hasHead.(bool); isBool {
+			if b {
+				return "已取到当前队首任务。", true
+			}
+			return "当前队列没有可处理任务。", true
+		}
+	}
+
+	if _, ok := payload["slot_candidates"]; ok {
+		if total, exists := readIntAnyFromMap(payload, "total"); exists {
+			return fmt.Sprintf("已找到 %d 个可用时段。", total), true
+		}
+	}
+
+	if toolRaw != "" {
+		return fmt.Sprintf("已完成「%s」。", toolName), true
+	}
+
+	return "", false
+}
+
+func truncateToolSummaryCN(text string) string {
+	runes := []rune(strings.TrimSpace(text))
+	if len(runes) <= 48 {
+		return string(runes)
+	}
+	return string(runes[:48]) + "..."
+}
+
+// buildToolCallStartSummary 生成“工具开始调用”的中文摘要。
+//
+// 职责边界：
+// 1. 摘要面向前端展示，避免直接暴露参数字段名；
+// 2. 只做轻量信息拼接，不做业务语义推断；
+// 3. 仅展示少量关键参数，避免消息过长抢占正文注意力。
+func buildToolCallStartSummary(toolName string, args map[string]any) string {
+	displayName := resolveToolDisplayNameCN(toolName)
+	argSummary := buildToolArgumentsPreviewCN(args)
+	if argSummary == "" {
+		return fmt.Sprintf("已调用工具：%s。", displayName)
+	}
+	return fmt.Sprintf("已调用工具：%s（%s）。", displayName, argSummary)
+}
+
+// buildToolArgumentsPreviewCN 把工具参数转换为中文可读摘要。
+//
+// 职责边界：
+// 1. 只输出白名单字段的中文标签，避免把原始参数键直接透出给前端；
+// 2. 默认最多展示 2 组参数，防止工具行过长；
+// 3. 无可展示参数时返回空字符串，由上层决定是否展示。
+func buildToolArgumentsPreviewCN(args map[string]any) string {
+	if len(args) <= 0 {
+		return ""
+	}
+
+	type argPair struct {
+		Key   string
+		Label string
+	}
+
+	orderedPairs := []argPair{
+		{Key: "title", Label: "任务标题"},
+		{Key: "task_name", Label: "任务名称"},
+		{Key: "deadline_at", Label: "截止时间"},
+		{Key: "new_day", Label: "目标天"},
+		{Key: "new_slot_start", Label: "目标开始节次"},
+		{Key: "day", Label: "天"},
+		{Key: "day_start", Label: "起始天"},
+		{Key: "day_end", Label: "结束天"},
+		{Key: "day_scope", Label: "日期范围"},
+		{Key: "day_of_week", Label: "星期"},
+		{Key: "week", Label: "周"},
+		{Key: "week_from", Label: "起始周"},
+		{Key: "week_to", Label: "结束周"},
+		{Key: "week_filter", Label: "周筛选"},
+		{Key: "slot_start", Label: "开始节次"},
+		{Key: "slot_end", Label: "结束节次"},
+		{Key: "slot_type", Label: "时段类型"},
+		{Key: "slot_types", Label: "时段类型"},
+		{Key: "task_id", Label: "任务编号"},
+		{Key: "task_ids", Label: "任务列表"},
+		{Key: "task_item_id", Label: "任务条目"},
+		{Key: "task_item_ids", Label: "任务条目列表"},
+		{Key: "query", Label: "搜索词"},
+		{Key: "keyword", Label: "关键词"},
+		{Key: "top_k", Label: "返回数量"},
+		{Key: "url", Label: "链接"},
+		{Key: "reason", Label: "原因"},
+		{Key: "limit", Label: "数量"},
+	}
+
+	items := make([]string, 0, 2)
+	for _, pair := range orderedPairs {
+		rawValue, exists := args[pair.Key]
+		if !exists {
+			continue
+		}
+		valueText := formatToolArgValueByKeyCN(pair.Key, rawValue)
+		if valueText == "" {
+			continue
+		}
+		items = append(items, fmt.Sprintf("%s：%s", pair.Label, valueText))
+		if len(items) >= 2 {
+			break
+		}
+	}
+
+	return strings.Join(items, "，")
+}
+
+// resolveToolDisplayNameCN 返回工具中文展示名。
+func resolveToolDisplayNameCN(toolName string) string {
+	name := strings.TrimSpace(toolName)
+	if name == "" {
+		return "未知工具"
+	}
+
+	displayNameMap := map[string]string{
+		"get_overview":          "查看总览",
+		"query_range":           "查询时段详情",
+		"queue_status":          "查看任务队列",
+		"queue_pop_head":        "获取队首任务",
+		"queue_apply_head_move": "调整队首任务时段",
+		"queue_skip_head":       "跳过队首任务",
+		"query_target_tasks":    "查询目标任务",
+		"query_available_slots": "查询可用时间段",
+		"get_task_info":         "查看任务详情",
+		"quick_note_create":     "创建提醒任务",
+		"query_tasks":           "查询任务列表",
+		"web_search":            "网页搜索",
+		"web_fetch":             "网页抓取",
+		"move":                  "移动任务",
+		"place":                 "放置任务",
+		"swap":                  "交换任务",
+		"batch_move":            "批量移动任务",
+		"spread_even":           "均匀分散任务",
+		"min_context_switch":    "减少上下文切换",
+		"unplace":               "移除任务安排",
+	}
+
+	if label, ok := displayNameMap[name]; ok {
+		return label
+	}
+	return name
+}
+
+func formatToolArgValueByKeyCN(key string, value any) string {
+	switch key {
+	case "day_scope":
+		scope := strings.ToLower(strings.TrimSpace(formatToolArgValueCN(value)))
+		switch scope {
+		case "workday":
+			return "工作日"
+		case "weekend":
+			return "周末"
+		case "all":
+			return "全部日期"
+		default:
+			return scope
+		}
+	case "day_of_week":
+		weekdays := parseAnyToIntSlice(value)
+		if len(weekdays) <= 0 {
+			return formatToolArgValueCN(value)
+		}
+		labels := make([]string, 0, len(weekdays))
+		for _, day := range weekdays {
+			labels = append(labels, fmt.Sprintf("周%d", day))
+			if len(labels) >= 4 {
+				break
+			}
+		}
+		return strings.Join(labels, "、")
+	case "task_ids", "task_item_ids", "week_filter":
+		values := parseAnyToIntSlice(value)
+		if len(values) <= 0 {
+			return formatToolArgValueCN(value)
+		}
+		items := make([]string, 0, len(values))
+		for _, current := range values {
+			items = append(items, strconv.Itoa(current))
+			if len(items) >= 4 {
+				break
+			}
+		}
+		return strings.Join(items, "、")
+	case "url":
+		return truncateToolSummaryCN(formatToolArgValueCN(value))
+	case "reason", "title", "task_name", "query", "keyword":
+		return truncateToolSummaryCN(formatToolArgValueCN(value))
+	default:
+		return formatToolArgValueCN(value)
+	}
+}
+
+// formatToolArgValueCN 把参数值格式化为中文可读字符串。
+func formatToolArgValueCN(value any) string {
+	switch v := value.(type) {
+	case string:
+		text := strings.TrimSpace(v)
+		if text == "" {
+			return ""
+		}
+		return text
+	case int:
+		return strconv.Itoa(v)
+	case int8:
+		return strconv.Itoa(int(v))
+	case int16:
+		return strconv.Itoa(int(v))
+	case int32:
+		return strconv.Itoa(int(v))
+	case int64:
+		return strconv.Itoa(int(v))
+	case float32:
+		return strings.TrimSpace(strconv.FormatFloat(float64(v), 'f', -1, 32))
+	case float64:
+		return strings.TrimSpace(strconv.FormatFloat(v, 'f', -1, 64))
+	case bool:
+		if v {
+			return "是"
+		}
+		return "否"
+	case []any:
+		values := make([]string, 0, len(v))
+		for _, item := range v {
+			text := formatToolArgValueCN(item)
+			if text == "" {
+				continue
+			}
+			values = append(values, text)
+			if len(values) >= 3 {
+				break
+			}
+		}
+		return strings.Join(values, "、")
+	default:
+		if value == nil {
+			return ""
+		}
+		text := strings.TrimSpace(fmt.Sprintf("%v", value))
+		if text == "" || text == "<nil>" || text == "map[]" {
+			return ""
+		}
+		return text
+	}
 }

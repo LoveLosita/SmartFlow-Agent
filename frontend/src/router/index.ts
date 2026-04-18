@@ -5,6 +5,7 @@ import AuthView from '@/views/AuthView.vue'
 import AssistantView from '@/views/AssistantView.vue'
 import DashboardView from '@/views/DashboardView.vue'
 import ScheduleView from '@/views/ScheduleView.vue'
+import ToolTracePrototypeView from '@/views/ToolTracePrototypeView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -44,6 +45,11 @@ const router = createRouter({
       meta: {
         requiresAuth: true,
       },
+    },
+    {
+      path: '/prototype/tool-trace',
+      name: 'tool-trace-prototype',
+      component: ToolTracePrototypeView,
     },
   ],
 })

@@ -125,28 +125,30 @@ const renderSlots = computed<RenderSlot[]>(() =>
       <span class="timeline-card__caption">按时间顺序展示课程与任务安排</span>
     </header>
 
-    <div v-if="loading" class="timeline-skeleton">
-      <div v-for="slot in slotBlueprint" :key="slot.key" class="timeline-skeleton__item" />
-    </div>
+    <transition name="fade-switch" mode="out-in">
+      <div v-if="loading" key="loading" class="timeline-skeleton">
+        <div v-for="slot in slotBlueprint" :key="slot.key" class="timeline-skeleton__item" />
+      </div>
 
-    <div v-else class="timeline-grid">
-      <template v-for="slot in renderSlots" :key="slot.key">
-        <article
-          v-if="slot.kind === 'event'"
-          class="timeline-event"
-          :class="`timeline-event--${slot.tone}`"
-        >
-          <span class="timeline-event__time">{{ slot.timeText }}</span>
-          <strong class="timeline-event__title">{{ slot.title }}</strong>
-          <span class="timeline-event__location">{{ slot.locationText }}</span>
-        </article>
+      <div v-else key="content" class="timeline-grid">
+        <template v-for="slot in renderSlots" :key="slot.key">
+          <article
+            v-if="slot.kind === 'event'"
+            class="timeline-event"
+            :class="`timeline-event--${slot.tone}`"
+          >
+            <span class="timeline-event__time">{{ slot.timeText }}</span>
+            <strong class="timeline-event__title">{{ slot.title }}</strong>
+            <span class="timeline-event__location">{{ slot.locationText }}</span>
+          </article>
 
-        <article v-else class="timeline-placeholder timeline-placeholder--pause">
-          <strong class="timeline-placeholder__title">{{ slot.title }}</strong>
-          <span class="timeline-placeholder__hint">{{ slot.hint }}</span>
-        </article>
-      </template>
-    </div>
+          <article v-else class="timeline-placeholder timeline-placeholder--pause">
+            <strong class="timeline-placeholder__title">{{ slot.title }}</strong>
+            <span class="timeline-placeholder__hint">{{ slot.hint }}</span>
+          </article>
+        </template>
+      </div>
+    </transition>
   </section>
 </template>
 
@@ -203,7 +205,7 @@ const renderSlots = computed<RenderSlot[]>(() =>
 .timeline-skeleton__item {
   min-width: 0;
   min-height: 124px;
-  border-radius: 20px;
+  border-radius: 14px;
 }
 
 .timeline-event {
@@ -211,7 +213,7 @@ const renderSlots = computed<RenderSlot[]>(() =>
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  border: 1px solid rgba(17, 24, 39, 0.06);
+  border: 1px solid transparent;
   position: relative;
   overflow: hidden;
 }
@@ -222,107 +224,142 @@ const renderSlots = computed<RenderSlot[]>(() =>
   left: 0;
   top: 0;
   bottom: 0;
-  width: 5px;
-  opacity: 0.92;
+  width: 4px;
 }
 
 .timeline-event__time {
   font-size: 12px;
   font-weight: 700;
-  color: #295b9b;
+  color: #64748b;
 }
 
 .timeline-event__title {
   margin-top: 12px;
   font-size: 15px;
   line-height: 1.35;
-  color: #172033;
+  color: #0f172a;
 }
 
 .timeline-event__location {
   margin-top: 14px;
   font-size: 12px;
-  color: #5f6980;
+  color: #64748b;
 }
 
 .timeline-event--course {
-  background: linear-gradient(180deg, #ecf4ff 0%, #e4eefc 100%);
+  background: #eff6ff;
 }
 
 .timeline-event--course::before {
-  background: #1669c1;
+  background: #3b82f6;
+}
+
+.timeline-event--course .timeline-event__title,
+.timeline-event--course .timeline-event__time {
+  color: #1d4ed8;
 }
 
 .timeline-event--sky {
-  background: linear-gradient(180deg, #f8fbff 0%, #f3f7fc 100%);
+  background: #f0f9ff;
 }
 
 .timeline-event--sky::before {
-  background: #c8d6e8;
+  background: #0ea5e9;
+}
+
+.timeline-event--sky .timeline-event__title,
+.timeline-event--sky .timeline-event__time {
+  color: #0369a1;
 }
 
 .timeline-event--violet {
-  background: linear-gradient(180deg, #eef0ff 0%, #e6e8ff 100%);
+  background: #f5f3ff;
 }
 
 .timeline-event--violet::before {
-  background: #676cff;
+  background: #8b5cf6;
+}
+
+.timeline-event--violet .timeline-event__title,
+.timeline-event--violet .timeline-event__time {
+  color: #6d28d9;
 }
 
 .timeline-event--mint {
-  background: linear-gradient(180deg, #e6f2ff 0%, #dceaff 100%);
+  background: #ecfdf5;
 }
 
 .timeline-event--mint::before {
-  background: #2f7de1;
+  background: #10b981;
+}
+
+.timeline-event--mint .timeline-event__title,
+.timeline-event--mint .timeline-event__time {
+  color: #047857;
 }
 
 .timeline-event--emerald {
-  background: linear-gradient(180deg, #e6f8f1 0%, #def5ec 100%);
+  background: #dcfce7;
 }
 
 .timeline-event--emerald::before {
-  background: #27b482;
+  background: #22c55e;
+}
+
+.timeline-event--emerald .timeline-event__title,
+.timeline-event--emerald .timeline-event__time {
+  color: #15803d;
 }
 
 .timeline-event--amber {
-  background: linear-gradient(180deg, #fff5db 0%, #fff0cb 100%);
+  background: #fffbeb;
 }
 
 .timeline-event--amber::before {
   background: #f59e0b;
 }
 
+.timeline-event--amber .timeline-event__title,
+.timeline-event--amber .timeline-event__time {
+  color: #b45309;
+}
+
 .timeline-event--cyan {
-  background: linear-gradient(180deg, #e1f7ff 0%, #d6f2fb 100%);
+  background: #cffafe;
 }
 
 .timeline-event--cyan::before {
-  background: #57b8ea;
+  background: #06b6d4;
+}
+
+.timeline-event--cyan .timeline-event__title,
+.timeline-event--cyan .timeline-event__time {
+  color: #0e7490;
 }
 
 .timeline-event--neutral {
-  background: linear-gradient(180deg, #f8fbff 0%, #f3f7fc 100%);
+  background: #f8fafc;
+  border-color: rgba(15, 23, 42, 0.05);
 }
 
 .timeline-event--neutral::before {
-  background: #c8d6e8;
+  background: #94a3b8;
 }
 
 .timeline-placeholder {
-  border: 1px dashed rgba(120, 144, 171, 0.28);
-  background: rgba(255, 255, 255, 0.55);
+  border: 1px dashed rgba(15, 23, 42, 0.15);
+  background: #ffffff;
   display: grid;
   align-content: center;
   justify-items: center;
   gap: 8px;
   padding: 14px 12px;
   text-align: center;
-  color: #8a96a8;
+  color: #64748b;
 }
 
 .timeline-placeholder--pause {
-  background: linear-gradient(180deg, #f5f9ff 0%, #eef4fb 100%);
+  background: #f8fafc;
 }
 
 .timeline-placeholder__title {
@@ -357,6 +394,20 @@ const renderSlots = computed<RenderSlot[]>(() =>
   100% {
     background-position: -200% 0;
   }
+}
+
+.fade-switch-enter-active,
+.fade-switch-leave-active {
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.fade-switch-enter-from,
+.fade-switch-leave-to {
+  opacity: 0;
+  transform: translateY(4px);
+}
+.fade-switch-leave-to {
+  transform: translateY(-4px);
 }
 
 @media (max-width: 1320px) {

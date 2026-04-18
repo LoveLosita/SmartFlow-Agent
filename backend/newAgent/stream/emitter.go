@@ -191,70 +191,55 @@ func (e *ChunkEmitter) EmitPseudoAssistantText(ctx context.Context, blockID, sta
 
 // EmitStatus 输出一条阶段状态事件。
 //
-// 当前兼容策略：
-// 1. extra 用 status 表达结构化语义；
-// 2. reasoning_content 里同时放一份可读降级文本，保证旧前端也能看到。
+// 协议约束：
+// 1. 状态事件只通过 extra 传递，不再写入 reasoning_content；
+// 2. includeRole 保留是为了兼容旧签名，当前结构化事件路径不依赖 role。
 func (e *ChunkEmitter) EmitStatus(blockID, stage, code, summary string, includeRole bool) error {
 	if e == nil || e.emit == nil {
 		return nil
 	}
-
-	text := buildStageReasoningText(stage, summary)
-	payload, err := ToOpenAIReasoningChunkWithExtra(
-		e.RequestID,
-		e.ModelName,
-		e.Created,
-		text,
-		includeRole,
-		NewStatusExtra(blockID, stage, code, summary),
-	)
-	if err != nil {
-		return err
-	}
-	if payload == "" {
-		return nil
-	}
-	return e.emit(payload)
+	_ = includeRole
+	return e.emitExtraOnly(NewStatusExtra(blockID, stage, code, summary))
 }
 
 // EmitToolCallStart 输出一次工具调用开始事件。
+//
+// 协议约束：
+// 1. 工具调用开始事件只走 extra.tool，不回写 reasoning_content；
+// 2. includeRole 保留是为了兼容旧签名，当前结构化事件路径不依赖 role。
 func (e *ChunkEmitter) EmitToolCallStart(blockID, stage, toolName, summary, argumentsPreview string, includeRole bool) error {
 	if e == nil || e.emit == nil {
 		return nil
 	}
-
-	text := buildToolCallReasoningText(toolName, summary, argumentsPreview)
-	payload, err := ToOpenAIReasoningChunkWithExtra(
-		e.RequestID,
-		e.ModelName,
-		e.Created,
-		text,
-		includeRole,
-		NewToolCallExtra(blockID, stage, toolName, "start", summary, argumentsPreview),
-	)
-	if err != nil {
-		return err
-	}
-	if payload == "" {
-		return nil
-	}
-	return e.emit(payload)
+	_ = includeRole
+	return e.emitExtraOnly(NewToolCallExtra(blockID, stage, toolName, "start", summary, argumentsPreview))
 }
 
 // EmitToolCallResult 输出一次工具调用结果事件。
-func (e *ChunkEmitter) EmitToolCallResult(blockID, stage, toolName, summary, argumentsPreview string, includeRole bool) error {
+//
+// 协议约束：
+// 1. status 由调用方明确传入（如 done/blocked/failed）；
+// 2. 结果事件只走 extra.tool，不回写 reasoning_content。
+func (e *ChunkEmitter) EmitToolCallResult(blockID, stage, toolName, status, summary, argumentsPreview string, includeRole bool) error {
 	if e == nil || e.emit == nil {
 		return nil
 	}
+	_ = includeRole
+	return e.emitExtraOnly(NewToolResultExtra(blockID, stage, toolName, status, summary, argumentsPreview))
+}
 
-	text := buildToolResultReasoningText(toolName, summary)
-	payload, err := ToOpenAIReasoningChunkWithExtra(
+// emitExtraOnly 仅输出结构化 extra 事件，不附带 content/reasoning。
+func (e *ChunkEmitter) emitExtraOnly(extra *OpenAIChunkExtra) error {
+	if e == nil || e.emit == nil {
+		return nil
+	}
+	payload, err := ToOpenAIStreamWithExtra(
+		nil,
 		e.RequestID,
 		e.ModelName,
 		e.Created,
-		text,
-		includeRole,
-		NewToolResultExtra(blockID, stage, toolName, "done", summary, argumentsPreview),
+		false,
+		extra,
 	)
 	if err != nil {
 		return err

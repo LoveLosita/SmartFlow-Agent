@@ -45,8 +45,24 @@ interface StreamConfirmPayload {
   summary?: string
 }
 
+interface StreamStatusExtraPayload {
+  code?: string
+  summary?: string
+}
+
+interface StreamToolExtraPayload {
+  name?: string
+  status?: string
+  summary?: string
+  arguments_preview?: string
+}
+
 interface StreamExtraPayload {
   kind?: string
+  block_id?: string
+  stage?: string
+  status?: StreamStatusExtraPayload
+  tool?: StreamToolExtraPayload
   confirm?: StreamConfirmPayload
 }
 
@@ -58,6 +74,25 @@ interface StreamEventPayload {
   finish_reason?: string | null
   error?: StreamErrorPayload
   extra?: StreamExtraPayload
+}
+
+type ToolTraceState = 'called' | 'completed' | 'create' | 'blocked'
+
+interface ToolTraceEvent {
+  id: string
+  seq: number
+  state: ToolTraceState
+  summary: string
+  detail?: string
+  toolName?: string
+}
+
+interface StatusTraceEvent {
+  id: string
+  seq: number
+  code: string
+  stage: string
+  summary: string
 }
 
 
@@ -102,6 +137,21 @@ interface DisplayMessage {
   merged: boolean
 }
 
+interface DisplayAssistantBlock {
+  id: string
+  type: 'tool' | 'status' | 'reasoning' | 'content' | 'content_indicator'
+  seq: number
+  text?: string
+  event?: ToolTraceEvent
+  statusEvent?: StatusTraceEvent
+}
+
+interface AssistantContentBlock {
+  id: string
+  seq: number
+  text: string
+}
+
 const props = withDefaults(
   defineProps<{
     initialHistoryWidth?: number
@@ -119,7 +169,7 @@ const assistantBodyRef = ref<HTMLElement | null>(null)
 const messageViewportRef = ref<HTMLElement | null>(null)
 const historyContentRef = ref<HTMLElement | null>(null)
 
-const conversationLoading = ref(false)
+const conversationLoading = ref(true)
 const conversationLoadingMore = ref(false)
 const chatLoading = ref(false)
 const historyExpanded = ref(true)
@@ -158,6 +208,12 @@ const reasoningStartedAtMap = reactive<Record<string, number>>({})
 const reasoningDurationMap = reactive<Record<string, number>>({})
 const confirmOnlyStreamMap = reactive<Record<string, boolean>>({})
 const confirmVisiblePrefixMap = reactive<Record<string, boolean>>({})
+const toolTraceEventsMap = reactive<Record<string, ToolTraceEvent[]>>({})
+const statusTraceEventsMap = reactive<Record<string, StatusTraceEvent[]>>({})
+const toolTraceExpandedMap = reactive<Record<string, boolean>>({})
+const assistantReasoningSeqMap = reactive<Record<string, number>>({})
+const assistantContentBlocksMap = reactive<Record<string, AssistantContentBlock[]>>({})
+const assistantTimelineLastKindMap = reactive<Record<string, 'content' | 'tool' | 'status' | 'reasoning' | 'other'>>({})
 const conversationContextStatsMap = reactive<Record<string, ConversationContextStats | null>>({})
 const conversationContextStatsLoadingMap = reactive<Record<string, boolean>>({})
 const conversationContextStatsReadyMap = reactive<Record<string, boolean>>({})
@@ -178,6 +234,7 @@ let messageScrollReleaseRaf = 0
 let reasoningTicker = 0
 let historyResizeCleanup: (() => void) | null = null
 const conversationListItemRevealTimerMap = new Map<string, number>()
+let assistantTimelineSeq = 0
 const reasoningDisplayNow = ref(Date.now())
 const shouldAutoFollowMessages = ref(true)
 const messageBottomTolerancePx = 24
@@ -378,6 +435,237 @@ function appendConversationMessage(conversationId: string, message: AssistantMes
   return appended
 }
 
+function ensureToolTraceBucket(messageId: string) {
+  if (!toolTraceEventsMap[messageId]) {
+    toolTraceEventsMap[messageId] = []
+  }
+}
+
+function ensureStatusTraceBucket(messageId: string) {
+  if (!statusTraceEventsMap[messageId]) {
+    statusTraceEventsMap[messageId] = []
+  }
+}
+
+function ensureAssistantContentBucket(messageId: string) {
+  if (!assistantContentBlocksMap[messageId]) {
+    assistantContentBlocksMap[messageId] = []
+  }
+}
+
+function nextAssistantTimelineSeq() {
+  assistantTimelineSeq += 1
+  return assistantTimelineSeq
+}
+
+function clearToolTraceState(messageId: string) {
+  delete toolTraceEventsMap[messageId]
+  delete statusTraceEventsMap[messageId]
+  delete assistantReasoningSeqMap[messageId]
+  delete assistantContentBlocksMap[messageId]
+  delete assistantTimelineLastKindMap[messageId]
+  for (const key of Object.keys(toolTraceExpandedMap)) {
+    if (key.startsWith(`${messageId}:tool:`)) {
+      delete toolTraceExpandedMap[key]
+    }
+  }
+}
+
+function appendToolTraceEvent(
+  messageId: string,
+  state: ToolTraceState,
+  summary: string,
+  detail = '',
+  toolName = '',
+) {
+  const normalizedSummary = summary.trim()
+  if (!normalizedSummary) {
+    return
+  }
+
+  ensureToolTraceBucket(messageId)
+  const eventSeq = nextAssistantTimelineSeq()
+  const eventId = `${messageId}:tool:${eventSeq}`
+
+  toolTraceEventsMap[messageId].push({
+    id: eventId,
+    seq: eventSeq,
+    state,
+    summary: normalizedSummary,
+    detail: detail.trim() || undefined,
+    toolName: toolName.trim() || undefined,
+  })
+  assistantTimelineLastKindMap[messageId] = 'tool'
+}
+
+function appendStatusTraceEvent(
+  messageId: string,
+  code: string,
+  summary: string,
+  stage = '',
+) {
+  const normalizedSummary = summary.trim()
+  if (!normalizedSummary) {
+    return
+  }
+
+  ensureStatusTraceBucket(messageId)
+
+  // 1. 状态事件可能在同一轮里被重复推送（如重试/补偿分片）。
+  // 2. 这里按“同 code + 同摘要 + 同 stage”做相邻去重，避免前端刷出重复提示行。
+  // 3. 仅做相邻去重，不做全局去重，保留真实阶段演进顺序。
+  const statusEvents = statusTraceEventsMap[messageId]
+  const last = statusEvents[statusEvents.length - 1]
+  if (last && last.code === code && last.summary === normalizedSummary && last.stage === stage) {
+    return
+  }
+
+  const eventSeq = nextAssistantTimelineSeq()
+  statusEvents.push({
+    id: `${messageId}:status:${eventSeq}`,
+    seq: eventSeq,
+    code: code.trim(),
+    stage: stage.trim(),
+    summary: normalizedSummary,
+  })
+  assistantTimelineLastKindMap[messageId] = 'status'
+}
+
+function appendAssistantContentChunk(messageId: string, chunk: string) {
+  if (!chunk) {
+    return
+  }
+  ensureAssistantContentBucket(messageId)
+  const blocks = assistantContentBlocksMap[messageId]
+  const lastKind = assistantTimelineLastKindMap[messageId]
+
+  if (lastKind === 'content' && blocks.length > 0) {
+    blocks[blocks.length - 1]!.text += chunk
+    return
+  }
+
+  const seq = nextAssistantTimelineSeq()
+  blocks.push({
+    id: `${messageId}:content:${seq}`,
+    seq,
+    text: chunk,
+  })
+  assistantTimelineLastKindMap[messageId] = 'content'
+}
+
+function mapToolEventState(rawStatus?: string): ToolTraceState {
+  const normalized = `${rawStatus || ''}`.trim().toLowerCase()
+  if (normalized === 'start' || normalized === 'calling' || normalized === 'called') {
+    return 'called'
+  }
+  if (normalized === 'create' || normalized === 'created') {
+    return 'create'
+  }
+  if (normalized === 'blocked') {
+    return 'blocked'
+  }
+  if (normalized === 'failed' || normalized === 'error') {
+    return 'blocked'
+  }
+  return 'completed'
+}
+
+function normalizeToolSummary(extra: StreamToolExtraPayload): string {
+  const summary = `${extra.summary || ''}`.trim()
+  if (summary) {
+    return summary
+  }
+  const toolName = `${extra.name || ''}`.trim()
+  if (!toolName) {
+    return '工具事件'
+  }
+  return `已调用工具：${toolName}`
+}
+
+function buildToolDetail(extra: StreamToolExtraPayload): string {
+  const argsPreview = `${extra.arguments_preview || ''}`.trim()
+  if (!argsPreview || argsPreview === '{}') {
+    return ''
+  }
+  return argsPreview
+}
+
+function normalizeStatusCode(rawCode?: string) {
+  const code = `${rawCode || ''}`.trim().toLowerCase()
+  if (!code) {
+    return 'status'
+  }
+  return code
+}
+
+function mapStatusCodeLabel(code: string) {
+  const labelMap: Record<string, string> = {
+    accepted: '请求已接收',
+    planning: '正在规划',
+    resumed: '继续处理中',
+    confirmed: '确认后继续执行',
+    rejected: '已取消并重新规划',
+    executing: '正在执行',
+    plan_confirm: '等待计划确认',
+    tool_confirm: '等待操作确认',
+    ask_user: '等待补充信息',
+    confirm: '等待用户确认',
+    interrupted: '会话已中断',
+    summarizing: '正在生成总结',
+    done: '流程已结束',
+    rough_building: '正在生成初始排课方案',
+    rough_build_failed: '初始排课失败',
+    rough_build_done: '初始排课已完成',
+    rough_build_done_no_refine: '初始排课已完成',
+    order_guard_initialized: '已记录顺序基线',
+    order_guard_passed: '顺序校验通过',
+    order_guard_restored: '顺序已自动恢复',
+    order_guard_restore_skipped: '顺序恢复已跳过',
+    context_compact_start: '正在压缩上下文',
+    context_compact_done: '上下文压缩完成',
+    plan_auto_confirmed: '计划已自动确认',
+  }
+  return labelMap[code] || '状态已更新'
+}
+
+function buildStatusSummary(extra: StreamExtraPayload): string {
+  const summary = `${extra.status?.summary || ''}`.trim()
+  if (summary) {
+    return summary
+  }
+  return mapStatusCodeLabel(normalizeStatusCode(extra.status?.code))
+}
+
+function isLegacyToolStatusCode(code: string) {
+  return code === 'tool_call' || code === 'tool_result' || code === 'tool_blocked'
+}
+
+function mapLegacyToolStatusToState(code: string): ToolTraceState {
+  if (code === 'tool_call') {
+    return 'called'
+  }
+  if (code === 'tool_blocked') {
+    return 'blocked'
+  }
+  return 'completed'
+}
+
+function shouldSkipStatusEvent(code: string, stage = '') {
+  // confirm_request 已有专属卡片，避免重复显示同语义状态行。
+  if (stage === 'confirm' && (code === 'plan_confirm' || code === 'tool_confirm' || code === 'confirm')) {
+    return true
+  }
+  return false
+}
+
+function isToolTraceExpanded(eventId: string) {
+  return toolTraceExpandedMap[eventId] === true
+}
+
+function toggleToolTraceExpanded(eventId: string) {
+  toolTraceExpandedMap[eventId] = !toolTraceExpandedMap[eventId]
+}
+
 function removeConversationMessage(conversationId: string, messageId: string) {
   const bucket = conversationMessagesMap[conversationId]
   if (!bucket || bucket.length <= 0) {
@@ -388,6 +676,7 @@ function removeConversationMessage(conversationId: string, messageId: string) {
     return
   }
   bucket.splice(targetIndex, 1)
+  clearToolTraceState(messageId)
 }
 
 function cleanupHiddenAssistantMessageState(messageId: string) {
@@ -400,6 +689,7 @@ function cleanupHiddenAssistantMessageState(messageId: string) {
   delete reasoningDurationMap[messageId]
   delete confirmOnlyStreamMap[messageId]
   delete confirmVisiblePrefixMap[messageId]
+  clearToolTraceState(messageId)
 }
 
 function clearConfirmStreamFlags(messageId: string) {
@@ -845,6 +1135,124 @@ function isDisplayStreaming(dm: DisplayMessage): boolean {
   return dm.sources.some(m => m.id === activeStreamingMessageId.value)
 }
 
+function getDisplayReasoningSeq(dm: DisplayMessage) {
+  const seqList: number[] = []
+  for (const source of dm.sources) {
+    const seq = assistantReasoningSeqMap[source.id]
+    if (typeof seq === 'number' && seq > 0) {
+      seqList.push(seq)
+    }
+  }
+  if (seqList.length > 0) {
+    return Math.min(...seqList)
+  }
+  if (dm.reasoning?.trim()) {
+    return 10
+  }
+  return -1
+}
+
+function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] {
+  if (dm.role !== 'assistant') {
+    return []
+  }
+
+  const blocks: DisplayAssistantBlock[] = []
+  let fallbackSeq = -100000
+  let hasContentBlock = false
+
+  for (const source of dm.sources) {
+    const sourceEvents = (toolTraceEventsMap[source.id] || []).slice().sort((left, right) => left.seq - right.seq)
+    for (const event of sourceEvents) {
+      blocks.push({
+        id: event.id,
+        type: 'tool',
+        seq: event.seq,
+        event,
+      })
+    }
+
+    const statusEvents = (statusTraceEventsMap[source.id] || []).slice().sort((left, right) => left.seq - right.seq)
+    for (const statusEvent of statusEvents) {
+      blocks.push({
+        id: statusEvent.id,
+        type: 'status',
+        seq: statusEvent.seq,
+        statusEvent,
+      })
+    }
+
+    const contentBlocks = assistantContentBlocksMap[source.id] || []
+    if (contentBlocks.length > 0) {
+      hasContentBlock = true
+      for (const contentBlock of contentBlocks) {
+        blocks.push({
+          id: contentBlock.id,
+          type: 'content',
+          seq: contentBlock.seq,
+          text: contentBlock.text,
+        })
+      }
+      continue
+    }
+
+    if (source.content) {
+      hasContentBlock = true
+      fallbackSeq += 1
+      blocks.push({
+        id: `${source.id}:content:fallback`,
+        type: 'content',
+        seq: fallbackSeq,
+        text: source.content,
+      })
+    }
+  }
+
+  if (shouldShowDisplayReasoningBox(dm)) {
+    const reasoningSeq = getDisplayReasoningSeq(dm)
+    blocks.push({
+      id: `${dm.id}:reasoning`,
+      type: 'reasoning',
+      seq: reasoningSeq > 0 ? reasoningSeq : 10,
+      text: dm.reasoning,
+    })
+  }
+
+  if (!hasContentBlock && dm.content) {
+    fallbackSeq += 1
+    blocks.push({
+      id: `${dm.id}:content`,
+      type: 'content',
+      seq: fallbackSeq,
+      text: dm.content,
+    })
+  }
+
+  if (shouldShowDisplayAnsweringIndicator(dm)) {
+    const maxSeq = blocks.length > 0 ? Math.max(...blocks.map((item) => item.seq)) : 0
+    blocks.push({
+      id: `${dm.id}:content-indicator`,
+      type: 'content_indicator',
+      seq: maxSeq + 1,
+    })
+  }
+
+  return blocks.sort((left, right) => left.seq - right.seq)
+}
+
+function getToolTraceStateLabel(state: ToolTraceState): string {
+  if (state === 'called') {
+    return '已调用'
+  }
+  if (state === 'create') {
+    return '已创建'
+  }
+  if (state === 'blocked') {
+    return '已拦截'
+  }
+  return '已完成'
+}
+
 function shouldShowDisplayReasoningBox(dm: DisplayMessage): boolean {
   if (dm.role !== 'assistant') return false
   return dm.sources.some(m =>
@@ -994,11 +1402,15 @@ async function loadConversationListData(reset = false) {
   }
 
   try {
-    const result = await getConversationList({
-      page: conversationPage.value,
-      pageSize: conversationPageSize,
-      status: 'active',
-    })
+    const minTimer = new Promise((resolve) => setTimeout(resolve, 800))
+    const [result] = await Promise.all([
+      getConversationList({
+        page: conversationPage.value,
+        pageSize: conversationPageSize,
+        status: 'active',
+      }),
+      reset ? minTimer : Promise.resolve(),
+    ])
 
     if (reset) {
       conversationList.value = conversationList.value.filter((item) => isDraftConversationId(item.conversation_id))
@@ -1408,6 +1820,80 @@ function prepareAssistantMessageForStreaming(message: AssistantMessage, createdA
   reasoningCollapsedMap[message.id] = false
   delete reasoningStartedAtMap[message.id]
   delete reasoningDurationMap[message.id]
+  clearToolTraceState(message.id)
+  toolTraceEventsMap[message.id] = []
+  statusTraceEventsMap[message.id] = []
+  assistantContentBlocksMap[message.id] = []
+  assistantTimelineLastKindMap[message.id] = 'other'
+}
+
+function handleStreamExtraEvent(extra: StreamExtraPayload | undefined, assistantMessage: AssistantMessage) {
+  if (!extra?.kind) {
+    return
+  }
+
+  if (extra.kind === 'confirm_request') {
+    // 1. 记录“confirm 到来前是否已存在可见正文/思考”。
+    // 2. 若已有可见前缀，后续流结束时只隐藏 confirm 相关部分，不删除整条消息。
+    if (assistantMessage.content.trim() || `${assistantMessage.reasoning || ''}`.trim()) {
+      confirmVisiblePrefixMap[assistantMessage.id] = true
+    }
+    confirmOnlyStreamMap[assistantMessage.id] = true
+    applyConfirmOverlay(extra.confirm)
+    return
+  }
+
+  if (extra.kind === 'tool_call' && extra.tool) {
+    appendToolTraceEvent(
+      assistantMessage.id,
+      mapToolEventState(extra.tool.status || 'start'),
+      normalizeToolSummary(extra.tool),
+      buildToolDetail(extra.tool),
+      `${extra.tool.name || ''}`,
+    )
+    return
+  }
+
+  if (extra.kind === 'tool_result' && extra.tool) {
+    appendToolTraceEvent(
+      assistantMessage.id,
+      mapToolEventState(extra.tool.status || 'done'),
+      normalizeToolSummary(extra.tool),
+      buildToolDetail(extra.tool),
+      `${extra.tool.name || ''}`,
+    )
+    return
+  }
+
+  if (extra.kind === 'status' && extra.status) {
+    // 1. status 是固定节点（rough_build/order_guard/compact 等）的主通道，需要进入时间线。
+    // 2. 兼容老协议：若 status.code 仍是 tool_*，归并到工具事件，避免重复两条。
+    // 3. 非工具状态统一转为“节点状态行”，和正文按 seq 自然穿插。
+    const code = normalizeStatusCode(extra.status.code)
+    if (isLegacyToolStatusCode(code)) {
+      appendToolTraceEvent(
+        assistantMessage.id,
+        mapLegacyToolStatusToState(code),
+        `${extra.status.summary || '工具事件'}`.trim() || '工具事件',
+      )
+      return
+    }
+    if (!shouldSkipStatusEvent(code, `${extra.stage || ''}`.trim())) {
+      appendStatusTraceEvent(
+        assistantMessage.id,
+        code,
+        buildStatusSummary(extra),
+        `${extra.stage || ''}`,
+      )
+    }
+  }
+}
+
+function shouldSuppressReasoningDeltaByExtraKind(kind?: string) {
+  if (!kind) {
+    return false
+  }
+  return kind === 'status' || kind === 'tool_call' || kind === 'tool_result'
 }
 
 // processSseBlock 负责解析单个 SSE block，并把增量内容落到当前 assistant message 上。
@@ -1451,23 +1937,17 @@ function processSseBlock(block: string, assistantMessage: AssistantMessage) {
     throw new Error(parsed.error.message)
   }
 
-  if (parsed.extra?.kind === 'confirm_request') {
-    // 1. 记录“confirm 到来前是否已存在可见正文/思考”。
-    // 2. 若已有可见前缀，后续流结束时只隐藏 confirm 相关部分，不删除整条消息。
-    if (assistantMessage.content.trim() || `${assistantMessage.reasoning || ''}`.trim()) {
-      confirmVisiblePrefixMap[assistantMessage.id] = true
-    }
-    confirmOnlyStreamMap[assistantMessage.id] = true
-    applyConfirmOverlay(parsed.extra.confirm)
-  }
+  handleStreamExtraEvent(parsed.extra, assistantMessage)
 
   const shouldSuppressVisibleDelta = confirmOnlyStreamMap[assistantMessage.id] === true
+  const shouldSuppressReasoningByExtraKind = shouldSuppressReasoningDeltaByExtraKind(parsed.extra?.kind)
   const choice = parsed.choices?.[0]
   const delta = choice?.delta ?? parsed.delta ?? parsed
   const finishReason = choice?.finish_reason ?? parsed.finish_reason ?? null
 
   if (
     !shouldSuppressVisibleDelta &&
+    !shouldSuppressReasoningByExtraKind &&
     typeof delta?.reasoning_content === 'string' &&
     delta.reasoning_content
   ) {
@@ -1477,10 +1957,15 @@ function processSseBlock(block: string, assistantMessage: AssistantMessage) {
       markReasoningStart(assistantMessage)
       thinkingMessageMap[assistantMessage.id] = true
     }
+    if (!assistantReasoningSeqMap[assistantMessage.id]) {
+      assistantReasoningSeqMap[assistantMessage.id] = nextAssistantTimelineSeq()
+    }
+    assistantTimelineLastKindMap[assistantMessage.id] = 'reasoning'
     assistantMessage.reasoning = `${assistantMessage.reasoning || ''}${delta.reasoning_content}`
   }
 
   if (!shouldSuppressVisibleDelta && typeof delta?.content === 'string' && delta.content) {
+    appendAssistantContentChunk(assistantMessage.id, delta.content)
     if (isThinkingMessage(assistantMessage)) {
       // 1. 一旦正文开始回流，立刻结束“思考中”阶段，避免两个等待动画同时出现。
       // 2. 这样视觉上始终保持“先思考，再输出正文”的单阶段感知。
@@ -1793,7 +2278,7 @@ onBeforeUnmount(() => {
 
 <template>
   <aside class="assistant-shell glass-panel" :class="{ 'assistant-shell--standalone': isStandaloneMode }">
-    <header class="assistant-header">
+    <header class="assistant-header dashboard-item-pop" :style="{ '--anim-delay': '0s' }">
       <div class="assistant-header__text">
         <span class="assistant-header__eyebrow">AI 对话</span>
         <strong>{{ selectedConversationTitle }}</strong>
@@ -1810,7 +2295,7 @@ onBeforeUnmount(() => {
       }"
       :style="assistantBodyStyle"
       >
-        <aside class="assistant-history" :class="{ 'assistant-history--collapsed': !historyExpanded }">
+        <aside class="assistant-history dashboard-item-pop" :class="{ 'assistant-history--collapsed': !historyExpanded }" :style="{ '--anim-delay': '0.05s' }">
           <div class="assistant-history__toolbar">
             <div v-if="historyExpanded" class="assistant-history__brand">
               <span class="assistant-history__brand-icon" aria-hidden="true">
@@ -1890,8 +2375,9 @@ onBeforeUnmount(() => {
       </aside>
 
       <div
-        class="assistant-splitter"
+        class="assistant-splitter dashboard-item-pop"
         :class="{ 'assistant-splitter--hidden': !historyExpanded }"
+        :style="{ '--anim-delay': '0.08s' }"
         role="separator"
         aria-label="调整会话列表宽度"
         @pointerdown.prevent="startResizeHistoryPanel"
@@ -1899,7 +2385,7 @@ onBeforeUnmount(() => {
         <span class="assistant-splitter__line" />
       </div>
 
-      <section class="assistant-chat">
+      <section class="assistant-chat dashboard-item-pop" :style="{ '--anim-delay': '0.1s' }">
         <div
           ref="messageViewportRef"
           class="assistant-messages"
@@ -1910,18 +2396,20 @@ onBeforeUnmount(() => {
             当前会话的历史消息暂时不可读，但你仍然可以继续追问；后续刷新后会自动恢复。
           </div>
 
-          <div v-if="!selectedMessages.length && !chatLoading" class="assistant-empty">
-            <div class="assistant-empty__halo" />
-            <strong>从这里开始和 AI 协作</strong>
-            <p>右侧采用更接近 DeepSeek 的阅读式布局，只保留用户气泡，AI 回复直接按正文流展示。</p>
-          </div>
+          <transition name="fade-switch" mode="out-in">
+            <div v-if="!selectedMessages.length && !chatLoading" key="empty" class="assistant-empty">
+              <div class="assistant-empty__halo" />
+              <strong>从这里开始和 AI 协作</strong>
+              <p>右侧采用更接近 DeepSeek 的阅读式布局，只保留用户气泡，AI 回复直接按正文流展示。</p>
+            </div>
 
-          <article
-            v-for="dm in displayMessages"
-            :key="dm.id"
-            class="chat-message"
-            :class="`chat-message--${dm.role}`"
-          >
+            <TransitionGroup v-else tag="div" name="message-stagger" class="assistant-message-list" key="list">
+              <article
+                v-for="dm in displayMessages"
+                :key="dm.id"
+                class="chat-message"
+                :class="`chat-message--${dm.role}`"
+              >
             <div v-if="dm.role === 'user'" class="chat-message__user-row">
               <div class="chat-message__user-bubble">
                 <template v-if="isEditingUserMessage(dm.id)">
@@ -1971,83 +2459,139 @@ onBeforeUnmount(() => {
             </div>
 
             <div v-else class="chat-message__assistant-flow">
-              <div v-if="shouldShowDisplayReasoningBox(dm)" class="chat-message__reasoning">
-                <div class="chat-message__reasoning-head">
-                  <div class="chat-message__reasoning-title">
-                    <span class="chat-message__reasoning-icon">
-                      <svg
-                        class="chat-message__reasoning-icon-svg"
-                        viewBox="0 0 16 16"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                        aria-hidden="true"
-                      >
-                        <path
-                          d="M8.00195 6.64454C8.75029 6.64454 9.35735 7.25169 9.35742 8.00001C9.35742 8.74838 8.75033 9.35548 8.00195 9.35548C7.2537 9.35533 6.64746 8.74829 6.64746 8.00001C6.64753 7.25178 7.25374 6.64468 8.00195 6.64454Z"
-                          fill="currentColor"
-                        />
-                        <path
-                          fill-rule="evenodd"
-                          clip-rule="evenodd"
-                          d="M9.97168 1.29981C11.5854 0.718916 13.271 0.642197 14.3145 1.68555C15.3578 2.72902 15.2811 4.41466 14.7002 6.02833C14.4708 6.66561 14.1505 7.32937 13.75 8.00001C14.1505 8.67062 14.4708 9.33444 14.7002 9.97169C15.2811 11.5854 15.3579 13.271 14.3145 14.3145C13.271 15.3579 11.5854 15.2811 9.97168 14.7002C9.33443 14.4708 8.67062 14.1505 8 13.75C7.32936 14.1505 6.66561 14.4708 6.02832 14.7002C4.41464 15.2811 2.72902 15.3578 1.68555 14.3145C0.642186 13.271 0.718901 11.5854 1.29981 9.97169C1.52918 9.33454 1.84868 8.67049 2.24902 8.00001C1.84869 7.32953 1.52918 6.66544 1.29981 6.02833C0.718882 4.41459 0.6421 2.729 1.68555 1.68555C2.729 0.642112 4.41459 0.718887 6.02832 1.29981C6.66544 1.52918 7.32953 1.8487 8 2.24903C8.67048 1.84869 9.33454 1.52919 9.97168 1.29981ZM12.9404 9.2129C12.4391 9.893 11.8616 10.5681 11.2148 11.2149C10.5681 11.8616 9.89299 12.4391 9.21289 12.9404C9.62535 13.1579 10.0271 13.338 10.4121 13.4766C11.9146 14.0174 12.9173 13.8738 13.3955 13.3955C13.8737 12.9173 14.0174 11.9146 13.4766 10.4121C13.338 10.0271 13.1579 9.62535 12.9404 9.2129ZM3.05859 9.2129C2.84124 9.62523 2.662 10.0272 2.52344 10.4121C1.98255 11.9146 2.1263 12.9172 2.60449 13.3955C3.08281 13.8737 4.08548 14.0174 5.58789 13.4766C5.97267 13.338 6.37392 13.1577 6.78613 12.9404C6.10627 12.4393 5.43171 11.8614 4.78516 11.2149C4.13826 10.5679 3.55995 9.89313 3.05859 9.2129ZM7.99902 3.792C7.23182 4.31419 6.45309 4.95512 5.7041 5.70411C4.95512 6.45309 4.31418 7.23184 3.79199 7.99903C4.31434 8.76666 4.95474 9.54653 5.7041 10.2959C6.45312 11.0449 7.23274 11.6848 8 12.207C8.76728 11.6848 9.54686 11.0449 10.2959 10.2959C11.0449 9.54686 11.6848 8.76729 12.207 8.00001C11.6848 7.23275 11.0449 6.45312 10.2959 5.70411C9.54653 4.95475 8.76665 4.31434 7.99902 3.792ZM5.58789 2.52344C4.08536 1.98255 3.08275 2.12625 2.60449 2.6045C2.12624 3.08275 1.98255 4.08536 2.52344 5.5879C2.66192 5.97253 2.84143 6.37409 3.05859 6.78614C3.55986 6.10611 4.13843 5.43189 4.78516 4.78516C5.4319 4.13843 6.10609 3.55987 6.78613 3.0586C6.37408 2.84144 5.97252 2.66192 5.58789 2.52344ZM13.3955 2.6045C12.9172 2.12631 11.9146 1.98257 10.4121 2.52344C10.0272 2.66201 9.62522 2.84125 9.21289 3.0586C9.89313 3.55996 10.5679 4.13827 11.2148 4.78516C11.8614 5.43172 12.4392 6.10627 12.9404 6.78614C13.1577 6.37393 13.338 5.97267 13.4766 5.5879C14.0174 4.08549 13.8736 3.08281 13.3955 2.6045Z"
-                          fill="currentColor"
-                        />
-                      </svg>
-                    </span>
-                    <span class="chat-message__reasoning-status">{{ getDisplayReasoningStatusLabel(dm) }}</span>
-                  </div>
-                  <button
-                    type="button"
-                    class="chat-message__reasoning-toggle"
-                    :aria-label="isDisplayReasoningCollapsed(dm) ? '展开深度思考' : '折叠深度思考'"
-                    @click="toggleDisplayReasoningCollapse(dm)"
+              <TransitionGroup name="inner-fade">
+                <div v-for="block in getDisplayAssistantBlocks(dm)" :key="block.id">
+                <div v-if="block.type === 'tool'" class="chat-message__tool-list">
+                  <article
+                    class="chat-message__tool-item"
+                    :class="{
+                      'chat-message__tool-item--called': block.event?.state === 'called',
+                      'chat-message__tool-item--completed': block.event?.state === 'completed',
+                      'chat-message__tool-item--create': block.event?.state === 'create',
+                      'chat-message__tool-item--blocked': block.event?.state === 'blocked',
+                    }"
                   >
-                    <span class="chat-message__reasoning-chevron">
-                      <svg
-                        class="chat-message__reasoning-chevron-icon"
-                        :class="{ 'chat-message__reasoning-chevron-icon--expanded': !isDisplayReasoningCollapsed(dm) }"
-                        width="14"
-                        height="14"
-                        viewBox="0 0 14 14"
-                        fill="none"
-                        xmlns="http://www.w3.org/2000/svg"
-                        aria-hidden="true"
-                      >
-                        <path
-                          d="M5.5 2.15137L5.92383 2.57617L8.65137 5.30273C8.90706 5.55843 9.13382 5.78438 9.29785 5.98828C9.46883 6.20088 9.61756 6.44405 9.66602 6.75C9.69222 6.91565 9.69222 7.08435 9.66602 7.25C9.61756 7.55595 9.46883 7.79912 9.29785 8.01172C9.13382 8.21561 8.90706 8.44157 8.65137 8.69727L5.92383 11.4238L5.5 11.8486L4.65137 11L5.07617 10.5762L7.80273 7.84863C8.07732 7.57405 8.24849 7.40124 8.3623 7.25977C8.46904 7.12709 8.47813 7.07728 8.48047 7.0625C8.48703 7.02105 8.48703 6.97895 8.48047 6.9375C8.47813 6.92272 8.46904 6.87291 8.3623 6.74023C8.24848 6.59876 8.07732 6.42595 7.80273 6.15137L5.07617 3.42383L4.65137 3L5.5 2.15137Z"
-                          fill="currentColor"
-                        />
-                      </svg>
-                    </span>
-                  </button>
+                    <button
+                      type="button"
+                      class="chat-message__tool-head"
+                      @click="block.event && toggleToolTraceExpanded(block.event.id)"
+                    >
+                      <span class="chat-message__tool-icon" aria-hidden="true">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+                        </svg>
+                      </span>
+                      <span class="chat-message__tool-summary">{{ block.event?.summary }}</span>
+                      <em class="chat-message__tool-badge">{{ getToolTraceStateLabel(block.event?.state || 'completed') }}</em>
+                      <span class="chat-message__tool-chevron" :class="{ 'chat-message__tool-chevron--expanded': block.event ? isToolTraceExpanded(block.event.id) : false }" aria-hidden="true">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                          <polyline points="9 18 15 12 9 6"></polyline>
+                        </svg>
+                      </span>
+                    </button>
+
+                    <p v-if="block.event && isToolTraceExpanded(block.event.id) && block.event.detail" class="chat-message__tool-detail">
+                      {{ block.event.detail }}
+                    </p>
+                  </article>
                 </div>
 
-                <div v-if="!isDisplayReasoningCollapsed(dm)" class="chat-message__reasoning-body">
-                  <div
-                    v-if="dm.reasoning"
-                    class="chat-message__markdown chat-message__markdown--reasoning"
-                    v-html="renderMessageMarkdown(dm.reasoning)"
-                  />
-                  <div v-else class="chat-message__streaming chat-message__streaming--reasoning">
-                    <div class="typing-indicator">
-                      <span />
-                      <span />
-                      <span />
+                <div v-else-if="block.type === 'status'" class="chat-message__status-line">
+                  <span class="chat-message__status-icon" aria-hidden="true">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M12 2v4" />
+                      <path d="M12 18v4" />
+                      <path d="M4.93 4.93l2.83 2.83" />
+                      <path d="M16.24 16.24l2.83 2.83" />
+                      <path d="M2 12h4" />
+                      <path d="M18 12h4" />
+                      <path d="M4.93 19.07l2.83-2.83" />
+                      <path d="M16.24 7.76l2.83-2.83" />
+                    </svg>
+                  </span>
+                  <span class="chat-message__status-text">{{ block.statusEvent?.summary }}</span>
+                </div>
+
+                <div v-else-if="block.type === 'reasoning'" class="chat-message__reasoning">
+                  <div class="chat-message__reasoning-head">
+                    <div class="chat-message__reasoning-title">
+                      <span class="chat-message__reasoning-icon">
+                        <svg
+                          class="chat-message__reasoning-icon-svg"
+                          viewBox="0 0 16 16"
+                          fill="none"
+                          xmlns="http://www.w3.org/2000/svg"
+                          aria-hidden="true"
+                        >
+                          <path
+                            d="M8.00195 6.64454C8.75029 6.64454 9.35735 7.25169 9.35742 8.00001C9.35742 8.74838 8.75033 9.35548 8.00195 9.35548C7.2537 9.35533 6.64746 8.74829 6.64746 8.00001C6.64753 7.25178 7.25374 6.64468 8.00195 6.64454Z"
+                            fill="currentColor"
+                          />
+                          <path
+                            fill-rule="evenodd"
+                            clip-rule="evenodd"
+                            d="M9.97168 1.29981C11.5854 0.718916 13.271 0.642197 14.3145 1.68555C15.3578 2.72902 15.2811 4.41466 14.7002 6.02833C14.4708 6.66561 14.1505 7.32937 13.75 8.00001C14.1505 8.67062 14.4708 9.33444 14.7002 9.97169C15.2811 11.5854 15.3579 13.271 14.3145 14.3145C13.271 15.3579 11.5854 15.2811 9.97168 14.7002C9.33443 14.4708 8.67062 14.1505 8 13.75C7.32936 14.1505 6.66561 14.4708 6.02832 14.7002C4.41464 15.2811 2.72902 15.3578 1.68555 14.3145C0.642186 13.271 0.718901 11.5854 1.29981 9.97169C1.52918 9.33454 1.84868 8.67049 2.24902 8.00001C1.84869 7.32953 1.52918 6.66544 1.29981 6.02833C0.718882 4.41459 0.6421 2.729 1.68555 1.68555C2.729 0.642112 4.41459 0.718887 6.02832 1.29981C6.66544 1.52918 7.32953 1.8487 8 2.24903C8.67048 1.84869 9.33454 1.52919 9.97168 1.29981ZM12.9404 9.2129C12.4391 9.893 11.8616 10.5681 11.2148 11.2149C10.5681 11.8616 9.89299 12.4391 9.21289 12.9404C9.62535 13.1579 10.0271 13.338 10.4121 13.4766C11.9146 14.0174 12.9173 13.8738 13.3955 13.3955C13.8737 12.9173 14.0174 11.9146 13.4766 10.4121C13.338 10.0271 13.1579 9.62535 12.9404 9.2129ZM3.05859 9.2129C2.84124 9.62523 2.662 10.0272 2.52344 10.4121C1.98255 11.9146 2.1263 12.9172 2.60449 13.3955C3.08281 13.8737 4.08548 14.0174 5.58789 13.4766C5.97267 13.338 6.37392 13.1577 6.78613 12.9404C6.10627 12.4393 5.43171 11.8614 4.78516 11.2149C4.13826 10.5679 3.55995 9.89313 3.05859 9.2129ZM7.99902 3.792C7.23182 4.31419 6.45309 4.95512 5.7041 5.70411C4.95512 6.45309 4.31418 7.23184 3.79199 7.99903C4.31434 8.76666 4.95474 9.54653 5.7041 10.2959C6.45312 11.0449 7.23274 11.6848 8 12.207C8.76728 11.6848 9.54686 11.0449 10.2959 10.2959C11.0449 9.54686 11.6848 8.76729 12.207 8.00001C11.6848 7.23275 11.0449 6.45312 10.2959 5.70411C9.54653 4.95475 8.76665 4.31434 7.99902 3.792ZM5.58789 2.52344C4.08536 1.98255 3.08275 2.12625 2.60449 2.6045C2.12624 3.08275 1.98255 4.08536 2.52344 5.5879C2.66192 5.97253 2.84143 6.37409 3.05859 6.78614C3.55986 6.10611 4.13843 5.43189 4.78516 4.78516C5.4319 4.13843 6.10609 3.55987 6.78613 3.0586C6.37408 2.84144 5.97252 2.66192 5.58789 2.52344ZM13.3955 2.6045C12.9172 2.12631 11.9146 1.98257 10.4121 2.52344C10.0272 2.66201 9.62522 2.84125 9.21289 3.0586C9.89313 3.55996 10.5679 4.13827 11.2148 4.78516C11.8614 5.43172 12.4392 6.10627 12.9404 6.78614C13.1577 6.37393 13.338 5.97267 13.4766 5.5879C14.0174 4.08549 13.8736 3.08281 13.3955 2.6045Z"
+                            fill="currentColor"
+                          />
+                        </svg>
+                      </span>
+                      <span class="chat-message__reasoning-status">{{ getDisplayReasoningStatusLabel(dm) }}</span>
+                    </div>
+                    <button
+                      type="button"
+                      class="chat-message__reasoning-toggle"
+                      :aria-label="isDisplayReasoningCollapsed(dm) ? '展开深度思考' : '折叠深度思考'"
+                      @click="toggleDisplayReasoningCollapse(dm)"
+                    >
+                      <span class="chat-message__reasoning-chevron">
+                        <svg
+                          class="chat-message__reasoning-chevron-icon"
+                          :class="{ 'chat-message__reasoning-chevron-icon--expanded': !isDisplayReasoningCollapsed(dm) }"
+                          width="14"
+                          height="14"
+                          viewBox="0 0 14 14"
+                          fill="none"
+                          xmlns="http://www.w3.org/2000/svg"
+                          aria-hidden="true"
+                        >
+                          <path
+                            d="M5.5 2.15137L5.92383 2.57617L8.65137 5.30273C8.90706 5.55843 9.13382 5.78438 9.29785 5.98828C9.46883 6.20088 9.61756 6.44405 9.66602 6.75C9.69222 6.91565 9.69222 7.08435 9.66602 7.25C9.61756 7.55595 9.46883 7.79912 9.29785 8.01172C9.13382 8.21561 8.90706 8.44157 8.65137 8.69727L5.92383 11.4238L5.5 11.8486L4.65137 11L5.07617 10.5762L7.80273 7.84863C8.07732 7.57405 8.24849 7.40124 8.3623 7.25977C8.46904 7.12709 8.47813 7.07728 8.48047 7.0625C8.48703 7.02105 8.48703 6.97895 8.48047 6.9375C8.47813 6.92272 8.46904 6.87291 8.3623 6.74023C8.24848 6.59876 8.07732 6.42595 7.80273 6.15137L5.07617 3.42383L4.65137 3L5.5 2.15137Z"
+                            fill="currentColor"
+                          />
+                        </svg>
+                      </span>
+                    </button>
+                  </div>
+
+                  <div v-if="!isDisplayReasoningCollapsed(dm)" class="chat-message__reasoning-body">
+                    <div
+                      v-if="block.text"
+                      class="chat-message__markdown chat-message__markdown--reasoning"
+                      v-html="renderMessageMarkdown(block.text)"
+                    />
+                    <div v-else class="chat-message__streaming chat-message__streaming--reasoning">
+                      <div class="typing-indicator">
+                        <span />
+                        <span />
+                        <span />
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
 
-              <div v-if="dm.content" class="chat-message__assistant-content">
-                <div class="chat-message__markdown chat-message__markdown--assistant" v-html="renderMessageMarkdown(dm.content)" />
-              </div>
-              <div v-else-if="shouldShowDisplayAnsweringIndicator(dm)" class="chat-message__streaming chat-message__streaming--plain">
-                <div class="typing-indicator">
-                  <span />
-                  <span />
-                  <span />
+                <div v-else-if="block.type === 'content'" class="chat-message__assistant-content">
+                  <div class="chat-message__markdown chat-message__markdown--assistant" v-html="renderMessageMarkdown(block.text || '')" />
                 </div>
-              </div>
+
+                <div v-else-if="block.type === 'content_indicator'" class="chat-message__streaming chat-message__streaming--plain">
+                  <div class="typing-indicator">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                  </div>
+                </div>
+              </TransitionGroup>
 
               <div v-if="dm.content" class="chat-message__action-bar">
                 <button
@@ -2064,8 +2608,10 @@ onBeforeUnmount(() => {
               </div>
               <span class="chat-message__time">{{ formatMessageTime(dm.createdAt) }}</span>
             </div>
-          </article>
-        </div>
+            </article>
+          </TransitionGroup>
+        </transition>
+      </div>
 
         <div class="assistant-actions">
           <button
@@ -2249,18 +2795,94 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+@keyframes assistant-item-pop {
+  0% { opacity: 0; transform: scale(0.98) translateY(10px); }
+  60% { opacity: 1; transform: scale(1.01) translateY(-1px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.dashboard-item-pop {
+  animation: assistant-item-pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation-delay: var(--anim-delay, 0s);
+}
+
+.fade-switch-enter-active,
+.fade-switch-leave-active {
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.fade-switch-enter-from {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+.fade-switch-leave-to {
+  opacity: 0;
+  transform: translateY(-10px);
+}
+
+.message-stagger-enter-active,
+.message-stagger-leave-active {
+  transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.message-stagger-enter-from {
+  opacity: 0;
+  transform: translateY(20px) scale(0.98);
+}
+
+.message-stagger-leave-to {
+  opacity: 0;
+  transform: translateX(30px) scale(0.95);
+}
+
+.message-stagger-leave-active {
+  position: absolute;
+  width: 100%;
+}
+
+.inner-fade-enter-active,
+.inner-fade-leave-active {
+  transition: all 0.5s ease;
+}
+
+.inner-fade-enter-from {
+  opacity: 0;
+  transform: translateY(5px);
+}
+
+.inner-fade-leave-to {
+  opacity: 0;
+}
+
 .assistant-shell {
   height: 100%;
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
-  border-radius: 30px;
-  border: 1px solid rgba(16, 24, 40, 0.08);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(247, 249, 252, 0.98)),
-    radial-gradient(circle at top right, rgba(127, 169, 255, 0.16), transparent 34%);
-  font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Segoe UI Variable Text', sans-serif;
+  background: #f8fafc;
+  font-family: 'Inter', 'Segoe UI', Roboto, -apple-system, sans-serif;
+}
+
+/* --- 全局精致滚动条 --- */
+:deep(::-webkit-scrollbar) {
+  width: 5px;
+  height: 5px;
+}
+
+:deep(::-webkit-scrollbar-track) {
+  background: transparent;
+}
+
+:deep(::-webkit-scrollbar-thumb) {
+  background: rgba(15, 23, 42, 0.08);
+  border-radius: 10px;
+  transition: background 0.3s;
+}
+
+:deep(::-webkit-scrollbar-thumb:hover) {
+  background: rgba(15, 23, 42, 0.15);
 }
 
 .assistant-shell--standalone {
@@ -2305,31 +2927,36 @@ onBeforeUnmount(() => {
 }
 
 .assistant-header {
-  padding: 18px 20px 16px;
-  border-bottom: 1px solid rgba(16, 24, 40, 0.06);
+  padding: 24px 32px;
+  border-bottom: 1px solid #f1f5f9;
+  background: #ffffff;
 }
 
 .assistant-header__eyebrow {
   display: inline-flex;
-  padding: 5px 10px;
-  border-radius: 999px;
-  background: rgba(39, 110, 241, 0.08);
-  color: #2263cb;
+  padding: 4px 12px;
+  border-radius: 6px;
+  background: #eff6ff;
+  color: #3b82f6;
   font-size: 11px;
   font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 .assistant-header strong {
   display: block;
-  margin-top: 10px;
-  color: #142133;
-  font-size: 20px;
+  margin-top: 12px;
+  color: #0f172a;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
 }
 
 .assistant-header p {
   margin: 6px 0 0;
-  color: #738197;
-  font-size: 12px;
+  color: #64748b;
+  font-size: 13px;
 }
 
 .assistant-history__toggle,
@@ -2344,10 +2971,12 @@ onBeforeUnmount(() => {
   min-height: 0;
   display: grid;
   grid-template-columns: var(--assistant-history-width) 8px minmax(0, 1fr);
+  position: relative;
+  transition: grid-template-columns 0.35s cubic-bezier(0.4, 0, 0.2, 1); /* 核心过渡动效 */
 }
 
 .assistant-body--collapsed {
-  grid-template-columns: 68px 0 minmax(0, 1fr);
+  grid-template-columns: 0 0 minmax(0, 1fr);
 }
 
 .assistant-body--standalone {
@@ -2355,7 +2984,7 @@ onBeforeUnmount(() => {
 }
 
 .assistant-body--standalone.assistant-body--collapsed {
-  grid-template-columns: 68px 0 minmax(0, 1fr);
+  grid-template-columns: 0 0 minmax(0, 1fr);
 }
 
 .assistant-history {
@@ -2363,8 +2992,10 @@ onBeforeUnmount(() => {
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  border-right: 1px solid rgba(16, 24, 40, 0.05);
-  background: linear-gradient(180deg, #f8f9fc 0%, #f5f7fb 100%);
+  background: #f8fafc;
+  border-right: 1px solid #f1f5f9;
+  transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
 }
 
 .assistant-history__toolbar {
@@ -2435,31 +3066,34 @@ onBeforeUnmount(() => {
   display: grid;
   align-content: start;
   gap: 12px;
-  padding: 0 10px 14px 12px;
+  padding: 12px 10px 14px 12px; /* 增加顶部内边距 */
   scrollbar-gutter: stable;
+  transition: opacity 0.3s;
+  opacity: 1;
 }
 
 .assistant-history__new {
   width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  height: 42px;
-  box-sizing: border-box;
-  border: 1px solid rgba(15, 23, 42, 0.1);
+  height: 48px;
+  padding: 0 16px;
   border-radius: 12px;
+  border: 1px solid #e2e8f0;
   background: #ffffff;
-  display: inline-flex;
+  color: #1e293b;
+  font-weight: 600;
+  font-size: 14px;
+  display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 8px;
-  color: #344054;
-  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+  gap: 10px;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
 .assistant-history__new:hover {
-  border-color: rgba(54, 96, 210, 0.35);
-  background: #edf2ff;
-  color: #355fd5;
+  border-color: #3b82f6;
+  background: #eff6ff;
+  color: #2563eb;
+  /* 移除位移效果，避免溢出 */
 }
 
 .assistant-history__new-icon {
@@ -2597,51 +3231,47 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
-.assistant-history--collapsed .assistant-history__toolbar {
-  padding-inline: 8px;
-  justify-content: center;
+.assistant-history--collapsed {
+  border-right: none;
+  background: transparent;
+  overflow: visible !important; /* 强制允许绝对定位子元素外溢 */
 }
 
+.assistant-history--collapsed .assistant-history__content,
 .assistant-history--collapsed .assistant-history__brand,
-.assistant-history--collapsed .assistant-history__new-text,
-.assistant-history--collapsed .assistant-history__group-title,
-.assistant-history--collapsed .assistant-history__item-time {
-  display: none;
-}
-
-.assistant-history--collapsed .assistant-history__content {
-  padding-inline: 8px;
-}
-
 .assistant-history--collapsed .assistant-history__new {
-  width: 42px;
-  justify-self: center;
-  padding: 0;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  display: none; /* 彻底移除这些占用空间的东西，防止由于 0 宽度导致的堆叠挤压 */
 }
 
-.assistant-history--collapsed .assistant-history__item {
-  width: 42px;
-  min-height: 42px;
-  justify-self: center;
+/* 在收起状态下，切换按钮应该绝对定位在内容区左上角 */
+.assistant-history--collapsed .assistant-history__toolbar {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 2000; /* 调高 z-index 层级 */
+  padding: 0;
+  display: flex !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  pointer-events: auto !important;
+  width: 32px;
+  height: 32px;
+  transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.assistant-history--collapsed .assistant-history__toggle {
+  width: 32px;
+  height: 32px;
+  background: #ffffff !important;
+  color: #3b82f6 !important; /* 强制使用蓝色，确保可见 */
+  border: 1px solid #e2e8f0 !important;
+  border-radius: 8px !important;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12) !important;
+  display: flex !important;
+  align-items: center;
   justify-content: center;
-  padding: 0;
-}
-
-.assistant-history--collapsed .assistant-history__item-title {
-  display: none;
-}
-
-.assistant-history--collapsed .assistant-history__item::before {
-  content: '';
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: currentColor;
-  opacity: 0.42;
-}
-
-.assistant-history--collapsed .assistant-history__item--active::before {
-  opacity: 0.72;
 }
 
 .assistant-history__loading {
@@ -2650,15 +3280,11 @@ onBeforeUnmount(() => {
 }
 
 .assistant-history__loading-item {
-  height: 38px;
-  border-radius: 10px;
-  background: linear-gradient(90deg, rgba(231, 236, 244, 0.85), rgba(246, 249, 252, 1), rgba(231, 236, 244, 0.85));
+  height: 48px;
+  border-radius: 12px;
+  background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%);
   background-size: 200% 100%;
-  animation: history-shimmer 1.3s linear infinite;
-}
-
-.assistant-history__loading--more .assistant-history__loading-item {
-  height: 54px;
+  animation: history-shimmer 1.5s infinite linear;
 }
 
 .assistant-history__empty,
@@ -2710,6 +3336,81 @@ onBeforeUnmount(() => {
   border-top: 1px solid rgba(16, 24, 40, 0.05);
 }
 
+/* 深度美化 Select 下拉面板 - 极简扁平化 */
+:global(.assistant-thinking-select-panel) {
+  border: 1px solid #f1f5f9 !important; /* 极淡的边框代替多层投影 */
+  border-radius: 12px !important;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.08) !important;
+  padding: 0 !important; /* 移除外层内边距 */
+  margin-top: 6px !important;
+  background: #ffffff !important;
+  overflow: hidden !important;
+}
+
+:global(.assistant-thinking-select-panel .el-select-dropdown__list) {
+  padding: 4px !important; /* 让内部列表直接决定间距 */
+}
+
+:global(.assistant-thinking-select-panel .el-select-dropdown__item) {
+  border-radius: 8px !important;
+  margin: 0 !important;
+  font-size: 13px !important;
+  color: #475569 !important;
+  height: 36px !important;
+  line-height: 36px !important;
+}
+
+:global(.assistant-thinking-select-panel .el-popper__arrow) {
+  display: none !important;
+}
+
+.assistant-toolbar__pill--ds-thinking {
+  height: 32px;
+  padding: 0 4px 0 10px;
+  background: #f1f5f9;
+  border-radius: 9px;
+  border: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  transition: all 0.2s;
+  cursor: pointer;
+}
+
+.assistant-toolbar__pill--ds-thinking:hover {
+  background: #eef2f6;
+}
+
+.assistant-toolbar__select-label {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.assistant-toolbar__select-box {
+  width: 64px;
+}
+
+.assistant-toolbar__select-box :deep(.el-select__wrapper) {
+  min-height: 24px !important;
+  padding: 0 4px !important;
+  background: transparent !important; /* 彻底透明，由外层 pill 提供背景 */
+  box-shadow: none !important;
+  border: none !important;
+  outline: none !important;
+}
+
+.assistant-toolbar__select-box :deep(.el-select__selected-item) {
+  color: #1e293b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.assistant-toolbar__select-box :deep(.el-select__caret) {
+  color: #94a3b8;
+  font-size: 11px;
+}
+
 .assistant-confirm-composer {
   width: 100%;
   padding: 2px 0;
@@ -2717,144 +3418,150 @@ onBeforeUnmount(() => {
 
 .assistant-confirm-card {
   width: 100%;
-  border-radius: 22px;
-  border: 1px solid rgba(42, 72, 145, 0.22);
-  background: linear-gradient(180deg, #ffffff, #f6f9ff);
-  box-shadow: 0 14px 28px rgba(22, 37, 74, 0.16);
-  padding: 24px 24px 18px;
-  display: grid;
-  gap: 14px;
-  animation: confirm-card-enter 220ms ease-out;
+  border-radius: 16px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  position: relative;
+  overflow: hidden;
+  border-top: 4px solid #f59e0b; /* 警告色顶部装饰条 */
+  animation: confirm-card-enter 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .assistant-confirm-card__header {
-  display: grid;
-  gap: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .assistant-confirm-card__eyebrow {
   margin: 0;
-  color: #4a5f88;
-  font-size: 12px;
+  color: #f59e0b;
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.06em;
   text-transform: uppercase;
+  letter-spacing: 0.1em;
 }
 
 .assistant-confirm-card__title {
   margin: 0;
-  color: #17263d;
-  font-size: 26px;
-  line-height: 1.28;
+  color: #0f172a;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .assistant-confirm-card__summary {
   margin: 0;
-  color: #22304a;
-  line-height: 1.75;
+  padding: 16px;
+  background: #fffbeb;
+  border-radius: 12px;
+  border-left: 4px solid #fef3c7;
+  color: #92400e;
+  font-size: 14px;
+  line-height: 1.6;
   white-space: pre-wrap;
 }
 
 .assistant-confirm-card__hint {
   margin: 0;
-  color: #5f6f88;
+  color: #64748b;
   font-size: 13px;
-  line-height: 1.7;
+  line-height: 1.5;
 }
 
 .assistant-confirm-card__actions {
-  margin-top: 6px;
   display: grid;
-  gap: 12px;
+  gap: 16px;
 }
 
 .assistant-confirm-card__button {
-  width: 100%;
-  height: 38px;
+  height: 44px;
   border-radius: 12px;
   border: 1px solid transparent;
-  padding: 0 14px;
-  font-size: 13px;
+  padding: 0 20px;
+  font-size: 14px;
+  font-weight: 600;
   cursor: pointer;
-  transition: all 0.16s ease;
-}
-
-.assistant-confirm-card__button:disabled {
-  opacity: 0.48;
-  cursor: not-allowed;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .assistant-confirm-card__button--primary {
-  background: linear-gradient(180deg, #2f62df, #234ec2);
+  background: #f59e0b;
   color: #ffffff;
-  box-shadow: 0 8px 18px rgba(35, 78, 194, 0.28);
+  box-shadow: 0 4px 6px -1px rgba(245, 158, 11, 0.2);
 }
 
 .assistant-confirm-card__button--primary:hover {
-  filter: brightness(1.05);
+  background: #d97706;
+  transform: translateY(-1px);
+  box-shadow: 0 10px 15px -3px rgba(245, 158, 11, 0.3);
 }
 
 .assistant-confirm-card__button--ghost {
-  border-color: rgba(25, 48, 98, 0.22);
+  border-color: #e2e8f0;
   background: #ffffff;
-  color: #2a3c5f;
+  color: #475569;
 }
 
 .assistant-confirm-card__button--ghost:hover {
-  border-color: rgba(25, 48, 98, 0.34);
-  background: #f8fbff;
+  border-color: #cbd5e1;
+  background: #f8fafc;
+  color: #1e293b;
 }
 
 .assistant-confirm-card__reject-box {
-  display: grid;
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 16px;
+  border-top: 1px solid #f1f5f9;
 }
 
 .assistant-confirm-card__reject-label {
-  color: #405173;
-  font-size: 12px;
+  color: #1e293b;
+  font-size: 13px;
   font-weight: 600;
-  line-height: 1.4;
 }
 
 .assistant-confirm-card__reject-input {
   width: 100%;
-  min-height: 88px;
+  min-height: 80px;
   border-radius: 12px;
-  border: 1px solid rgba(25, 48, 98, 0.2);
-  background: #ffffff;
-  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  padding: 12px;
   font: inherit;
-  font-size: 13px;
-  line-height: 1.6;
-  color: #1f2a3f;
-  resize: vertical;
-  box-sizing: border-box;
-  outline: none;
-  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+  font-size: 14px;
+  color: #0f172a;
+  resize: none;
+  transition: all 0.2s;
 }
 
 .assistant-confirm-card__reject-input:focus {
-  border-color: rgba(47, 98, 223, 0.55);
-  box-shadow: 0 0 0 3px rgba(47, 98, 223, 0.14);
-}
-
-.assistant-confirm-card__reject-input:disabled {
-  background: #f5f7fb;
-  color: #73819b;
+  background: #ffffff;
+  border-color: #f59e0b;
+  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.1);
+  outline: none;
 }
 
 .assistant-confirm-card__button--plain {
-  border-color: transparent;
   background: transparent;
-  color: #6a7791;
-  width: auto;
-  justify-self: end;
+  color: #94a3b8;
+  height: 32px;
+  font-size: 13px;
 }
 
 .assistant-confirm-card__button--plain:hover {
-  color: #3d4f74;
-  background: rgba(35, 78, 194, 0.07);
+  color: #64748b;
+  background: #f1f5f9;
 }
 
 .assistant-messages {
@@ -2876,17 +3583,20 @@ onBeforeUnmount(() => {
     radial-gradient(circle at top center, rgba(126, 150, 199, 0.08), transparent 36%);
 }
 
-.assistant-chat__fallback,
-.chat-message__reasoning {
-  border-radius: 16px;
-  border: 1px solid rgba(36, 102, 220, 0.1);
-  background: #f8fbff;
+.assistant-chat__fallback {
+  padding: 16px 20px;
+  background: #fffbeb;
+  border: 1px solid #fef3c7;
+  border-radius: 12px;
+  color: #92400e;
+  font-size: 13px;
 }
 
-.assistant-chat__fallback {
-  padding: 14px 16px;
-  color: #617189;
-  font-size: 12px;
+.chat-message__reasoning {
+  border-radius: 14px;
+  border: 1px solid #f1f5f9;
+  background: #f8fafc;
+  padding: 4px 0;
 }
 
 .assistant-empty {
@@ -2928,12 +3638,15 @@ onBeforeUnmount(() => {
 }
 
 .chat-message__user-bubble {
-  max-width: min(90%, 760px);
-  padding: 14px 16px;
-  border-radius: 20px;
-  background: linear-gradient(180deg, #dff0ff, #d7ebff);
-  color: #173252;
-  border: 1px solid rgba(64, 138, 240, 0.18);
+  max-width: 85%;
+  padding: 12px 18px;
+  border-radius: 18px;
+  background: #3b82f6; 
+  color: #ffffff;
+  box-shadow: 0 4px 14px -3px rgba(59, 130, 246, 0.4), 0 2px 6px -2px rgba(59, 130, 246, 0.2);
+  border: none;
+  font-size: 15px;
+  line-height: 1.6;
 }
 
 .chat-message__assistant-flow {
@@ -2945,6 +3658,144 @@ onBeforeUnmount(() => {
 
 .chat-message__assistant-content {
   padding-right: 10px;
+}
+
+.chat-message__tool-list {
+  display: grid;
+  gap: 8px;
+}
+
+.chat-message__tool-item {
+  font-size: 13px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+  position: relative;
+}
+
+.chat-message__tool-item:hover {
+  border-color: #cbd5e1;
+  background: #f1f5f9;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+}
+
+.chat-message__tool-item--called {
+  border-left: 4px solid #3b82f6;
+}
+
+.chat-message__tool-item--completed {
+  border-left: 4px solid #10b981;
+}
+
+.chat-message__tool-item--create {
+  border-left: 4px solid #10b981;
+}
+
+.chat-message__tool-item--blocked {
+  border-left: 4px solid #f43f5e;
+}
+
+.chat-message__tool-head {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: #1e293b;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+}
+
+.chat-message__tool-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  flex: 0 0 22px;
+}
+
+.chat-message__tool-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.chat-message__tool-badge {
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 6px;
+  padding: 2px 8px;
+  line-height: normal;
+  background: #eff6ff;
+  color: #3b82f6;
+}
+
+.chat-message__tool-chevron {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #94a3b8;
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.chat-message__tool-chevron--expanded {
+  transform: rotate(90deg);
+}
+
+.chat-message__tool-detail {
+  margin: 0;
+  padding: 0 16px 12px 44px;
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #475569;
+  animation: detail-slide-down 0.2s ease-out;
+}
+
+.chat-message__status-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  box-shadow: 0 2px 5px rgba(15, 23, 42, 0.03);
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+  margin: 4px 0;
+}
+
+.chat-message__status-icon {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #6b778a;
+}
+
+.chat-message__status-text {
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .chat-message__action-bar {
@@ -3069,6 +3920,74 @@ onBeforeUnmount(() => {
   color: #5a6577;
 }
 
+/* --- Tooling & Selector Beautification --- */
+:global(.assistant-thinking-select-panel) {
+  border: 1px solid #f1f5f9 !important;
+  border-radius: 12px !important;
+  box-shadow: 0 12px 20px -5px rgba(15, 23, 42, 0.12) !important;
+  padding: 4px !important;
+  margin-top: 6px !important;
+  background: #ffffff !important;
+}
+
+:global(.assistant-thinking-select-panel .el-select-dropdown__item) {
+  border-radius: 8px !important;
+  margin-bottom: 2px !important;
+  font-size: 13px !important;
+  height: 36px !important;
+  line-height: 36px !important;
+}
+
+:global(.assistant-thinking-select-panel .el-select-dropdown__item.is-hovering) {
+  background: #f8fafc !important;
+}
+
+:global(.assistant-thinking-select-panel .el-popper__arrow) {
+  display: none !important;
+}
+
+.assistant-toolbar__pill--ds-thinking {
+  height: 32px;
+  padding: 0 4px 0 10px;
+  background: #f1f5f9; /* 统一的浅色底 */
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.assistant-toolbar__pill--ds-thinking:hover {
+  background: #eef2f6;
+  filter: brightness(0.98);
+}
+
+.assistant-toolbar__select-label {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.assistant-toolbar__select-box {
+  width: 68px;
+}
+
+.assistant-toolbar__select-box :deep(.el-select__wrapper) {
+  min-height: 24px !important;
+  padding: 0 4px !important;
+  background: transparent !important; /* 核心：去掉内部背景，杜绝多层感 */
+  box-shadow: none !important;
+  border: none !important;
+}
+
+.assistant-toolbar__select-box :deep(.el-select__selected-item) {
+  color: #1e293b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .chat-message__reasoning-status {
   font-size: 13px;
   font-weight: 600;
@@ -3122,9 +4041,11 @@ onBeforeUnmount(() => {
 }
 
 .chat-message__reasoning-body {
-  margin-left: 7px;
-  padding-left: 14px;
-  border-left: 2px solid rgba(120, 134, 156, 0.24);
+  margin: 10px 0 10px 7px;
+  padding-left: 16px;
+  border-left: 2px dashed rgba(59, 130, 246, 0.3); /* 改为虚线，更具“思考中”的科技感 */
+  font-style: italic;
+  color: #64748b;
 }
 
 .chat-message__markdown {
@@ -3321,10 +4242,17 @@ onBeforeUnmount(() => {
 }
 
 .aaff8b8f {
-  border: 1px solid rgba(15, 23, 42, 0.1);
+  border: 1px solid rgba(15, 23, 42, 0.08);
   border-radius: 20px;
   background: #ffffff;
-  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.05);
+  box-shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.1), 0 8px 10px -6px rgba(15, 23, 42, 0.1);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.aaff8b8f:focus-within {
+  border-color: rgba(59, 130, 246, 0.3);
+  box-shadow: 0 20px 25px -5px rgba(15, 23, 42, 0.12), 0 10px 10px -5px rgba(15, 23, 42, 0.04);
+  transform: translateY(-2px);
 }
 
 ._77cefa5,
@@ -3405,78 +4333,10 @@ onBeforeUnmount(() => {
   background: #e4ecff;
 }
 
-._6dbc175 {
-  font-weight: 600;
-}
-
-.assistant-toolbar__pill--ds-thinking {
-  height: 32px;
-  padding: 0 8px 0 10px;
-  border: 1px solid rgba(15, 23, 42, 0.1);
-  border-radius: 999px;
-  background: #ffffff;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  flex: 0 0 auto;
-}
-
-.assistant-toolbar__pill--ds-thinking {
-  min-width: 138px;
-}
-
 .assistant-toolbar__context-meter {
-  width: 188px;
-  min-width: 188px;
-  flex: 0 0 188px;
+  flex: 1;
+  max-width: 160px;
   margin-right: auto;
-}
-
-.assistant-toolbar__select-label {
-  color: #4b5563;
-  font-weight: 600;
-  font-size: 13px;
-  line-height: 1;
-  white-space: nowrap;
-  writing-mode: horizontal-tb;
-  text-orientation: mixed;
-  flex: 0 0 auto;
-}
-
-.assistant-toolbar__select-box {
-  min-width: 96px;
-  flex: 0 0 96px;
-}
-
-.assistant-toolbar__select-box--thinking {
-  min-width: 86px;
-  flex: 0 0 86px;
-}
-
-.assistant-toolbar__select-box :deep(.el-select__wrapper) {
-  min-height: 28px;
-  padding: 0 6px 0 8px;
-  border-radius: 9px;
-  border: 1px solid transparent;
-  box-shadow: none;
-  background: rgba(248, 250, 252, 0.9);
-  transition: border-color 0.15s ease, background-color 0.15s ease;
-}
-
-.assistant-toolbar__select-box:hover :deep(.el-select__wrapper) {
-  border-color: rgba(77, 107, 254, 0.24);
-  background: #ffffff;
-}
-
-.assistant-toolbar__select-box :deep(.el-select__selected-item) {
-  color: #334155;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.assistant-toolbar__select-box :deep(.el-select__caret) {
-  color: #64748b;
-  font-size: 13px;
 }
 
 .ds-icon-button {

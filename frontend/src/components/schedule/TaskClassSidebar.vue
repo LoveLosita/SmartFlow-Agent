@@ -68,9 +68,6 @@ function resolveDetailPanelStyle(items: TaskClassDetail['items']) {
   )
   const finalHeight = Math.min(preferredHeight, maxHeightByItemCount, maxHeightByContainer)
 
-  // 1. 条目少时让卡片自然长高，避免只有两三条时还出现大块留白。
-  // 2. 条目超过“当前屏幕可安全展示的最大条数”后，立即锁住高度并进入内部滚动。
-  // 3. 这样像 8 条 task_item 这类中等长度列表会稳定触发滚动，不会再因为估算过大而失效。
   return {
     maxHeight: `${finalHeight}px`,
   }
@@ -171,39 +168,41 @@ watch(
           </span>
         </button>
 
-        <div
-          v-if="isExpanded(taskClass.id)"
-          class="task-class-card__detail"
-          :style="expandedTaskClassDetail ? resolveDetailPanelStyle(expandedTaskClassDetail.items) : undefined"
-        >
-          <div v-if="detailLoading" class="task-class-card__detail-loading">正在载入任务块…</div>
+        <transition name="task-detail">
+          <div
+            v-if="isExpanded(taskClass.id)"
+            class="task-class-card__detail"
+            :style="expandedTaskClassDetail ? resolveDetailPanelStyle(expandedTaskClassDetail.items) : { maxHeight: '60px' }"
+          >
+            <div v-if="detailLoading" class="task-class-card__detail-loading">正在载入任务块…</div>
 
-          <div v-else-if="expandedTaskClassDetail" class="task-class-card__detail-list">
-            <div
-              v-for="item in expandedTaskClassDetail.items"
-              :key="item.order"
-              class="task-class-card__detail-item"
-            >
-              <span class="task-class-card__detail-order">{{ item.order }}</span>
-              <span class="task-class-card__detail-text">{{ item.content }}</span>
-              <span
-                class="task-class-card__detail-status"
-                :class="{ 'task-class-card__detail-status--arranged': item.embedded_time }"
+            <div v-else-if="expandedTaskClassDetail" class="task-class-card__detail-list">
+              <div
+                v-for="item in expandedTaskClassDetail.items"
+                :key="item.order"
+                class="task-class-card__detail-item"
               >
-                {{ formatEmbeddedTime(item.embedded_time) }}
-              </span>
-              <button
-                type="button"
-                class="task-class-card__detail-delete"
-                aria-label="删除任务块"
-                :disabled="typeof item.id !== 'number'"
-                @click="typeof item.id === 'number' && emit('deleteItem', item.id)"
-              >
-                ×
-              </button>
+                <span class="task-class-card__detail-order">{{ item.order }}</span>
+                <span class="task-class-card__detail-text">{{ item.content }}</span>
+                <span
+                  class="task-class-card__detail-status"
+                  :class="{ 'task-class-card__detail-status--arranged': item.embedded_time }"
+                >
+                  {{ formatEmbeddedTime(item.embedded_time) }}
+                </span>
+                <button
+                  type="button"
+                  class="task-class-card__detail-delete"
+                  aria-label="删除任务块"
+                  :disabled="typeof item.id !== 'number'"
+                  @click="typeof item.id === 'number' && emit('deleteItem', item.id)"
+                >
+                  ×
+                </button>
+              </div>
             </div>
           </div>
-        </div>
+        </transition>
       </article>
 
       <button type="button" class="task-class-sidebar__create" @click="emit('create')">
@@ -221,14 +220,33 @@ watch(
   height: 100%;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  border-right: 1px solid rgba(196, 209, 227, 0.55);
-  background: linear-gradient(180deg, rgba(251, 253, 255, 0.96), rgba(247, 250, 254, 0.98));
+  border-right: 1px solid rgba(15, 23, 42, 0.05);
+  background: #ffffff;
   overflow: hidden;
 }
 
+/* --- 全局精致滚动条 --- */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.08);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 23, 42, 0.15);
+}
+
 .task-class-sidebar__header {
-  padding: 16px 24px 14px;
-  border-bottom: 1px solid rgba(214, 223, 238, 0.68);
+  padding: 20px 24px;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.05);
   display: grid;
   gap: 12px;
   min-width: 0;
@@ -261,7 +279,7 @@ watch(
   width: 16px;
   height: 16px;
   display: inline-flex;
-  color: #165fd0;
+  color: #3b82f6;
 }
 
 .task-class-sidebar__count {
@@ -275,21 +293,21 @@ watch(
 
 .task-class-sidebar__mode {
   height: 34px;
-  border: 1px solid rgba(25, 95, 213, 0.18);
+  border: 1px solid rgba(59, 130, 246, 0.18);
   border-radius: 12px;
-  background: #f6f9ff;
-  color: #1d64d2;
+  background: #f8fafc;
+  color: #3b82f6;
   font-size: 12px;
   font-weight: 700;
   justify-self: start;
   padding: 0 14px;
   cursor: pointer;
-  transition: border-color 0.16s ease, background-color 0.16s ease, color 0.16s ease;
+  transition: all 0.2s;
 }
 
 .task-class-sidebar__mode:hover {
-  border-color: rgba(25, 95, 213, 0.34);
-  background: #edf4ff;
+  border-color: rgba(59, 130, 246, 0.34);
+  background: #eff6ff;
 }
 
 .task-class-sidebar__list,
@@ -300,7 +318,6 @@ watch(
   padding: 24px;
   display: flex;
   flex-direction: column;
-  align-items: stretch;
   gap: 14px;
   scrollbar-gutter: stable;
 }
@@ -308,25 +325,25 @@ watch(
 .task-class-sidebar__skeleton-item {
   flex: 0 0 auto;
   height: 120px;
-  border-radius: 24px;
-  background: linear-gradient(90deg, rgba(234, 239, 246, 0.9), rgba(248, 251, 255, 1), rgba(234, 239, 246, 0.9));
-  background-size: 200% 100%;
+  border-radius: 20px;
+  background: rgba(15, 23, 42, 0.03);
   animation: task-class-skeleton 1.25s linear infinite;
 }
 
 .task-class-card {
   flex: 0 0 auto;
   min-width: 0;
-  border-radius: 24px;
-  border: 1px solid rgba(216, 225, 238, 0.9);
-  background: linear-gradient(180deg, #fdfefe 0%, #f8fbff 100%);
-  box-shadow: 0 10px 22px rgba(19, 51, 107, 0.04);
+  border-radius: 20px;
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  background: #ffffff;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.02);
   overflow: hidden;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .task-class-card--selected {
-  border-color: rgba(28, 98, 206, 0.28);
-  box-shadow: 0 14px 24px rgba(22, 95, 208, 0.08);
+  border-color: #3b82f6;
+  box-shadow: 0 10px 25px rgba(59, 130, 246, 0.1);
 }
 
 .task-class-card__summary {
@@ -345,8 +362,8 @@ watch(
 }
 
 .task-class-card__summary:hover .task-class-card__corner {
-  background: #edf4ff;
-  color: #2067d5;
+  background: #eff6ff;
+  color: #3b82f6;
 }
 
 .task-class-card__selector {
@@ -359,8 +376,8 @@ watch(
 }
 
 .task-class-card__selector--active {
-  border-color: #1e66d4;
-  background: #1e66d4;
+  border-color: #3b82f6;
+  background: #3b82f6;
   box-shadow: inset 0 0 0 3px #ffffff;
 }
 
@@ -391,9 +408,17 @@ watch(
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: rgba(246, 249, 253, 0.9);
-  color: #1e66d4;
-  transition: background-color 0.16s ease, color 0.16s ease;
+  background: #f8fafc;
+  color: #3b82f6;
+  transition: all 0.2s;
+}
+
+.task-class-card__corner svg {
+  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.task-class-card--expanded .task-class-card__corner svg {
+  transform: rotate(45deg);
 }
 
 .task-class-card__detail {
@@ -405,27 +430,26 @@ watch(
   overflow-x: hidden;
   scrollbar-gutter: stable;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(114, 130, 157, 0.65) transparent;
+}
+
+.task-detail-enter-active,
+.task-detail-leave-active {
+  transition: max-height 0.4s cubic-bezier(0.34, 1.56, 0.64, 1), padding 0.4s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.3s ease;
+  overflow: hidden;
+}
+
+.task-detail-enter-from,
+.task-detail-leave-to {
+  max-height: 0 !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  opacity: 0;
 }
 
 .task-class-card__detail-loading {
   padding: 14px 12px 10px;
   color: #7b88a1;
   font-size: 13px;
-}
-
-.task-class-card__detail::-webkit-scrollbar {
-  width: 8px;
-}
-
-.task-class-card__detail::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.task-class-card__detail::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: rgba(114, 130, 157, 0.55);
 }
 
 .task-class-card__detail-list {
@@ -482,7 +506,7 @@ watch(
   height: 24px;
   border: none;
   border-radius: 999px;
-  background: #bb3326;
+  background: #ef4444;
   color: #ffffff;
   font-size: 16px;
   line-height: 1;
@@ -497,23 +521,23 @@ watch(
 .task-class-sidebar__create {
   flex: 0 0 auto;
   min-width: 0;
-  min-height: 108px;
-  border: 1px dashed rgba(204, 216, 232, 0.92);
-  border-radius: 24px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(249, 251, 255, 0.98));
-  color: #b1bccd;
+  min-height: 96px;
+  border: 1.5px dashed rgba(15, 23, 42, 0.1);
+  border-radius: 20px;
+  background: transparent;
+  color: #94a3b8;
   display: grid;
   justify-items: center;
   align-content: center;
   gap: 10px;
   cursor: pointer;
-  transition: border-color 0.16s ease, background-color 0.16s ease, color 0.16s ease;
+  transition: all 0.2s;
 }
 
 .task-class-sidebar__create:hover {
-  border-color: rgba(25, 95, 213, 0.22);
-  background: #f7fbff;
-  color: #6d7f99;
+  border-color: #3b82f6;
+  background: #f8fafc;
+  color: #3b82f6;
 }
 
 .task-class-sidebar__create-icon {
@@ -529,13 +553,8 @@ watch(
 }
 
 @keyframes task-class-skeleton {
-  0% {
-    background-position: 200% 0;
-  }
-
-  100% {
-    background-position: -200% 0;
-  }
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 
 @media (max-width: 1520px) {
@@ -545,102 +564,18 @@ watch(
     padding-left: 18px;
     padding-right: 18px;
   }
-
-  .task-class-card__summary {
-    padding: 16px 16px 16px 15px;
-    min-height: 84px;
-  }
 }
 
 @media (max-width: 1380px) {
   .task-class-sidebar {
     border-right: none;
-    border-bottom: 1px solid rgba(196, 209, 227, 0.55);
-  }
-}
-
-@media (max-width: 1180px) {
-  .task-class-card__detail-item {
-    grid-template-columns: 28px minmax(0, 1fr) 24px;
-    align-items: start;
-  }
-
-  .task-class-card__detail-status {
-    grid-column: 2;
-    justify-self: start;
-  }
-
-  .task-class-card__detail-delete {
-    grid-column: 3;
-    grid-row: 1 / span 2;
-    align-self: center;
+    border-bottom: 1px solid rgba(15, 23, 42, 0.05);
   }
 }
 
 @media (max-height: 900px) {
-  .task-class-sidebar__header {
-    padding-top: 12px;
-    padding-bottom: 12px;
-    gap: 10px;
-  }
-
+  .task-class-sidebar__header { padding: 12px 18px; }
   .task-class-sidebar__list,
-  .task-class-sidebar__skeleton {
-    padding-top: 16px;
-    padding-bottom: 16px;
-    gap: 10px;
-  }
-
-  .task-class-card {
-    border-radius: 20px;
-  }
-
-  .task-class-card__summary {
-    padding: 14px 14px 14px 13px;
-    min-height: 76px;
-  }
-
-  .task-class-card__content {
-    gap: 6px;
-  }
-
-  .task-class-card__content strong {
-    font-size: 15px;
-  }
-
-  .task-class-sidebar__create {
-    min-height: 88px;
-  }
-
-}
-
-@media (max-height: 820px) {
-  .task-class-sidebar__header,
-  .task-class-sidebar__list,
-  .task-class-sidebar__skeleton {
-    padding-left: 14px;
-    padding-right: 14px;
-  }
-
-  .task-class-card__summary {
-    padding: 12px;
-    min-height: 72px;
-  }
-
-  .task-class-card__corner {
-    width: 40px;
-    height: 40px;
-  }
-
-  .task-class-card__content strong {
-    font-size: 14px;
-  }
-
-  .task-class-card__content span,
-  .task-class-card__detail-text,
-  .task-class-card__detail-status {
-    font-size: 12px;
-  }
-
+  .task-class-sidebar__skeleton { padding: 16px 18px; }
 }
 </style>

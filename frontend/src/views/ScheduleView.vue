@@ -116,13 +116,6 @@ if (typeof window !== 'undefined') {
 const router = useRouter()
 const route = useRoute()
 
-const sidebarItems: SidebarItem[] = [
-  { key: 'home', label: '总览', short: '总', to: '/dashboard' },
-  { key: 'task', label: '任务', short: '任' },
-  { key: 'calendar', label: '日程', short: '程', to: '/schedule' },
-  { key: 'ai', label: '助手', short: 'AI', to: '/assistant' },
-]
-
 const taskClassLoading = ref(false)
 const taskClassDetailLoading = ref(false)
 const weekLoading = ref(false)
@@ -154,16 +147,6 @@ const MAX_SCHEDULE_WEEK = 24
 
 let weekRequestSequence = 0
 let activeWeekRequestSequence = 0
-
-const activeSidebarKey = computed<SidebarItem['key']>(() => {
-  if (route.path.startsWith('/assistant')) {
-    return 'ai'
-  }
-  if (route.path.startsWith('/schedule')) {
-    return 'calendar'
-  }
-  return 'home'
-})
 
 const effectiveSelectedTaskClassIds = computed(() => {
   if (taskClassMultiSelectMode.value) {
@@ -944,28 +927,8 @@ onMounted(async () => {
 </script>
 
 <template>
-  <main class="schedule-page">
-    <div class="schedule-layout">
-      <aside class="dashboard-sidebar">
-        <div class="dashboard-sidebar__brand">S</div>
-        <nav class="dashboard-sidebar__nav">
-          <button
-            v-for="item in sidebarItems"
-            :key="item.key"
-            type="button"
-            class="dashboard-sidebar__nav-item"
-            :class="{ 'dashboard-sidebar__nav-item--active': item.key === activeSidebarKey }"
-            @click="handleSidebarNavigate(item)"
-          >
-            <span>{{ item.short }}</span>
-            <small>{{ item.label }}</small>
-          </button>
-        </nav>
-        <button type="button" class="dashboard-sidebar__settings">设</button>
-      </aside>
-
-      <section class="schedule-shell">
-        <header class="schedule-topbar">
+  <section class="schedule-shell">
+    <header class="schedule-topbar">
           <div class="schedule-topbar__brand">
             <span class="schedule-topbar__brand-icon" aria-hidden="true">
               <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -1084,104 +1047,26 @@ onMounted(async () => {
           </section>
         </div>
       </section>
-    </div>
 
-    <CreateTaskClassDialog
-      v-model="createDialogVisible"
-      :loading="createDialogLoading"
-      @submit="handleCreateTaskClass"
-    />
-  </main>
+      <CreateTaskClassDialog
+        v-model="createDialogVisible"
+        :loading="createDialogLoading"
+        @submit="handleCreateTaskClass"
+      />
 </template>
 
 <style scoped>
-.schedule-page {
-  height: 100vh;
-  padding: 10px;
-  overflow: hidden;
-  background: linear-gradient(180deg, #f6f9fd 0%, #eff4fb 100%);
-}
-
-.schedule-layout {
-  height: calc(100vh - 20px);
-  display: grid;
-  grid-template-columns: 78px minmax(0, 1fr);
-  gap: 8px;
-  min-height: 0;
-}
-
-.dashboard-sidebar {
-  height: 100%;
-  border-radius: 26px;
-  background: linear-gradient(180deg, #165ca8 0%, #104d8f 100%);
-  padding: 16px 12px;
-  display: grid;
-  grid-template-rows: auto 1fr auto;
-  gap: 16px;
-}
-
-.dashboard-sidebar__brand,
-.dashboard-sidebar__settings {
-  width: 50px;
-  height: 50px;
-  border: none;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.14);
-  color: #fff;
-  font-weight: 800;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.dashboard-sidebar__nav {
-  display: grid;
-  gap: 12px;
-  align-content: start;
-}
-
-.dashboard-sidebar__nav-item {
-  width: 54px;
-  border: none;
-  border-radius: 16px;
-  background: transparent;
-  color: rgba(255, 255, 255, 0.74);
-  padding: 10px 8px;
-  display: grid;
-  justify-items: center;
-  gap: 5px;
-  cursor: pointer;
-}
-
-.dashboard-sidebar__nav-item span {
-  width: 32px;
-  height: 32px;
-  border-radius: 11px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(255, 255, 255, 0.08);
-  font-weight: 700;
-}
-
-.dashboard-sidebar__nav-item small {
-  font-size: 10px;
-}
-
-.dashboard-sidebar__nav-item--active {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
-}
-
 .schedule-shell {
-  min-width: 0;
-  min-height: 0;
-  border-radius: 28px;
-  border: 1px solid rgba(215, 224, 237, 0.84);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 251, 255, 0.98));
+  height: 100%;
+  border-radius: 20px;
+  background: #ffffff;
+  border: 1px solid rgba(15, 23, 42, 0.05);
+  box-shadow: 0 4px 15px rgba(15, 23, 42, 0.02);
   overflow: hidden;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
 }
 
 .schedule-topbar {
@@ -1202,14 +1087,15 @@ onMounted(async () => {
 }
 
 .schedule-topbar__brand-icon {
-  width: 44px;
-  height: 44px;
-  border-radius: 14px;
-  background: linear-gradient(180deg, #1b64cf 0%, #0f56b7 100%);
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: #3b82f6;
   color: #ffffff;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.25);
 }
 
 .schedule-topbar__brand strong {
@@ -1222,8 +1108,8 @@ onMounted(async () => {
 .schedule-topbar__meta {
   display: grid;
   justify-items: end;
-  gap: 6px;
-  color: #8493aa;
+  gap: 4px;
+  color: #64748b;
   min-width: 0;
   text-align: right;
 }
@@ -1279,36 +1165,40 @@ onMounted(async () => {
 
 .schedule-board__toolbar-button,
 .schedule-board__footer-button {
-  height: 36px;
+  height: 38px;
   border-radius: 10px;
   border: 1px solid transparent;
-  padding: 0 18px;
+  padding: 0 16px;
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
-  transition: border-color 0.16s ease, background-color 0.16s ease, color 0.16s ease;
+  transition: all 0.2s ease;
 }
 
 .schedule-board__toolbar-button--primary,
 .schedule-board__footer-button--primary {
-  background: linear-gradient(180deg, #1d64d1 0%, #1157bd 100%);
+  background: #3b82f6;
   color: #ffffff;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.25);
 }
 
 .schedule-board__toolbar-button--primary:hover,
 .schedule-board__footer-button--primary:hover {
-  background: linear-gradient(180deg, #1757b8 0%, #0f4ea9 100%);
+  background: #2563eb;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(37, 99, 235, 0.3);
 }
 
 .schedule-board__toolbar-button--ghost {
-  border-color: rgba(27, 96, 208, 0.22);
+  border-color: #e2e8f0;
   background: #ffffff;
-  color: #1e66d4;
+  color: #475569;
 }
 
 .schedule-board__toolbar-button--ghost:hover {
-  border-color: rgba(27, 96, 208, 0.38);
-  background: #f2f7ff;
+  border-color: #cbd5e1;
+  background: #f8fafc;
+  color: #0f172a;
 }
 
 .schedule-board__footer {
@@ -1318,8 +1208,14 @@ onMounted(async () => {
 }
 
 .schedule-board__footer-button--danger {
-  background: #bb3326;
+  background: #ef4444;
   color: #ffffff;
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.25);
+}
+
+.schedule-board__footer-button--danger:hover {
+  background: #dc2626;
+  transform: translateY(-1px);
 }
 
 .schedule-board__footer-button--danger:disabled,
@@ -1411,17 +1307,5 @@ onMounted(async () => {
   }
 }
 
-@media (max-width: 1180px) {
-  .schedule-layout {
-    grid-template-columns: 1fr;
-  }
-
-  .dashboard-sidebar {
-    display: none;
-  }
-
-  .schedule-main {
-    grid-template-columns: 1fr;
-  }
-}
+@media (max-width: 1440px) { .schedule-main { grid-template-columns: 320px 1fr; } }
 </style>
