@@ -12,7 +12,6 @@ interface SidebarItem {
 
 const sidebarItems: SidebarItem[] = [
   { key: 'home', label: '总览', short: '总', to: '/dashboard' },
-  { key: 'task', label: '任务', short: '任' },
   { key: 'calendar', label: '日程', short: '程', to: '/schedule' },
   { key: 'ai', label: '助手', short: 'AI', to: '/assistant' },
 ]

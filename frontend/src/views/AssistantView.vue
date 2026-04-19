@@ -11,10 +11,6 @@ import AssistantPanel from '@/components/dashboard/AssistantPanel.vue'
   min-width: 0;
   min-height: 0;
   height: 100%;
-  border-radius: 24px;
-  background: #ffffff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-  overflow: hidden;
 }
 
 @media (max-width: 720px) {

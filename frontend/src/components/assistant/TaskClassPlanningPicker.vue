@@ -352,33 +352,57 @@ function formatDateLabel(value: string) {
 .assistant-planning__panel {
   display: grid;
   gap: 14px;
+  /* 弹出动画 */
+  animation: planning-panel-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes planning-panel-pop {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .assistant-planning__panel-header strong {
   display: block;
-  color: #1f2937;
-  font-size: 15px;
+  color: #0f172a;
+  font-size: 16px;
+  font-weight: 850;
+  letter-spacing: -0.01em;
 }
 
 .assistant-planning__panel-header p {
-  margin: 6px 0 0;
-  color: #6b7280;
+  margin: 4px 0 0;
+  color: #64748b;
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.6;
 }
 
 .assistant-planning__loading,
 .assistant-planning__list {
   display: grid;
-  gap: 8px;
-  max-height: 260px;
+  gap: 6px;
+  max-height: 300px;
   overflow-y: auto;
+  padding: 2px;
+  scrollbar-width: thin;
 }
 
 .assistant-planning__loading-item {
-  height: 62px;
-  border-radius: 16px;
-  background: linear-gradient(90deg, rgba(241, 245, 249, 0.9), rgba(226, 232, 240, 0.72), rgba(241, 245, 249, 0.9));
+  height: 60px;
+  border-radius: 12px;
+  background: linear-gradient(90deg, #f1f5f9 0%, #e2e8f0 50%, #f1f5f9 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite linear;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 
 .assistant-planning__item {
@@ -387,66 +411,89 @@ function formatDateLabel(value: string) {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
-  padding: 12px 14px;
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  border-radius: 16px;
-  background: #ffffff;
+  padding: 10px 14px;
+  border: 1px solid rgba(15, 23, 42, 0.04);
+  border-radius: 14px;
+  background: #f8fafc;
   text-align: left;
-  transition: border-color 0.15s ease, background-color 0.15s ease, transform 0.15s ease;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .assistant-planning__item:hover {
-  border-color: rgba(57, 86, 178, 0.24);
-  background: #fafcff;
+  border-color: rgba(59, 130, 246, 0.2);
+  background: #ffffff;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.04);
+  transform: translateY(-1px);
 }
 
 .assistant-planning__item--selected {
-  border-color: rgba(57, 86, 178, 0.28);
-  background: #f5f8ff;
+  border-color: #3b82f6;
+  background: #ffffff;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.06);
 }
 
 .assistant-planning__item-check {
-  width: 16px;
-  height: 16px;
-  border-radius: 999px;
-  border: 1.5px solid rgba(148, 163, 184, 0.8);
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  border: 2px solid #e2e8f0;
   background: #ffffff;
+  transition: all 0.2s;
 }
 
 .assistant-planning__item-check--selected {
-  border-color: #3357c2;
-  background: radial-gradient(circle at center, #3357c2 0 45%, transparent 46%);
+  border-color: #3b82f6;
+  background: #3b82f6;
+  position: relative;
+}
+
+.assistant-planning__item-check--selected::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 6px;
+  height: 3px;
+  border-left: 2px solid #ffffff;
+  border-bottom: 2px solid #ffffff;
+  transform: translate(-50%, -65%) rotate(-45deg);
 }
 
 .assistant-planning__item-body {
   min-width: 0;
   display: grid;
-  gap: 4px;
 }
 
 .assistant-planning__item-body strong {
-  color: #1f2430;
-  font-size: 13px;
+  color: #1e293b;
+  font-size: 14px;
+  font-weight: 700;
 }
 
 .assistant-planning__item-body small {
-  color: #64748b;
-  font-size: 12px;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 500;
+  margin-top: 2px;
 }
 
 .assistant-planning__item-slots {
-  color: #475569;
+  color: #64748b;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 700;
+  background: #f1f5f9;
+  padding: 2px 8px;
+  border-radius: 6px;
 }
 
 .assistant-planning__empty {
-  padding: 18px 16px;
-  border-radius: 16px;
+  padding: 30px 20px;
+  text-align: center;
+  border-radius: 12px;
   background: #f8fafc;
-  color: #64748b;
+  color: #94a3b8;
   font-size: 13px;
-  line-height: 1.6;
 }
 
 .assistant-planning__panel-actions {
@@ -465,20 +512,31 @@ function formatDateLabel(value: string) {
 }
 
 .assistant-planning__panel-button--ghost {
-  background: #ffffff;
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.assistant-planning__panel-button--ghost:hover {
+  background: #e2e8f0;
   color: #475569;
 }
 
 .assistant-planning__panel-button--primary {
-  border-color: transparent;
-  background: #3357c2;
+  background: #3b82f6;
   color: #ffffff;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);
+}
+
+.assistant-planning__panel-button--primary:hover {
+  background: #2563eb;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 15px rgba(59, 130, 246, 0.25);
 }
 
 :global(.assistant-planning-popover) {
-  padding: 14px;
-  border-radius: 20px;
-  border: 1px solid rgba(203, 213, 225, 0.78);
-  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.14);
+  padding: 18px !important;
+  border-radius: 20px !important;
+  border: 1px solid rgba(15, 23, 42, 0.08) !important;
+  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.12) !important;
 }
 </style>

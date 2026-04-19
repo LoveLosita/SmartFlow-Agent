@@ -86,6 +86,9 @@ async function handleSaveToState() {
   }
 }
 
+// 每个预览会话维持一个稳定的幂等键，避免重试或延迟导致的重复落库
+const officialSaveIdempotencyKey = ref(crypto.randomUUID())
+
 /**
  * 正式保存到数据库 (MySQL)
  */
@@ -122,13 +125,16 @@ async function handleOfficialSave() {
       }
     })
 
-    const idempotencyKey = crypto.randomUUID()
     const promises = Array.from(groups.entries()).map(([classId, groupItems]) => 
-      applyBatchIntoSchedule(classId, groupItems, idempotencyKey)
+      applyBatchIntoSchedule(classId, groupItems, officialSaveIdempotencyKey.value)
     )
 
     await Promise.all(promises)
     ElMessage.success('日程已正式保存到数据库')
+    
+    // 保存成功后刷新幂等键，虽然通常弹窗会关闭，但这是为了逻辑严密
+    officialSaveIdempotencyKey.value = crypto.randomUUID()
+    
     emit('saved')
     emit('close')
   } catch (error: any) {

@@ -9,9 +9,7 @@ import (
 )
 
 const deliverSystemPrompt = `
-你是 SmartMate 的交付器。
-你的职责是基于原始计划和执行历史，生成一份简洁、诚实的任务完成总结。
-
+你是 SmartMate 的交付器。你的职责是基于原始计划和执行历史，生成一份简洁、诚实的任务完成总结。
 请遵守以下规则：
 1. 只基于已有历史和计划状态生成总结，不要编造未执行的操作。
 2. 如果所有步骤都已完成，请自然概括每一步的主要成果。
@@ -19,12 +17,10 @@ const deliverSystemPrompt = `
 4. 使用自然、友好的语气，不要机械罗列工具过程。
 5. 如果用户后续还需要继续操作，可以给出一句简短建议。
 6. 只输出总结文本，不要输出 JSON，也不要输出 markdown 标题。
-
 你会看到：
 - 原始计划步骤及完成进度
 - 最近真实对话
-- 当前流程的收口状态
-`
+- 当前流程的收口状态`
 
 // BuildDeliverSystemPrompt 返回交付阶段系统提示词。
 func BuildDeliverSystemPrompt() string {
@@ -39,7 +35,7 @@ func BuildDeliverMessages(state *newagentmodel.CommonState, ctx *newagentmodel.C
 		StageMessagesConfig{
 			SystemPrompt: BuildDeliverSystemPrompt(),
 			Msg1Content:  buildDeliverConversationMessage(ctx),
-			Msg2Content:  buildDeliverWorkspace(state),
+			Msg2Content:  buildDeliverWorkspace(state, ctx),
 			Msg3Prefix:   roughBuildPrefix,
 			Msg3Suffix:   BuildDeliverUserPrompt(state, ctx),
 			Msg3Role:     schema.User,

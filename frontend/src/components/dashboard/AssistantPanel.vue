@@ -230,6 +230,7 @@ const conversationContextStatsReadyMap = reactive<Record<string, boolean>>({})
 const conversationListItemRevealMap = reactive<Record<string, boolean>>({})
 const scheduleResultMap = reactive<Record<string, SchedulePreviewData>>({})
 const isFineTuneModalVisible = ref(false)
+const fineTuneLoading = ref(false)
 const activeFineTuneData = ref<SchedulePreviewData | null>(null)
 
 const quickActions = [
@@ -1301,9 +1302,14 @@ function scheduleScrollMessagesToBottom(smooth = false, force = false) {
 }
 
 async function ensureSelectedConversationAfterListLoad() {
+  // 1. 根据用户最新要求：进入页面时不自动加载最后一次对话。
+  // 2. 默认保持 selectedConversationId 为空，从而触发居中的“新会话”看板及动画过渡逻辑。
+  // 3. 用户若需查看历史，可从左侧列表中手动点击。
+  /*
   if (!selectedConversationId.value && conversationList.value.length > 0) {
     await selectConversation(conversationList.value[0].conversation_id)
   }
+  */
 }
 
 // loadConversationListData 负责按页读取会话列表，并驱动首屏选中与懒加载状态。
@@ -1601,16 +1607,16 @@ function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[
         break
 
       case 'schedule_completed':
-        // 标记该消息需要排程卡片
-        // 详情通过 schedule_completed 事件触发的 getSchedulePreview 异步填充
-        void (async () => {
-          try {
-            const preview = await getSchedulePreview(conversationId)
-            scheduleResultMap[mid] = preview
-          } catch {
-            // 吞掉，可能是过期的预览
-          }
-        })()
+        // 1. 标记该消息需要排程卡片。
+        // 2. 改造点：不在此处立即进行 getSchedulePreview 的异步拉取，
+        //    避免后端还未完成落库、或者并发过高导致的 'schedule plan preview not found' 404 捕获。
+        // 3. 这里先存入占位标志，真正的拉取推迟到用户“点击卡片”时。
+        scheduleResultMap[mid] = {
+          summary: '智能编排方案已就绪',
+          conversation_id: conversationId,
+          hybrid_entries: [],
+          is_placeholder: true, // 内部临时标记
+        } as any
         break
     }
   }
@@ -1761,8 +1767,34 @@ function isManualThinkingEnabled(mode: ThinkingModeType) {
   return mode === 'true'
 }
 
-function openFineTuneModal(data: SchedulePreviewData) {
-  activeFineTuneData.value = data
+async function openFineTuneModal(data: SchedulePreviewData) {
+  // 1. 如果点击的是占位卡片（尚未加载详情），则触发实时拉取。
+  if ((data as any).is_placeholder) {
+    if (fineTuneLoading.value) return
+    
+    fineTuneLoading.value = true
+    try {
+      const realData = await getSchedulePreview(selectedConversationId.value)
+      // 成功后覆盖占位符，下次点击无需再查
+      activeFineTuneData.value = realData
+      
+      // 这里的逻辑主要是为了同步界面上的 card 状态（如果是合并消息，对应的 id 为 dm.id）
+      for (const mid of Object.keys(scheduleResultMap)) {
+        if ((scheduleResultMap[mid] as any).is_placeholder) {
+          scheduleResultMap[mid] = realData
+        }
+      }
+    } catch (error: any) {
+      console.error('Lazy load schedule failed:', error)
+      ElMessage.warning('编排方案正在生成中，请稍候再试...')
+      return
+    } finally {
+      fineTuneLoading.value = false
+    }
+  } else {
+    activeFineTuneData.value = data
+  }
+
   isFineTuneModalVisible.value = true
 }
 
@@ -1965,6 +1997,9 @@ function handleStreamExtraEvent(extra: StreamExtraPayload | undefined, assistant
     return
   }
 
+  // 结构化 extra 事件（如卡片、工具调用、状态变更）处理逻辑。
+  // 注意：为了避免请求爆炸，不再每个事件都刷新统计信息。仅在里程碑事件（如卡片生成）处精准刷新。
+
   if (extra.kind === 'confirm_request') {
     // 1. 记录“confirm 到来前是否已存在可见正文/思考”。
     // 2. 若已有可见前缀，后续流结束时只隐藏 confirm 相关部分，不删除整条消息。
@@ -1995,6 +2030,9 @@ function handleStreamExtraEvent(extra: StreamExtraPayload | undefined, assistant
       buildToolDetail(extra.tool),
       `${extra.tool.name || ''}`,
     )
+    if (extra.tool.status === 'done') {
+      void loadConversationContextStats(selectedConversationId.value, true)
+    }
     return
   }
 
@@ -2022,16 +2060,18 @@ function handleStreamExtraEvent(extra: StreamExtraPayload | undefined, assistant
   }
 
   if (extra.kind === 'schedule_completed') {
-    // 异步拉取详细排程方案
-    void (async () => {
-      try {
-        const preview = await getSchedulePreview(selectedConversationId.value)
-        scheduleResultMap[assistantMessage.id] = preview
-        scheduleScrollMessagesToBottom(true)
-      } catch (error: any) {
-        ElMessage.error(error.message || '获取排程方案失败')
-      }
-    })()
+    // 1. 每当“排程卡片”这种重量级里程碑出现时，刷新统计信息，让用户感知到上下文变动。
+    void loadConversationContextStats(selectedConversationId.value, true)
+
+    // 2. 收到编排完成事件，仅在前端打上占位标记，展示展示卡片。
+    // 不再并发执行异步 fetch，防止后端落库延迟导致的 NotFound。
+    scheduleResultMap[assistantMessage.id] = {
+      summary: '智能编排方案已就绪',
+      conversation_id: selectedConversationId.value,
+      hybrid_entries: [],
+      is_placeholder: true,
+    } as any
+    scheduleScrollMessagesToBottom(true)
   }
 }
 
@@ -2069,6 +2109,8 @@ function processSseBlock(block: string, assistantMessage: AssistantMessage) {
     }
     activeStreamingMessageId.value = ''
     reasoningCollapsedMap[assistantMessage.id] = true
+    // 整个 SSE 流结束信号
+    void loadConversationContextStats(selectedConversationId.value, true)
     return
   }
 
@@ -2127,6 +2169,8 @@ function processSseBlock(block: string, assistantMessage: AssistantMessage) {
     }
     activeStreamingMessageId.value = ''
     reasoningCollapsedMap[assistantMessage.id] = true
+    // 单条消息结束标志
+    void loadConversationContextStats(selectedConversationId.value, true)
   }
 
   if (!shouldSuppressVisibleDelta) {
@@ -2201,6 +2245,9 @@ async function streamAssistantReply(
       ? '已完成深度思考，但当前响应未返回正文内容。'
       : '暂未收到回复正文，请稍后重试。'
   }
+
+  // 4. 传输彻底结束后，做最后一次上下文统计更新，确保最终的 Token 用量胶囊是准确的。
+  void loadConversationContextStats(actualConversationId, true)
 
   if (shouldSyncCurrentConversationMeta) {
     await syncNewConversationTitleAfterFirstReply(actualConversationId)
@@ -2383,14 +2430,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <aside class="assistant-shell glass-panel" :class="{ 'assistant-shell--standalone': isStandaloneMode }">
-    <header class="assistant-header dashboard-item-pop" :style="{ '--anim-delay': '0s' }">
-      <div class="assistant-header__text">
-        <span class="assistant-header__eyebrow">AI 对话</span>
-        <strong>{{ selectedConversationTitle }}</strong>
-        <p>{{ selectedConversationSubtitle }}</p>
-      </div>
-    </header>
+  <aside class="assistant-shell" :class="{ 'assistant-shell--standalone': isStandaloneMode }">
 
     <div
       ref="assistantBodyRef"
@@ -2491,7 +2531,12 @@ onBeforeUnmount(() => {
         <span class="assistant-splitter__line" />
       </div>
 
-      <section class="assistant-chat dashboard-item-pop" :style="{ '--anim-delay': '0.1s' }">
+      <section 
+        class="assistant-chat dashboard-item-pop" 
+        :class="{ 'assistant-chat--empty': !selectedMessages.length && !chatLoading }"
+        :style="{ '--anim-delay': '0.1s' }"
+      >
+        <div class="assistant-chat__spacer-top" />
         <div
           ref="messageViewportRef"
           class="assistant-messages"
@@ -2502,14 +2547,7 @@ onBeforeUnmount(() => {
             当前会话的历史消息暂时不可读，但你仍然可以继续追问；后续刷新后会自动恢复。
           </div>
 
-          <transition name="fade-switch" mode="out-in">
-            <div v-if="!selectedMessages.length && !chatLoading" key="empty" class="assistant-empty">
-              <div class="assistant-empty__halo" />
-              <strong>从这里开始和 AI 协作</strong>
-              <p>右侧采用更接近 DeepSeek 的阅读式布局，只保留用户气泡，AI 回复直接按正文流展示。</p>
-            </div>
-
-            <TransitionGroup v-else tag="div" name="message-stagger" class="assistant-message-list" key="list">
+          <TransitionGroup v-if="selectedMessages.length" tag="div" name="message-stagger" class="assistant-message-list">
               <article
                 v-for="dm in displayMessages"
                 :key="dm.id"
@@ -2723,21 +2761,33 @@ onBeforeUnmount(() => {
             </div>
             </article>
           </TransitionGroup>
-        </transition>
-      </div>
-
-        <div class="assistant-actions">
-          <button
-            v-for="action in quickActions"
-            :key="action"
-            type="button"
-            class="assistant-actions__chip"
-            :disabled="chatLoading"
-            @click="sendMessage(action)"
-          >
-            {{ action }}
-          </button>
         </div>
+
+        <div class="assistant-chat__interaction-group">
+          <!-- Welcome Content (Only in empty state) -->
+          <Transition name="fade-switch">
+            <div v-if="!selectedMessages.length && !chatLoading" class="assistant-empty">
+              <div class="assistant-empty__halo" />
+              <div class="assistant-empty__content">
+                <strong>SmartMate AI 伙伴</strong>
+                <p>我是你的智能助理，你可以从直接输入任务开始。</p>
+              </div>
+            </div>
+          </Transition>
+
+          <!-- Suggestion Chips -->
+          <div v-if="quickActions.length" class="assistant-actions">
+            <button
+              v-for="action in quickActions"
+              :key="action"
+              type="button"
+              class="assistant-actions__chip"
+              :disabled="chatLoading"
+              @click="sendMessage(action)"
+            >
+              {{ action }}
+            </button>
+          </div>
 
         <div class="_9a2f8e4 assistant-composer-ds" :class="{ 'assistant-composer-ds--confirm': shouldShowDialogConfirmOverlay }">
           <div
@@ -2805,6 +2855,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-else class="aaff8b8f">
+            <div class="assistant-chat__spacer-bottom" />
             <div class="_77cefa5 _9996a53">
               <div class="_020ab5b">
                 <TaskClassPlanningPicker
@@ -2916,7 +2967,9 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </div>
+          </div>
         </div>
+        <div class="assistant-chat__spacer-bottom" />
       </section>
     </div>
   </aside>
@@ -2994,10 +3047,12 @@ onBeforeUnmount(() => {
 .assistant-shell {
   height: 100%;
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
-  background: #f8fafc;
+  background: transparent;
+  padding: 12px;
+  box-sizing: border-box;
   font-family: 'Inter', 'Segoe UI', Roboto, -apple-system, sans-serif;
 }
 
@@ -3104,11 +3159,13 @@ onBeforeUnmount(() => {
 
 .assistant-body {
   --assistant-history-width: 228px;
+  flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: var(--assistant-history-width) 8px minmax(0, 1fr);
+  grid-template-columns: var(--assistant-history-width) auto minmax(0, 1fr);
+  gap: 12px;
   position: relative;
-  transition: grid-template-columns 0.35s cubic-bezier(0.4, 0, 0.2, 1); /* 核心过渡动效 */
+  transition: grid-template-columns 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .assistant-body--collapsed {
@@ -3116,7 +3173,8 @@ onBeforeUnmount(() => {
 }
 
 .assistant-body--standalone {
-  grid-template-columns: var(--assistant-history-width) 8px minmax(0, 1fr);
+  grid-template-columns: var(--assistant-history-width) auto minmax(0, 1fr);
+  gap: 12px;
 }
 
 .assistant-body--standalone.assistant-body--collapsed {
@@ -3128,10 +3186,12 @@ onBeforeUnmount(() => {
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  background: #f8fafc;
-  border-right: 1px solid #f1f5f9;
+  background: #ffffff;
+  border-radius: 24px;
+  border: 1px solid rgba(15, 23, 42, 0.05);
   transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
   position: relative;
+  box-shadow: 0 4px 15px rgba(15, 23, 42, 0.02);
 }
 
 .assistant-history__toolbar {
@@ -3435,6 +3495,9 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   cursor: col-resize;
+  width: 8px;
+  margin: 0 -4px;
+  z-index: 20;
 }
 
 .assistant-splitter--hidden {
@@ -3460,8 +3523,46 @@ onBeforeUnmount(() => {
 .assistant-chat {
   min-width: 0;
   min-height: 0;
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto auto auto;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background: #ffffff;
+  border-radius: 24px;
+  border: 1px solid rgba(15, 23, 42, 0.05);
+  box-shadow: 0 4px 15px rgba(15, 23, 42, 0.02);
+  overflow: hidden;
+}
+
+.assistant-chat__spacer-top {
+  flex: 0;
+  transition: flex 0.75s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.assistant-chat__spacer-bottom {
+  flex: 0;
+  transition: flex 0.75s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.assistant-chat--empty .assistant-chat__spacer-top {
+  flex: 1.2; /* 稍微偏上一点，视觉重心更舒适 */
+}
+
+.assistant-chat--empty .assistant-chat__spacer-bottom {
+  flex: 1;
+}
+
+.assistant-messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* 隐藏滚动条，保持纯净感，仅在非空时显示 */
+  scrollbar-width: thin;
+}
+
+.assistant-chat--empty .assistant-messages {
+  flex: 0;
+  overflow: hidden;
+  pointer-events: none;
 }
 
 .assistant-shell--standalone .assistant-chat {
@@ -3742,32 +3843,46 @@ onBeforeUnmount(() => {
 }
 
 .assistant-empty {
-  min-height: 260px;
-  display: grid;
-  place-items: center;
-  align-content: center;
-  justify-items: center;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   text-align: center;
-  gap: 10px;
-  color: #68778e;
+  padding-bottom: 24px;
 }
 
-.assistant-empty strong {
-  color: #162334;
-}
-
-.assistant-empty p {
-  margin: 0;
-  max-width: 420px;
-  line-height: 1.75;
+.assistant-empty__content {
+  position: relative;
+  z-index: 10;
 }
 
 .assistant-empty__halo {
-  width: 74px;
-  height: 74px;
-  border-radius: 26px;
-  background: radial-gradient(circle at center, rgba(37, 99, 235, 0.18), rgba(37, 99, 235, 0.02));
-  animation: halo-breathe 2.4s ease-in-out infinite;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 400px;
+  height: 400px;
+  background: radial-gradient(circle, rgba(59, 130, 246, 0.08) 0%, transparent 70%);
+  filter: blur(40px);
+  pointer-events: none;
+}
+
+.assistant-empty strong {
+  display: block;
+  font-size: 24px;
+  font-weight: 850;
+  color: #0f172a;
+  margin-bottom: 12px;
+  letter-spacing: -0.02em;
+}
+
+.assistant-empty p {
+  color: #64748b;
+  font-size: 15px;
+  max-width: 320px;
+  line-height: 1.6;
 }
 
 .chat-message__user-row {

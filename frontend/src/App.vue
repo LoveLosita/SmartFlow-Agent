@@ -11,9 +11,9 @@ const showLayout = computed(() => {
 </script>
 
 <template>
-  <div v-if="showLayout" class="smartflow-layout">
+  <div v-if="showLayout" class="smartmate-layout">
     <MainSidebar />
-    <div class="smartflow-content">
+    <div class="smartmate-content">
       <router-view v-slot="{ Component }">
         <component :is="Component" />
       </router-view>
@@ -28,7 +28,7 @@ body {
   margin: 0;
 }
 
-.smartflow-layout {
+.smartmate-layout {
   height: 100vh;
   height: 100dvh;
   box-sizing: border-box;
@@ -41,7 +41,7 @@ body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
-.smartflow-content {
+.smartmate-content {
   flex: 1;
   min-width: 0;
   min-height: 0;

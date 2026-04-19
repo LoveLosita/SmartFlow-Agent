@@ -36,7 +36,7 @@
 
 > **问题3：** 那么我作为一个规划能力比较差的懒人，也能用这个项目来让自己变的充实吗？
 
-**本项目带来的解决方案3：** 当然可以，这就是本项目接入AI的意义。聊天区域的AI将会被调教成一个日程安排的小助手，既能满足你简单的对日程的增删改查，又能协助你从0开始一点点制定属于你的计划。(**第一批次开发计划**只支持AI随口记这一"增"的功能，以及大多数能想到的"查"功能，暂时无让AI改和删的想法)
+**本项目带来的解决方案3：** 当然可以，这就是本项目接入AI的意义。聊天区域的AI将会被调教成一个日程安排的小助手，既能满足你简单的任务记录、任务查询与部分日程调整需求，又能协助你从0开始一点点制定属于你的计划。(当前版本已支持AI随口记、任务查询，以及部分日程调整的确认流；更完整的自动规划与更复杂的读写能力仍在继续迭代)
 
 > **问题4：** 我平时会突然冒出来一个能让自己活的更舒服亦或是变得更好的小想法(例如把桌面理一下、给自己挑一件新衣服等)，但是现在很忙，根本没时间做，然后等忙完了有时间了又忘记了。传统的日程软件确实能让我记录下来(比如将这个小想法记录在日程软件的四象限里面的"不重要不紧急"象限)，就是太麻烦了。
 >
@@ -58,31 +58,31 @@
 
 1. **对用户目前时间尺度的适应。**
 
-   如果用户是正在上学的大学生，时间尺度可以设置为以学校排课为主，通用时间为辅(以第1-2节，第3-4节这种的学校排课的时间方式为主，又能兼容某个特定时间的突发小事，做到对总体执行效率和事情安排效率的兼顾)；
+   当前版本以学校排课节次为主，采用第1-2节、第3-4节这种时间组织方式，同时兼容首页任务管理与周课表日程编排两套视图，方便把任务管理和日程安排放在同一系统中；
 
-   如果用户既想要自定义时间，又想要一键编排任务，本项目还支持用户自定义时间尺度，例如设置9:00-11:00为第一节课等。
+   目前暂未开放用户自定义时间尺度配置，当前仍以固定节次模型为主。后续会有更新计划的！
 
-2. **导入学校课表。** 如果用户选择以学校排课为主的时间尺度，本项目支持快速导入学校课表(只会尝试兼容CQUPT的课表格式)，以便后续以课表为基底的日程安排。
+2. **导入学校课表。** 本项目后端已提供学校课表导入能力(当前主要尝试兼容CQUPT的课表格式)，以便后续以课表为基底进行日程安排；前端完整导入流程入口仍在补齐。
 
-3. **"水课"任务嵌入。** 正如上方**问题2**所言，在导入课表后，支持设置某一门你想拿来干其它事情的课为"可嵌入任务"状态，此时这门课所占据的时间区域就是可以嵌入任务的了，但是仍然有区别于其它完全空白的时间区域，便于真正安排适合在嘈杂环境下做的事情。
+3. **"水课"任务嵌入。** 正如上方**问题2**所言，在已导入课表的前提下，支持设置某一门你想拿来干其它事情的课为"可嵌入任务"状态，此时这门课所占据的时间区域就是可以嵌入任务的了，但是仍然有区别于其它完全空白的时间区域，便于真正安排适合在嘈杂环境下做的事情。
 
-4. **设置某一任务类，并提前安排其执行路线。** 正如上方**问题1**所言，用户可以先设置一个大的任务类(例如概率论复习、算法进阶计划等等)，再在这个任务类下方安排其在对应时间尺度下的执行计划(例如第1-2节干啥，第3-4节干啥)，方便后续的日程编排。
+4. **设置某一任务类，并配置其编排参数。** 正如上方**问题1**所言，用户可以先设置一个大的任务类(例如概率论复习、算法进阶计划等等)，再为这个任务类配置任务块内容、起止日期、总节数、编排策略等信息，方便后续的日程编排。
 
-5. **一键编排任务。** 结合算法、用户偏好以及AI的建议，将任务基于上方的时间尺度、导入的课表，排进日程中，并给出这样排的理由(如果动用了AI)。  
+5. **一键编排任务。** 结合算法与用户配置，将任务基于导入的课表和任务类设置先生成预览结果；确认无误后，再正式应用到日程中。  
 
-6. **AI随口记。** 正如问题4所言，就是支持通过AI随手记录一些大小事。
+6. **AI随口记与任务查询。** 正如问题4所言，当前版本支持通过AI随手记录一些大小事，也支持按象限、关键词、截止时间等维度查询任务；部分日程调整能力已接入确认流。
 
 7. **多用户。** 本系统可支持多个用户同时使用，并且记录AI对话、编排任务的Token使用情况等，并进行限额。
 
-8. **动态任务和静态任务。**   **动态任务**包括学校的课和排入日程中的任务类，这些任务随着时间往后会默认已经完成，无需手动勾选；
+8. **四象限任务与日程编排并行管理。** 首页的四象限任务用于日常待办管理；
 
-   而**静态任务**为四个任务队列中的任务，这些任务需要手动勾选为完成状态。
+   而周课表中的课程与排入日程的任务类则用于日程编排，两类信息分别展示、相互配合。
 
-9. **完成任务状态的撤回。** 无论是因为哪种情况，是误触给队列里面的任务打钩，还是水课翘课了被叫回去点名导致任务中断，都支持**撤回**这个"任务已完成"的状态。
+9. **完成任务状态的恢复。** 当前首页四象限任务支持将"已完成"恢复为"未完成"状态。
 
-   前者，用户只需要在队列的下沉列表中找到该任务然后点击一下灰色的勾即可(模仿了滴答清单的设计)。
+   用户只需要在队列中找到该任务，然后再次点击对应状态按钮即可完成恢复。
 
-   至于后者，由于后者为动态任务，所以用户需要手动去"最近已完成任务"的清单里面选择该任务然后恢复，此时任务会自动回到未安排状态。目前暂不支持课程的撤回，课程方面的改动目前仅支持删除，其它操作后续考虑开发。
+   至于日程侧，当前主要支持删除、解除安排与预览后再正式应用，其它更完整的恢复能力仍在后续迭代中。
 
 10. **长期记忆积累。** 系统在对话中自动抽取用户相关事实与偏好，跨会话召回并注入对话上下文，实现"越用越懂你"的个性化体验。支持结构化检索 + 向量召回双路召回，全链路优雅降级。
 
@@ -90,23 +90,65 @@
 
 ## 2.1 业务流程图
 
+当前版本主业务闭环如下，重点体现“首页任务管理 / AI 助手 / 日程编排 / 长期记忆”四条主线如何互相联动：
 
+```mermaid
+flowchart TD
+    A["用户进入系统"] --> B{"是否已登录"}
+    B -- "否" --> C["/auth 登录 / 注册"]
+    C --> D["进入主工作区"]
+    B -- "是" --> D
 
-## 2.2 原型展示
+    D --> E{"选择功能入口"}
 
-![登录页](./docs/design/Pics/登录页.png)
+    E -- "首页 /dashboard" --> F["查看四象限任务 + 今日日程"]
+    F --> G["创建任务 / 完成任务 / 恢复任务"]
+    G --> H["首页持续展示最新待办状态"]
 
-![平台首页_已登录](./docs/design/Pics/平台首页_已登录.png)
+    E -- "AI 助手 /assistant" --> I["输入自然语言需求"]
+    I --> J["newAgent 统一 graph"]
+    J --> K{"路由结果"}
+    K -- "随口记 / 任务查询" --> L["写入任务或返回查询结果"]
+    K -- "智能编排 / 日程调整" --> M["plan / confirm / execute / deliver"]
+    K -- "普通问答" --> N["直接回复用户"]
 
-![日程查看&安排中心 多选后](./docs/design/Pics/日程查看&安排中心_多选后.png)
+    M --> O["返回排程结果卡片"]
+    O --> P["查看结构化预览并继续微调"]
+    P --> Q{"如何收口"}
+    Q -- "暂存" --> R["保存到 Redis 运行态"]
+    Q -- "正式应用" --> S["写入正式课表"]
 
-![日程查看&安排中心 展开数据结构并排进去一个任务后](./docs/design/Pics/日程查看&安排中心_展开数据结构并排进去一个任务后.png)
+    L --> T["更新任务列表 / 对话历史"]
+    N --> U["沉淀对话历史"]
 
-![日程查看&安排中心](./docs/design/Pics/日程查看&安排中心.png)
+    E -- "日程中心 /schedule" --> V["查看周课表与任务类"]
+    V --> W["新建任务类 / 删除任务块 / 单选或批量多选"]
+    W --> X["智能粗排 / 批量粗排"]
+    X --> Y["前端预览态拖拽调整"]
+    Y --> Z["正式应用到日程"]
 
-![用户设置&杂项](./docs/design/Pics/用户设置&杂项.png)
+    S --> AA["周课表更新"]
+    Z --> AA
+    H --> AB["用户继续使用系统"]
+    T --> AB
+    U --> AB
+    AA --> AB
 
-![注册页](./docs/design/Pics/注册页.png)
+    AB --> AC["异步事件：聊天持久化 / Outbox / Memory 抽取"]
+    AC --> AD["长期记忆写入与更新"]
+    AD --> AE["下一轮对话自动召回 memory_context"]
+    AE --> I
+```
+
+## 2.2 页面展示
+
+![登录页](D:\SmartFlow-Agent\docs\pics\登录页.png)
+
+![平台首页_已登录](./docs/pics/主页.png)
+
+![课程表页面](D:\SmartFlow-Agent\docs\pics\课程表页面.png)
+
+![AI-工具调用中](D:\SmartFlow-Agent\docs\pics\AI-工具调用中.png)
 
 # 3 后端数据架构
 
@@ -278,6 +320,51 @@ CREATE TABLE `users`
 
 ## 4.2 Agent可调用的工具定义
 
+以下定义基于当前代码实现（`backend/newAgent/tools/registry.go` + `backend/cmd/start.go` 注入），不是规划态文档。
+
+### 4.2.1 调用契约
+
+1. `tool_call` 必须是单个对象，格式为：
+
+```json
+{"tool_call":{"name":"工具名","arguments":{}}}
+```
+
+2. 日程写工具默认走 `confirm` 确认闸门（`always_execute=true` 时可跳过确认）。
+3. 非日程写工具（如 `quick_note_create`、`query_tasks`、`web_search`、`web_fetch`）走 `continue + tool_call`。
+4. 当前每轮只允许调用一个工具，不支持同轮批量工具数组。
+
+### 4.2.2 工具清单（当前版本）
+
+| 工具名 | 类型 | 是否需确认 | 是否依赖 ScheduleState | 核心参数 | 作用与约束 |
+| --- | --- | --- | --- | --- | --- |
+| `get_overview` | 读 | 否 | 是 | 无 | 获取规划窗口总览（任务视角，全量返回） |
+| `query_range` | 读 | 否 | 是 | `day`(必填), `slot_start`, `slot_end` | 查询某天/某时段占用详情 |
+| `query_available_slots` | 读 | 否 | 是 | `span`, `duration`, `limit`, `day_scope`, `week_filter` 等 | 查询候选空位池（纯空位优先，不足再补可嵌入位） |
+| `query_target_tasks` | 读 | 否 | 是 | `status`, `category`, `task_ids`, `enqueue` 等 | 过滤任务集合，可选自动入队供后续队列工具处理 |
+| `queue_pop_head` | 读 | 否 | 是 | 无 | 取出/复用当前队首任务（一次只处理一个） |
+| `queue_status` | 读 | 否 | 是 | 无 | 查看队列状态（pending/current/completed/skipped） |
+| `get_task_info` | 读 | 否 | 是 | `task_id`(必填) | 查询单任务详细信息 |
+| `place` | 写 | 是 | 是 | `task_id`, `day`, `slot_start`(均必填) | 将待安排任务预排到指定位置 |
+| `move` | 写 | 是 | 是 | `task_id`, `new_day`, `new_slot_start`(均必填) | 仅允许移动 `suggested`；`existing` 不可 `move` |
+| `swap` | 写 | 是 | 是 | `task_a`, `task_b`(均必填) | 交换两个已落位任务，要求时长一致 |
+| `batch_move` | 写 | 是 | 是 | `moves[]`(必填) | 原子批量移动，当前最多 2 条，任一冲突整批回滚 |
+| `queue_apply_head_move` | 写 | 是 | 是 | `new_day`, `new_slot_start`(均必填) | 移动当前队首并自动出队，不接受 `task_id` |
+| `queue_skip_head` | 队列控制 | 否 | 是 | `reason` | 跳过当前队首并标记 `skipped`（不改日程） |
+| `spread_even` | 写 | 是 | 是 | `task_ids`(必填，兼容 `task_id`) | 在任务集合内做均匀铺开，按筛选条件原子落地 |
+| `min_context_switch` | 写 | 是 | 是 | `task_ids`(必填，兼容 `task_id`) | 减少上下文切换重排；仅在用户明确允许打乱顺序时可执行 |
+| `unplace` | 写 | 是 | 是 | `task_id`(必填) | 取消任务落位并恢复待安排状态 |
+| `quick_note_create` | 读写混合（业务写入） | 否 | 否 | `title`(必填), `deadline_at`, `priority_group` | 记录随口记任务，支持中文相对时间；优先级可自动推断 |
+| `query_tasks` | 读 | 否 | 否 | `quadrant`, `keyword`, `deadline_before/after`, `limit` 等 | 按象限/关键词/时间边界查询任务 |
+| `web_search` | 读 | 否 | 否 | `query`(必填), `top_k`, `domain_allow`, `recency_days` | Web 检索，返回结构化标题/摘要/URL；未启用时优雅返回错误 observation |
+| `web_fetch` | 读 | 否 | 否 | `url`(必填), `max_chars` | 抓取并清洗网页正文；服务不可用时优雅返回错误 observation |
+
+### 4.2.3 当前实现中的关键规则
+
+1. `min_context_switch` 有顺序护栏：未授权“允许打乱顺序”会被后端拦截并返回拒绝结果。
+2. `batch_move` 有安全上限：当前最多支持 2 条移动请求，超出建议走队列化逐项处理。
+3. `quick_note_create` 和 `query_tasks` 不依赖 `ScheduleState`，由执行层注入 `_user_id` 后可直接调用。
+4. `web_search`/`web_fetch` 失败不会打断主链路，都会回传结构化错误 observation 给模型继续决策。
 
 
 # 5 后端实现
@@ -368,193 +455,170 @@ $$Gap = \frac{TotalAvailableSlots - (TaskCount \times 2)}{TaskCount + 1}$$
 
 ## 5.4 Agent范式实现细节
 
-### 1) 总分流图（消息识别后的去向）
+### 1) 统一入口与 graph 主链
 
 ```mermaid
 flowchart TD
-    A["/api/v1/agent/chat<br/>解析请求体 + 规范 conversation_id<br/>Header 写入 X-Conversation-ID"] --> B["AgentService.AgentChat<br/>创建 outChan / errChan"]
-    B --> C["规范 chat_id + 选择模型(worker/strategist)"]
-    C --> D["确保会话存在<br/>先查 Redis 状态<br/>未命中回源 DB + 必要时创建"]
-    D --> E["模型控制码路由<br/>route.DecideActionRouting<br/>action=chat/quick_note_create/task_query/schedule_plan_create/schedule_plan_refine"]
-    E --> F{"RouteFailed?"}
+    A["/api/v1/agent/chat<br/>接收 user_message / thinkingMode / extra"] --> B["AgentService.runNewAgentGraph"]
+    B --> C["确保会话存在<br/>加载或创建 RuntimeState"]
+    C --> D["恢复或构建 ConversationContext<br/>并预取 memory pinned block"]
+    D --> E["先持久化本轮 user message"]
+    E --> F["组装 AgentGraphRunInput<br/>Chat/Deliver 用 Pro<br/>Plan/Execute 用 Max"]
+    F --> G["RunAgentGraph"]
+    G --> H["START -> chat"]
 
-    F -- "是" --> G["pushErrNonBlocking(errChan, RouteControlInternalError)<br/>API 侧 SSE 输出 error + [DONE]"]
-    F -- "否" --> H{"action 类型"}
+    H --> I{"chat 决定下一步"}
+    I -- "简单回复 / 深答" --> J["chat 节点内直接完成"]
+    I -- "复杂规划" --> K["plan"]
+    I -- "直接执行" --> L["execute"]
+    I -- "execute 前需要粗排" --> M["rough_build"]
+    I -- "已有 pending interaction" --> N["chat 先做 resume"]
 
-    H -- "chat" --> I["runNormalChatFlow<br/>Redis 取历史 -> miss 回源 DB + 回填<br/>裁剪上下文窗口 -> StreamChat 流式输出"]
-    I --> I2["后置持久化收口<br/>user/assistant 先写 Redis<br/>再 PersistChatHistory(outbox 或同步DB)<br/>异步尝试生成标题"]
-
-    H -- "quick_note_create" --> J["发阶段块 request.accepted<br/>tryHandleQuickNoteWithGraph"]
-    J --> J1{"graph 出错?"}
-    J1 -- "是" --> J2["记录日志 + 发 fallback 阶段块<br/>回退 runNormalChatFlow"]
-    J1 -- "否" --> J3{"handled=true?"}
-    J3 -- "否" --> J2
-    J3 -- "是" --> J4["buildQuickNoteFinalReply<br/>emitSingleAssistantCompletion"]
-    J4 --> J5["persistChatAfterReply<br/>统一后置持久化 + 异步标题"]
-
-    H -- "task_query" --> K["runTaskQueryFlow -> TaskQueryGraph<br/>plan/quadrant/time_anchor/tool_query/reflect"]
-    K --> K1{"查询链路报错?"}
-    K1 -- "是" --> K2["记录日志 + 发 fallback 阶段块<br/>回退 runNormalChatFlow"]
-    K1 -- "否" --> K3["emitSingleAssistantCompletion<br/>persistChatAfterReply + 异步标题"]
-
-    H -- "schedule_plan_create" --> L["runSchedulePlanFlow -> SchedulePlanGraph<br/>并写入排程预览缓存"]
-    L --> L1{"排程链路报错?"}
-    L1 -- "是" --> L2["记录日志 + 发 fallback 阶段块<br/>回退 runNormalChatFlow"]
-    L1 -- "否" --> L3["emitSingleAssistantCompletion<br/>persistChatAfterReply + 异步标题"]
-
-    H -- "schedule_plan_refine" --> M["runScheduleRefineFlow -> ScheduleRefineGraph<br/>读取上一版排程预览上下文"]
-    M --> M1{"连续微调链路报错?"}
-    M1 -- "是" --> M2["直接上报错误<br/>不回退普通聊天"]
-    M1 -- "否" --> M3["emitSingleAssistantCompletion<br/>persistChatAfterReply + 异步标题"]
-
-    H -- "未知 action" --> N["兜底回退 runNormalChatFlow"]
-
-    I2 --> Z["API c.Stream 转发 outChan/errChan<br/>正常收尾或错误收尾"]
-    J2 --> Z
-    J5 --> Z
-    K2 --> Z
-    K3 --> Z
-    L2 --> Z
-    L3 --> Z
-    M2 --> Z
-    M3 --> Z
-    N --> Z
-    G --> Z
-```
-
-### 2) 命中“添加日程/随口记”后的业务流转
-
-```mermaid
-flowchart TD
-    A[用户消息进入 /agent/chat] --> B[规范会话ID + 选模型]
-    B --> C[确保会话存在<br/>Redis会话状态检查<br/>必要时回源DB创建]
-    C --> D[模型控制码路由<br/>action=quick_note/chat]
-    D --> E{route是否命中quick_note}
-    E -- 否 --> X[普通聊天链路<br/>StreamChat流式输出<br/>或者其它分支]
-    E -- 是 --> F[quick_note.request.accepted<br/>推送reasoning状态块]
-    F --> G[跳过二次意图判定<br/>直接进入聚合规划]
-    G --> H[单请求聚合规划<br/>生成title/deadline/priority/banter]
-    H --> I[时间校验<br/>quick_note.deadline.validating]
-    I --> J{时间是否有效}
-    J -- 否 --> K[返回纠错文案<br/>不写库<br/>quick_note.failed]
-    J -- 是 --> L{优先级是否有效}
-    L -- 是 --> M[复用聚合优先级]
-    L -- 否 --> N[本地优先级兜底<br/>不再二次调用模型]
-    M --> O[调用写库工具<br/>quick_note.persisting]
+    K --> O["confirm / rough_build / execute / deliver / interrupt"]
+    L --> P["execute / confirm / order_guard / deliver / interrupt"]
+    M --> Q["execute / order_guard / deliver / interrupt"]
     N --> O
-    O --> P{task_id是否有效}
-    P -- 否 --> Q[按重试策略处理<br/>最终返回失败文案]
-    P -- 是 --> R[quick_note.persisted]
-    R --> S[拼接最终正文<br/>优先复用聚合banter<br/>一次性content输出]
-    S --> T[后置持久化<br/>user+assistant写Redis<br/>并写outbox/DB]
-    X --> T
+    N --> P
+
+    J --> R["deliver 或 END"]
+    O --> S["deliver"]
+    P --> S
+    Q --> S
+    S --> T["END"]
 ```
 
-### 3) 命中“随口问/任务查询”后的业务流转
+### 2) `chat` 节点路由与恢复
 
 ```mermaid
 flowchart TD
-    A["用户消息进入 /agent/chat"] --> B["通用控制码分流<br/>action=chat/quick_note_create/task_query/schedule_plan_create/schedule_plan_refine"]
-    B --> C{"action 是否为 task_query"}
-    C -- 否 --> D["走其它分支<br/>普通聊天或随口记"]
-    C -- 是 --> E["进入 TaskQueryGraph"]
-    E --> F["节点1: plan<br/>一次模型调用产出查询计划"]
-    F --> G["节点2: quadrant<br/>归一化象限范围"]
-    G --> H["节点3: time_anchor<br/>锁定时间过滤边界"]
-    H --> I["节点4: tool_query<br/>调用 query_tasks 工具查询"]
-    I --> J{"首次结果是否为空"}
-    J -- 是 --> K["自动放宽一次<br/>仅放宽关键词/完成状态/时间边界"]
-    K --> L["再次调用 query_tasks"]
-    J -- 否 --> M["进入反思节点"]
+    A["进入 chat 节点"] --> B{"存在 pending interaction?"}
+
+    B -- "是" --> C["handleChatResume<br/>不再调路由 LLM"]
+    C --> D{"pending 类型"}
+    D -- "ask_user" --> E["ResumeFromPending<br/>发 resumed 状态"]
+    E --> F["恢复原 phase<br/>继续 plan 或 execute"]
+    D -- "confirm + accept" --> G["恢复 PendingTool<br/>Phase=executing"]
+    D -- "confirm + reject(计划)" --> H["RejectPlan<br/>回 planning"]
+    D -- "confirm + reject(工具)" --> I["回 executing 改策略"]
+    D -- "interaction_id 不匹配" --> J["stale_resume<br/>本轮结束"]
+
+    B -- "否" --> K{"上一轮是否 completed?"}
+    K -- "是" --> L["写 execute_loop_closed marker<br/>ResetForNextRun"]
+    K -- "否" --> M["直接构建路由消息"]
     L --> M
-    M --> N["节点5: reflect<br/>模型判断结果是否满足用户诉求"]
-    N --> O{"need_retry 且未超上限"}
-    O -- 是 --> P["应用 retry_patch<br/>重试次数+1"]
-    P --> I
-    O -- 否 --> Q["后端确定性渲染最终回复<br/>严格按 limit 输出条数"]
-    Q --> R["后置持久化<br/>user+assistant 写 Redis + outbox/DB"]
+    M --> N["一次快速路由 LLM<br/>BuildChatRoutingMessages"]
+    N --> O{"route"}
+
+    O -- "direct_reply" --> P["chat 内直接流式回复<br/>Phase=chatting -> END"]
+    O -- "deep_answer" --> Q["二次 deep answer 调用<br/>可开启 thinking -> END"]
+    O -- "plan" --> R["Phase=planning"]
+    O -- "execute" --> S["StartDirectExecute<br/>写 AllowReorder / ExecuteThinking"]
+
+    S --> T{"NeedsRoughBuild?"}
+    T -- "是" --> U["rough_build"]
+    T -- "否" --> V["execute"]
+    R --> W["plan"]
 ```
 
-### 4) 命中新建“智能排程”后的业务流转图
+### 3) `plan / confirm / rough_build` 链路
 
 ```mermaid
 flowchart TD
-    A["命中 action=schedule_plan_create<br/>发 request.accepted 阶段块"] --> B["runSchedulePlanFlow 入口"]
-    B --> B1{"依赖齐全?<br/>model + 3个函数注入"}
-    B1 -- "否" --> B2["返回 error 给上层<br/>上层回退普通聊天"]
-    B1 -- "是" --> C["清理旧预览缓存<br/>DeleteSchedulePlanPreview<br/>失败仅记日志"]
-    C --> D["加载对话历史<br/>Redis 优先 -> miss 回源 DB<br/>失败降级为空历史继续"]
-    D --> E["RunSchedulePlanGraph<br/>注入并发度与预算配置"]
+    A["Phase=planning -> plan 节点"] --> B["LLM 生成 PlanDecision<br/>可开启 thinking"]
+    B --> C{"action"}
 
-    E --> P1["plan 节点<br/>合并 extra.task_class_ids + 模型提取约束/策略/标签<br/>模型失败时可用 extra 兜底"]
-    P1 --> P1B{"FinalSummary 非空<br/>或 task_class_ids 为空?"}
-    P1B -- "是" --> PX["exit 节点 -> END<br/>直接返回已有失败文案"]
-    P1B -- "否" --> P2["rough_build 节点<br/>HybridScheduleWithPlanMulti 构建 HybridEntries<br/>可选解析全局窗口(起止周/天)"]
+    C -- "continue" --> A
+    C -- "ask_user" --> D["OpenAskUserInteraction<br/>graph -> interrupt"]
+    C -- "done" --> E["FinishPlan<br/>写 pinned blocks:<br/>current_plan / current_step"]
 
-    P2 --> P2B{"HybridEntries 为空<br/>或构建失败?"}
-    P2B -- "是" --> PX
-    P2B -- "否" --> P3{"len(task_class_ids) >= 2 ?"}
+    E --> F{"AlwaysExecute?"}
+    F -- "否" --> G["confirm"]
+    G --> H["EmitConfirmRequest<br/>OpenConfirmInteraction(type=plan)"]
+    H --> I["interrupt 等用户"]
+    I --> J["用户下一轮回复 -> chat resume"]
+    J --> K{"accept / reject"}
+    K -- "accept" --> L{"NeedsRoughBuild?"}
+    K -- "reject" --> A
 
-    P3 -- "是" --> P4["daily_split<br/>按周天拆 DayGroup + 注入 ContextTag<br/>suggested<=2 标记 SkipRefine"]
-    P4 --> P5["daily_refine(并发)<br/>按天并发 ReAct<br/>单天失败回退原天结果"]
-    P5 --> P6["merge<br/>合并 DailyResults<br/>冲突则整体回退 merge 前快照"]
-    P6 --> P7["weekly_refine(并发按周)<br/>有效周保底预算 + 负载加权分配"]
+    F -- "是" --> M["自动展示计划摘要<br/>ConfirmPlan -> PhaseExecuting"]
+    M --> L
 
-    P3 -- "否" --> P7
-    P7 --> P7A["单周 worker 循环<br/>每轮只允许 1 个 Move/Swap 或 done<br/>总预算(成功/失败都扣) + 有效预算(仅成功扣)<br/>Move 受本周与全局窗口硬约束"]
-
-    P7A --> P8["final_check<br/>physicsCheck(冲突/节次越界/数量核对)<br/>失败回退 MergeSnapshot<br/>再生成自然语言总结"]
-    P8 --> P9["return_preview<br/>回填 AllocatedItems 嵌入时间<br/>生成 CandidatePlans + FinalSummary + Completed"]
-    P9 --> F1["saveSchedulePlanPreview<br/>写 Redis 结构化快照<br/>失败仅记日志"]
-    F1 --> F2["返回 FinalSummary 给 AgentChat"]
-
-    F2 --> G1["emitSingleAssistantCompletion<br/>SSE 输出终审文本"]
-    G1 --> G2["persistChatAfterReply<br/>user/assistant 写 Redis + outbox/DB"]
-    G2 --> G3["ensureConversationTitleAsync"]
-
-    F1 --> H1["结构化通道<br/>GET /api/v1/agent/schedule-preview?conversation_id=..."]
-    H1 --> H2["GetSchedulePlanPreview<br/>按 user_id + conversation_id 读 Redis 快照<br/>未命中返回业务错误码"]
-
-    B2 --> Z["上层发 fallback 阶段块<br/>回退 runNormalChatFlow"]
-    PX --> F1
-    G3 --> Z
-    H2 --> Z
+    L -- "否" --> N["execute"]
+    L -- "是" --> O["rough_build"]
+    O --> P["调用 RoughBuildFunc<br/>写回 ScheduleState"]
+    P --> Q["写 rough_build_done pinned block<br/>标记 HasScheduleChanges"]
+    Q --> R{"仍有真实 pending?"}
+    R -- "是" --> S["Abort -> deliver"]
+    R -- "否" --> T{"需要继续微调?"}
+    T -- "是" --> N
+    T -- "否" --> U["Done -> deliver"]
 ```
 
-### 5) 命中“排程连续微调”后的业务流转图
+### 4) `execute / confirm / order_guard` 链路
 
 ```mermaid
 flowchart TD
-    A["命中 action=schedule_plan_refine<br/>发 request.accepted 阶段块"] --> B["runScheduleRefineFlow 入口"]
-    B --> C{"selectedModel 非空?"}
-    C -- "否" --> C1["直接返回错误<br/>不回退普通聊天"]
-    C -- "是" --> D["loadSchedulePreviewContext<br/>Redis 预览优先 -> miss 回源 MySQL 快照"]
-    D --> E{"上一版预览存在?"}
-    E -- "否" --> E1["返回 SchedulePlanPreviewNotFound<br/>直接上报错误"]
-    E -- "是" --> F["NewScheduleRefineState<br/>注入 HybridEntries / AllocatedItems / CandidatePlans / OriginOrderMap"]
-    F --> G["RunScheduleRefineGraph"]
+    A["Phase=executing -> execute 节点"] --> U{"NextRound 成功?"}
+    U -- "否" --> V["Exhaust -> deliver"]
+    U -- "是" --> B{"有 PendingConfirmTool?"}
+    B -- "是" --> C["直接执行已确认写工具"]
+    B -- "否" --> D["BuildExecuteMessages<br/>LLM 产出 ExecuteDecision"]
 
-    G --> H["contract<br/>抽取 intent / strategy / hard_assertions<br/>默认 keep_relative_order=true"]
-    H --> I["plan<br/>生成 3~4 步执行计划<br/>必要时注入复合工具硬条件"]
-    I --> J["slice<br/>提取 week/source_days/target_days<br/>编译 objective + workset"]
-    J --> K["route<br/>命中 SpreadEven / MinContextSwitch 时先走复合路由<br/>首次 + 最多2次重试"]
-    K --> K1{"CompositeRouteSucceeded?"}
-    K1 -- "是" --> L["react<br/>检测到已收口，直接 skip"]
-    K1 -- "否" --> M["react<br/>单任务微步循环<br/>失败后禁复合，只用基础工具"]
-    L --> N["hard_check<br/>先锁定业务目标<br/>再按需顺序归位 / 一次修复"]
-    M --> N
-    N --> O["summary<br/>回填 AllocatedItems + CandidatePlans<br/>Completed 仅由终审是否通过决定"]
+    C --> E["写 observation / 更新 ScheduleState"]
+    D --> F{"action"}
 
-    O --> P{"shouldPersistScheduleRefinePreview?"}
-    P -- "是" --> Q["saveSchedulePlanPreview<br/>覆盖 Redis + MySQL 快照"]
-    P -- "否" --> R["emit schedule_refine.preview.skipped<br/>保留上一版预览基线"]
-    Q --> S["emitSingleAssistantCompletion<br/>输出 FinalSummary"]
+    F -- "continue + tool_call" --> G["每轮只调用 1 个工具"]
+    G --> H{"写工具且需要确认?"}
+    H -- "是" --> I["PendingConfirmTool -> confirm"]
+    I --> J["EmitConfirmRequest<br/>OpenConfirmInteraction(type=execute)"]
+    J --> K["interrupt 等用户"]
+    K --> L["用户 accept -> chat resume -> execute"]
+    H -- "否" --> M["写 observation<br/>继续 execute 循环"]
+
+    F -- "continue 无工具" --> M
+    F -- "ask_user" --> N["OpenAskUserInteraction<br/>interrupt 等用户"]
+    F -- "next_plan" --> O["推进 current_step<br/>写 execute_step_advanced marker"]
+    O --> P{"还有后续计划?"}
+    P -- "是" --> M
+    P -- "否" --> Q["Done -> deliver"]
+
+    F -- "done" --> R{"AllowReorder?"}
+    R -- "false" --> S["order_guard<br/>校验 suggested 相对顺序"]
+    S --> T["自动复原或保守放行"]
+    T --> Q
+    R -- "true" --> Q
+
+    F -- "abort" --> Q
+```
+
+### 5) `interrupt / deliver / 状态持久化` 链路
+
+```mermaid
+flowchart TD
+    A["plan / execute / confirm 产生 pending"] --> B["interrupt"]
+    B --> C{"pending 类型"}
+    C -- "ask_user" --> D["把 DisplayText 当 assistant 文本输出"]
+    C -- "confirm" --> E["不重复发确认卡片<br/>仅发 waiting status"]
+    D --> F["interrupt -> END"]
+    E --> F
+    F --> G["saveAgentState"]
+    G --> H["用户下一轮输入<br/>重新从 chat resume"]
+
+    I["任务正常完成 / abort / exhausted"] --> J["deliver"]
+    J --> K["GenerateDeliverSummary<br/>LLM 失败则降级机械总结"]
+    K --> L{"completed 且有日程变更?"}
+    L -- "是" --> M["EmitScheduleCompleted"]
+    L -- "否" --> N["跳过排程完毕卡片"]
+    M --> O["输出最终总结"]
+    N --> O
+
+    O --> P{"terminal_status=completed?"}
+    P -- "是" --> Q["WriteSchedulePreview<br/>只写结果态工作区"]
+    P -- "否" --> R["跳过排程预览写入"]
+    Q --> S["deliver 后 saveAgentState"]
     R --> S
-    S --> T["persistChatAfterReply<br/>统一后置持久化 + 异步标题"]
-
-    C1 --> Z["错误直接返回前端"]
-    E1 --> Z
-    T --> Z
+    S --> T["graph 返回 service<br/>发布 AgentStateSnapshot(outbox)"]
+    T --> U["EmitDone + 异步生成会话标题"]
 ```
 
 ## 5.5 长期记忆系统
@@ -578,50 +642,58 @@ flowchart TD
 ### 读路径（同步）
 
 ```
-用户消息到达 → injectMemoryContext → 结构化检索(按用户/类别过滤)
-+ 向量召回(Milvus) → 重排序 → 拼接为 pinned block 注入 Prompt → LLM 生成回复
+用户消息到达 → injectMemoryContext
+→ 先读 Redis 预取缓存并注入 memory_context（上一轮检索结果，首字节零等待）
+→ 后台完整检索：结构化检索(按用户/类别过滤) + 向量召回(Milvus) + 重排序
+→ 渲染后的最新结果经 channel 交给 Plan/Execute 节点消费，同时回写 Redis
+→ 作为下一轮 Chat 节点的预取记忆继续接力 → LLM 生成回复
 ```
 
 关键设计：
 
-1. **双路召回**：结构化检索保证精确匹配，向量召回覆盖语义关联，两者合并后重排序取 Top-K。
-2. **优雅降级**：记忆检索失败时不阻断主对话链路，仅降级为无记忆模式，不影响正常功能。
-3. **访问时间刷新**：被召回的记忆会更新最近访问时间，热点记忆更不容易被淘汰。
+1. **Redis 接力预取**：本轮 Chat 先消费上一轮写入 Redis 的记忆预取缓存，保证首字节几乎不受完整检索耗时影响；后台再把最新检索结果通过 channel 交给 Plan/Execute，并顺手回写 Redis，形成“上一轮服务下一轮”的接力链路。
+2. **双路召回**：完整检索阶段仍采用结构化检索 + 向量召回的混合模式，先保证精确过滤，再补足语义相关性，最后统一重排序取 Top-K。
+3. **优雅降级**：Redis 未命中、后台检索失败、短应答跳过检索等情况都不会阻断主链路；最差也只是本轮不注入记忆，而不是把对话打挂。
 
 # 6 前端实现
 
-PS:当前前端进度大幅度落后于后端，将在后端闭环跑通后开始维护。
+当前前端位于 `frontend/` 目录，已经形成一个可独立运行的 Vue 单页应用，并且前端入口目前呈现为“两条主线并存”：
 
-## 6.1 当前前端技术栈与工程约定
+1. `/assistant`：承接 `newAgent` 对话、确认、时间线、排程结果卡片与微调链路。
+2. `/schedule`：承接传统课表中心、任务类侧栏、粗排预览、拖拽调整与正式应用。
 
-当前前端位于 `frontend/` 目录，已经落地为一个可独立运行的 Vue 单页应用。
+## 6.1 当前前端技术栈与整体结构
 
 技术栈如下：
 
 | 分类 | 当前选型 | 说明 |
 | --- | --- | --- |
-| 前端框架 | Vue 3 | 统一使用 Composition API 与 `<script setup>` 编写页面与组件 |
-| 构建工具 | Vite 6 | 本地开发、代理联调、生产构建均由 Vite 提供 |
-| 语言 | TypeScript | 页面、接口层、类型定义均已类型化 |
-| UI 组件库 | Element Plus | 用于表单、输入框、下拉框、消息提示、弹窗等基础交互 |
-| 状态管理 | Pinia | 当前主要承载登录态与 token 持久化 |
-| 路由 | Vue Router 4 | 已配置鉴权守卫、访客页守卫与页面跳转 |
-| HTTP | Axios + 原生 fetch | 常规 JSON 接口走 Axios；AI 对话流式 SSE 走原生 `fetch` |
-| Markdown 渲染 | markdown-it + highlight.js | AI 回复正文支持 Markdown 渲染与代码高亮 |
+| 前端框架 | Vue 3 | 统一使用 Composition API 与 `<script setup>` |
+| 构建工具 | Vite 6 | 本地开发、代理联调、生产构建统一由 Vite 提供 |
+| 语言 | TypeScript | API、页面状态、排程数据结构已基本类型化 |
+| UI 组件库 | Element Plus | 登录、表单、选择器、弹窗、消息提示等基础交互由其承接 |
+| 状态管理 | Pinia | 当前主要用于认证态、token 与用户信息持久化 |
+| 路由 | Vue Router 4 | 已配置 `requiresAuth` / `guestOnly` 守卫 |
+| HTTP | Axios + 原生 `fetch` | 常规 JSON 接口走 Axios；`/agent/chat` 流式接口走原生 `fetch` |
+| Markdown 渲染 | markdown-it + highlight.js | 助手正文支持 Markdown 渲染与代码高亮 |
 
 当前前端工程结构如下：
 
 ```text
 frontend/src
-├─ api/                  # 接口封装：auth / task / schedule / scheduleCenter / agent
+├─ api/                  # auth / task / schedule / scheduleCenter / agent / schedule_agent
 ├─ components/
-│  ├─ dashboard/         # 首页与 AI 面板相关组件
-│  └─ schedule/          # 智能排程页相关组件
-├─ router/               # 路由定义与前置守卫
+│  ├─ assistant/         # 上下文窗口、排程结果卡片、微调弹窗、任务类选择器
+│  ├─ common/            # 全局主侧边栏 MainSidebar
+│  ├─ dashboard/         # 首页卡片与 AssistantPanel
+│  └─ schedule/          # 任务类侧栏、周课表画板、创建弹窗
+├─ router/               # 路由定义与守卫
 ├─ stores/               # Pinia store（当前主要是 auth）
-├─ types/                # 页面与接口类型定义
-├─ utils/                # 日期、HTTP 错误、Markdown、幂等 key 等工具
-└─ views/                # Auth / Dashboard / Assistant / Schedule 四个主视图
+├─ types/                # dashboard / schedule / api 类型定义
+├─ utils/                # 日期、Markdown、HTTP 错误、幂等 key 等工具
+├─ views/                # Auth / Dashboard / Assistant / Schedule / Prototype
+├─ App.vue               # 全局布局壳层与 router-view 容器
+└─ main.ts               # Vue / Pinia / Router / Element Plus 挂载入口
 ```
 
 工程约定如下：
@@ -629,24 +701,28 @@ frontend/src
 1. 所有业务请求默认走 `/api/v1` 前缀。
 2. 本地开发通过 Vite 代理把 `/api` 转发到 `http://127.0.0.1:8080`。
 3. 常规接口统一走 `frontend/src/api/http.ts`，内置 `401 -> refresh token -> 原请求重放`。
-4. 对话流接口 `POST /api/v1/agent/chat` 因为要消费 SSE，所以单独用原生 `fetch`。
-5. 写操作尽量补 `X-Idempotency-Key`，当前任务创建、日程应用、日程删除、任务块删除都已经这样处理。
+4. 对话流接口 `POST /api/v1/agent/chat` 单独走原生 `fetch`，并在前端手动处理一次 refresh token 重试。
+5. 写操作尽量补 `X-Idempotency-Key`，当前任务类创建、日程应用、日程删除、任务块删除都已接入。
+6. `App.vue` 会对 `/dashboard`、`/assistant`、`/schedule` 统一套用主壳层与 `MainSidebar`，而不是每个页面各自维护一套侧边栏。
 
 ## 6.2 当前页面与路由状态
 
-当前前端已经接通的页面路由如下：
+当前已接通的页面路由如下：
 
 | 路由 | 页面状态 | 说明 |
 | --- | --- | --- |
-| `/auth` | 已完成 | 登录/注册同页切换，登录成功后按 `redirect` 返回目标页 |
-| `/dashboard` | 已完成 | 首页工作台，展示四象限任务、今日日程、快捷创建任务、左侧导航 |
-| `/assistant` | 已完成 | 独立 AI 对话页，复用同一套 AI 面板组件，支持历史会话与流式消息 |
-| `/schedule` | 已完成 | 周课表与任务编排中心，支持任务类、粗排、预览、拖拽、应用 |
+| `/` | 已完成 | 默认重定向到 `/dashboard` |
+| `/auth` | 已完成 | 登录/注册同页切换，支持 `redirect` 回跳 |
+| `/dashboard` | 已完成 | 首页工作台，承接四象限任务与今日日程 |
+| `/assistant` | 已完成 | `newAgent` 对话主入口，支持时间线、确认卡片、排程结果卡片 |
+| `/schedule` | 已完成 | 传统课表中心，支持任务类、粗排、拖拽预览与正式应用 |
+| `/prototype/tool-trace` | 原型页 | 用于展示工具 trace / 阻断 / 排程卡片交互原型，不在主导航中暴露 |
 
-当前仍处于占位/未独立成页的入口：
+当前仍未接出正式独立路由的入口：
 
-1. 左侧导航里的“任务”按钮目前还是占位提示，没有独立路由页。
-2. 侧边栏底部“设置”按钮目前也是视觉占位，没有接出 `/settings`。
+1. “任务”独立页仍未落地，侧边栏没有 `/task` 路由。
+2. 侧边栏底部“设置”按钮仍是视觉占位，尚未接出 `/settings`。
+3. `src/views/layout`、`src/views/login`、`src/views/register`、`src/views/settings` 以及 `src/store/` 目前更偏预留/历史残留目录，不承载当前主运行链路。
 
 ## 6.3 认证页 `/auth`
 
@@ -659,25 +735,30 @@ frontend/src
 当前行为：
 
 1. 登录与注册共用一页，通过 tab 切换。
-2. 登录成功后会写入 `access_token`、`refresh_token` 与最近一次登录用户名。
+2. 登录成功后会把 `access_token`、`refresh_token` 与最近一次用户名写入 `localStorage`。
 3. 路由守卫会阻止未登录用户进入 `/dashboard`、`/assistant`、`/schedule`。
-4. 登录态失效时，Axios 拦截器会自动尝试刷新 token；刷新失败则清空本地登录态并跳回登录页。
+4. 普通 JSON 接口走 Axios 自动续签；流式对话接口走 `fetch` 时也会在前端手动尝试一次 refresh token 重试。
+5. 登出时会先尽力调用后端注销接口，再无条件清理本地登录态，避免前端出现“假在线”。
 
-## 6.4 首页工作台 `/dashboard`
+## 6.4 统一壳层与首页工作台 `/dashboard`
 
 对应文件：
 
+- `frontend/src/App.vue`
+- `frontend/src/components/common/MainSidebar.vue`
 - `frontend/src/views/DashboardView.vue`
 - `frontend/src/components/dashboard/TaskQuadrantCard.vue`
 - `frontend/src/components/dashboard/TodayTimeline.vue`
 
 当前已实现能力：
 
-1. 左侧导航栏与顶部欢迎区已经落地，首页与 `/assistant` 使用统一的主视觉语言。
-2. 中心区展示四象限任务卡片，支持获取任务列表、创建任务、完成任务、撤销完成任务。
-3. 右侧展示“今日日程”，通过 `/schedule/today` 拉取当天事件。
-4. 首页整体做了缩放适配，目标是在 100% 缩放下尽量完整展示主要内容，而不是依赖用户手动缩放浏览器。
-5. 首页右侧已经不再承载完整 AI 对话页；AI 对话已收口到独立 `/assistant` 页面。
+1. `/dashboard`、`/assistant`、`/schedule` 已统一挂在同一套全局壳层下，由 `App.vue + MainSidebar` 负责外层布局。
+2. 侧边栏当前只保留“总览 / 日程 / 助手”三项主导航，避免过早把尚未做完的页面入口暴露出来。
+3. 首页中心区展示四象限任务卡片，支持获取任务列表、创建任务、完成任务、撤销完成任务。
+4. 右侧展示“今日日程”，通过 `GET /api/v1/schedule/today` 拉取当天事件。
+5. 首页顶部已具备退出登录、用户昵称展示、当前日期展示等基础工作台能力。
+6. 首页整体做了缩放适配，目标是在常见笔记本分辨率下尽量完整展示主要内容，而不是依赖用户手动缩放浏览器。
+7. “课表导入”入口目前仍是占位提示，还没有真正接出导入向导页。
 
 ## 6.5 AI 对话页 `/assistant`
 
@@ -685,27 +766,37 @@ frontend/src
 
 - `frontend/src/views/AssistantView.vue`
 - `frontend/src/components/dashboard/AssistantPanel.vue`
+- `frontend/src/components/assistant/ContextWindowMeter.vue`
+- `frontend/src/components/assistant/TaskClassPlanningPicker.vue`
+- `frontend/src/components/assistant/ScheduleResultCard.vue`
+- `frontend/src/components/assistant/ScheduleFineTuneModal.vue`
 - `frontend/src/api/agent.ts`
+- `frontend/src/api/schedule_agent.ts`
 
 当前已实现能力：
 
-1. 页面拆成“左侧主导航 + 右侧 AI 面板”两部分，最左侧侧栏样式已与首页统一。
-2. AI 面板同时支持嵌入态和独立页态；`/assistant` 使用独立页态。
-3. 已接通的对话相关接口包括：
+1. `/assistant` 页面本身很薄，核心能力基本都收敛在 `AssistantPanel` 中，便于后续继续复用为嵌入态或独立页态。
+2. 已接通的对话与上下文接口包括：
    - `POST /api/v1/agent/chat`
    - `GET /api/v1/agent/conversation-list`
    - `GET /api/v1/agent/conversation-meta`
    - `GET /api/v1/agent/conversation-history`
-4. 支持流式 SSE 回复，并区分深度思考内容、正文内容，以及刷新后从历史接口恢复的 `reasoning_duration_seconds`。
-5. 历史消息支持重试分页元数据：`retry_group_id`、`retry_index`、`retry_total`。
-6. 助手消息底部已支持复制、重新生成、版本分页切换。
-7. 用户消息底部已支持复制、修改消息；当前“修改消息”的语义是“复制到输入框后重新发送一条新消息”，不会覆盖旧消息。
-8. “重新生成”按钮当前的前端策略是：
-   - 先尝试直接使用当前消息上的持久化 ID；
-   - 若命中的是本地乐观态消息，则先静默调用一次历史接口补抓真实 ID；
-   - 仍然拿不到时，再提示：`消息正在处理，请稍后再重试，或者直接复制消息重新发送`。
-9. 历史消息与本地乐观态消息会做合并，避免刷新历史时把当前页内正在看的消息直接抹掉。
-10. 消息区实现了“自动跟随到底部 / 用户手动上滚后停止跟随”的双态滚动策略。
+   - `GET /api/v1/agent/context-stats`
+   - `GET /api/v1/agent/conversation-timeline`
+3. 已接通的排程结果相关接口包括：
+   - `GET /api/v1/agent/schedule-preview`
+   - `POST /api/v1/agent/schedule-state`
+   - `PUT /api/v1/task-class/apply-batch-into-schedule`
+4. 输入区支持两类核心控制参数：`thinking` 模式（`auto / true / false`）与执行模式（`manual / always`）。
+5. 对于智能编排类对话，前端可通过 `TaskClassPlanningPicker` 透传 `task_class_ids`，让 `newAgent` 直接以指定任务类启动规划。
+6. 流式回复已支持区分正文、思考内容和结构化 `extra` 事件，并可将 `tool_call / tool_result / status / confirm_request / schedule_completed` 转成前端时间线展示。
+7. 对话页已经具备确认覆盖层：收到确认事件后，前端可以在卡片上直接确认、拒绝或补充说明，再把 `confirm_action / resume` 透传回后端。
+8. 当后端发出 `schedule_completed` 信号后，消息流中会展示排程结果卡片；点击后可拉取结构化预览，并在 `ScheduleFineTuneModal` 中继续拖拽微调。
+9. 微调弹窗已经支持两种收口方式：先“暂存到 Redis 状态”，或按任务类分桶后正式应用到数据库。
+10. 对话页已具备上下文窗口计量器，可展示 `msg0 ~ msg3 / total / budget` 统计，用于观察当前对话窗口消耗。
+11. 历史消息与本地乐观态消息会合并，避免刷新历史时把当前页内正在看的流式消息直接抹掉。
+12. 助手消息底部支持复制、重新生成、版本分页切换；用户消息支持复制与“改写后重新发送”，但不会覆盖旧消息。
+13. 消息区实现了“自动跟随到底部 / 用户手动上滚后停止跟随”的双态滚动策略。
 
 ## 6.6 日程编排页 `/schedule`
 
@@ -719,12 +810,11 @@ frontend/src
 
 当前已实现能力：
 
-1. 左侧为任务类侧栏，右侧为周课表/排程画板。
-2. 任务类侧栏支持获取任务类列表、展开任务类详情、删除单个任务块、新建任务类弹窗、单选与批量多选模式切换。
-3. 当任务类较多时，左侧侧栏改为固定卡片高度 + 列表滚动，不再通过压缩卡片高度硬塞。
-4. 单个任务类展开后，其内部任务块列表也支持独立滚动，避免详情直接溢出容器。
-5. 周课表支持周次切换，当前前端限制为 `1 ~ 24` 周，不允许继续越界请求。
-6. 已接通的课表/编排相关接口包括：
+1. `/schedule` 仍然是一套独立于 `newAgent` 对话页的传统编排中心，主要承接任务类管理、粗排预览与正式应用。
+2. 左侧为任务类侧栏，右侧为周课表/排程画板，支持单选与批量多选两种任务类操作模式。
+3. 任务类侧栏支持获取任务类列表、展开详情、删除任务块、新建任务类弹窗，以及长列表滚动。
+4. 周课表支持周次切换，当前前端将请求范围限制在 `1 ~ 24` 周，并且加入请求序列号保护，快速切周时只认最后一次响应。
+5. 已接通的课表/编排相关接口包括：
    - `GET /api/v1/schedule/week`
    - `GET /api/v1/task-class/list`
    - `GET /api/v1/task-class/get`
@@ -734,41 +824,163 @@ frontend/src
    - `POST /api/v1/schedule/smart-planning-multi`
    - `PUT /api/v1/task-class/apply-batch-into-schedule`
    - `DELETE /api/v1/schedule/delete`
-7. 智能编排结果当前分为单任务类粗排和多任务类批量粗排。
-8. 预览态结果不会立刻写入正式课表，而是先保存在前端运行时内存中；用户确认后再应用到后端。
-9. 预览态结果的生命周期是“当前单页应用存活期间”，刷新页面会丢失，因此页面已挂载 `beforeunload` 原生拦截提示。
-10. 已请求过的周课表会缓存在前端内存中，当前页切换周次时优先复用缓存，避免反复打后端。
-11. 周请求增加了序列号保护，快速切周时只认最后一次请求结果，用来降低闪动。
-12. 预览态 `suggested` 任务支持拖拽调整位置，并且拖拽会同步修改前端持有的预览 JSON，保证“用户看到的布局”和“最终提交给后端的布局”一致。
-13. 对于嵌入课程中的预览任务，只有拖到嵌入任务本身时才允许把它单独拖出来，不会整块课程卡一起被拖动。
-14. 预览态支持批量应用；如果是多任务类批量粗排，前端会先把预览结果按任务类分桶，再逐桶调用现有应用接口。
+6. 智能编排结果当前分为单任务类粗排和多任务类批量粗排，结果先进入前端运行时预览态，而不会立即写入正式课表。
+7. 预览态结果只保存在单页应用运行时内存中，不落 `localStorage / sessionStorage`；刷新页面会丢失，因此页面挂了 `beforeunload` 原生拦截提示。
+8. 已请求过的周课表会缓存在前端内存中，切周时优先复用缓存，避免反复回源后端。
+9. 预览态 `suggested` 任务支持拖拽调整位置，并会同步修改前端持有的预览 JSON，保证“用户看到的布局”和“最终提交给后端的布局”一致。
+10. 对于可嵌入课程的预览任务，只有拖到允许嵌入的课程块上时才允许嵌入，不会把整块课程卡一起误拖走。
+11. 多任务类粗排的正式应用采用“先按任务类分桶，再逐桶调用现有应用接口”的兼容策略，避免一次性重写整个后端应用协议。
 
 ## 6.7 当前前后端衔接边界
 
 当前前端已经覆盖的主业务链路：
 
-1. 登录 / 注册 / 自动续签
-2. 首页任务获取、创建、完成、撤销
-3. 今日日程展示
-4. AI 对话、历史会话、深度思考展示、重新生成、消息复制、消息修改
-5. 任务类管理、智能粗排、批量粗排、预览拖拽、正式应用、删除日程
+1. 登录 / 注册 / 自动续签 / 安全登出。
+2. 首页四象限任务获取、创建、完成、撤销与今日日程展示。
+3. `newAgent` 对话、历史会话、思考内容展示、消息重试、结构化时间线、确认覆盖层、上下文窗口计量。
+4. AI 对话页中的排程结果卡片、结构化预览拉取、弹窗微调、暂存到 Redis 状态、正式应用到课表。
+5. 传统 `/schedule` 页面中的任务类管理、智能粗排、批量粗排、拖拽预览、正式应用、删除日程。
+6. `/prototype/tool-trace` 原型页，用于展示工具 trace 与交互形态。
 
 当前仍明确留给后续迭代的部分：
 
 1. “任务”独立页面与“设置”独立页面尚未接出。
-2. 课表导入流程入口已在首页预留，但还没有完整的导入页与导入向导。
-3. 用户消息“修改后原地提交并替换旧消息”的真正后端语义尚未实现，目前按“发送一条新消息”处理。
-4. 更多 AI 工具态页面（例如结构化预览页、设置面板、统计页）尚未独立拆页。
+2. AI 输入区已经预留附件上传按钮，但上传、解析、落盘、发送给模型的完整链路尚未接通。
+3. `/assistant` 与 `/schedule` 目前还是两套并行入口，状态模型与交互语义尚未完全统一。
+4. 课表导入流程入口虽然已预留，但还没有完整的导入页与导入向导。
+5. 用户消息“修改后原地替换旧消息”的真正后端语义尚未实现，目前仍按“复制到输入框后再发送一条新消息”处理。
+6. 原型页、预留目录和历史壳层代码还未进一步收敛清理，说明前端仍处在快速迭代期。
 
 # 7 部署与监控
 
 ## 7.1 容器化部署方案
+当前项目已经具备一套**“依赖栈容器化 + 应用进程宿主机运行”**的落地方案，适合本地联调、答辩演示和单机部署。
 
+### 当前部署形态
 
+当前根目录已经提供 `docker-compose.yml`，用于启动以下基础设施：
+
+| 服务 | 端口 | 用途 |
+| --- | --- | --- |
+| MySQL 8.0 | `3306` | 主业务库，承载用户、任务、课表、对话、memory 等结构化数据 |
+| Redis 7 | `6379` | 登录态、幂等键、会话缓存、Agent 快照、预览状态等 |
+| Kafka 3.7 | `9092` | Outbox 事件总线，承接聊天持久化、token 统计、memory 抽取等异步事件 |
+| etcd | `2379` | Milvus 元数据存储 |
+| MinIO | `9000` / `9001` | Milvus 对象存储依赖 |
+| Milvus Standalone | `19530` / `9091` | RAG / memory 向量检索引擎 |
+| Attu | `8000` | Milvus 可视化管理台 |
+| kafka-init | 无外部端口 | 启动时自动创建 `smartflow.agent.outbox` topic |
+
+其中，`docker-compose.yml` 已经为 MySQL、Redis、Kafka、etcd、MinIO、Milvus 配好了 `healthcheck`，并通过 `depends_on.condition: service_healthy` 保证依赖按健康状态顺序启动。
+
+### 推荐启动顺序
+
+1. 先启动依赖栈：
+
+```bash
+docker compose up -d
+```
+
+2. 准备后端配置文件：
+
+```bash
+cd backend
+cp config.example.yaml config.yaml
+```
+
+然后按实际环境修改以下配置：
+
+1. `database`：MySQL 地址、用户名、密码、库名。
+2. `redis`：Redis 地址、密码。
+3. `kafka`：Broker 地址与 topic / groupID。
+4. `jwt`：`accessSecret` 与 `refreshSecret`。
+5. `agent`：模型名、`baseURL`、推理开关。
+6. `rag` / `memory`：Milvus 地址、embedding 配置、memory 模式。
+7. `websearch`：联网搜索 provider 与 API Key。
+
+3. 启动后端：
+
+```bash
+cd backend
+go run .
+```
+
+后端默认监听 `8080`，并提供健康检查接口：
+
+```text
+GET /api/v1/health
+```
+
+4. 启动前端：
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+前端默认运行在 `5173`，并通过 Vite 代理把 `/api` 转发到 `http://127.0.0.1:8080`。
+
+### 当前方案的边界
+
+1. **已容器化的部分**：MySQL、Redis、Kafka、Milvus 及其依赖。
+2. **未容器化的部分**：Go 后端进程与 Vue 前端进程当前仍以宿主机方式运行，仓库中尚未提供后端/前端 Dockerfile。
+3. **因此更准确的表述**：当前项目已经完成“基础设施容器化”，但还没有做到“整站一键镜像化部署”。
+4. **如果后续继续工程化**：优先补 `backend/Dockerfile`、`frontend/Dockerfile` 与生产态反向代理配置，再把前后端服务一并纳入 compose 编排。
 
 ## 7.2 性能监控&统计
+当前项目已经接入了一套**轻量级、以日志和内存计数器为主的观测方案**，但还没有完整接入 Prometheus / Grafana 这类统一监控平台。
 
+### 当前已具备的监控能力
 
+1. **基础健康检查**：
+   - 后端提供 `GET /api/v1/health`。
+   - Docker Compose 为 MySQL、Redis、Kafka、etcd、MinIO、Milvus 提供了容器级健康检查。
+2. **应用日志观测**：
+   - Gin 默认开启 `Logger + Recovery`，可覆盖 HTTP 请求与 panic 恢复。
+   - Outbox / Kafka、RAG、memory、newAgent 执行链路都已在关键节点输出结构化或半结构化日志。
+3. **RAG 运行观测**：
+   - `backend/cmd/start.go` 中已为 RAG runtime 注入 `LoggerObserver`。
+   - 当前可观测向量检索、召回、Milvus 建表/查表、fallback 等运行事件。
+4. **Memory 模块计数器**：
+   - memory 模块已经实现 `MetricsRegistry` 这类轻量内存计数器。
+   - 当前已覆盖的统计项包括：
+     - `memory_job_total`
+     - `memory_job_retry_total`
+     - `memory_decision_total`
+     - `memory_decision_fallback_total`
+     - `memory_retrieve_hit_total`
+     - `memory_retrieve_dedup_drop_total`
+     - `memory_inject_item_total`
+     - `memory_rag_fallback_total`
+     - `memory_manage_total`
+     - `memory_cleanup_run_total`
+     - `memory_cleanup_archived_total`
+5. **Agent 链路观测**：
+   - `newAgent` 主链路会记录 chat / plan / execute / rough_build / order_guard / deliver 等阶段日志。
+   - 对话时间线、确认事件、排程结果卡片、schedule preview 状态，也都能通过业务接口和 Redis 快照回看。
+6. **向量库侧辅助观测**：
+   - Milvus 自带 `9091` 健康/指标端口。
+   - Attu 已在 compose 中接入，可用于观察 collection、索引与向量数据状态。
+
+### 当前更适合关注的关键指标
+
+现阶段最有价值的观测重点，不是“大而全”的机器监控，而是以下业务指标：
+
+1. **Agent 可用性**：`/api/v1/health` 是否可用，`/agent/chat` 首字延迟是否异常。
+2. **事件总线稳定性**：Kafka topic 是否就绪，Outbox 是否持续消费，是否出现重试堆积。
+3. **memory 质量**：命中率、fallback 次数、decision fallback 次数、job retry 次数。
+4. **RAG 检索质量**：Milvus 查询是否超时、是否频繁降级到 MySQL、topK/threshold 是否合理。
+5. **排程链路稳定性**：rough build 失败率、order guard 是否频繁触发、preview 是否能成功落盘。
+
+### 当前仍未完成的部分
+
+1. 还没有把 memory 计数器正式暴露成 Prometheus `/metrics` 接口。
+2. 还没有统一的 Grafana 看板、告警规则与告警分级。
+3. 还没有把 Gin、Kafka、RAG、memory、newAgent 的指标统一汇聚到同一套 tracing / metrics 平台。
+4. 当前更偏“开发期可诊断”而不是“生产期可运营”的观测体系。
+
+因此，现阶段 README 中更准确的结论是：**项目已经具备基础健康检查、关键日志观测和 memory/RAG 轻量指标能力，但尚未完成完整生产级监控平台建设。**
 
 # 8 快速开始
 

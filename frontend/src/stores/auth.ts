@@ -4,9 +4,9 @@ import { defineStore } from 'pinia'
 import type { LoginPayload, RegisterPayload, TokenPair } from '@/types/api'
 import { login as loginApi, logout as logoutApi, register as registerApi } from '@/api/auth'
 
-const ACCESS_TOKEN_KEY = 'smartflow_access_token'
-const REFRESH_TOKEN_KEY = 'smartflow_refresh_token'
-const LAST_USERNAME_KEY = 'smartflow_last_username'
+const ACCESS_TOKEN_KEY = 'smartmate_access_token'
+const REFRESH_TOKEN_KEY = 'smartmate_refresh_token'
+const LAST_USERNAME_KEY = 'smartmate_last_username'
 
 export const useAuthStore = defineStore('auth', () => {
   const accessToken = ref(localStorage.getItem(ACCESS_TOKEN_KEY) ?? '')

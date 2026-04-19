@@ -75,7 +75,7 @@ const quadrantMeta: Record<
 }
 
 const pageTitleDate = computed(() => formatHeaderDate(new Date()))
-const greetingName = computed(() => authStore.lastUsername || 'SmartFlow 用户')
+const greetingName = computed(() => authStore.lastUsername || 'SmartMate 用户')
 
 const groupedTasks = computed(() => {
   const groups: Record<number, TaskItem[]> = { 1: [], 2: [], 3: [], 4: [] }
@@ -325,7 +325,8 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
   width: calc(100% / var(--dashboard-main-scale));
   height: calc(100% / var(--dashboard-main-scale));
   display: grid;
-  grid-template-rows: auto auto;
+  grid-template-rows: auto 1fr;
+  align-content: start;
   gap: 10px;
   transform: scale(var(--dashboard-main-scale));
   transform-origin: top left;
@@ -340,6 +341,8 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
   background: #ffffff;
   border: 1px solid rgba(15, 23, 42, 0.05);
   box-shadow: 0 4px 15px rgba(15, 23, 42, 0.03);
+  flex-shrink: 0;
+  max-height: 72px; /* 锁定高度，防止在布局缩放时发生形变 */
 }
 
 .dashboard-topbar__brandline { display: flex; align-items: center; gap: 14px; }

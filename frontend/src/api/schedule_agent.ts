@@ -90,7 +90,7 @@ export async function applyBatchIntoSchedule(
       items,
     }, {
       headers: {
-        'Idempotency-Key': idempotencyKey
+        'X-Idempotency-Key': idempotencyKey
       }
     })
   } catch (error) {

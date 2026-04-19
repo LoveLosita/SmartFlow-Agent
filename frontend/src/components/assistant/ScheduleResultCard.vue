@@ -41,30 +41,49 @@ const emit = defineEmits<{
   gap: 16px;
   padding: 16px;
   background: #ffffff;
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  border-radius: 16px;
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  border-radius: 20px;
   cursor: pointer;
-  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.03);
-  margin: 8px 0;
+  transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  margin: 12px 0;
+  position: relative;
+  overflow: hidden;
+  /* 弹出动画 */
+  animation: schedule-card-pop 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes schedule-card-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.9) translateY(10px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
 }
 
 .schedule-result-card:hover {
-  transform: translateY(-2px);
   border-color: #3b82f6;
-  box-shadow: 0 10px 20px -5px rgba(59, 130, 246, 0.15);
+  background: #fcfdfe;
+  box-shadow: 0 4px 20px rgba(59, 130, 246, 0.04);
 }
 
 .schedule-result-card__icon {
-  width: 44px;
-  height: 44px;
+  width: 48px;
+  height: 48px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #eff6ff;
+  background: linear-gradient(135deg, #eff6ff 0%, #dbebff 100%);
   color: #3b82f6;
-  border-radius: 12px;
+  border-radius: 14px;
   flex-shrink: 0;
+  transition: transform 0.3s ease;
+}
+
+.schedule-result-card:hover .schedule-result-card__icon {
+  transform: rotate(-5deg) scale(1.05);
 }
 
 .schedule-result-card__content {
@@ -75,23 +94,33 @@ const emit = defineEmits<{
 .schedule-result-card__summary {
   margin: 0 0 4px;
   font-size: 15px;
-  font-weight: 700;
-  color: #1e293b;
+  font-weight: 850;
+  color: #0f172a;
+  letter-spacing: -0.01em;
 }
 
 .schedule-result-card__detail {
   margin: 0;
   font-size: 13px;
+  font-weight: 500;
   color: #64748b;
 }
 
 .schedule-result-card__arrow {
-  color: #cbd5e1;
-  transition: transform 0.3s;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f8fafc;
+  border-radius: 10px;
+  color: #94a3b8;
+  transition: all 0.3s;
 }
 
 .schedule-result-card:hover .schedule-result-card__arrow {
   transform: translateX(4px);
-  color: #3b82f6;
+  background: #3b82f6;
+  color: #ffffff;
 }
 </style>

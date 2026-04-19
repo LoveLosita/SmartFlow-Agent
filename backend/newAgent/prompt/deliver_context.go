@@ -7,9 +7,14 @@ import (
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 )
 
-// buildDeliverConversationMessage 生成 deliver 节点看到的真实对话视图。
+// buildDeliverConversationMessage 生成 deliver 节点看到的轻量历史提示。
+//
+// 职责边界：
+// 1. 这里不再承载完整历史，也不再把旧轮次对话重新灌回 deliver；
+// 2. 真正可供收口的本轮 execute 窗口放到 msg2，由工作区统一呈现；
+// 3. 这里只给模型一个明确提示：历史已经折叠，请不要主动回顾旧轮次。
 func buildDeliverConversationMessage(ctx *newagentmodel.ConversationContext) string {
-	return buildConversationHistoryMessage(ctx, "执行对话记录")
+	return "历史视图：已折叠到交付工作区的本轮 execute 窗口，请仅依据 msg2 收口，不要回顾旧轮次。"
 }
 
 // buildDeliverRoughBuildPrefix 构造 deliver 在“粗排已完成”场景下的专属前缀。
@@ -43,22 +48,24 @@ func buildDeliverRoughBuildPrefix(ctx *newagentmodel.ConversationContext, state 
 	return strings.Join(lines, "\n")
 }
 
-// buildDeliverWorkspace 渲染 deliver 节点自己的结果视图。
+// buildDeliverWorkspace 渲染 deliver 节点自己的结果态工作区。
 //
 // 设计说明：
-// 1. deliver 只需要结果态信息：计划简表、完成进度、收口状态；
-// 2. 不再注入工具目录、任务类约束、ReAct 摘要等过程噪声；
-// 3. 没有正式计划时，明确退回“只基于对话做总结”。
-func buildDeliverWorkspace(state *newagentmodel.CommonState) string {
+// 1. 先保留 deliver 原本依赖的结果态信息：terminal outcome、计划进度、步骤简表；
+// 2. 再把基于 execute_loop_closed 切出来的“本轮 execute 窗口”拼到 msg2，作为唯一的本轮事实视图；
+// 3. 没有正式计划时也保留 execute 窗口，保证 deliver 仍能基于当前轮活跃上下文诚实收口。
+func buildDeliverWorkspace(state *newagentmodel.CommonState, ctx *newagentmodel.ConversationContext) string {
 	lines := []string{"交付工作区："}
 	if state == nil {
-		lines = append(lines, "- 当前缺少流程状态，请仅基于最近对话做诚实总结。")
+		lines = append(lines, "- 当前缺少流程状态，请仅基于可见结果态与本轮 execute 窗口诚实收口。")
+		lines = append(lines, "", buildDeliverExecuteWindow(ctx))
 		return strings.Join(lines, "\n")
 	}
 
 	lines = append(lines, renderDeliverTerminalSummary(state))
 	if !state.HasPlan() {
 		lines = append(lines, "- 当前没有正式计划，请只概括本次互动。")
+		lines = append(lines, "", buildDeliverExecuteWindow(ctx))
 		return strings.Join(lines, "\n")
 	}
 
@@ -67,6 +74,7 @@ func buildDeliverWorkspace(state *newagentmodel.CommonState) string {
 	lines = append(lines, fmt.Sprintf("- 计划进度：已完成 %d/%d 步。", completed, total))
 	lines = append(lines, "计划步骤：")
 	lines = append(lines, renderDeliverStepOutline(state, completed))
+	lines = append(lines, "", buildDeliverExecuteWindow(ctx))
 
 	return strings.Join(lines, "\n")
 }
