@@ -112,6 +112,9 @@ type CommonState struct {
 	// HasScheduleWriteOps 标记本轮 execute 循环是否执行过日程写工具。
 	// 调用目的：graph 分支函数据此判断是否需要走 order_guard，非日程操作跳过守卫。
 	HasScheduleWriteOps bool `json:"has_schedule_write_ops,omitempty"`
+	// HasScheduleChanges 标记本轮流程是否产生过日程变更（粗排或写工具）。
+	// 调用目的：deliver 节点据此判断是否向前端推送"排程完毕"卡片。
+	HasScheduleChanges bool `json:"has_schedule_changes,omitempty"`
 
 	// ExecuteThinking 由 Chat 路由决策传入，表示 Execute 节点是否应开启深度思考。
 	// 预埋字段，当前阶段 Execute 节点可自行决定是否读取。
@@ -222,6 +225,7 @@ func (s *CommonState) ResetForNextRun() {
 	// 5. 重置顺序约束临时态与终止结果，避免上一轮 completed/aborted/exhausted 语义串到下一轮。
 	s.AllowReorder = false
 	s.HasScheduleWriteOps = false
+	s.HasScheduleChanges = false
 	s.SuggestedOrderBaseline = nil
 	s.ClearTerminalOutcome()
 }

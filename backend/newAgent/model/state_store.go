@@ -73,13 +73,6 @@ type ScopedScheduleStateProvider interface {
 	LoadScheduleStateForTaskClasses(ctx context.Context, userID int, taskClassIDs []int) (*schedule.ScheduleState, error)
 }
 
-// SchedulePersistor 定义持久化 ScheduleState 变更的接口。
-// 由 Service 层或 DAO 层实现，注入到 AgentGraphDeps 中。
-// 使用接口而非具体 DAO 类型，避免 model → dao 的循环依赖。
-type SchedulePersistor interface {
-	PersistScheduleChanges(ctx context.Context, original, modified *schedule.ScheduleState, userID int) error
-}
-
 // CompactionStore 定义上下文压缩的持久化接口。
 // 由 Service 层实现（组合 DAO + Redis Cache），注入到各阶段 NodeInput。
 type CompactionStore interface {

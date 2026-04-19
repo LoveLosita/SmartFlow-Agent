@@ -860,9 +860,17 @@ func buildHybridEntriesFromSchedulesAndAllocated(
 			Type:              "task",
 			Status:            "suggested",
 			TaskItemID:        item.ID,
+			TaskClassID:       derefInt(item.CategoryID),
 			BlockForSuggested: true,
 		})
 	}
 
 	return entries
+}
+
+func derefInt(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
 }

@@ -87,6 +87,11 @@ func RunRoughBuildNode(ctx context.Context, st *newagentmodel.AgentGraphState) e
 	// 6. 把粗排结果写入 ScheduleState。
 	applyStats := applyRoughBuildPlacements(scheduleState, placements)
 
+	// 6.1 标记本轮产生过日程变更，供 deliver 节点判断是否推送"排程完毕"卡片。
+	if applyStats.AppliedCount > 0 {
+		flowState.HasScheduleChanges = true
+	}
+
 	// 7. 先校验粗排后是否仍有真实 pending。
 	stillPending := countPendingTasks(scheduleState, taskClassIDs)
 	log.Printf(

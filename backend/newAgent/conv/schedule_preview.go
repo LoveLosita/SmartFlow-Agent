@@ -71,6 +71,7 @@ func ScheduleStateToPreview(
 				entry.EventID = t.SourceID
 			} else {
 				entry.TaskItemID = t.SourceID
+				entry.TaskClassID = t.TaskClassID
 			}
 
 			// 嵌入与阻塞语义。

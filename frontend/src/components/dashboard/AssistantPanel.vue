@@ -11,6 +11,7 @@ import {
   getConversationMeta,
   type ConversationHistoryMessage,
 } from '@/api/agent'
+import { getSchedulePreview } from '@/api/schedule_agent'
 import { refreshToken } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 import type {
@@ -21,7 +22,10 @@ import type {
   ConversationListItem,
   ConversationMeta,
   ThinkingModeType,
+  SchedulePreviewData,
 } from '@/types/dashboard'
+import ScheduleResultCard from '@/components/assistant/ScheduleResultCard.vue'
+import ScheduleFineTuneModal from '@/components/assistant/ScheduleFineTuneModal.vue'
 import { formatConversationTime, formatMessageTime } from '@/utils/date'
 import { renderMarkdown } from '@/utils/markdown'
 
@@ -139,11 +143,12 @@ interface DisplayMessage {
 
 interface DisplayAssistantBlock {
   id: string
-  type: 'tool' | 'status' | 'reasoning' | 'content' | 'content_indicator'
+  type: 'tool' | 'status' | 'reasoning' | 'content' | 'content_indicator' | 'schedule_card'
   seq: number
   text?: string
   event?: ToolTraceEvent
   statusEvent?: StatusTraceEvent
+  schedulePreview?: SchedulePreviewData
 }
 
 interface AssistantContentBlock {
@@ -218,6 +223,9 @@ const conversationContextStatsMap = reactive<Record<string, ConversationContextS
 const conversationContextStatsLoadingMap = reactive<Record<string, boolean>>({})
 const conversationContextStatsReadyMap = reactive<Record<string, boolean>>({})
 const conversationListItemRevealMap = reactive<Record<string, boolean>>({})
+const scheduleResultMap = reactive<Record<string, SchedulePreviewData>>({})
+const isFineTuneModalVisible = ref(false)
+const activeFineTuneData = ref<SchedulePreviewData | null>(null)
 
 const quickActions = [
   '帮我梳理今天最重要的三件事',
@@ -464,6 +472,7 @@ function clearToolTraceState(messageId: string) {
   delete assistantReasoningSeqMap[messageId]
   delete assistantContentBlocksMap[messageId]
   delete assistantTimelineLastKindMap[messageId]
+  delete scheduleResultMap[messageId]
   for (const key of Object.keys(toolTraceExpandedMap)) {
     if (key.startsWith(`${messageId}:tool:`)) {
       delete toolTraceExpandedMap[key]
@@ -1208,6 +1217,16 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
     }
   }
 
+  const schedulePreview = scheduleResultMap[dm.id]
+  if (schedulePreview) {
+    blocks.push({
+      id: `${dm.id}:schedule-card`,
+      type: 'schedule_card',
+      seq: nextAssistantTimelineSeq(),
+      schedulePreview,
+    })
+  }
+
   if (shouldShowDisplayReasoningBox(dm)) {
     const reasoningSeq = getDisplayReasoningSeq(dm)
     blocks.push({
@@ -1699,6 +1718,30 @@ function isManualThinkingEnabled(mode: ThinkingModeType) {
   return mode === 'true'
 }
 
+function openFineTuneModal(data: SchedulePreviewData) {
+  activeFineTuneData.value = data
+  isFineTuneModalVisible.value = true
+}
+
+function closeFineTuneModal() {
+  isFineTuneModalVisible.value = false
+}
+
+function handleScheduleSaved() {
+  // 保存成功后可选的操作：重新刷新历史或状态
+  if (selectedConversationId.value) {
+    void loadConversationContextStats(selectedConversationId.value, true)
+  }
+}
+
+function closeConfirmOverlay() {
+  // 1. “手动关闭”与“自动收起”要区分：手动关闭后，本次 interaction 的重复分片不应反复弹层。
+  // 2. 仅恢复对话框可见性，不改后端 pending 状态；真正的确认流转仍由用户点击确认/拒绝触发。
+  confirmOverlayState.visible = false
+  confirmOverlayState.manuallyClosed = true
+  confirmRejectDraft.value = ''
+}
+
 function resetConfirmOverlay() {
   // 1. 会话切换/新建会话时直接重置确认覆盖层，避免把上一个会话的确认状态误带到当前会话。
   // 2. interactionId 同时清空，确保下一次收到相同 ID 的事件也能被视为新事件并重新拉起卡片。
@@ -1710,12 +1753,51 @@ function resetConfirmOverlay() {
   confirmRejectDraft.value = ''
 }
 
-function closeConfirmOverlay() {
-  // 1. “手动关闭”与“自动收起”要区分：手动关闭后，本次 interaction 的重复分片不应反复弹层。
-  // 2. 仅恢复对话框可见性，不改后端 pending 状态；真正的确认流转仍由用户点击确认/拒绝触发。
+async function sendConfirmAction(action: 'approve' | 'reject' | 'cancel') {
+  const interactionId = confirmOverlayState.interactionId
+  if (!interactionId) return
+
+  // 1. 立即关闭覆盖层，避免用户重复点击。
+  // 2. 构造 resume 特殊载荷，复用 sendMessageInternal 发送到聊天接口。
   confirmOverlayState.visible = false
-  confirmOverlayState.manuallyClosed = true
-  confirmRejectDraft.value = ''
+  await sendMessageInternal({
+    preset: '',
+    bypassConfirmOverlayCheck: true,
+    requestExtra: {
+      resume: {
+        interaction_id: interactionId,
+        type: 'confirm',
+        action
+      }
+    }
+  })
+}
+
+async function submitConfirmRejectMessage() {
+  const text = confirmRejectDraft.value.trim()
+  if (!text) return
+
+  const interactionId = confirmOverlayState.interactionId
+  if (!interactionId) return
+
+  confirmOverlayState.visible = false
+  await sendMessageInternal({
+    preset: text,
+    bypassConfirmOverlayCheck: true,
+    requestExtra: {
+      resume: {
+        interaction_id: interactionId,
+        type: 'ask_user',
+        action: 'reply'
+      }
+    }
+  })
+}
+
+function handleConfirmRejectInputEnter(event: KeyboardEvent) {
+  if (event.shiftKey) return
+  event.preventDefault()
+  void submitConfirmRejectMessage()
 }
 
 function applyConfirmOverlay(confirmPayload?: StreamConfirmPayload) {
@@ -1886,6 +1968,19 @@ function handleStreamExtraEvent(extra: StreamExtraPayload | undefined, assistant
         `${extra.stage || ''}`,
       )
     }
+  }
+
+  if (extra.kind === 'schedule_completed') {
+    // 异步拉取详细排程方案
+    void (async () => {
+      try {
+        const preview = await getSchedulePreview(selectedConversationId.value)
+        scheduleResultMap[assistantMessage.id] = preview
+        scheduleScrollMessagesToBottom(true)
+      } catch (error: any) {
+        ElMessage.error(error.message || '获取排程方案失败')
+      }
+    })()
   }
 }
 
@@ -2195,47 +2290,6 @@ async function sendMessageInternal(options: SendMessageOptions = {}) {
 
 async function sendMessage(preset?: string) {
   await sendMessageInternal({ preset })
-}
-
-async function sendConfirmAction(action: 'accept' | 'reject', rejectMessage?: string) {
-  // 1. confirm 是显式人工动作，先关闭覆盖层再发送，让对话框立即恢复可见。
-  // 2. “拒绝”动作允许带上用户自定义要求，后端可据此进行重规划。
-  // 3. 发送完成后清空输入草稿，避免旧要求残留到下一轮确认卡片。
-  const normalizedRejectMessage = `${rejectMessage || ''}`.trim()
-  const presetMessage =
-    action === 'accept'
-      ? '我确认，继续执行。'
-      : normalizedRejectMessage || '先不执行，请重新规划。'
-
-  closeConfirmOverlay()
-  await sendMessageInternal({
-    preset: presetMessage,
-    requestExtra: { confirm_action: action },
-    resetPlanningSelectionOnSuccess: false,
-    bypassConfirmOverlayCheck: true,
-  })
-  confirmRejectDraft.value = ''
-}
-
-async function submitConfirmRejectMessage() {
-  const rejectMessage = confirmRejectDraft.value.trim()
-  if (!rejectMessage) {
-    ElMessage.warning('请输入你的调整要求后再发送。')
-    return
-  }
-
-  await sendConfirmAction('reject', rejectMessage)
-}
-
-function handleConfirmRejectInputEnter(event: KeyboardEvent) {
-  // 1. 中文输入法上屏期间按回车只用于选词，不应误触发发送。
-  // 2. 仅在“非组合输入 + 单独 Enter”时提交，Shift+Enter 仍可换行。
-  if (event.isComposing) {
-    return
-  }
-
-  event.preventDefault()
-  void submitConfirmRejectMessage()
 }
 
 watch(
@@ -2583,13 +2637,20 @@ onBeforeUnmount(() => {
                   <div class="chat-message__markdown chat-message__markdown--assistant" v-html="renderMessageMarkdown(block.text || '')" />
                 </div>
 
-                <div v-else-if="block.type === 'content_indicator'" class="chat-message__streaming chat-message__streaming--plain">
+                <template v-else-if="block.type === 'schedule_card' && block.schedulePreview">
+                  <ScheduleResultCard
+                    :summary="block.schedulePreview.summary"
+                    @click="openFineTuneModal(block.schedulePreview)"
+                  />
+                </template>
+
+                <div v-else-if="block.type === 'content_indicator'" class="assistant-timeline__answering-indicator">
                   <div class="typing-indicator">
                     <span />
                     <span />
                     <span />
                   </div>
-                  </div>
+                </div>
                 </div>
               </TransitionGroup>
 
@@ -2652,7 +2713,7 @@ onBeforeUnmount(() => {
                   type="button"
                   class="assistant-confirm-card__button assistant-confirm-card__button--primary"
                   :disabled="chatLoading"
-                  @click="sendConfirmAction('accept')"
+                  @click="sendConfirmAction('approve')"
                 >
                   确认执行
                 </button>
@@ -2792,6 +2853,14 @@ onBeforeUnmount(() => {
       </section>
     </div>
   </aside>
+
+  <!-- 日程排程方案精排弹窗 -->
+  <ScheduleFineTuneModal
+    v-if="isFineTuneModalVisible && activeFineTuneData"
+    :preview-data="activeFineTuneData"
+    @close="closeFineTuneModal"
+    @saved="handleScheduleSaved"
+  />
 </template>
 
 <style scoped>
@@ -4566,5 +4635,143 @@ onBeforeUnmount(() => {
 }
 </style>
 <style>
+/* --- AI 助手确认卡片 & 弹窗高级样式 --- */
+:global(.premium-msg-box) {
+  --el-messagebox-width: 420px;
+  border-radius: 24px !important;
+  padding: 24px !important;
+  border: 1px solid rgba(15, 23, 42, 0.08) !important;
+  box-shadow: 0 25px 50px -12px rgba(15, 23, 42, 0.25) !important;
+  backdrop-filter: blur(16px) !important;
+  background: rgba(255, 255, 255, 0.9) !important;
+}
 
+:global(.premium-msg-box .el-message-box__header) {
+  padding-bottom: 8px !important;
+}
+
+:global(.premium-msg-box .el-message-box__title) {
+  font-size: 18px !important;
+  font-weight: 800 !important;
+  color: #0f172a !important;
+}
+
+:global(.premium-msg-box .el-message-box__message) {
+  color: #64748b !important;
+  line-height: 1.6 !important;
+}
+
+.assistant-confirm-composer {
+  padding: 16px;
+  background: #ffffff;
+}
+
+.assistant-confirm-card {
+  background: #f8fafc;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 24px;
+  padding: 24px;
+  box-shadow: 0 10px 15px -3px rgba(15, 23, 42, 0.05);
+}
+
+.assistant-confirm-card__eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #3b82f6;
+  margin-bottom: 8px;
+  letter-spacing: 0.05em;
+}
+
+.assistant-confirm-card__title {
+  margin: 0 0 12px;
+  font-size: 20px;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.assistant-confirm-card__summary {
+  margin-bottom: 20px;
+  font-size: 15px;
+  color: #1e293b;
+  line-height: 1.5;
+}
+
+.assistant-confirm-card__hint {
+  font-size: 13px;
+  color: #94a3b8;
+  margin-bottom: 24px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: 12px;
+}
+
+.assistant-confirm-card__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.assistant-confirm-card__button {
+  height: 48px;
+  border-radius: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  border: none;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.assistant-confirm-card__button--primary {
+  background: #3b82f6;
+  color: #ffffff;
+}
+
+.assistant-confirm-card__button--primary:hover {
+  background: #2563eb;
+  transform: translateY(-1px);
+}
+
+.assistant-confirm-card__button--ghost {
+  background: #ffffff;
+  color: #475569;
+  border: 1px solid #e2e8f0;
+}
+
+.assistant-confirm-card__button--plain {
+  background: transparent;
+  color: #94a3b8;
+  font-size: 14px;
+}
+
+.assistant-confirm-card__reject-box {
+  margin: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.assistant-confirm-card__reject-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #64748b;
+}
+
+.assistant-confirm-card__reject-input {
+  width: 100%;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  resize: none;
+  font-family: inherit;
+  font-size: 14px;
+}
+
+.assistant-confirm-card__reject-input:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
 </style>

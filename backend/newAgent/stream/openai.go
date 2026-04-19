@@ -39,14 +39,15 @@ type OpenAIChunkDelta struct {
 type StreamExtraKind string
 
 const (
-	StreamExtraKindReasoningText StreamExtraKind = "reasoning_text"
-	StreamExtraKindAssistantText StreamExtraKind = "assistant_text"
-	StreamExtraKindStatus        StreamExtraKind = "status"
-	StreamExtraKindToolCall      StreamExtraKind = "tool_call"
-	StreamExtraKindToolResult    StreamExtraKind = "tool_result"
-	StreamExtraKindConfirm       StreamExtraKind = "confirm_request"
-	StreamExtraKindInterrupt     StreamExtraKind = "interrupt"
-	StreamExtraKindFinish        StreamExtraKind = "finish"
+	StreamExtraKindReasoningText     StreamExtraKind = "reasoning_text"
+	StreamExtraKindAssistantText     StreamExtraKind = "assistant_text"
+	StreamExtraKindStatus            StreamExtraKind = "status"
+	StreamExtraKindToolCall          StreamExtraKind = "tool_call"
+	StreamExtraKindToolResult        StreamExtraKind = "tool_result"
+	StreamExtraKindConfirm           StreamExtraKind = "confirm_request"
+	StreamExtraKindInterrupt         StreamExtraKind = "interrupt"
+	StreamExtraKindFinish            StreamExtraKind = "finish"
+	StreamExtraKindScheduleCompleted StreamExtraKind = "schedule_completed"
 )
 
 // StreamDisplayMode 表示前端更适合如何展示该结构化事件。
@@ -262,7 +263,22 @@ func NewInterruptExtra(blockID, stage, interactionID, interactionType, summary s
 	}
 }
 
-// NewFinishExtra 创建“收尾完成”事件的 extra。
+// NewScheduleCompletedExtra 创建”排程完毕”卡片事件的 extra。
+//
+// 职责边界：
+// 1. 仅作为前端渲染”排程完毕小卡片”的信号，不携带排程数据；
+// 2. 前端收到此事件后，自行通过对话 ID 调用现有接口拉取排程详情；
+// 3. 触发条件：CommonState.HasScheduleChanges == true 且 IsCompleted()。
+func NewScheduleCompletedExtra(blockID, stage string) *OpenAIChunkExtra {
+	return &OpenAIChunkExtra{
+		Kind:        StreamExtraKindScheduleCompleted,
+		BlockID:     blockID,
+		Stage:       stage,
+		DisplayMode: StreamDisplayModeCard,
+	}
+}
+
+// NewFinishExtra 创建”收尾完成”事件的 extra。
 func NewFinishExtra(blockID, stage string) *OpenAIChunkExtra {
 	return &OpenAIChunkExtra{
 		Kind:        StreamExtraKindFinish,

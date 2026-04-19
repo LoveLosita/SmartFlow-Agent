@@ -43,8 +43,7 @@ const (
 // 3. ConversationContext 提供历史对话与置顶上下文；
 // 4. ToolRegistry 提供工具注册表；
 // 5. ScheduleState 提供工具操作的内存数据源（可为 nil，由调用方按需加载）；
-// 6. SchedulePersistor 仍保留注入位，但当前阶段不调用，避免写库；
-// 7. OriginalScheduleState 继续保留，供 Redis 快照恢复时维持“当前态/原始态”成对语义。
+// 6. OriginalScheduleState 继续保留，供 Redis 快照恢复时维持“当前态/原始态”成对语义。
 type ExecuteNodeInput struct {
 	RuntimeState          *newagentmodel.AgentRuntimeState
 	ConversationContext   *newagentmodel.ConversationContext
@@ -54,7 +53,6 @@ type ExecuteNodeInput struct {
 	ResumeNode            string
 	ToolRegistry          *newagenttools.ToolRegistry
 	ScheduleState         *schedule.ScheduleState
-	SchedulePersistor     newagentmodel.SchedulePersistor
 	CompactionStore       newagentmodel.CompactionStore
 	WriteSchedulePreview  newagentmodel.WriteSchedulePreviewFunc
 	OriginalScheduleState *schedule.ScheduleState
@@ -114,7 +112,6 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 			conversationContext,
 			input.ToolRegistry,
 			input.ScheduleState,
-			input.SchedulePersistor,
 			input.OriginalScheduleState,
 			input.WriteSchedulePreview,
 			emitter,
@@ -1467,6 +1464,7 @@ func executeToolCall(
 	// 3.1 标记本轮执行过日程写工具，graph 分支据此决定是否走 order_guard。
 	if registry.IsWriteTool(toolName) {
 		flowState.HasScheduleWriteOps = true
+		flowState.HasScheduleChanges = true
 	}
 
 	// 4. 写工具实时预览：每次写工具执行后都尝试刷新 Redis 预览，确保前端可见“最新操作结果”。
@@ -1507,7 +1505,6 @@ func executePendingTool(
 	conversationContext *newagentmodel.ConversationContext,
 	registry *newagenttools.ToolRegistry,
 	scheduleState *schedule.ScheduleState,
-	persistor newagentmodel.SchedulePersistor,
 	originalState *schedule.ScheduleState,
 	writePreview newagentmodel.WriteSchedulePreviewFunc,
 	emitter *newagentstream.ChunkEmitter,
@@ -1595,6 +1592,7 @@ func executePendingTool(
 	// 5.1 标记本轮执行过日程写工具，graph 分支据此决定是否走 order_guard。
 	if registry.IsWriteTool(pending.ToolName) {
 		flowState.HasScheduleWriteOps = true
+		flowState.HasScheduleChanges = true
 	}
 
 	// 5. 写工具实时预览：confirm accept 后真实执行写工具时，立即刷新一次预览缓存。

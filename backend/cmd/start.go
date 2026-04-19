@@ -235,7 +235,6 @@ func Start() {
 		},
 	}))
 	agentService.SetScheduleProvider(newagentconv.NewScheduleProvider(scheduleRepo, taskClassRepo))
-	agentService.SetSchedulePersistor(newagentconv.NewSchedulePersistorAdapter(manager))
 	agentService.SetCompactionStore(agentRepo)
 	agentService.SetMemoryReader(memoryModule, memoryCfg)
 

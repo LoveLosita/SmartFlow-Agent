@@ -115,3 +115,43 @@ export interface ChatStreamRequest {
   thinking?: ThinkingModeType
   extra?: ChatRequestExtra
 }
+
+export interface HybridScheduleEntry {
+  week: number
+  day_of_week: number
+  section_from: number
+  section_to: number
+  name: string
+  type: 'course' | 'task'
+  status: 'existing' | 'suggested'
+  task_item_id: number
+  task_class_id: number
+  event_id: number
+  can_be_embedded: boolean
+  block_for_suggested: boolean
+  context_tag: string
+}
+
+export interface ScheduleCandidatePlan {
+  week: number
+  events: TodayEvent[]
+}
+
+export interface SchedulePreviewData {
+  conversation_id: string
+  trace_id: string
+  summary: string
+  candidate_plans: ScheduleCandidatePlan[]
+  hybrid_entries: HybridScheduleEntry[]
+  task_class_ids: number[]
+  generated_at: string
+}
+
+export interface PlacedItem {
+  task_item_id: number
+  week: number
+  day_of_week: number
+  start_section: number
+  end_section: number
+  embed_course_event_id?: number
+}

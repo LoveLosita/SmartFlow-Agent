@@ -96,6 +96,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, userRepo *d
 			agentGroup.GET("/conversation-history", handlers.AgentHandler.GetConversationHistory)
 			agentGroup.GET("/schedule-preview", handlers.AgentHandler.GetSchedulePlanPreview)
 			agentGroup.GET("/context-stats", handlers.AgentHandler.GetContextStats)
+			agentGroup.POST("/schedule-state", handlers.AgentHandler.SaveScheduleState)
 		}
 		memoryGroup := apiGroup.Group("/memory")
 		{

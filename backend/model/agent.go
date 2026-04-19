@@ -247,6 +247,7 @@ type GetSchedulePlanPreviewResponse struct {
 	Summary        string                `json:"summary"`
 	CandidatePlans []UserWeekSchedule    `json:"candidate_plans"`
 	HybridEntries  []HybridScheduleEntry `json:"hybrid_entries,omitempty"`
+	TaskClassIDs   []int                 `json:"task_class_ids,omitempty"`
 	GeneratedAt    time.Time             `json:"generated_at"`
 }
 
@@ -302,3 +303,25 @@ type ChatHistory struct {
 }
 
 func (ChatHistory) TableName() string { return "chat_histories" }
+
+// SaveScheduleStatePlacedItem 描述一个已放置的 task_item 的绝对时间位置。
+// 与 apply-batch 的 SingleTaskClassItem 格式统一，前端两个按钮共享同一数据格式。
+type SaveScheduleStatePlacedItem struct {
+	TaskItemID         int `json:"task_item_id" binding:"required"`
+	Week               int `json:"week" binding:"required,min=1"`
+	DayOfWeek          int `json:"day_of_week" binding:"required,min=1,max=7"`
+	StartSection       int `json:"start_section" binding:"required,min=1"`
+	EndSection         int `json:"end_section" binding:"required,min=1,gtefield=StartSection"`
+	EmbedCourseEventID int `json:"embed_course_event_id"`
+}
+
+// SaveScheduleStateRequest 前端暂存日程调整的请求体。
+//
+// 职责边界：
+// 1. 只承载 conversation_id 和已放置的 task_item 列表（绝对时间格式）；
+// 2. 后端将绝对坐标转换为 ScheduleState 内部的相对 day_index；
+// 3. source=event 的课程不受影响，天然过滤。
+type SaveScheduleStateRequest struct {
+	ConversationID string                        `json:"conversation_id" binding:"required"`
+	Items          []SaveScheduleStatePlacedItem `json:"items" binding:"required,dive,required"`
+}

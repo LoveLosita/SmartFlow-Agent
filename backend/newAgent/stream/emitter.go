@@ -324,6 +324,18 @@ func (e *ChunkEmitter) EmitInterruptMessage(ctx context.Context, blockID, stage,
 	)
 }
 
+// EmitScheduleCompleted 输出一次"排程完毕"卡片事件。
+//
+// 协议约束：
+// 1. 只走 extra，不附带 content/reasoning；
+// 2. 前端拿到 kind=schedule_completed 后自行拉取排程数据渲染卡片。
+func (e *ChunkEmitter) EmitScheduleCompleted(blockID, stage string) error {
+	if e == nil || e.emit == nil {
+		return nil
+	}
+	return e.emitExtraOnly(NewScheduleCompletedExtra(blockID, stage))
+}
+
 // EmitFinish 统一输出 stop 结束块，并带上 finish extra。
 func (e *ChunkEmitter) EmitFinish(blockID, stage string) error {
 	if e == nil || e.emit == nil {

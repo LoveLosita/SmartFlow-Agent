@@ -69,6 +69,14 @@ func RunDeliverNode(ctx context.Context, input DeliverNodeInput) error {
 	// 2. 调 LLM 生成交付总结。
 	summary := generateDeliverSummary(ctx, input.Client, flowState, conversationContext, input.ThinkingEnabled, input.CompactionStore, emitter)
 
+	// 2.1 排程完毕卡片信号：
+	// 1. 仅在流程正常完成且确实产生过日程变更（粗排或写工具）时推送；
+	// 2. 前端收到 kind=schedule_completed 后，自行用对话 ID 调用现有接口拉取排程数据渲染卡片；
+	// 3. 不携带 Redis key 或排程数据，保持信号职责单一。
+	if flowState.IsCompleted() && flowState.HasScheduleChanges {
+		_ = emitter.EmitScheduleCompleted(deliverStatusBlockID, deliverStageName)
+	}
+
 	// 3. 伪流式推送总结。
 	if strings.TrimSpace(summary) != "" {
 		msg := schema.AssistantMessage(summary, nil)

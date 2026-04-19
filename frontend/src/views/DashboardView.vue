@@ -178,7 +178,7 @@ function syncDashboardMainScale() {
     const gridGap = 10
     const naturalHeight = topbar.getBoundingClientRect().height + content.scrollHeight + gridGap
     if (!availableHeight || !naturalHeight) { dashboardMainScale.value = 1; return }
-    const nextScale = Math.min(1, (availableHeight / naturalHeight) * 0.98)
+    const nextScale = Math.min(1, (availableHeight / naturalHeight) * 0.96)
     dashboardMainScale.value = Number(nextScale.toFixed(4))
   })
 }
@@ -343,9 +343,9 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
 .dashboard-quadrants { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
 
 .dashboard-import {
-  border-radius: 24px;
-  padding: 32px;
-  min-height: 220px;
+  border-radius: 20px;
+  padding: 24px 32px;
+  min-height: 180px;
   background: #ffffff;
   border: 1px solid rgba(15, 23, 42, 0.05);
   box-shadow: 0 4px 15px rgba(15, 23, 42, 0.02);
@@ -358,8 +358,8 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
 
 .dashboard-import__content { position: relative; z-index: 1; max-width: 460px; }
 .dashboard-import__eyebrow { margin: 0 0 10px; color: #3b82f6; text-transform: uppercase; font-size: 12px; font-weight: 700; }
-.dashboard-import h2 { margin: 0; font-size: 32px; color: #0f172a; font-weight: 800; }
-.dashboard-import p { margin: 14px 0 24px; color: #64748b; font-size: 14px; }
+.dashboard-import h2 { margin: 0; font-size: 24px; color: #0f172a; font-weight: 800; }
+.dashboard-import p { margin: 8px 0 16px; color: #64748b; font-size: 13px; line-height: 1.5; }
 .dashboard-import__button { height: 44px; padding: 0 24px; border: none; border-radius: 12px; background: #3b82f6; color: #ffffff; font-weight: 700; cursor: pointer; }
 
 .dashboard-import__shape { position: absolute; right: -50px; bottom: -50px; width: 220px; height: 220px; opacity: 0.1; pointer-events: none; }

@@ -304,3 +304,43 @@ func (api *AgentHandler) GetContextStats(c *gin.Context) {
 	var raw json.RawMessage = json.RawMessage(statsJSON)
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, raw))
 }
+
+// SaveScheduleState 前端暂存日程调整到 Redis 快照。
+//
+// 设计说明：
+// 1. 前端在 confirm 卡片上拖拽调整任务位置后，调用此接口以绝对时间格式提交放置项；
+// 2. 后端将绝对坐标转换为 ScheduleState 内部的相对 day_index，只修改 task_item，不动课程；
+// 3. 不触发 LLM 调用、不写 MySQL、不刷新预览缓存。
+//
+// 降级策略：
+// 1. 快照不存在（TTL 过期或会话未进入排程）返回 400，让前端提示用户重新对话；
+// 2. 坐标越界、task_item_id 不存在等校验错误统一返回 400。
+func (api *AgentHandler) SaveScheduleState(c *gin.Context) {
+	// 1. 解析请求体。
+	var req model.SaveScheduleStateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		return
+	}
+
+	// 2. 校验 conversation_id。
+	conversationID := strings.TrimSpace(req.ConversationID)
+	if conversationID == "" {
+		c.JSON(http.StatusBadRequest, respond.MissingParam)
+		return
+	}
+
+	// 3. 从鉴权上下文取当前用户 ID。
+	userID := c.GetInt("user_id")
+
+	// 4. 设置短超时，防止快照读写阻塞过久。
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
+
+	// 5. 调用 service 层执行 Load → 应用放置项 → Save。
+	if err := api.svc.SaveScheduleState(ctx, userID, conversationID, req.Items); err != nil {
+		respond.DealWithError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, nil))
+}

@@ -51,15 +51,14 @@ type AgentService struct {
 	ResolvePlanningWindowFunc func(ctx context.Context, userID int, taskClassIDs []int) (startWeek, startDay, endWeek, endDay int, err error)
 
 	// ── newAgent 依赖（由 cmd/start.go 通过 Set* 方法注入）──
-	toolRegistry      *newagenttools.ToolRegistry
-	scheduleProvider  newagentmodel.ScheduleStateProvider
-	schedulePersistor newagentmodel.SchedulePersistor
-	agentStateStore   newagentmodel.AgentStateStore
-	compactionStore   newagentmodel.CompactionStore
-	memoryReader      MemoryReader
-	memoryCfg         memorymodel.Config
-	memoryObserver    memoryobserve.Observer
-	memoryMetrics     memoryobserve.MetricsRecorder
+	toolRegistry     *newagenttools.ToolRegistry
+	scheduleProvider newagentmodel.ScheduleStateProvider
+	agentStateStore  newagentmodel.AgentStateStore
+	compactionStore  newagentmodel.CompactionStore
+	memoryReader     MemoryReader
+	memoryCfg        memorymodel.Config
+	memoryObserver   memoryobserve.Observer
+	memoryMetrics    memoryobserve.MetricsRecorder
 }
 
 // NewAgentService 构造 AgentService。

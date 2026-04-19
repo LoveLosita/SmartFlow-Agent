@@ -169,7 +169,6 @@ func (n *AgentNodes) Execute(ctx context.Context, st *newagentmodel.AgentGraphSt
 		ResumeNode:            "execute",
 		ToolRegistry:          st.Deps.ToolRegistry,
 		ScheduleState:         scheduleState,
-		SchedulePersistor:     st.Deps.SchedulePersistor,
 		CompactionStore:       st.Deps.CompactionStore,
 		WriteSchedulePreview:  st.Deps.WriteSchedulePreview,
 		OriginalScheduleState: st.OriginalScheduleState,

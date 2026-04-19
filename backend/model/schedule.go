@@ -143,10 +143,11 @@ type HybridScheduleEntry struct {
 	SectionFrom int    `json:"section_from"`
 	SectionTo   int    `json:"section_to"`
 	Name        string `json:"name"`
-	Type        string `json:"type"`                   // "course" | "task"
-	Status      string `json:"status"`                 // "existing" | "suggested"
-	TaskItemID  int    `json:"task_item_id,omitempty"` // 仅 suggested 的 task 有值
-	EventID     int    `json:"event_id,omitempty"`     // 仅 existing 有值
+	Type        string `json:"type"`                    // "course" | "task"
+	Status      string `json:"status"`                  // "existing" | "suggested"
+	TaskItemID  int    `json:"task_item_id,omitempty"`  // 仅 suggested 的 task 有值
+	TaskClassID int    `json:"task_class_id,omitempty"` // 仅 suggested 的 task 有值，对应 TaskClass.ID
+	EventID     int    `json:"event_id,omitempty"`      // 仅 existing 有值
 	// CanBeEmbedded 表示该条 existing 课程块是否允许嵌入任务。
 	// 仅课程条目有意义，task 条目默认 false。
 	CanBeEmbedded bool `json:"can_be_embedded,omitempty"`

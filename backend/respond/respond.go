@@ -354,6 +354,31 @@ var ( //请求相关的响应
 		Info:   "invalid memory content",
 	}
 
+	ScheduleStateSnapshotNotFound = Response{ //排程快照不存在或已过期
+		Status: "40058",
+		Info:   "schedule state snapshot not found",
+	}
+
+	ScheduleStateInvalidCoordinates = Response{ //绝对时间坐标超出排程窗口范围
+		Status: "40059",
+		Info:   "invalid week/day_of_week coordinates",
+	}
+
+	ScheduleStateTaskItemNotFound = Response{ //task_item_id 在快照中不存在
+		Status: "40060",
+		Info:   "task_item_id not found in schedule state",
+	}
+
+	ScheduleStateEventNotFound = Response{ //embed_course_event_id 在快照课程中不存在
+		Status: "40061",
+		Info:   "embed_course_event_id not found in schedule state events",
+	}
+
+	ScheduleStateDuplicateTaskItem = Response{ //请求中包含重复的 task_item_id
+		Status: "40062",
+		Info:   "duplicate task_item_id in request",
+	}
+
 	RouteControlInternalError = Response{ //路由控制码内部错误
 		Status: "50001",
 		Info:   "route control failed",

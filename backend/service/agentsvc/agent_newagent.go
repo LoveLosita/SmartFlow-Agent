@@ -192,7 +192,6 @@ func (s *AgentService) runNewAgentGraph(
 		StateStore:            s.agentStateStore,
 		ToolRegistry:          s.toolRegistry,
 		ScheduleProvider:      s.scheduleProvider,
-		SchedulePersistor:     s.schedulePersistor,
 		CompactionStore:       s.compactionStore,
 		RoughBuildFunc:        s.makeRoughBuildFunc(),
 		WriteSchedulePreview:  s.makeWriteSchedulePreviewFunc(),
@@ -658,11 +657,6 @@ func (s *AgentService) SetToolRegistry(registry *newagenttools.ToolRegistry) {
 // scheduleProvider 由 cmd/start.go 注入
 func (s *AgentService) SetScheduleProvider(provider newagentmodel.ScheduleStateProvider) {
 	s.scheduleProvider = provider
-}
-
-// schedulePersistor 由 cmd/start.go 注入
-func (s *AgentService) SetSchedulePersistor(persistor newagentmodel.SchedulePersistor) {
-	s.schedulePersistor = persistor
 }
 
 // agentStateStore 由 cmd/start.go 注入
