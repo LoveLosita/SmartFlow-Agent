@@ -220,15 +220,6 @@ type GetConversationListResponse struct {
 	HasMore  bool                      `json:"has_more"`
 }
 
-type GetConversationHistoryItem struct {
-	ID                       int        `json:"id,omitempty"`
-	Role                     string     `json:"role"`
-	Content                  string     `json:"content"`
-	CreatedAt                *time.Time `json:"created_at,omitempty"`
-	ReasoningContent         string     `json:"reasoning_content,omitempty"`
-	ReasoningDurationSeconds int        `json:"reasoning_duration_seconds,omitempty"`
-}
-
 type SchedulePlanPreviewCache struct {
 	UserID         int                   `json:"user_id"`
 	ConversationID string                `json:"conversation_id"`

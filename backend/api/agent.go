@@ -34,6 +34,23 @@ func writeSSEData(w io.Writer, payload string) error {
 	return err
 }
 
+// mapResumeConfirmAction 把 extra.resume.action 映射为现有 confirm_action 口径。
+//
+// 映射规则：
+// 1. approve -> accept（确认执行）；
+// 2. reject/cancel -> reject（拒绝执行）；
+// 3. 兜底走 reject，避免脏值误触发执行。
+func mapResumeConfirmAction(action model.AgentResumeAction) string {
+	switch action {
+	case model.AgentResumeActionApprove:
+		return "accept"
+	case model.AgentResumeActionReject, model.AgentResumeActionCancel:
+		return "reject"
+	default:
+		return "reject"
+	}
+}
+
 func (api *AgentHandler) ChatAgent(c *gin.Context) {
 	// 1) 设置 SSE 响应头
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
@@ -49,10 +66,34 @@ func (api *AgentHandler) ChatAgent(c *gin.Context) {
 		return
 	}
 
+	// 2.1 兼容新恢复协议：把 extra.resume 统一映射到现有内部字段。
+	// 1. 前端新协议只传 resume，不再直接传 confirm_action；
+	// 2. 后端这里做一次入口归一，保证下游状态机继续按既有字段消费；
+	// 3. 解析失败直接返回 400，避免把非法恢复请求当普通消息继续执行。
+	resumeReq, resumeErr := req.ResumeRequest()
+	if resumeErr != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		return
+	}
+	if resumeReq != nil {
+		if req.Extra == nil {
+			req.Extra = make(map[string]any)
+		}
+		req.Extra["resume_interaction_id"] = resumeReq.InteractionID
+		if resumeReq.IsConfirmResume() {
+			req.Extra["confirm_action"] = mapResumeConfirmAction(resumeReq.Action)
+		}
+	}
+
 	// 3) 规范化会话 ID
 	conversationID := strings.TrimSpace(req.ConversationID)
 	if conversationID == "" {
-		// confirm_action 需要关联已存在的会话状态，缺少 conversation_id 直接报错。
+		// 恢复类请求必须关联既有会话状态，缺少 conversation_id 直接报错。
+		if resumeReq != nil {
+			c.JSON(http.StatusBadRequest, respond.MissingConversationID)
+			return
+		}
+		// 兼容旧协议：confirm_action 也必须绑定已有会话。
 		if _, ok := req.Extra["confirm_action"]; ok {
 			c.JSON(http.StatusBadRequest, respond.MissingConversationID)
 			return
@@ -209,29 +250,25 @@ func (api *AgentHandler) GetConversationList(c *gin.Context) {
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
 }
 
-// GetConversationHistory 返回指定会话的聊天历史记录。
+// GetConversationTimeline 返回指定会话的统一时间线（正文+卡片）。
 //
-// 设计说明：
-// 1) 该接口只读历史，不负责改写 Redis/DB 中的会话状态；
-// 2) 读取顺序复用现有服务层能力：先校验归属，再查 Redis，未命中再回源 DB；
-// 3) 会话不存在时统一返回 400，避免前端把无效会话误判成系统故障。
-func (api *AgentHandler) GetConversationHistory(c *gin.Context) {
-	// 1. 参数校验：conversation_id 必填。
+// 说明：
+// 1. 该接口是新前端刷新重建的单一来源；
+// 2. 返回结果已按 seq 升序，前端按数组顺序渲染即可；
+// 3. 会话不存在时统一返回 400，避免误判成系统异常。
+func (api *AgentHandler) GetConversationTimeline(c *gin.Context) {
 	conversationID := strings.TrimSpace(c.Query("conversation_id"))
 	if conversationID == "" {
 		c.JSON(http.StatusBadRequest, respond.MissingParam)
 		return
 	}
 
-	// 2. 从鉴权上下文取当前用户 ID，确保查询范围只落在“本人会话”内。
 	userID := c.GetInt("user_id")
 
-	// 3. 设置短超时，避免缓存抖动或慢查询长期占用连接。
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
 
-	// 4. 调 service 查询聊天历史。
-	history, err := api.svc.GetConversationHistory(ctx, userID, conversationID)
+	timeline, err := api.svc.GetConversationTimeline(ctx, userID, conversationID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusBadRequest, respond.WrongParamType)
@@ -241,8 +278,7 @@ func (api *AgentHandler) GetConversationHistory(c *gin.Context) {
 		return
 	}
 
-	// 5. 返回统一响应结构。
-	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, history))
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, timeline))
 }
 
 // GetSchedulePlanPreview 返回“指定会话”的排程结构化预览。

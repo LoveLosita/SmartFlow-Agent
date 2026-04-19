@@ -74,10 +74,6 @@ func (p *GormCachePlugin) dispatchCacheLogic(modelObj interface{}) {
 		p.invalidTaskCache(m.UserID)
 	case model.AgentScheduleState:
 		p.invalidSchedulePlanPreviewCache(m.UserID, m.ConversationID)
-	case model.ChatHistory:
-		p.invalidConversationHistoryCache(m.UserID, m.ChatID)
-	case model.AgentChat:
-		p.invalidConversationHistoryCache(m.UserID, m.ChatID)
 	case model.MemoryItem:
 		// 1. 管理面删除/修改/恢复/新增记忆时，自动失效该用户所有会话的预取缓存；
 		// 2. repo 方法通过 Model(&model.MemoryItem{UserID: userID}) 携带 userID，
@@ -86,6 +82,9 @@ func (p *GormCachePlugin) dispatchCacheLogic(modelObj interface{}) {
 		p.invalidMemoryPrefetchCache(m.UserID)
 	case model.AgentOutboxMessage,
 		model.User,
+		model.ChatHistory,
+		model.AgentChat,
+		model.AgentTimelineEvent,
 		model.AgentStateSnapshotRecord,
 		model.MemoryJob,
 		model.MemoryAuditLog,
@@ -149,23 +148,6 @@ func (p *GormCachePlugin) invalidSchedulePlanPreviewCache(userID int, conversati
 			return
 		}
 		log.Printf("[GORM-Cache] Invalidated schedule preview cache for user %d conversation %s", userID, normalizedConversationID)
-	}()
-}
-
-func (p *GormCachePlugin) invalidConversationHistoryCache(userID int, conversationID string) {
-	normalizedConversationID := strings.TrimSpace(conversationID)
-	if userID == 0 || normalizedConversationID == "" {
-		return
-	}
-
-	go func() {
-		// 1. 聊天历史写入或重试补种后，删除历史视图缓存，保证下次列表/详情能拿到最新版本。
-		// 2. 这里只清“前台历史视图缓存”，不碰 LLM 上下文热缓存，避免影响首 token 体验。
-		if err := p.cacheDAO.DeleteConversationHistoryFromCache(context.Background(), userID, normalizedConversationID); err != nil {
-			log.Printf("[GORM-Cache] Failed to invalidate conversation history cache for user %d conversation %s: %v", userID, normalizedConversationID, err)
-			return
-		}
-		log.Printf("[GORM-Cache] Invalidated conversation history cache for user %d conversation %s", userID, normalizedConversationID)
 	}()
 }
 

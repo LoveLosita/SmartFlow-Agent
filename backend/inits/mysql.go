@@ -15,6 +15,7 @@ func autoMigrateModels(db *gorm.DB) error {
 		&model.User{},
 		&model.AgentChat{},
 		&model.ChatHistory{},
+		&model.AgentTimelineEvent{},
 		&model.Task{},
 		&model.TaskClass{},
 		&model.TaskClassItem{},

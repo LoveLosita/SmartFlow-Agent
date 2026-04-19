@@ -386,18 +386,19 @@ func (s *AgentService) runNormalChatFlow(
 			pushErrNonBlocking(errChan, err)
 			return
 		}
-		s.appendConversationHistoryCacheOptimistically(
-			context.Background(),
+		if _, timelineErr := s.appendConversationTimelineEvent(
+			ctx,
 			userID,
 			chatID,
-			buildOptimisticConversationHistoryItem(
-				"user",
-				userMessage,
-				"",
-				0,
-				requestStart,
-			),
-		)
+			model.AgentTimelineKindUserText,
+			"user",
+			userMessage,
+			nil,
+			0,
+		); timelineErr != nil {
+			pushErrNonBlocking(errChan, timelineErr)
+			return
+		}
 	}
 
 	// 普通聊天链路也需要把助手回复写入 Redis，
@@ -425,18 +426,25 @@ func (s *AgentService) runNormalChatFlow(
 	}); saveErr != nil {
 		pushErrNonBlocking(errChan, saveErr)
 	} else {
-		s.appendConversationHistoryCacheOptimistically(
+		assistantTimelinePayload := map[string]any{}
+		if strings.TrimSpace(assistantReasoning) != "" {
+			assistantTimelinePayload["reasoning_content"] = strings.TrimSpace(assistantReasoning)
+		}
+		if reasoningDurationSeconds > 0 {
+			assistantTimelinePayload["reasoning_duration_seconds"] = reasoningDurationSeconds
+		}
+		if _, timelineErr := s.appendConversationTimelineEvent(
 			context.Background(),
 			userID,
 			chatID,
-			buildOptimisticConversationHistoryItem(
-				"assistant",
-				fullText,
-				assistantReasoning,
-				reasoningDurationSeconds,
-				time.Now(),
-			),
-		)
+			model.AgentTimelineKindAssistantText,
+			"assistant",
+			fullText,
+			assistantTimelinePayload,
+			requestTotalTokens,
+		); timelineErr != nil {
+			pushErrNonBlocking(errChan, timelineErr)
+		}
 	}
 
 	// 9. 在主回复完成后异步尝试生成会话标题（仅首次、仅标题为空时生效）。

@@ -39,6 +39,7 @@ func (n *AgentNodes) Chat(ctx context.Context, st *newagentmodel.AgentGraphState
 		ConversationContext:   st.EnsureConversationContext(),
 		UserInput:             st.Request.UserInput,
 		ConfirmAction:         st.Request.ConfirmAction,
+		ResumeInteractionID:   st.Request.ResumeInteractionID,
 		Client:                st.Deps.ResolveChatClient(),
 		ChunkEmitter:          st.EnsureChunkEmitter(),
 		CompactionStore:       st.Deps.CompactionStore,

@@ -62,6 +62,11 @@ type ChunkEmitter struct {
 	RequestID string
 	ModelName string
 	Created   int64
+	// extraEventHook 用于把关键结构化事件同步给上层做持久化。
+	// 1. hook 失败不能影响 SSE 主链路；
+	// 2. hook 只接收 extra 结构，避免 emitter 反向依赖业务层；
+	// 3. 不注入时保持空实现，兼容旧调用路径。
+	extraEventHook func(extra *OpenAIChunkExtra)
 }
 
 // NoopPayloadEmitter 返回一个空实现，便于骨架期安全占位。
@@ -107,6 +112,14 @@ func NewChunkEmitter(emit PayloadEmitter, requestID, modelName string, created i
 		ModelName: modelName,
 		Created:   created,
 	}
+}
+
+// SetExtraEventHook 设置结构化事件回调。
+func (e *ChunkEmitter) SetExtraEventHook(hook func(extra *OpenAIChunkExtra)) {
+	if e == nil {
+		return
+	}
+	e.extraEventHook = hook
 }
 
 // EmitReasoningText 输出一段 reasoning 文字，并附带 reasoning_text extra。
@@ -233,6 +246,7 @@ func (e *ChunkEmitter) emitExtraOnly(extra *OpenAIChunkExtra) error {
 	if e == nil || e.emit == nil {
 		return nil
 	}
+	e.emitExtraEventHook(extra)
 	payload, err := ToOpenAIStreamWithExtra(
 		nil,
 		e.RequestID,
@@ -250,6 +264,13 @@ func (e *ChunkEmitter) emitExtraOnly(extra *OpenAIChunkExtra) error {
 	return e.emit(payload)
 }
 
+func (e *ChunkEmitter) emitExtraEventHook(extra *OpenAIChunkExtra) {
+	if e == nil || e.extraEventHook == nil || extra == nil {
+		return
+	}
+	e.extraEventHook(extra)
+}
+
 // EmitConfirmRequest 输出一次待确认事件。
 //
 // 当前展示策略：
@@ -263,6 +284,7 @@ func (e *ChunkEmitter) EmitConfirmRequest(ctx context.Context, blockID, stage, i
 
 	text := buildConfirmAssistantText(title, summary)
 	extra := NewConfirmRequestExtra(blockID, stage, interactionID, title, summary)
+	e.emitExtraEventHook(extra)
 	return e.emitPseudoText(
 		ctx,
 		text,

@@ -260,13 +260,19 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
         </div>
       </section>
 
-    <el-dialog v-model="createTaskDialogVisible" title="添加任务" width="460px" align-center class="dashboard-dialog">
+    <el-dialog
+      v-model="createTaskDialogVisible"
+      title="添加新任务"
+      width="440px"
+      align-center
+      class="dashboard-dialog premium-dialog"
+    >
       <el-form label-position="top">
         <el-form-item label="任务标题">
           <el-input v-model="taskForm.title" maxlength="255" placeholder="例如：完成数据库复习" />
         </el-form-item>
         <el-form-item label="优先级象限">
-          <el-select v-model="taskForm.priority_group" class="dashboard-dialog__select">
+          <el-select v-model="taskForm.priority_group" class="dashboard-dialog__select" popper-class="premium-select-popper" placement="bottom-start">
             <el-option :value="1" label="1 - 重要且紧急" />
             <el-option :value="2" label="2 - 重要不紧急" />
             <el-option :value="3" label="3 - 简单不重要" />
@@ -274,12 +280,22 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
           </el-select>
         </el-form-item>
         <el-form-item label="截止时间">
-          <el-date-picker v-model="taskForm.deadline_at" type="datetime" placeholder="可选" class="dashboard-dialog__select" />
+          <el-date-picker
+            v-model="taskForm.deadline_at"
+            type="datetime"
+            placeholder="可选"
+            class="dashboard-dialog__select"
+            popper-class="premium-select-popper"
+          />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="createTaskDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="createTaskLoading" @click="handleCreateTask">保存任务</el-button>
+        <div class="premium-dialog__footer">
+          <button class="premium-btn premium-btn--ghost" @click="createTaskDialogVisible = false">取消</button>
+          <button class="premium-btn premium-btn--primary" :disabled="createTaskLoading" @click="handleCreateTask">
+            {{ createTaskLoading ? '保存中...' : '确认添加' }}
+          </button>
+        </div>
       </template>
     </el-dialog>
 </template>
@@ -365,4 +381,196 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
 .dashboard-import__shape { position: absolute; right: -50px; bottom: -50px; width: 220px; height: 220px; opacity: 0.1; pointer-events: none; }
 .dashboard-import__shape-ring { position: absolute; inset: 0; border: 40px solid #3b82f6; border-radius: 50%; }
 .dashboard-import__shape-core { position: absolute; inset: 80px; background: #3b82f6; border-radius: 50%; }
+
+/* --- Premium Dialog Styles --- */
+:global(.premium-dialog) {
+  border-radius: 20px !important;
+  background: #ffffff !important;
+  border: 1px solid rgba(15, 23, 42, 0.08) !important;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25) !important;
+  overflow: hidden;
+}
+
+:global(.premium-dialog .el-dialog__header) {
+  padding: 24px 28px 12px !important;
+  margin-right: 0 !important;
+  text-align: left;
+}
+
+:global(.premium-dialog .el-dialog__title) {
+  font-size: 18px !important;
+  font-weight: 800 !important;
+  color: #0f172a !important;
+  letter-spacing: -0.02em;
+}
+
+:global(.premium-dialog .el-dialog__body) {
+  padding: 12px 28px 20px !important;
+}
+
+:global(.premium-dialog .el-dialog__footer) {
+  padding: 0 !important;
+}
+
+.premium-dialog__footer {
+  padding: 16px 28px 24px;
+  background: #f8fafc;
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  border-top: 1px solid #f1f5f9;
+}
+
+.premium-btn {
+  height: 40px;
+  padding: 0 20px;
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.premium-btn--primary {
+  background: #3b82f6;
+  color: #ffffff;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);
+}
+
+.premium-btn--primary:hover:not(:disabled) {
+  background: #2563eb;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(59, 130, 246, 0.3);
+}
+
+.premium-btn--ghost {
+  background: #ffffff;
+  color: #64748b;
+  border: 1px solid #e2e8f0;
+}
+
+.premium-btn--ghost:hover {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+/* 弹出动画覆写 */
+:global(.dialog-fade-enter-active .premium-dialog) {
+  animation: premium-dialog-pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes premium-dialog-pop {
+  0% { opacity: 0; transform: scale(0.92) translateY(20px); }
+  60% { opacity: 1; transform: scale(1.02) translateY(-2px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+:global(.el-overlay) {
+  backdrop-filter: blur(6px);
+  background: rgba(15, 23, 42, 0.35) !important;
+}
+
+/* 表单美化 */
+:global(.premium-dialog .el-form-item__label) {
+  font-weight: 700 !important;
+  color: #475569 !important;
+  font-size: 13px !important;
+  margin-bottom: 6px !important;
+}
+
+:global(.premium-dialog .el-input__wrapper),
+:global(.premium-dialog .el-select__wrapper) {
+  background-color: #f8fafc !important;
+  box-shadow: 0 0 0 1px #e2e8f0 inset !important;
+  border-radius: 10px !important;
+  padding: 4px 12px !important;
+}
+
+:global(.premium-dialog .el-input__wrapper.is-focus),
+:global(.premium-dialog .el-select__wrapper.is-focused) {
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2) inset !important;
+  background-color: #ffffff !important;
+}
+:global(.premium-dialog .el-dialog__headerbtn) {
+  top: 20px !important;
+  right: 20px !important;
+  width: 32px !important;
+  height: 32px !important;
+  border-radius: 50% !important;
+  background: #f1f5f9 !important;
+  transition: all 0.2s !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+:global(.premium-dialog .el-dialog__headerbtn:hover) {
+  background: #e2e8f0 !important;
+  transform: rotate(90deg);
+}
+
+:global(.premium-dialog .el-dialog__headerbtn .el-dialog__close) {
+  color: #64748b !important;
+  font-size: 16px !important;
+  font-weight: 800 !important;
+}
+
+/* 统一输入框高度与背景 */
+:global(.premium-dialog .el-input__inner),
+:global(.premium-dialog .el-select .el-input__inner) {
+  height: 38px !important;
+  color: #0f172a !important;
+  font-weight: 600 !important;
+}
+
+/* --- 下拉菜单扁平化 --- */
+:global(.premium-select-popper) {
+  border-radius: 16px !important;
+  border: 1px solid rgba(15, 23, 42, 0.08) !important;
+  box-shadow: 0 12px 30px -5px rgba(0, 0, 0, 0.12) !important;
+  background: #ffffff !important;
+  overflow: hidden !important;
+  margin-top: 8px !important;
+}
+
+:global(.premium-select-popper .el-select-dropdown__list) {
+  padding: 6px !important;
+}
+
+:global(.premium-select-popper .el-select-dropdown__item) {
+  border-radius: 10px !important;
+  height: 38px !important;
+  line-height: 38px !important;
+  margin-bottom: 2px !important;
+  font-weight: 600 !important;
+  color: #475569 !important;
+  padding: 0 12px !important;
+}
+
+:global(.premium-select-popper .el-select-dropdown__item.is-selected) {
+  background: #eff6ff !important;
+  color: #3b82f6 !important;
+}
+
+:global(.premium-select-popper .el-select-dropdown__item:hover) {
+  background: #f1f5f9 !important;
+  color: #0f172a !important;
+}
+
+:global(.premium-select-popper .el-popper__arrow) {
+  display: none !important;
+}
+
+/* 时间选择器特定深度覆盖 */
+:global(.premium-select-popper.el-picker-popper) {
+  padding: 0 !important;
+}
+
+:global(.premium-select-popper .el-picker-panel) {
+  background: transparent !important;
+}
 </style>

@@ -37,8 +37,12 @@ func (d *CacheDAO) schedulePreviewKey(userID int, conversationID string) string 
 	return fmt.Sprintf("smartflow:schedule_preview:u:%d:c:%s", userID, conversationID)
 }
 
-func (d *CacheDAO) conversationHistoryKey(userID int, conversationID string) string {
-	return fmt.Sprintf("smartflow:conversation_history:u:%d:c:%s", userID, conversationID)
+func (d *CacheDAO) conversationTimelineKey(userID int, conversationID string) string {
+	return fmt.Sprintf("smartflow:conversation_timeline:u:%d:c:%s", userID, conversationID)
+}
+
+func (d *CacheDAO) conversationTimelineSeqKey(userID int, conversationID string) string {
+	return fmt.Sprintf("smartflow:conversation_timeline_seq:u:%d:c:%s", userID, conversationID)
 }
 
 // SetBlacklist 把 Token 写入黑名单。
@@ -450,13 +454,59 @@ func (d *CacheDAO) DeleteSchedulePlanPreviewFromCache(ctx context.Context, userI
 	return d.client.Del(ctx, d.schedulePreviewKey(userID, normalizedConversationID)).Err()
 }
 
-// SetConversationHistoryToCache 写入“会话历史视图”缓存。
+// IncrConversationTimelineSeq 原子递增并返回会话时间线 seq。
 //
-// 职责边界：
-// 1. 负责按 user_id + conversation_id 写入前端历史查询所需的稳定 DTO；
-// 2. 只负责缓存当前可展示历史，不负责上下文窗口缓存；
-// 3. 不负责 DB 回源，也不负责重试分组补算。
-func (d *CacheDAO) SetConversationHistoryToCache(ctx context.Context, userID int, conversationID string, items []model.GetConversationHistoryItem) error {
+// 说明：
+// 1. seq 只在同一 user_id + conversation_id 维度内递增；
+// 2. 使用 Redis INCR 保证并发下不会拿到重复顺序号；
+// 3. 该 key 也会设置 TTL，避免长尾会话长期占用缓存。
+func (d *CacheDAO) IncrConversationTimelineSeq(ctx context.Context, userID int, conversationID string) (int64, error) {
+	if d == nil || d.client == nil {
+		return 0, errors.New("cache dao is not initialized")
+	}
+	if userID <= 0 {
+		return 0, fmt.Errorf("invalid user_id: %d", userID)
+	}
+	normalizedConversationID := strings.TrimSpace(conversationID)
+	if normalizedConversationID == "" {
+		return 0, errors.New("conversation_id is empty")
+	}
+
+	key := d.conversationTimelineSeqKey(userID, normalizedConversationID)
+	pipe := d.client.Pipeline()
+	incrCmd := pipe.Incr(ctx, key)
+	pipe.Expire(ctx, key, 24*time.Hour)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, err
+	}
+	return incrCmd.Val(), nil
+}
+
+// SetConversationTimelineSeq 强制设置会话时间线当前 seq（DB 回填 Redis 兜底场景）。
+func (d *CacheDAO) SetConversationTimelineSeq(ctx context.Context, userID int, conversationID string, seq int64) error {
+	if d == nil || d.client == nil {
+		return errors.New("cache dao is not initialized")
+	}
+	if userID <= 0 {
+		return fmt.Errorf("invalid user_id: %d", userID)
+	}
+	normalizedConversationID := strings.TrimSpace(conversationID)
+	if normalizedConversationID == "" {
+		return errors.New("conversation_id is empty")
+	}
+	if seq < 0 {
+		seq = 0
+	}
+	return d.client.Set(ctx, d.conversationTimelineSeqKey(userID, normalizedConversationID), seq, 24*time.Hour).Err()
+}
+
+// AppendConversationTimelineEventToCache 追加单条时间线缓存事件。
+func (d *CacheDAO) AppendConversationTimelineEventToCache(
+	ctx context.Context,
+	userID int,
+	conversationID string,
+	item model.GetConversationTimelineItem,
+) error {
 	if d == nil || d.client == nil {
 		return errors.New("cache dao is not initialized")
 	}
@@ -468,20 +518,53 @@ func (d *CacheDAO) SetConversationHistoryToCache(ctx context.Context, userID int
 		return errors.New("conversation_id is empty")
 	}
 
-	data, err := json.Marshal(items)
+	data, err := json.Marshal(item)
 	if err != nil {
-		return fmt.Errorf("marshal conversation history failed: %w", err)
+		return fmt.Errorf("marshal conversation timeline item failed: %w", err)
 	}
-	return d.client.Set(ctx, d.conversationHistoryKey(userID, normalizedConversationID), data, 1*time.Hour).Err()
+
+	key := d.conversationTimelineKey(userID, normalizedConversationID)
+	pipe := d.client.Pipeline()
+	pipe.RPush(ctx, key, data)
+	pipe.Expire(ctx, key, 24*time.Hour)
+	_, err = pipe.Exec(ctx)
+	return err
 }
 
-// GetConversationHistoryFromCache 读取“会话历史视图”缓存。
-//
-// 输入输出语义：
-// 1. 命中时返回历史 DTO 切片与 nil error；
-// 2. 未命中时返回 (nil, nil)；
-// 3. Redis 异常或反序列化失败时返回 error。
-func (d *CacheDAO) GetConversationHistoryFromCache(ctx context.Context, userID int, conversationID string) ([]model.GetConversationHistoryItem, error) {
+// SetConversationTimelineToCache 全量回填时间线缓存。
+func (d *CacheDAO) SetConversationTimelineToCache(ctx context.Context, userID int, conversationID string, items []model.GetConversationTimelineItem) error {
+	if d == nil || d.client == nil {
+		return errors.New("cache dao is not initialized")
+	}
+	if userID <= 0 {
+		return fmt.Errorf("invalid user_id: %d", userID)
+	}
+	normalizedConversationID := strings.TrimSpace(conversationID)
+	if normalizedConversationID == "" {
+		return errors.New("conversation_id is empty")
+	}
+
+	key := d.conversationTimelineKey(userID, normalizedConversationID)
+	pipe := d.client.Pipeline()
+	pipe.Del(ctx, key)
+	if len(items) > 0 {
+		values := make([]interface{}, 0, len(items))
+		for _, item := range items {
+			data, err := json.Marshal(item)
+			if err != nil {
+				return fmt.Errorf("marshal conversation timeline item failed: %w", err)
+			}
+			values = append(values, data)
+		}
+		pipe.RPush(ctx, key, values...)
+	}
+	pipe.Expire(ctx, key, 24*time.Hour)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+// GetConversationTimelineFromCache 读取时间线缓存（按 seq 正序）。
+func (d *CacheDAO) GetConversationTimelineFromCache(ctx context.Context, userID int, conversationID string) ([]model.GetConversationTimelineItem, error) {
 	if d == nil || d.client == nil {
 		return nil, errors.New("cache dao is not initialized")
 	}
@@ -493,28 +576,30 @@ func (d *CacheDAO) GetConversationHistoryFromCache(ctx context.Context, userID i
 		return nil, errors.New("conversation_id is empty")
 	}
 
-	raw, err := d.client.Get(ctx, d.conversationHistoryKey(userID, normalizedConversationID)).Result()
+	rawItems, err := d.client.LRange(ctx, d.conversationTimelineKey(userID, normalizedConversationID), 0, -1).Result()
 	if err == redis.Nil {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	if len(rawItems) == 0 {
+		return nil, nil
+	}
 
-	var items []model.GetConversationHistoryItem
-	if err = json.Unmarshal([]byte(raw), &items); err != nil {
-		return nil, fmt.Errorf("unmarshal conversation history failed: %w", err)
+	items := make([]model.GetConversationTimelineItem, 0, len(rawItems))
+	for _, raw := range rawItems {
+		var item model.GetConversationTimelineItem
+		if err := json.Unmarshal([]byte(raw), &item); err != nil {
+			return nil, fmt.Errorf("unmarshal conversation timeline item failed: %w", err)
+		}
+		items = append(items, item)
 	}
 	return items, nil
 }
 
-// DeleteConversationHistoryFromCache 删除“会话历史视图”缓存。
-//
-// 说明：
-// 1. 删除操作是幂等的，key 不存在也视为成功；
-// 2. 该方法用于 chat_histories 写入/补种 retry 分组后触发失效；
-// 3. 这里只处理前端历史视图缓存，不影响 Agent 上下文热缓存。
-func (d *CacheDAO) DeleteConversationHistoryFromCache(ctx context.Context, userID int, conversationID string) error {
+// DeleteConversationTimelineFromCache 删除时间线缓存和 seq 缓存。
+func (d *CacheDAO) DeleteConversationTimelineFromCache(ctx context.Context, userID int, conversationID string) error {
 	if d == nil || d.client == nil {
 		return errors.New("cache dao is not initialized")
 	}
@@ -525,7 +610,11 @@ func (d *CacheDAO) DeleteConversationHistoryFromCache(ctx context.Context, userI
 	if normalizedConversationID == "" {
 		return errors.New("conversation_id is empty")
 	}
-	return d.client.Del(ctx, d.conversationHistoryKey(userID, normalizedConversationID)).Err()
+	return d.client.Del(
+		ctx,
+		d.conversationTimelineKey(userID, normalizedConversationID),
+		d.conversationTimelineSeqKey(userID, normalizedConversationID),
+	).Err()
 }
 
 // agentStateKey 返回 agent 运行态快照的 Redis key。
@@ -615,7 +704,7 @@ const (
 
 // memoryPrefetchKey 生成用户+会话维度的记忆预取缓存 key。
 //
-// 1. 格式：smartflow:memory_prefetch:u:{userID}:c:{chatID}，与 conversationHistoryKey / schedulePreviewKey 命名风格一致；
+// 1. 格式：smartflow:memory_prefetch:u:{userID}:c:{chatID}，与 conversationTimelineKey / schedulePreviewKey 命名风格一致；
 // 2. chatID 为空时 key 为 smartflow:memory_prefetch:u:5:c:，仍然合法且唯一，不会与其他会话 key 冲突；
 // 3. 加 chatID 隔离后，不同会话各自维护独立的预取缓存，避免会话间记忆上下文互相覆盖。
 func (d *CacheDAO) memoryPrefetchKey(userID int, chatID string) string {

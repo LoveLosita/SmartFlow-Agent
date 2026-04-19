@@ -21,7 +21,9 @@ import (
 type AgentGraphRequest struct {
 	UserInput     string
 	ConfirmAction string // "accept" / "reject" / ""，仅 confirm 恢复场景由前端传入
-	AlwaysExecute bool   // true 时写工具跳过确认闸门直接执行，适合前端已展示预览、用户无需逐步确认的场景
+	// ResumeInteractionID 用于校验“本次恢复请求”是否命中了当前 pending 交互，避免旧卡片误恢复。
+	ResumeInteractionID string
+	AlwaysExecute       bool // true 时写工具跳过确认闸门直接执行，适合前端已展示预览、用户无需逐步确认的场景
 }
 
 // Normalize 统一清洗请求级输入中的字符串字段。
@@ -31,6 +33,7 @@ func (r *AgentGraphRequest) Normalize() {
 	}
 	r.UserInput = strings.TrimSpace(r.UserInput)
 	r.ConfirmAction = strings.TrimSpace(r.ConfirmAction)
+	r.ResumeInteractionID = strings.TrimSpace(r.ResumeInteractionID)
 }
 
 // RoughBuildPlacement 是粗排算法返回的单条放置结果。

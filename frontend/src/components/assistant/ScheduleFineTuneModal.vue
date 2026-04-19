@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { HybridScheduleEntry, PlacedItem, SchedulePreviewData } from '@/types/dashboard'
 import { saveScheduleState, applyBatchIntoSchedule } from '@/api/schedule_agent'
 
 const props = defineProps<{
-  previewData: SchedulePreviewData
+  previewData: SchedulePreviewData | null
+  visible: boolean
 }>()
 
 const emit = defineEmits<{
@@ -13,8 +14,22 @@ const emit = defineEmits<{
   (e: 'saved'): void
 }>()
 
-// 计算数据中的起止周次
+const currentWeek = ref(1)
+const isSaving = ref(false)
+
+// 内部维护一份可变的建议任务列表，组件初始化时默认空
+const suggestedItems = ref<HybridScheduleEntry[]>([])
+
+// 监听数据变化，当传了有效数据时才进行初始化，解决 v-if 延迟导致的空引用问题
+watch(() => props.previewData, (newVal) => {
+  if (newVal) {
+    suggestedItems.value = JSON.parse(JSON.stringify(newVal.hybrid_entries))
+    currentWeek.value = newVal.hybrid_entries.length > 0 ? Math.min(...newVal.hybrid_entries.map(e => e.week)) : 1
+  }
+}, { immediate: true })
+
 const weekRange = computed(() => {
+  if (!props.previewData) return { min: 1, max: 20 }
   const weeks = props.previewData.hybrid_entries.map(e => e.week)
   if (weeks.length === 0) return { min: 1, max: 20 }
   return {
@@ -22,14 +37,6 @@ const weekRange = computed(() => {
     max: Math.max(...weeks)
   }
 })
-
-const currentWeek = ref(weekRange.value.min)
-const isSaving = ref(false)
-
-// 内部维护一份可变的建议任务列表，用于拖拽更新
-const suggestedItems = ref<HybridScheduleEntry[]>(
-  JSON.parse(JSON.stringify(props.previewData.hybrid_entries))
-)
 
 const sectionSlots = [
   { order: 1, title: '1-2', timeRange: '08:00\n09:40' },
@@ -66,6 +73,7 @@ function buildPlacedItems(): PlacedItem[] {
  * 暂存至 State (Redis)
  */
 async function handleSaveToState() {
+  if (!props.previewData) return
   isSaving.value = true
   try {
     const items = buildPlacedItems()
@@ -82,6 +90,7 @@ async function handleSaveToState() {
  * 正式保存到数据库 (MySQL)
  */
 async function handleOfficialSave() {
+  if (!props.previewData) return
   await ElMessageBox.confirm(
     '正式保存将把当前编排结果写入你的日程表。保存后本轮编排微调将终止，确认继续吗？',
     '正式保存确认',
@@ -206,7 +215,7 @@ const currentWeekEntries = computed(() =>
 <template>
   <Teleport to="body">
     <Transition name="modal">
-      <div v-if="previewData" class="schedule-modal-overlay" @click.self="emit('close')">
+      <div v-if="visible && previewData" class="schedule-modal-overlay" @click.self="emit('close')">
         <div class="schedule-modal">
           <header class="schedule-modal__header">
             <h3>日程预览与精排 (第 {{ currentWeek }} 周)</h3>
@@ -650,10 +659,13 @@ const currentWeekEntries = computed(() =>
   animation: board-item-spring 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
-/* 弹窗动画 */
-.modal-enter-active,
+/* 弹窗核心动画：采用物理弹簧质感 */
+.modal-enter-active {
+  transition: opacity 0.5s ease;
+}
+
 .modal-leave-active {
-  transition: opacity 0.4s ease;
+  transition: opacity 0.3s ease;
 }
 
 .modal-enter-from,
@@ -662,19 +674,23 @@ const currentWeekEntries = computed(() =>
 }
 
 .modal-enter-active .schedule-modal {
-  animation: modal-in 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: modal-pop-in 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .modal-leave-active .schedule-modal {
-  animation: modal-in 0.3s cubic-bezier(0.7, 0, 0.84, 0) reverse;
+  animation: modal-pop-in 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) reverse;
 }
 
-@keyframes modal-in {
-  from {
-    transform: scale(0.95) translateY(30px);
+@keyframes modal-pop-in {
+  0% {
+    transform: scale(0.9) translateY(40px);
     opacity: 0;
   }
-  to {
+  60% {
+    transform: scale(1.02) translateY(-2px);
+    opacity: 1;
+  }
+  100% {
     transform: scale(1) translateY(0);
     opacity: 1;
   }

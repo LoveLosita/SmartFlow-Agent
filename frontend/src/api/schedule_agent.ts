@@ -3,6 +3,37 @@ import type { ApiResponse } from '@/types/api'
 import type { PlacedItem, SchedulePreviewData } from '@/types/dashboard'
 import { extractErrorMessage } from '@/utils/http'
 
+export interface TimelineToolPayload {
+  name: string
+  status: 'start' | 'done' | 'blocked' | 'failed'
+  summary: string
+  arguments_preview?: string
+}
+
+export interface TimelineConfirmPayload {
+  interaction_id: string
+  title: string
+  summary: string
+}
+
+export interface TimelineEvent {
+  id: number
+  seq: number
+  kind: 'user_text' | 'assistant_text' | 'tool_call' | 'tool_result' | 'confirm_request' | 'schedule_completed'
+  role?: 'user' | 'assistant'
+  content?: string
+  payload?: {
+    reasoning_content?: string
+    stage?: string
+    block_id?: string
+    display_mode?: 'card'
+    tool?: TimelineToolPayload
+    confirm?: TimelineConfirmPayload
+  }
+  tokens_consumed?: number
+  created_at: string
+}
+
 /**
  * 获取排程预览数据
  */
@@ -14,6 +45,20 @@ export async function getSchedulePreview(conversationId: string): Promise<Schedu
     return response.data.data
   } catch (error) {
     throw new Error(extractErrorMessage(error, '获取方案预览失败'))
+  }
+}
+
+/**
+ * 获取会话完整时间线
+ */
+export async function getConversationTimeline(conversationId: string): Promise<TimelineEvent[]> {
+  try {
+    const response = await http.get<ApiResponse<TimelineEvent[]>>('/agent/conversation-timeline', {
+      params: { conversation_id: conversationId },
+    })
+    return response.data.data
+  } catch (error) {
+    throw new Error(extractErrorMessage(error, '获取会话时间线失败'))
   }
 }
 

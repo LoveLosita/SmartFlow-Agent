@@ -159,14 +159,19 @@ func (s *AgentService) runNewAgentGraph(
 	}
 
 	// 6. 构造 AgentGraphRequest。
-	var confirmAction string
+	var (
+		confirmAction       string
+		resumeInteractionID string
+	)
 	if len(extra) > 0 {
 		confirmAction = readAgentExtraString(extra, "confirm_action")
+		resumeInteractionID = readAgentExtraString(extra, "resume_interaction_id")
 	}
 	graphRequest := newagentmodel.AgentGraphRequest{
-		UserInput:     userMessage,
-		ConfirmAction: confirmAction,
-		AlwaysExecute: readAgentExtraBool(extra, "always_execute"),
+		UserInput:           userMessage,
+		ConfirmAction:       confirmAction,
+		ResumeInteractionID: resumeInteractionID,
+		AlwaysExecute:       readAgentExtraBool(extra, "always_execute"),
 	}
 	graphRequest.Normalize()
 
@@ -181,6 +186,10 @@ func (s *AgentService) runNewAgentGraph(
 	// 8. 适配 SSE emitter。
 	sseEmitter := newagentstream.NewSSEPayloadEmitter(outChan)
 	chunkEmitter := newagentstream.NewChunkEmitter(sseEmitter, traceID, resolvedModelName, requestStart.Unix())
+	// 关键卡片事件走统一时间线持久化，保证刷新后可重建。
+	chunkEmitter.SetExtraEventHook(func(extra *newagentstream.OpenAIChunkExtra) {
+		s.persistNewAgentTimelineExtraEvent(context.Background(), userID, chatID, extra)
+	})
 
 	// 9. 构造 AgentGraphDeps（由 cmd/start.go 注入的依赖）。
 	deps := newagentmodel.AgentGraphDeps{
@@ -466,19 +475,33 @@ func (s *AgentService) persistNewAgentConversationMessage(
 		return err
 	}
 
-	now := time.Now()
-	s.appendConversationHistoryCacheOptimistically(
+	// 统一写入会话时间线，保证正文与卡片可按单一 seq 顺序重建。
+	timelineKind := model.AgentTimelineKindAssistantText
+	switch role {
+	case "user":
+		timelineKind = model.AgentTimelineKindUserText
+	case "assistant":
+		timelineKind = model.AgentTimelineKindAssistantText
+	}
+	timelinePayload := map[string]any{}
+	if persistPayload.ReasoningContent != "" {
+		timelinePayload["reasoning_content"] = persistPayload.ReasoningContent
+	}
+	if reasoningDurationSeconds > 0 {
+		timelinePayload["reasoning_duration_seconds"] = reasoningDurationSeconds
+	}
+	if _, err := s.appendConversationTimelineEvent(
 		ctx,
 		userID,
 		chatID,
-		buildOptimisticConversationHistoryItem(
-			role,
-			content,
-			persistPayload.ReasoningContent,
-			reasoningDurationSeconds,
-			now,
-		),
-	)
+		timelineKind,
+		role,
+		content,
+		timelinePayload,
+		tokensConsumed,
+	); err != nil {
+		return err
+	}
 	return nil
 }
 

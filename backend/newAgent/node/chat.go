@@ -49,6 +49,7 @@ type ChatNodeInput struct {
 	ConversationContext   *newagentmodel.ConversationContext
 	UserInput             string
 	ConfirmAction         string
+	ResumeInteractionID   string
 	Client                *infrallm.Client
 	ChunkEmitter          *newagentstream.ChunkEmitter
 	CompactionStore       newagentmodel.CompactionStore // 上下文压缩持久化
@@ -679,6 +680,14 @@ func handleChatResume(
 	pending := runtimeState.PendingInteraction
 	flowState := runtimeState.EnsureCommonState()
 
+	if isMismatchedResumeInteraction(input.ResumeInteractionID, pending) {
+		_ = emitter.EmitStatus(
+			chatStatusBlockID, chatStageName,
+			"stale_resume", "当前确认已过期，请刷新后重试。", false,
+		)
+		return nil
+	}
+
 	// 用户输入在 service 层进入 graph 前已经统一追加到 ConversationContext。
 	// 这里不再二次写入，避免 pending 恢复路径把同一轮 user message 追加两次。
 
@@ -715,10 +724,18 @@ func handleConfirmResume(
 	pending *newagentmodel.PendingInteraction,
 	emitter *newagentstream.ChunkEmitter,
 ) error {
+	if isMismatchedResumeInteraction(input.ResumeInteractionID, pending) {
+		_ = emitter.EmitStatus(
+			chatStatusBlockID, chatStageName,
+			"stale_resume", "当前确认已过期，请刷新后重试。", false,
+		)
+		return nil
+	}
+
 	action := strings.ToLower(strings.TrimSpace(input.ConfirmAction))
 
 	switch action {
-	case "accept":
+	case "accept", "approve":
 		// 恢复前保存待执行工具，Execute 节点需要它。
 		pendingTool := pending.PendingTool
 		runtimeState.ResumeFromPending()
@@ -733,7 +750,7 @@ func handleConfirmResume(
 			"confirmed", "已确认，开始执行。", false,
 		)
 
-	case "reject":
+	case "reject", "cancel":
 		runtimeState.ResumeFromPending()
 		if pending.PendingTool != nil {
 			// 工具确认被拒 → 回到 executing 换策略。
@@ -748,15 +765,24 @@ func handleConfirmResume(
 		)
 
 	default:
-		// 无合法 confirm action → 保守：等同于 reject。
-		runtimeState.ResumeFromPending()
-		if pending.PendingTool != nil {
-			flowState.Phase = newagentmodel.PhaseExecuting
-		} else {
-			flowState.RejectPlan()
-		}
+		_ = emitter.EmitStatus(
+			chatStatusBlockID, chatStageName,
+			"invalid_confirm_action", "未识别确认动作，请重试。", false,
+		)
 	}
 	return nil
+}
+
+func isMismatchedResumeInteraction(resumeInteractionID string, pending *newagentmodel.PendingInteraction) bool {
+	if pending == nil {
+		return false
+	}
+	resumeID := strings.TrimSpace(resumeInteractionID)
+	pendingID := strings.TrimSpace(pending.InteractionID)
+	if resumeID == "" || pendingID == "" {
+		return false
+	}
+	return resumeID != pendingID
 }
 
 // prepareChatNodeInput 校验并准备聊天节点的运行态依赖。

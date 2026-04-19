@@ -6,12 +6,16 @@ import ContextWindowMeter from '@/components/assistant/ContextWindowMeter.vue'
 import TaskClassPlanningPicker from '@/components/assistant/TaskClassPlanningPicker.vue'
 import {
   getContextStats,
-  getConversationHistory,
   getConversationList,
   getConversationMeta,
-  type ConversationHistoryMessage,
 } from '@/api/agent'
-import { getSchedulePreview } from '@/api/schedule_agent'
+import {
+  getSchedulePreview,
+  getConversationTimeline,
+  type TimelineEvent,
+  type TimelineToolPayload,
+  type TimelineConfirmPayload
+} from '@/api/schedule_agent'
 import { refreshToken } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 import type {
@@ -181,6 +185,7 @@ const historyExpanded = ref(true)
 const selectedConversationId = ref('')
 
 const selectedThinkingMode = ref<ThinkingModeType>('auto')
+const selectedExecutionMode = ref<'manual' | 'always'>('manual')
 const messageInput = ref('')
 const historyPanelWidth = ref(props.initialHistoryWidth)
 const activeStreamingMessageId = ref('')
@@ -371,12 +376,12 @@ const selectedConversationTitle = computed(() => {
   }
 
   const meta = conversationMetaMap[selectedConversationId.value]
-  if (meta?.has_title && meta.title) {
+  if (meta?.title) {
     return meta.title
   }
 
   const current = selectedConversation.value
-  if (current?.has_title && current.title) {
+  if (current?.title) {
     return current.title
   }
 
@@ -880,104 +885,6 @@ function syncConversationListItemFromMeta(
   }
 }
 
-function normalizeHistoryMessage(message: ConversationHistoryMessage, index: number): AssistantMessage {
-  const id = `${message.id ?? `${message.role}-${index}`}`
-  const reasoningText = typeof message.reasoning_content === 'string' ? message.reasoning_content : ''
-  const normalized: AssistantMessage = {
-    id,
-    role: message.role,
-    content: message.content,
-    createdAt: message.created_at ?? new Date().toISOString(),
-    reasoning: reasoningText || undefined,
-  }
-
-  // 1. 历史消息优先使用后端持久化的思考时长，避免刷新后重新按“当前时间 - 创建时间”误算。
-  // 2. 若后端当前未返回有效时长，则清掉旧缓存，回退为“仅展示已思考文案”。
-  // 3. 同时清理 startedAt，防止历史消息误进入前端实时计时分支。
-  delete reasoningStartedAtMap[id]
-  if (typeof message.reasoning_duration_seconds === 'number' && message.reasoning_duration_seconds > 0) {
-    reasoningDurationMap[id] = Math.max(1, Math.round(message.reasoning_duration_seconds))
-  } else {
-    delete reasoningDurationMap[id]
-  }
-
-  thinkingMessageMap[id] = false
-  reasoningCollapsedMap[id] = Boolean(reasoningText.trim())
-  return normalized
-}
-
-function isSameLogicalMessage(left: AssistantMessage, right: AssistantMessage) {
-  return (
-    left.role === right.role &&
-    left.content === right.content &&
-    (left.reasoning || '') === (right.reasoning || '')
-  )
-}
-
-// mergeServerHistoryWithLocalState 将服务端历史与本地乐观消息合并为最终消息流。
-//
-// 核心策略：保留本地消息的原始顺序，用服务端数据"就地替换"匹配到的本地消息。
-//
-// 为什么不按时间戳排序？
-// 1. 聊天历史通过 Kafka 异步持久化，数据库 created_at 是消费者落库时刻，
-//    而非消息产生时刻。Kafka 消费顺序不保证与发布顺序一致，
-//    导致 assistant 消息可能比 user 消息先落库，created_at 反而更早。
-// 2. 本地消息按"用户发送 → 占位 → 流式填充"的顺序 append，天然是正确时序，
-//    任何基于时间戳的排序都会被异步落库的时钟偏差破坏。
-// 3. 因此：本地顺序权威，服务端数据用于刷新字段（如 reasoning_duration_seconds），
-//    新增的服务端消息（其他端产生）追加到尾部。
-function mergeServerHistoryWithLocalState(
-  conversationId: string,
-  history: ConversationHistoryMessage[],
-) {
-  const existingBucket = conversationMessagesMap[conversationId] ?? []
-  const normalizedHistory = history.map(normalizeHistoryMessage)
-
-  // 1. 构建服务端消息的快速查找索引：按 ID 和按角色+内容两种方式。
-  const serverById = new Map(normalizedHistory.map((m) => [m.id, m]))
-  const usedServerIds = new Set<string>()
-
-  // 2. 按本地消息的原始顺序逐一处理：
-  //    - ID 精确命中 → 用服务端数据替换，保持当前位置；
-  //    - 临时 ID 按语义匹配 → 同样替换，保持当前位置；
-  //    - 无法匹配 → 保留为乐观消息，保持当前位置。
-  const result: AssistantMessage[] = []
-  for (const localMsg of existingBucket) {
-    // 2.1 先按 ID 精确匹配（非临时 ID 的消息，如历史加载过的服务端消息）。
-    const exactMatch = serverById.get(localMsg.id)
-    if (exactMatch && !usedServerIds.has(exactMatch.id)) {
-      result.push(exactMatch)
-      usedServerIds.add(exactMatch.id)
-      continue
-    }
-
-    // 2.2 临时 ID（如 user-1700000000000-abc）走语义匹配：
-    //     同一角色 + 同一内容的消息视为同一条逻辑消息。
-    if (isLocalEphemeralMessageId(localMsg.id)) {
-      const logicalMatch = normalizedHistory.find(
-        (sm) => !usedServerIds.has(sm.id) && isSameLogicalMessage(sm, localMsg),
-      )
-      if (logicalMatch) {
-        result.push(logicalMatch)
-        usedServerIds.add(logicalMatch.id)
-        continue
-      }
-    }
-
-    // 2.3 无法匹配服务端消息时保留本地乐观消息（流式中的占位 / 网络延迟未落库）。
-    result.push(localMsg)
-  }
-
-  // 3. 本地不存在的服务端消息（如其他设备发送的）追加到尾部，按服务端返回顺序排列。
-  for (const serverMsg of normalizedHistory) {
-    if (!usedServerIds.has(serverMsg.id)) {
-      result.push(serverMsg)
-    }
-  }
-
-  return result
-}
-
 function renderMessageMarkdown(content: string) {
   return renderMarkdown(content)
 }
@@ -1281,7 +1188,6 @@ function shouldShowDisplayReasoningBox(dm: DisplayMessage): boolean {
 }
 
 function shouldShowDisplayAnsweringIndicator(dm: DisplayMessage): boolean {
-  if (dm.content) return false
   return isDisplayStreaming(dm) && dm.sources.every(m => thinkingMessageMap[m.id] !== true)
 }
 
@@ -1582,6 +1488,142 @@ function toggleHistoryPanel() {
   historyExpanded.value = !historyExpanded.value
 }
 
+function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[]) {
+  const result: AssistantMessage[] = []
+  let currentAssistantMessage: AssistantMessage | null = null
+
+  // 清理该会话旧的辅助状态（工具、排程卡片等）
+  // 注意：此处不清理 bucket 容器，只清理每个消息关联的映射
+  const existingMessages = conversationMessagesMap[conversationId] || []
+  existingMessages.forEach(msg => {
+    if (msg.role === 'assistant') {
+      clearToolTraceState(msg.id)
+    }
+  })
+
+  for (const event of events) {
+    const kind = String(event.kind || '').toLowerCase()
+    const rawRole = String(event.role || '').toLowerCase()
+    
+    // 如果 role 已明确为 user，或者 kind 包含 user 关键字
+    let isUser = rawRole === 'user' || kind.includes('user')
+    // 终极兜底：只要不是明确的五大助手专属事件，就将其视为用户的消息回合边界
+    if (!isUser) {
+      const knownAssistantKinds = ['assistant_text', 'tool_call', 'tool_result', 'confirm_request', 'schedule_completed']
+      if (!knownAssistantKinds.includes(kind)) {
+        isUser = true
+      }
+    }
+    if (isUser) {
+      currentAssistantMessage = null
+      result.push({
+        id: `t-${event.id}`,
+        role: 'user',
+        content: event.content || '',
+        createdAt: event.created_at,
+      })
+      continue
+    }
+
+    // 助手事件
+    if (!currentAssistantMessage) {
+      currentAssistantMessage = {
+        id: `t-${event.id}`,
+        role: 'assistant',
+        content: '',
+        createdAt: event.created_at,
+        reasoning: '',
+      }
+      result.push(currentAssistantMessage)
+      thinkingMessageMap[currentAssistantMessage.id] = false
+      reasoningCollapsedMap[currentAssistantMessage.id] = true
+    }
+
+    const mid = currentAssistantMessage.id
+
+    switch (event.kind) {
+      case 'assistant_text':
+        if (event.content) {
+          const newContent = event.content
+          const oldContent = currentAssistantMessage.content || ''
+          let chunk = newContent
+          if (newContent.startsWith(oldContent)) {
+            chunk = newContent.slice(oldContent.length)
+          }
+          
+          if (chunk) {
+            currentAssistantMessage.content += chunk
+            // 同时存入 blocks 以支持和工具交错显示
+            appendAssistantContentChunk(mid, chunk)
+          }
+        }
+        
+        if (event.payload?.reasoning_content) {
+          const newReasoning = event.payload.reasoning_content
+          const oldReasoning = currentAssistantMessage.reasoning || ''
+          let reasoningChunk = newReasoning
+          if (newReasoning.startsWith(oldReasoning)) {
+            reasoningChunk = newReasoning.slice(oldReasoning.length)
+          }
+          
+          if (reasoningChunk) {
+            currentAssistantMessage.reasoning = oldReasoning + reasoningChunk
+            // 记录推理块的 seq 环境
+            if (!assistantReasoningSeqMap[mid]) {
+              assistantReasoningSeqMap[mid] = event.seq
+            }
+          }
+        }
+        break
+      
+      case 'tool_call':
+        if (event.payload?.tool) {
+          const t = event.payload.tool
+          appendToolTraceEvent(mid, mapToolEventState(t.status), t.summary, t.arguments_preview, t.name)
+        }
+        break
+      
+      case 'tool_result':
+        if (event.payload?.tool) {
+          const t = event.payload.tool
+          appendToolTraceEvent(mid, mapToolEventState(t.status), t.summary, t.arguments_preview, t.name)
+        }
+        break
+
+      case 'confirm_request':
+        confirmOnlyStreamMap[mid] = true
+        // 记录确认卡片
+        if (event.payload?.confirm) {
+          // 这里我们只是记录，由 computed 判断是否需要弹出
+          // 实际上 applyConfirmOverlay 会立即修改全局状态，
+          // 在刷新恢复场景下，我们只需设置状态即可。
+        }
+        break
+
+      case 'schedule_completed':
+        // 标记该消息需要排程卡片
+        // 详情通过 schedule_completed 事件触发的 getSchedulePreview 异步填充
+        void (async () => {
+          try {
+            const preview = await getSchedulePreview(conversationId)
+            scheduleResultMap[mid] = preview
+          } catch {
+            // 吞掉，可能是过期的预览
+          }
+        })()
+        break
+    }
+  }
+
+  // 特殊逻辑：如果最后一条是 confirm_request，则激活弹出层
+  const lastEvent = events[events.length - 1]
+  if (lastEvent?.kind === 'confirm_request' && lastEvent.payload?.confirm) {
+    applyConfirmOverlay(lastEvent.payload.confirm)
+  }
+
+  return result
+}
+
 async function loadConversationMessages(conversationId: string, forceReload = false) {
   if (!conversationId) {
     return
@@ -1592,10 +1634,11 @@ async function loadConversationMessages(conversationId: string, forceReload = fa
   }
 
   try {
-    const history = await getConversationHistory(conversationId)
-    conversationMessagesMap[conversationId] = mergeServerHistoryWithLocalState(conversationId, history)
+    const events = await getConversationTimeline(conversationId)
+    conversationMessagesMap[conversationId] = rebuildStateFromTimeline(conversationId, events)
     unavailableHistoryMap[conversationId] = false
-  } catch {
+  } catch (error) {
+    console.error('Failed to load timeline:', error)
     unavailableHistoryMap[conversationId] = true
     ensureConversationBucket(conversationId)
   }
@@ -1757,11 +1800,13 @@ async function sendConfirmAction(action: 'approve' | 'reject' | 'cancel') {
   const interactionId = confirmOverlayState.interactionId
   if (!interactionId) return
 
-  // 1. 立即关闭覆盖层，避免用户重复点击。
-  // 2. 构造 resume 特殊载荷，复用 sendMessageInternal 发送到聊天接口。
+  // 1. 立即关闭覆盖层，并标记为“已手动处理”。
+  // 这样在同一轮流式响应中，若后端重复推送相同的 interactionId，也不会再误拉起层。
   confirmOverlayState.visible = false
+  confirmOverlayState.manuallyClosed = true
+  const actionText = action === 'approve' ? '确认执行' : (action === 'reject' ? '拒绝执行' : '取消操作')
   await sendMessageInternal({
-    preset: '',
+    preset: actionText,
     bypassConfirmOverlayCheck: true,
     requestExtra: {
       resume: {
@@ -1781,6 +1826,7 @@ async function submitConfirmRejectMessage() {
   if (!interactionId) return
 
   confirmOverlayState.visible = false
+  confirmOverlayState.manuallyClosed = true
   await sendMessageInternal({
     preset: text,
     bypassConfirmOverlayCheck: true,
@@ -1829,14 +1875,19 @@ function applyConfirmOverlay(confirmPayload?: StreamConfirmPayload) {
 function buildChatRequestExtra(
   planningTaskClassIds: number[] = [],
 ): ChatRequestExtra | undefined {
-  // retry 机制已整体下线，这里只负责把智能编排所需的 task_class_ids 透传给后端。
-  if (planningTaskClassIds.length <= 0) {
-    return undefined
+  const extra: ChatRequestExtra = {}
+  
+  // 1. 任务类别过滤：将智能编排所需的 task_class_ids 透传给后端。
+  if (planningTaskClassIds.length > 0) {
+    extra.task_class_ids = [...planningTaskClassIds]
   }
 
-  return {
-    task_class_ids: [...planningTaskClassIds],
+  // 2. 执行模式控制：若开启“自动执行”，则透传 always_execute 标志，跳过工具调用确认逻辑。
+  if (selectedExecutionMode.value === 'always') {
+    extra.always_execute = true
   }
+
+  return Object.keys(extra).length > 0 ? extra : undefined
 }
 
 function handlePlanningSelectionApplied(taskClassIds: number[]) {
@@ -2185,7 +2236,8 @@ interface SendMessageOptions {
 // 3. 失败时保留用户已发文本，只补齐占位消息兜底文案，确保交互可感知。
 async function sendMessageInternal(options: SendMessageOptions = {}) {
   const text = (options.preset ?? messageInput.value).trim()
-  if (!text || chatLoading.value) {
+  const isResume = Boolean(options.requestExtra?.resume)
+  if ((!text && !isResume) || chatLoading.value) {
     return
   }
 
@@ -2410,7 +2462,7 @@ onBeforeUnmount(() => {
                   @click="selectConversation(item.conversation_id)"
                 >
                   <span class="assistant-history__item-title">
-                    {{ item.has_title && item.title ? item.title : '未命名会话' }}
+                    {{ item.title || '未命名会话' }}
                   </span>
                   <small v-if="historyExpanded" class="assistant-history__item-time">
                     {{ formatConversationTime(item.last_message_at || item.created_at) }}
@@ -2654,7 +2706,7 @@ onBeforeUnmount(() => {
                 </div>
               </TransitionGroup>
 
-              <div v-if="dm.content" class="chat-message__action-bar">
+              <div v-if="dm.content && !isDisplayStreaming(dm)" class="chat-message__action-bar">
                 <button
                   type="button"
                   class="chat-message__icon-button"
@@ -2789,6 +2841,21 @@ onBeforeUnmount(() => {
                     </el-select>
                   </div>
 
+                  <div class="assistant-toolbar__pill assistant-toolbar__pill--select assistant-toolbar__pill--execution-mode">
+                    <span class="assistant-toolbar__select-label">模式</span>
+                    <el-select
+                      v-model="selectedExecutionMode"
+                      class="assistant-toolbar__select-box assistant-toolbar__select-box--execution"
+                      size="small"
+                      popper-class="assistant-thinking-select-panel"
+                      placement="top-start"
+                      :teleported="true"
+                    >
+                      <el-option value="manual" label="手动确认" />
+                      <el-option value="always" label="自动执行" />
+                    </el-select>
+                  </div>
+
 
                   <ContextWindowMeter
                     class="assistant-toolbar__context-meter"
@@ -2856,7 +2923,7 @@ onBeforeUnmount(() => {
 
   <!-- 日程排程方案精排弹窗 -->
   <ScheduleFineTuneModal
-    v-if="isFineTuneModalVisible && activeFineTuneData"
+    :visible="isFineTuneModalVisible"
     :preview-data="activeFineTuneData"
     @close="closeFineTuneModal"
     @saved="handleScheduleSaved"
@@ -3433,7 +3500,8 @@ onBeforeUnmount(() => {
   display: none !important;
 }
 
-.assistant-toolbar__pill--ds-thinking {
+.assistant-toolbar__pill--ds-thinking,
+.assistant-toolbar__pill--execution-mode {
   height: 32px;
   padding: 0 4px 0 10px;
   background: #f1f5f9;
@@ -3446,7 +3514,8 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
-.assistant-toolbar__pill--ds-thinking:hover {
+.assistant-toolbar__pill--ds-thinking:hover,
+.assistant-toolbar__pill--execution-mode:hover {
   background: #eef2f6;
 }
 
@@ -3456,8 +3525,12 @@ onBeforeUnmount(() => {
   font-weight: 700;
 }
 
-.assistant-toolbar__select-box {
-  width: 64px;
+.assistant-toolbar__select-box--thinking {
+  width: 58px;
+}
+
+.assistant-toolbar__select-box--execution {
+  width: 110px;
 }
 
 .assistant-toolbar__select-box :deep(.el-select__wrapper) {
@@ -4039,8 +4112,12 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.assistant-toolbar__select-box {
-  width: 68px;
+.assistant-toolbar__select-box--thinking {
+  width: 58px;
+}
+
+.assistant-toolbar__select-box--execution {
+  width: 110px;
 }
 
 .assistant-toolbar__select-box :deep(.el-select__wrapper) {
