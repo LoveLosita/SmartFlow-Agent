@@ -10,6 +10,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/model"
 	newagentconv "github.com/LoveLosita/smartflow/backend/newAgent/conv"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
+	newagentshared "github.com/LoveLosita/smartflow/backend/newAgent/shared"
 	"github.com/LoveLosita/smartflow/backend/respond"
 )
 
@@ -115,10 +116,10 @@ func (s *AgentService) refreshSchedulePreviewAfterStateSave(
 	if existingPreview != nil {
 		preview.TraceID = strings.TrimSpace(existingPreview.TraceID)
 		if len(existingPreview.CandidatePlans) > 0 {
-			preview.CandidatePlans = cloneWeekSchedules(existingPreview.CandidatePlans)
+			preview.CandidatePlans = newagentshared.CloneWeekSchedules(existingPreview.CandidatePlans)
 		}
 		if len(existingPreview.AllocatedItems) > 0 {
-			preview.AllocatedItems = cloneTaskClassItems(existingPreview.AllocatedItems)
+			preview.AllocatedItems = newagentshared.CloneTaskClassItems(existingPreview.AllocatedItems)
 		}
 		if len(preview.TaskClassIDs) == 0 && len(existingPreview.TaskClassIDs) > 0 {
 			preview.TaskClassIDs = append([]int(nil), existingPreview.TaskClassIDs...)

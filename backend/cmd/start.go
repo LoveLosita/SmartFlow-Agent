@@ -6,7 +6,6 @@ import (
 	"log"
 	"time"
 
-	agentnode "github.com/LoveLosita/smartflow/backend/agent/node"
 	"github.com/LoveLosita/smartflow/backend/api"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
@@ -20,6 +19,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/middleware"
 	"github.com/LoveLosita/smartflow/backend/model"
 	newagentconv "github.com/LoveLosita/smartflow/backend/newAgent/conv"
+	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 	"github.com/LoveLosita/smartflow/backend/newAgent/tools/web"
 	"github.com/LoveLosita/smartflow/backend/pkg"
@@ -201,7 +201,7 @@ func Start() {
 		TaskQuery: newagenttools.TaskQueryDeps{
 			// 调用目的：桥接新工具参数到旧 service 层查询能力，复用已有的过滤/排序/紧急度提升逻辑。
 			QueryTasks: func(ctx context.Context, userID int, params newagenttools.TaskQueryParams) ([]newagenttools.TaskQueryResult, error) {
-				req := agentnode.TaskQueryRequest{
+				req := newagentmodel.TaskQueryRequest{
 					UserID:           userID,
 					Quadrant:         params.Quadrant,
 					SortBy:           params.SortBy,

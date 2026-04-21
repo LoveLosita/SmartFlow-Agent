@@ -1,4 +1,4 @@
-package agentchat
+package agentsvc
 
 import (
 	"context"
@@ -6,19 +6,17 @@ import (
 	"strings"
 	"time"
 
-	agentllm "github.com/LoveLosita/smartflow/backend/agent/llm"
-	agentstream "github.com/LoveLosita/smartflow/backend/agent/stream"
+	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
+	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
 	"github.com/cloudwego/eino-ext/components/model/ark"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 	arkModel "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
 )
 
-// StreamChat 负责模型流式输出，并在关键节点打点：
-// 1) 流连接建立（llm.Stream 返回）
-// 2) 首包到达（首字延迟）
-// 3) 流式输出结束
-func StreamChat(
+// streamChatFallback 是 graph 执行失败时的降级流式聊天。
+// 内联了旧 agentchat.StreamChat 的核心逻辑，不再依赖 agent/ 包。
+func (s *AgentService) streamChatFallback(
 	ctx context.Context,
 	llm *ark.ChatModel,
 	modelName string,
@@ -26,15 +24,10 @@ func StreamChat(
 	ifThinking bool,
 	chatHistory []*schema.Message,
 	outChan chan<- string,
-	traceID string,
-	chatID string,
-	requestStart time.Time,
 	reasoningStartAt *time.Time,
 ) (string, string, int, *schema.TokenUsage, error) {
-	/*callStart := time.Now()*/
-
-	messages := make([]*schema.Message, 0)
-	messages = append(messages, schema.SystemMessage(SystemPrompt))
+	messages := make([]*schema.Message, 0, len(chatHistory)+2)
+	messages = append(messages, schema.SystemMessage(newagentprompt.SystemPrompt))
 	if len(chatHistory) > 0 {
 		messages = append(messages, chatHistory...)
 	}
@@ -47,52 +40,40 @@ func StreamChat(
 		thinking = &arkModel.Thinking{Type: arkModel.ThinkingTypeDisabled}
 	}
 
-	/*connectStart := time.Now()*/
-	reader, err := llm.Stream(ctx, messages, ark.WithThinking(thinking))
-	if err != nil {
-		return "", "", 0, nil, err
-	}
-	defer reader.Close()
-
 	if strings.TrimSpace(modelName) == "" {
 		modelName = "smartflow-worker"
 	}
 	requestID := "chatcmpl-" + uuid.NewString()
 	created := time.Now().Unix()
 	firstChunk := true
-	chunkCount := 0
-	var tokenUsage *schema.TokenUsage
+
 	var localReasoningStartAt *time.Time
 	if reasoningStartAt != nil && !reasoningStartAt.IsZero() {
 		startCopy := reasoningStartAt.In(time.Local)
 		localReasoningStartAt = &startCopy
 	}
 	var reasoningEndAt *time.Time
-	/*streamRecvStart := time.Now()
 
-	log.Printf("打点|流连接建立|trace_id=%s|chat_id=%s|request_id=%s|本步耗时_ms=%d|请求累计_ms=%d|history_len=%d",
-		traceID,
-		chatID,
-		requestID,
-		time.Since(connectStart).Milliseconds(),
-		time.Since(requestStart).Milliseconds(),
-		len(chatHistory),
-	)*/
+	reader, err := llm.Stream(ctx, messages, ark.WithThinking(thinking))
+	if err != nil {
+		return "", "", 0, nil, err
+	}
+	defer reader.Close()
 
 	var fullText strings.Builder
 	var reasoningText strings.Builder
+	var tokenUsage *schema.TokenUsage
 	for {
-		chunk, err := reader.Recv()
-		if err == io.EOF {
+		chunk, recvErr := reader.Recv()
+		if recvErr == io.EOF {
 			break
 		}
-		if err != nil {
-			return "", "", 0, nil, err
+		if recvErr != nil {
+			return "", "", 0, nil, recvErr
 		}
 
-		// 优先记录模型真实 usage（通常在尾块返回，部分模型也可能中途返回）。
 		if chunk != nil && chunk.ResponseMeta != nil && chunk.ResponseMeta.Usage != nil {
-			tokenUsage = agentllm.MergeUsage(tokenUsage, chunk.ResponseMeta.Usage)
+			tokenUsage = newagentstream.MergeUsage(tokenUsage, chunk.ResponseMeta.Usage)
 		}
 
 		if chunk != nil {
@@ -108,43 +89,22 @@ func StreamChat(
 			reasoningText.WriteString(chunk.ReasoningContent)
 		}
 
-		payload, err := agentstream.ToOpenAIStream(chunk, requestID, modelName, created, firstChunk)
-		if err != nil {
-			return "", "", 0, nil, err
+		payload, payloadErr := newagentstream.ToOpenAIStream(chunk, requestID, modelName, created, firstChunk)
+		if payloadErr != nil {
+			return "", "", 0, nil, payloadErr
 		}
 		if payload != "" {
 			outChan <- payload
-			chunkCount++
 			firstChunk = false
-			/*if firstChunk {
-				log.Printf("打点|首包到达|trace_id=%s|chat_id=%s|request_id=%s|本步耗时_ms=%d|请求累计_ms=%d",
-					traceID,
-					chatID,
-					requestID,
-					time.Since(streamRecvStart).Milliseconds(),
-					time.Since(requestStart).Milliseconds(),
-				)
-				firstChunk = false
-			}*/
 		}
 	}
 
-	finishChunk, err := agentstream.ToOpenAIFinishStream(requestID, modelName, created)
-	if err != nil {
-		return "", "", 0, nil, err
+	finishChunk, finishErr := newagentstream.ToOpenAIFinishStream(requestID, modelName, created)
+	if finishErr != nil {
+		return "", "", 0, nil, finishErr
 	}
 	outChan <- finishChunk
 	outChan <- "[DONE]"
-
-	/*log.Printf("打点|流式输出结束|trace_id=%s|chat_id=%s|request_id=%s|chunks=%d|reply_chars=%d|本步耗时_ms=%d|请求累计_ms=%d",
-		traceID,
-		chatID,
-		requestID,
-		chunkCount,
-		len(fullText.String()),
-		time.Since(callStart).Milliseconds(),
-		time.Since(requestStart).Milliseconds(),
-	)*/
 
 	reasoningDurationSeconds := 0
 	if localReasoningStartAt != nil {

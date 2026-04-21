@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	agentchat "github.com/LoveLosita/smartflow/backend/agent/chat"
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
@@ -17,6 +16,7 @@ import (
 	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	"github.com/LoveLosita/smartflow/backend/model"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
+	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
@@ -318,7 +318,7 @@ func (s *AgentService) runNormalChatFlow(
 
 	// 3. 计算本次请求可用的历史 token 预算，并执行历史裁剪。
 	//    这样可以在上下文增长时稳定控制模型窗口，避免超长上下文引发报错或高延迟。
-	historyBudget := pkg.HistoryTokenBudgetByModel(resolvedModelName, agentchat.SystemPrompt, userMessage)
+	historyBudget := pkg.HistoryTokenBudgetByModel(resolvedModelName, newagentprompt.SystemPrompt, userMessage)
 	trimmedHistory, totalHistoryTokens, keptHistoryTokens, droppedCount := pkg.TrimHistoryByTokenBudget(chatHistory, historyBudget)
 	chatHistory = trimmedHistory
 
@@ -346,7 +346,7 @@ func (s *AgentService) runNormalChatFlow(
 
 	// 6. 执行真正的流式聊天。
 	//    fullText 用于后续写 Redis/持久化，outChan 用于把流片段实时推给前端。
-	fullText, reasoningText, reasoningDurationSeconds, streamUsage, streamErr := agentchat.StreamChat(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, chatHistory, outChan, traceID, chatID, requestStart, assistantReasoningStartedAt)
+	fullText, reasoningText, reasoningDurationSeconds, streamUsage, streamErr := s.streamChatFallback(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, chatHistory, outChan, assistantReasoningStartedAt)
 	if streamErr != nil {
 		pushErrNonBlocking(errChan, streamErr)
 		return

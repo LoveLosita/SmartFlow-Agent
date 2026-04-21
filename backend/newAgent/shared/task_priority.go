@@ -1,4 +1,4 @@
-package agentmodel
+package newagentshared
 
 const (
 	TaskPriorityImportantUrgent     = 1
@@ -7,20 +7,18 @@ const (
 	TaskPriorityComplexNotImportant = 4
 )
 
-// IsValidTaskPriority 用于校验任务优先级是否合法。
-//
-// 职责边界：
-// 1. 只负责判断 priority 是否落在系统支持的 1~4 范围内。
-// 2. 不负责把自然语言映射成优先级，也不负责做业务兜底推断。
+// QuickNote 优先级别名，保持与旧 agent/model 命名兼容。
+const (
+	QuickNotePriorityImportantUrgent     = TaskPriorityImportantUrgent
+	QuickNotePriorityImportantNotUrgent  = TaskPriorityImportantNotUrgent
+	QuickNotePrioritySimpleNotImportant  = TaskPrioritySimpleNotImportant
+	QuickNotePriorityComplexNotImportant = TaskPriorityComplexNotImportant
+)
+
 func IsValidTaskPriority(priority int) bool {
 	return priority >= TaskPriorityImportantUrgent && priority <= TaskPriorityComplexNotImportant
 }
 
-// PriorityLabelCN 返回任务优先级对应的中文标签。
-//
-// 职责边界：
-// 1. 只负责“优先级枚举 -> 中文展示文案”的稳定映射。
-// 2. 不负责国际化、多语言切换或业务规则解释。
 func PriorityLabelCN(priority int) string {
 	switch priority {
 	case TaskPriorityImportantUrgent:

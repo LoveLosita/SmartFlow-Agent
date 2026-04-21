@@ -6,8 +6,7 @@ import (
 	"strings"
 	"time"
 
-	agentmodel "github.com/LoveLosita/smartflow/backend/agent/model"
-	agentnode "github.com/LoveLosita/smartflow/backend/agent/node"
+	newagentshared "github.com/LoveLosita/smartflow/backend/newAgent/shared"
 	"github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
 )
 
@@ -40,11 +39,11 @@ type QuickNoteCreateResult struct {
 func quickNoteFallbackPriority(deadline *time.Time) int {
 	if deadline != nil {
 		if time.Until(*deadline) <= 48*time.Hour {
-			return agentmodel.QuickNotePriorityImportantUrgent
+			return newagentshared.QuickNotePriorityImportantUrgent
 		}
-		return agentmodel.QuickNotePriorityImportantNotUrgent
+		return newagentshared.QuickNotePriorityImportantNotUrgent
 	}
-	return agentmodel.QuickNotePrioritySimpleNotImportant
+	return newagentshared.QuickNotePrioritySimpleNotImportant
 }
 
 // NewQuickNoteToolHandler 创建 quick_note_create 工具的 handler 闭包。
@@ -81,7 +80,7 @@ func NewQuickNoteToolHandler(deps QuickNoteDeps) ToolHandler {
 			raw = strings.TrimSpace(raw)
 			if raw != "" {
 				// 调用目的：复用旧链路成熟的中文相对时间解析器，支持"明天下午3点"等格式。
-				parsed, err := agentnode.ParseOptionalDeadline(raw)
+				parsed, err := newagentshared.ParseOptionalDeadline(raw)
 				if err != nil {
 					return fmt.Sprintf("工具调用失败：截止时间格式无法解析（%s）。支持格式：2026-04-20 18:00、明天下午3点、下周一上午9点。", err)
 				}
@@ -94,7 +93,7 @@ func NewQuickNoteToolHandler(deps QuickNoteDeps) ToolHandler {
 		if pg, ok := args["priority_group"].(float64); ok {
 			priorityGroup = int(pg)
 		}
-		if !agentmodel.IsValidTaskPriority(priorityGroup) {
+		if !newagentshared.IsValidTaskPriority(priorityGroup) {
 			priorityGroup = quickNoteFallbackPriority(deadline)
 		}
 
@@ -108,10 +107,10 @@ func NewQuickNoteToolHandler(deps QuickNoteDeps) ToolHandler {
 		}
 
 		// 6. 组装结构化返回，包含 banter 提示引导 LLM 自然生成调侃。
-		priorityLabel := agentmodel.PriorityLabelCN(priorityGroup)
+		priorityLabel := newagentshared.PriorityLabelCN(priorityGroup)
 		deadlineStr := ""
 		if deadline != nil {
-			deadlineStr = deadline.In(agentnode.QuickNoteLocation()).Format("2006-01-02 15:04")
+			deadlineStr = deadline.In(newagentshared.ShanghaiLocation()).Format("2006-01-02 15:04")
 		}
 
 		result := QuickNoteCreateResult{

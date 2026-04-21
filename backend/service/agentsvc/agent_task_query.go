@@ -7,44 +7,12 @@ import (
 	"strings"
 	"time"
 
-	agentgraph "github.com/LoveLosita/smartflow/backend/agent/graph"
-	agentmodel "github.com/LoveLosita/smartflow/backend/agent/model"
-	agentnode "github.com/LoveLosita/smartflow/backend/agent/node"
 	"github.com/LoveLosita/smartflow/backend/model"
+	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
-	"github.com/cloudwego/eino-ext/components/model/ark"
 )
 
-func (s *AgentService) runTaskQueryFlow(
-	ctx context.Context,
-	selectedModel *ark.ChatModel,
-	userMessage string,
-	userID int,
-	emitStage func(stage, detail string),
-) (string, error) {
-	if s == nil || s.taskRepo == nil {
-		return "", errors.New("task query service dependency is not ready")
-	}
-	if selectedModel == nil {
-		return "", errors.New("task query model is nil")
-	}
-
-	requestNow := time.Now().In(time.Local).Format("2006-01-02 15:04")
-	state := agentmodel.NewTaskQueryState(strings.TrimSpace(userMessage), requestNow, agentmodel.DefaultTaskQueryReflectRetry)
-	return agentgraph.RunTaskQueryGraph(ctx, agentnode.TaskQueryGraphRunInput{
-		Model:     selectedModel,
-		State:     state,
-		EmitStage: emitStage,
-		Deps: agentnode.TaskQueryToolDeps{
-			QueryTasks: func(ctx context.Context, req agentnode.TaskQueryRequest) ([]agentnode.TaskQueryTaskRecord, error) {
-				req.UserID = userID
-				return s.QueryTasksForTool(ctx, req)
-			},
-		},
-	})
-}
-
-func (s *AgentService) QueryTasksForTool(ctx context.Context, req agentnode.TaskQueryRequest) ([]agentnode.TaskQueryTaskRecord, error) {
+func (s *AgentService) QueryTasksForTool(ctx context.Context, req newagentmodel.TaskQueryRequest) ([]newagentmodel.TaskQueryTaskRecord, error) {
 	_ = ctx
 	if req.UserID <= 0 {
 		return nil, errors.New("invalid user_id in task query")
@@ -56,7 +24,7 @@ func (s *AgentService) QueryTasksForTool(ctx context.Context, req agentnode.Task
 	tasks, err := s.taskRepo.GetTasksByUserID(req.UserID)
 	if err != nil {
 		if errors.Is(err, respond.UserTasksEmpty) {
-			return make([]agentnode.TaskQueryTaskRecord, 0), nil
+			return make([]newagentmodel.TaskQueryTaskRecord, 0), nil
 		}
 		return nil, err
 	}
@@ -77,9 +45,9 @@ func (s *AgentService) QueryTasksForTool(ctx context.Context, req agentnode.Task
 		filtered = filtered[:req.Limit]
 	}
 
-	records := make([]agentnode.TaskQueryTaskRecord, 0, len(filtered))
+	records := make([]newagentmodel.TaskQueryTaskRecord, 0, len(filtered))
 	for _, task := range filtered {
-		records = append(records, agentnode.TaskQueryTaskRecord{
+		records = append(records, newagentmodel.TaskQueryTaskRecord{
 			ID:                 task.ID,
 			Title:              task.Title,
 			PriorityGroup:      task.Priority,
@@ -106,7 +74,7 @@ func applyReadTimeUrgencyPromotion(task *model.Task, now time.Time) {
 	}
 }
 
-func taskMatchesQueryFilter(task model.Task, req agentnode.TaskQueryRequest) bool {
+func taskMatchesQueryFilter(task model.Task, req newagentmodel.TaskQueryRequest) bool {
 	if !req.IncludeCompleted && task.IsCompleted {
 		return false
 	}
@@ -130,7 +98,7 @@ func taskMatchesQueryFilter(task model.Task, req agentnode.TaskQueryRequest) boo
 	return true
 }
 
-func sortTasksForQuery(tasks []model.Task, req agentnode.TaskQueryRequest) {
+func sortTasksForQuery(tasks []model.Task, req newagentmodel.TaskQueryRequest) {
 	if len(tasks) <= 1 {
 		return
 	}

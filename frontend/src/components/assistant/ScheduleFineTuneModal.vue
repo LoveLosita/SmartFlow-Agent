@@ -126,7 +126,7 @@ async function handleOfficialSave() {
     })
 
     const promises = Array.from(groups.entries()).map(([classId, groupItems]) => 
-      applyBatchIntoSchedule(classId, groupItems, officialSaveIdempotencyKey.value)
+      applyBatchIntoSchedule(classId, groupItems, `${officialSaveIdempotencyKey.value}-${classId}`)
     )
 
     await Promise.all(promises)

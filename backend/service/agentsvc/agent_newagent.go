@@ -18,9 +18,9 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/spf13/viper"
 
-	agentchat "github.com/LoveLosita/smartflow/backend/agent/chat"
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/model"
+	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/LoveLosita/smartflow/backend/respond"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
@@ -393,7 +393,7 @@ func (s *AgentService) loadConversationContext(ctx context.Context, chatID, user
 	}
 
 	// 构造 ConversationContext。
-	conversationContext := newagentmodel.NewConversationContext(agentchat.SystemPrompt)
+	conversationContext := newagentmodel.NewConversationContext(newagentprompt.SystemPrompt)
 	if history != nil {
 		conversationContext.ReplaceHistory(history)
 	}
