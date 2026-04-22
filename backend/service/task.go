@@ -168,21 +168,25 @@ func (ts *TaskService) UndoCompleteTask(ctx context.Context, req *model.UserUndo
 // 2. 真实平移由异步消费者条件更新 DB；
 // 3. DB 更新后由 cache_deleter 自动删缓存，下一次读取自然拿到新状态。
 func (ts *TaskService) GetUserTasks(ctx context.Context, userID int) ([]model.GetUserTaskResp, error) {
-	// 1. 读取原始任务模型（缓存优先，DB 兜底）。
+	derivedTasks, err := ts.GetTasksWithUrgencyPromotion(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return conv.ModelToGetUserTasksResp(derivedTasks), nil
+}
+
+// GetTasksWithUrgencyPromotion 读取用户任务并应用读时紧急性提升 + 异步落库触发。
+//
+// 统一入口，供前端查询（GetUserTasks）和 LLM 工具查询（QueryTasksForTool）复用。
+// 调用方不应假设 DB 已更新——持久化是异步的。
+func (ts *TaskService) GetTasksWithUrgencyPromotion(ctx context.Context, userID int) ([]model.Task, error) {
 	rawTasks, err := ts.getRawUserTasks(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-
-	// 2. 读时派生：本次请求内把“已到线任务”映射到紧急象限，同时收集待异步落库任务 ID。
 	derivedTasks, duePromoteTaskIDs := deriveTaskUrgencyForRead(rawTasks, time.Now())
-
-	// 3. 非阻断触发异步平移事件：发布失败不影响本次查询返回。
 	ts.tryEnqueueTaskUrgencyPromote(ctx, userID, duePromoteTaskIDs)
-
-	// 4. 最后统一走 conv 转 DTO，避免 API 层直接依赖内部模型。
-	response := conv.ModelToGetUserTasksResp(derivedTasks)
-	return response, nil
+	return derivedTasks, nil
 }
 
 // getRawUserTasks 读取“原始任务模型”。

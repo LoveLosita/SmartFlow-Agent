@@ -151,7 +151,7 @@ func Start() {
 	courseService := service.NewCourseService(courseRepo, scheduleRepo)
 	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo, manager)
 	scheduleService := service.NewScheduleService(scheduleRepo, userRepo, taskClassRepo, manager, cacheRepo)
-	agentService := service.NewAgentServiceWithSchedule(aiHub, agentRepo, taskRepo, cacheRepo, agentCacheRepo, eventBus, scheduleService)
+	agentService := service.NewAgentServiceWithSchedule(aiHub, agentRepo, taskRepo, cacheRepo, agentCacheRepo, eventBus, scheduleService, taskSv)
 
 	// newAgent 依赖接线。
 	agentService.SetAgentStateStore(dao.NewAgentStateStoreAdapter(cacheRepo))

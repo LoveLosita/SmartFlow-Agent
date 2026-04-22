@@ -36,6 +36,7 @@ func NewAgentServiceWithSchedule(
 	agentRedis *dao.AgentCache,
 	eventPublisher outboxinfra.EventPublisher,
 	scheduleSvc *ScheduleService,
+	taskSvc *TaskService,
 ) *AgentService {
 	svc := agentsvc.NewAgentService(aiHub, repo, taskRepo, cacheDAO, agentRedis, eventPublisher)
 
@@ -44,6 +45,11 @@ func NewAgentServiceWithSchedule(
 		svc.SmartPlanningMultiRawFunc = scheduleSvc.SmartPlanningMultiRaw
 		svc.HybridScheduleWithPlanMultiFunc = scheduleSvc.HybridScheduleWithPlanMulti
 		svc.ResolvePlanningWindowFunc = scheduleSvc.ResolvePlanningWindowByTaskClasses
+	}
+
+	// 注入任务紧急性提升依赖：复用 TaskService 的统一提升 + outbox 投递链路。
+	if taskSvc != nil {
+		svc.GetTasksWithUrgencyPromotionFunc = taskSvc.GetTasksWithUrgencyPromotion
 	}
 
 	return svc

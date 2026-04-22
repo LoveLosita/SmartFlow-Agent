@@ -13,31 +13,47 @@ import (
 )
 
 func (s *AgentService) QueryTasksForTool(ctx context.Context, req newagentmodel.TaskQueryRequest) ([]newagentmodel.TaskQueryTaskRecord, error) {
-	_ = ctx
 	if req.UserID <= 0 {
 		return nil, errors.New("invalid user_id in task query")
 	}
-	if s.taskRepo == nil {
-		return nil, errors.New("task repository is nil")
-	}
 
-	tasks, err := s.taskRepo.GetTasksByUserID(req.UserID)
-	if err != nil {
-		if errors.Is(err, respond.UserTasksEmpty) {
-			return make([]newagentmodel.TaskQueryTaskRecord, 0), nil
+	var tasks []model.Task
+	var err error
+
+	// 优先使用统一提升链路（含缓存读取 + 读时派生 + outbox 异步落库）。
+	if s.GetTasksWithUrgencyPromotionFunc != nil {
+		tasks, err = s.GetTasksWithUrgencyPromotionFunc(ctx, req.UserID)
+		if err != nil {
+			if errors.Is(err, respond.UserTasksEmpty) {
+				return make([]newagentmodel.TaskQueryTaskRecord, 0), nil
+			}
+			return nil, err
 		}
-		return nil, err
+	} else {
+		// 回退：未注入时走旧的 taskRepo 直接读取（无缓存、无持久化）。
+		if s.taskRepo == nil {
+			return nil, errors.New("task repository is nil")
+		}
+		tasks, err = s.taskRepo.GetTasksByUserID(req.UserID)
+		if err != nil {
+			if errors.Is(err, respond.UserTasksEmpty) {
+				return make([]newagentmodel.TaskQueryTaskRecord, 0), nil
+			}
+			return nil, err
+		}
+		now := time.Now()
+		for i := range tasks {
+			applyReadTimeUrgencyPromotion(&tasks[i], now)
+		}
 	}
 
-	now := time.Now()
+	// 过滤、排序、截断。
 	filtered := make([]model.Task, 0, len(tasks))
-	for _, originalTask := range tasks {
-		currentTask := originalTask
-		applyReadTimeUrgencyPromotion(&currentTask, now)
-		if !taskMatchesQueryFilter(currentTask, req) {
+	for _, task := range tasks {
+		if !taskMatchesQueryFilter(task, req) {
 			continue
 		}
-		filtered = append(filtered, currentTask)
+		filtered = append(filtered, task)
 	}
 
 	sortTasksForQuery(filtered, req)

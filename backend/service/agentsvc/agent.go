@@ -50,6 +50,12 @@ type AgentService struct {
 	// 2. 该函数只做”窗口解析”，不负责粗排与混排计算。
 	ResolvePlanningWindowFunc func(ctx context.Context, userID int, taskClassIDs []int) (startWeek, startDay, endWeek, endDay int, err error)
 
+	// ── 任务紧急性提升依赖（函数注入，避免 service 包循环依赖）──
+
+	// GetTasksWithUrgencyPromotionFunc 读取用户任务并应用读时紧急性提升 + 异步落库触发。
+	// 未注入时，QueryTasksForTool 回退到旧逻辑（纯内存提升，不持久化）。
+	GetTasksWithUrgencyPromotionFunc func(ctx context.Context, userID int) ([]model.Task, error)
+
 	// ── newAgent 依赖（由 cmd/start.go 通过 Set* 方法注入）──
 	toolRegistry     *newagenttools.ToolRegistry
 	scheduleProvider newagentmodel.ScheduleStateProvider
