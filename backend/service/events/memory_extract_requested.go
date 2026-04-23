@@ -125,6 +125,51 @@ func EnqueueMemoryExtractRequestedInTx(
 	return err
 }
 
+// PublishMemoryExtractFromGraph 在 graph 完成后直接发布记忆抽取事件。
+//
+// 设计目的：
+// 1. 绕过 chat-persist 链路，由 agent service 在 graph 完成后按需调用；
+// 2. 内部完成 source text 截断、幂等 key 生成、memory 开关检查；
+// 3. 发布失败只记日志，不阻断主链路。
+func PublishMemoryExtractFromGraph(
+	ctx context.Context,
+	publisher outboxinfra.EventPublisher,
+	userID int,
+	conversationID string,
+	sourceText string,
+) error {
+	if !isMemoryWriteEnabled() {
+		return nil
+	}
+	if publisher == nil {
+		return errors.New("event publisher is nil")
+	}
+
+	sourceText = strings.TrimSpace(sourceText)
+	if sourceText == "" || userID <= 0 || strings.TrimSpace(conversationID) == "" {
+		return nil
+	}
+
+	truncated := truncateByRune(sourceText, maxMemorySourceTextLength)
+	now := time.Now()
+	payload := model.MemoryExtractRequestedPayload{
+		UserID:         userID,
+		ConversationID: strings.TrimSpace(conversationID),
+		SourceRole:     "user",
+		SourceText:     truncated,
+		OccurredAt:     now,
+		IdempotencyKey: buildMemoryExtractIdempotencyKey(userID, conversationID, truncated),
+	}
+
+	return publisher.Publish(ctx, outboxinfra.PublishRequest{
+		EventType:    EventTypeMemoryExtractRequested,
+		EventVersion: outboxinfra.DefaultEventVersion,
+		MessageKey:   payload.ConversationID,
+		AggregateID:  payload.ConversationID,
+		Payload:      payload,
+	})
+}
+
 func buildMemoryExtractPayloadFromChat(chatPayload model.ChatHistoryPersistPayload) (model.MemoryExtractRequestedPayload, bool) {
 	role := strings.ToLower(strings.TrimSpace(chatPayload.Role))
 	if role != "user" {

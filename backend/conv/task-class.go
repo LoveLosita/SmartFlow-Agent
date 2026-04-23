@@ -128,6 +128,7 @@ func ProcessUserGetCompleteTaskClassRequest(taskClass *model.TaskClass) (*model.
 	req.Items = make([]model.UserAddTaskClassItemRequest, 0, len(taskClass.Items))
 	for _, item := range taskClass.Items {
 		itemReq := model.UserAddTaskClassItemRequest{
+			ID:           item.ID, // 填充数据库主键 ID，前端拖拽编排依赖此字段
 			Order:        safeInt(item.Order),
 			Content:      safeStr(item.Content),
 			EmbeddedTime: item.EmbeddedTime, // 结构体指针直接复用

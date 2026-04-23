@@ -47,8 +47,6 @@ func scoreRankedItem(item memorymodel.ItemDTO, now time.Time) float64 {
 		score += 0.15
 	case memorymodel.MemoryTypePreference:
 		score += 0.10
-	case memorymodel.MemoryTypeTodoHint:
-		score += 0.05
 	}
 	return score
 }

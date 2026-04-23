@@ -326,9 +326,6 @@ func (r *Runner) syncVectorDeletes(ctx context.Context, memoryIDs []int64) {
 
 func resolveMemoryTTLAt(base time.Time, memoryType string) *time.Time {
 	switch memoryType {
-	case memorymodel.MemoryTypeTodoHint:
-		t := base.Add(30 * 24 * time.Hour)
-		return &t
 	case memorymodel.MemoryTypeFact:
 		t := base.Add(180 * 24 * time.Hour)
 		return &t

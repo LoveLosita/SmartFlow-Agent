@@ -47,7 +47,7 @@ type MemoryItem struct {
 	AssistantID    *string `gorm:"column:assistant_id;type:varchar(64);index:idx_memory_items_user_asst_run_status,priority:2;comment:助手ID"`
 	RunID          *string `gorm:"column:run_id;type:varchar(64);index:idx_memory_items_user_asst_run_status,priority:3;comment:运行ID"`
 
-	MemoryType string `gorm:"column:memory_type;type:varchar(32);not null;index:idx_memory_items_user_status_type,priority:3;index:idx_memory_items_user_type_hash,priority:2;comment:preference/constraint/fact/todo_hint"`
+	MemoryType string `gorm:"column:memory_type;type:varchar(32);not null;index:idx_memory_items_user_status_type,priority:3;index:idx_memory_items_user_type_hash,priority:2;comment:preference/constraint/fact"`
 	Title      string `gorm:"column:title;type:varchar(128);not null;comment:记忆标题"`
 	Content    string `gorm:"column:content;type:text;not null;comment:记忆内容"`
 

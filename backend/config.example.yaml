@@ -152,8 +152,6 @@ memory:
     preferenceLimit: 5
     # fact 类型最大注入条数。
     factLimit: 5
-    # todo_hint 类型最大注入条数。
-    todoHintLimit: 3
   inject:
     # 注入渲染模式：
     # flat 为旧扁平列表；typed_v2 为按类型分段，便于模型区分“硬约束”和“参考事实”。

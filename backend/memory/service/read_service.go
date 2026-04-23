@@ -224,7 +224,6 @@ func normalizeRetrieveMemoryTypes(raw []string) []string {
 	return []string{
 		memorymodel.MemoryTypeConstraint,
 		memorymodel.MemoryTypePreference,
-		memorymodel.MemoryTypeTodoHint,
 		memorymodel.MemoryTypeFact,
 	}
 }
@@ -297,8 +296,6 @@ func scoreRetrievedItem(item model.MemoryItem, now time.Time) float64 {
 		score += 0.12
 	case memorymodel.MemoryTypePreference:
 		score += 0.08
-	case memorymodel.MemoryTypeTodoHint:
-		score += 0.05
 	}
 	return score
 }

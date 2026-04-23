@@ -22,8 +22,6 @@ const (
 	DefaultReadPreferenceLimit = 5
 	// DefaultReadFactLimit 是 fact 默认预算上限。
 	DefaultReadFactLimit = 5
-	// DefaultReadTodoHintLimit 是 todo_hint 默认预算上限。
-	DefaultReadTodoHintLimit = 3
 )
 
 // Config 是记忆模块配置对象（Day1 首版）。
@@ -39,7 +37,6 @@ type Config struct {
 	ReadConstraintLimit int
 	ReadPreferenceLimit int
 	ReadFactLimit       int
-	ReadTodoHintLimit   int
 	InjectRenderMode    string
 
 	ExtractPrompt  string
@@ -112,11 +109,6 @@ func (c Config) EffectiveReadFactLimit() int {
 	return normalizePositiveLimit(c.ReadFactLimit, DefaultReadFactLimit)
 }
 
-// EffectiveReadTodoHintLimit 返回 todo_hint 生效预算。
-func (c Config) EffectiveReadTodoHintLimit() int {
-	return normalizePositiveLimit(c.ReadTodoHintLimit, DefaultReadTodoHintLimit)
-}
-
 // EffectiveReadMode 返回生效读取模式。
 func (c Config) EffectiveReadMode() string {
 	return NormalizeReadMode(c.ReadMode)
@@ -127,12 +119,11 @@ func (c Config) EffectiveInjectRenderMode() string {
 	return NormalizeInjectRenderMode(c.InjectRenderMode)
 }
 
-// TotalReadBudget 返回四类记忆的总预算上限。
+// TotalReadBudget 返回三类记忆的总预算上限。
 func (c Config) TotalReadBudget() int {
 	return c.EffectiveReadConstraintLimit() +
 		c.EffectiveReadPreferenceLimit() +
-		c.EffectiveReadFactLimit() +
-		c.EffectiveReadTodoHintLimit()
+		c.EffectiveReadFactLimit()
 }
 
 func normalizePositiveLimit(value int, defaultValue int) int {

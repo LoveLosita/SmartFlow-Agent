@@ -112,6 +112,9 @@ type CommonState struct {
 	// HasScheduleWriteOps 标记本轮 execute 循环是否执行过日程写工具。
 	// 调用目的：graph 分支函数据此判断是否需要走 order_guard，非日程操作跳过守卫。
 	HasScheduleWriteOps bool `json:"has_schedule_write_ops,omitempty"`
+	// UsedQuickNote 标记本轮是否调用过 quick_note_create 工具。
+	// 调用目的：graph 完成后据此决定是否跳过记忆抽取，避免随口记内容被错误归类。
+	UsedQuickNote bool `json:"used_quick_note,omitempty"`
 	// HasScheduleChanges 标记本轮流程是否产生过日程变更（粗排或写工具）。
 	// 调用目的：deliver 节点据此判断是否向前端推送"排程完毕"卡片。
 	HasScheduleChanges bool `json:"has_schedule_changes,omitempty"`
@@ -226,6 +229,7 @@ func (s *CommonState) ResetForNextRun() {
 	s.AllowReorder = false
 	s.HasScheduleWriteOps = false
 	s.HasScheduleChanges = false
+	s.UsedQuickNote = false
 	s.SuggestedOrderBaseline = nil
 	s.ClearTerminalOutcome()
 }

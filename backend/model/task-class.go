@@ -92,6 +92,7 @@ type UserAddTaskClassConfig struct {
 
 // UserAddTaskClassItemRequest 用于处理用户添加任务类别时的任务块部分
 type UserAddTaskClassItemRequest struct {
+	ID           int         `json:"id,omitempty"` // 任务块的数据库主键 ID（查询时返回，创建时可省略）
 	Order        int         `json:"order" binding:"required,min=1"`
 	Content      string      `json:"content" binding:"required"`
 	EmbeddedTime *TargetTime `json:"embedded_time"` // 例: 2025-12-22 1-2节; nil 表示未安排

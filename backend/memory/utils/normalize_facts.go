@@ -119,8 +119,6 @@ func defaultImportanceByType(memoryType string) float64 {
 		return 0.85
 	case memorymodel.MemoryTypeConstraint:
 		return 0.95
-	case memorymodel.MemoryTypeTodoHint:
-		return 0.8
 	default:
 		return 0.6
 	}

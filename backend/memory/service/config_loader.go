@@ -31,7 +31,6 @@ func LoadConfigFromViper() memorymodel.Config {
 		ReadConstraintLimit: viper.GetInt("memory.read.constraintLimit"),
 		ReadPreferenceLimit: viper.GetInt("memory.read.preferenceLimit"),
 		ReadFactLimit:       viper.GetInt("memory.read.factLimit"),
-		ReadTodoHintLimit:   viper.GetInt("memory.read.todoHintLimit"),
 
 		// 决策层配置：默认关闭，灰度开启后才会生效。
 		DecisionEnabled:           viper.GetBool("memory.decision.enabled"),
@@ -64,7 +63,6 @@ func LoadConfigFromViper() memorymodel.Config {
 	cfg.ReadConstraintLimit = cfg.EffectiveReadConstraintLimit()
 	cfg.ReadPreferenceLimit = cfg.EffectiveReadPreferenceLimit()
 	cfg.ReadFactLimit = cfg.EffectiveReadFactLimit()
-	cfg.ReadTodoHintLimit = cfg.EffectiveReadTodoHintLimit()
 	cfg.ReadMode = cfg.EffectiveReadMode()
 	cfg.InjectRenderMode = cfg.EffectiveInjectRenderMode()
 

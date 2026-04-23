@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 
 import {
@@ -97,12 +97,18 @@ const SCHEDULE_SECTION_TIME_MAP: Record<number, [string, string]> = {
 // 1. 这里只负责触发浏览器原生确认弹框，不负责展示自定义 UI。
 // 2. 只有存在未应用的智能编排结果时才拦截，避免影响正常刷新体验。
 function handleSchedulePreviewBeforeUnload(event: BeforeUnloadEvent) {
-  if (!schedulePreviewRuntimeState.weeks?.length) {
+  // 1. 如果处于手动编辑模式且有变更，拦截刷新。
+  if (manualEditMode.value && (Boolean(previewWeeks.value?.length) || pendingDeleteIds.value.length > 0)) {
+    event.preventDefault()
+    event.returnValue = ''
     return
   }
 
-  event.preventDefault()
-  event.returnValue = ''
+  // 2. 如果存在待应用的智能预览，拦截刷新。
+  if (schedulePreviewRuntimeState.weeks?.length) {
+    event.preventDefault()
+    event.returnValue = ''
+  }
 }
 
 if (typeof window !== 'undefined') {
@@ -130,8 +136,11 @@ const expandedTaskClassId = ref<number | null>(null)
 const expandedTaskClassDetail = ref<TaskClassDetail | null>(null)
 const taskClassMultiSelectMode = ref(false)
 const selectedTaskClassIds = ref<number[]>([])
-const scheduleSelectionMode = ref(false)
 const selectedScheduleEventIds = ref<number[]>([])
+const scheduleSelectionMode = ref(false)
+const manualEditMode = ref(false)
+const pendingDeleteIds = ref<number[]>([])
+const hasManualChanges = ref(false)
 
 const liveWeeks = ref<ScheduleWeekData[]>([])
 const previewWeeks = ref<ScheduleWeekData[] | null>(schedulePreviewRuntimeState.weeks)
@@ -156,6 +165,51 @@ const effectiveSelectedTaskClassIds = computed(() => {
   return expandedTaskClassId.value ? [expandedTaskClassId.value] : []
 })
 
+const augmentedTaskClassDetail = computed<TaskClassDetail | null>(() => {
+  if (!expandedTaskClassDetail.value) {
+    return null
+  }
+
+  const detail = { ...expandedTaskClassDetail.value }
+  detail.items = detail.items.map((item) => {
+    // 0. 只要有 ID，就尝试进行匹配（注意类型一致性）
+    const targetId = Number(item.id)
+    if (isNaN(targetId) || targetId <= 0) {
+      return item
+    }
+
+    // 1. 先查找当前预览(previewWeeks)中是否有该任务块。
+    for (const weekData of previewWeeks.value ?? []) {
+      const event = weekData.events.find((e) =>
+        (e.status === 'suggested') &&
+        ((e.type === 'course' && Number(e.embedded_task_info?.id) === targetId) || (e.type !== 'course' && Number(e.id) === targetId)),
+      )
+
+      if (event) {
+        return {
+          ...item,
+          embedded_time: {
+            date: '', // 预览态下日期由预览周次决定，侧边栏格式化函数会处理
+            section_from: (event.order - 1) * 2 + 1,
+            section_to: (event.order - 1) * 2 + 2,
+            _preview_week: weekData.week, // 标记这是预览周
+            _day_of_week: event.day_of_week, // 注入周几信息
+          } as any,
+        }
+      }
+    }
+
+    // 3. 如果该任务块被标记为待删除，则强制显示为“未安排”。
+    if (typeof item.id === 'number' && pendingDeleteIds.value.includes(item.id)) {
+      return { ...item, embedded_time: null }
+    }
+
+    return item
+  })
+
+  return detail
+})
+
 const previewWeekLookup = computed(() => {
   const map = new Map<number, ScheduleWeekData>()
 
@@ -176,7 +230,11 @@ const liveWeekLookup = computed(() => {
   return map
 })
 
-const hasPendingPreview = computed(() => Boolean(previewWeeks.value?.length))
+const hasPendingPreview = computed(() => Boolean(previewWeeks.value?.length) || manualEditMode.value)
+
+const isEditUnsaved = computed(() =>
+  manualEditMode.value && (Boolean(previewWeeks.value?.length) || pendingDeleteIds.value.length > 0),
+)
 
 const resolvedCurrentWeekData = computed(() => {
   if (!previewWeeks.value?.length && !liveWeeks.value.length) {
@@ -232,8 +290,7 @@ const showDeleteModeButton = computed(() =>
 )
 
 const showApplyButton = computed(() =>
-  !scheduleSelectionMode.value &&
-  hasPendingPreview.value,
+  !scheduleSelectionMode.value && (hasPendingPreview.value || pendingDeleteIds.value.length > 0),
 )
 
 const canGoPreviousWeek = computed(() =>
@@ -343,6 +400,8 @@ function setPreviewState(weeks: ScheduleWeekData[] | null, taskClassIds: number[
 // 2. 调用方负责在“应用成功 / 删除后重算 / 用户主动替换预览”等时机决定是否清空。
 function clearPreviewState() {
   setPreviewState(null, [])
+  pendingDeleteIds.value = []
+  hasManualChanges.value = false
 }
 
 function isSuggestedPreviewEvent(event?: ScheduleWeekEvent) {
@@ -468,7 +527,7 @@ function buildPreviewEventWithSuggested(
     id: suggestedItem.id,
     order: slot.order,
     day_of_week: slot.dayOfWeek,
-    name: suggestedItem.name,
+    name: suggestedItem.name || '未命名任务',
     start_time: startTime,
     end_time: endTime,
     location: '',
@@ -556,6 +615,119 @@ function handleMovePreviewEvent(payload: PreviewMovePayload) {
   replacePreviewEventAtSlot(nextWeeks, sourceSlot, nextSourceEvent)
   replacePreviewEventAtSlot(nextWeeks, targetSlot, nextTargetEvent)
   setPreviewState(nextWeeks, previewTaskClassIds.value)
+  hasManualChanges.value = true
+}
+
+// handleDropTaskItem 负责处理从侧边栏拖入新任务块到格子的逻辑。
+function handleDropTaskItem(payload: {
+  id: number | string
+  content: string
+  taskClassId: number
+  week: number
+  dayOfWeek: number
+  order: number
+}) {
+  if (!manualEditMode.value) return
+
+  // 0. 强制规整 ID 为数值类型，防止后续匹配失效
+  const targetId = Number(payload.id)
+  if (isNaN(targetId) || targetId === 0) return
+
+  const targetSlot: SchedulePreviewSlotRef = {
+    week: payload.week,
+    dayOfWeek: payload.dayOfWeek,
+    order: payload.order,
+  }
+
+  // 1. 初始化预览数据（如果当前没有预览态，则基于 live 数据克隆）。
+  const nextWeeks = previewWeeks.value?.length
+    ? clonePreviewWeeks(previewWeeks.value)
+    : clonePreviewWeeks(liveWeeks.value)
+
+  // 1.5 查重：严禁同一个任务块被重复安排
+  const isDuplicate = nextWeeks.some(w => w.events.some(e => 
+    (e.status === 'suggested') && (Number(e.id || e.embedded_task_info?.id) === targetId)
+  ))
+
+  if (isDuplicate) {
+    ElMessage.warning('该任务块已在当前计划中安排，不可重复添加')
+    return
+  }
+
+  const { weekIndex, eventIndex } = findPreviewEventIndex(nextWeeks, targetSlot)
+  if (weekIndex < 0) return
+
+  const targetEvent = nextWeeks[weekIndex]!.events[eventIndex]
+  // 仅保护非编辑态下的课程，编辑态允许覆盖
+  if (targetEvent?.type === 'course' && !manualEditMode.value) {
+    ElMessage.warning('该位置无法放置任务块')
+    return
+  }
+
+  // 2. 构造建议项，确保所有字段就绪。
+  const suggestedItem: SuggestedPreviewItem = {
+    id: targetId,
+    name: payload.content || '未命名任务',
+    type: 'task',
+    span: 2,
+  }
+
+  // 3. 应用建议。
+  // 重新获取当前格子引用，确保操作的是克隆后的最新数据结构
+  const finalTargetEvent = nextWeeks[weekIndex]!.events[eventIndex]
+  const nextTargetEvent = buildPreviewEventWithSuggested(finalTargetEvent, targetSlot, suggestedItem)
+  replacePreviewEventAtSlot(nextWeeks, targetSlot, nextTargetEvent)
+
+  // 4. 更新全局状态
+  const nextTaskClassIds = Array.from(new Set([...previewTaskClassIds.value, Number(payload.taskClassId)]))
+  setPreviewState(nextWeeks, nextTaskClassIds)
+  
+  // 5. 将该任务从待删除列表中移除（如果存在）
+  pendingDeleteIds.value = pendingDeleteIds.value.filter(id => Number(id) !== targetId)
+  hasManualChanges.value = true
+}
+
+// handleRemoveEvent 从预览中移除某个已排/建议的任务块。
+function handleRemoveEvent(payload: {
+  id: number
+  type: string
+  status?: string
+  week: number
+  dayOfWeek: number
+  order: number
+}) {
+  if (!manualEditMode.value) return
+
+  const slot: SchedulePreviewSlotRef = {
+    week: payload.week,
+    dayOfWeek: payload.dayOfWeek,
+    order: payload.order,
+  }
+
+  const nextWeeks = previewWeeks.value?.length
+    ? clonePreviewWeeks(previewWeeks.value)
+    : clonePreviewWeeks(liveWeeks.value)
+
+  const { weekIndex, eventIndex } = findPreviewEventIndex(nextWeeks, slot)
+  if (weekIndex < 0 || eventIndex < 0) return
+
+  const targetEvent = nextWeeks[weekIndex]!.events[eventIndex]
+  
+  // 1. 如果是建议块（刚生成的），直接还原格子。
+  if (targetEvent.status === 'suggested') {
+    const nextEvent = buildPreviewEventWithSuggested(targetEvent, slot, null)
+    replacePreviewEventAtSlot(nextWeeks, slot, nextEvent)
+    setPreviewState(nextWeeks, previewTaskClassIds.value)
+  } 
+  // 2. 如果是正式块（原有的），加入待删除列表，并在预览中移除。
+  else if (targetEvent.type === 'task') {
+    pendingDeleteIds.value = Array.from(new Set([...pendingDeleteIds.value, targetEvent.id]))
+    const nextEvent = buildEmptyPreviewEvent(slot)
+    replacePreviewEventAtSlot(nextWeeks, slot, nextEvent)
+    setPreviewState(nextWeeks, previewTaskClassIds.value)
+  }
+
+  hasManualChanges.value = true
 }
 
 async function loadTaskClasses() {
@@ -688,6 +860,22 @@ async function handleSmartPlanning() {
   if (ids.length === 0) {
     ElMessage.info('请先选择任务类')
     return
+  }
+
+  if (hasManualChanges.value) {
+    try {
+      await ElMessageBox.confirm(
+        '自动编排将覆盖您当前的手动调整内容，是否继续？',
+        '提示',
+        {
+          confirmButtonText: '确定覆盖',
+          cancelButtonText: '取消',
+          type: 'warning',
+        },
+      )
+    } catch {
+      return
+    }
   }
 
   smartPlanningLoading.value = true
@@ -832,24 +1020,35 @@ async function buildApplyGroupsFromPreview(
 }
 
 async function handleApplyPreview() {
-  if (!previewWeeks.value?.length || previewTaskClassIds.value.length === 0) {
-    ElMessage.info('当前没有可正式应用的预览结果')
+  const hasAdditions = previewWeeks.value?.some(w => w.events.some(e => e.status === 'suggested'))
+  const hasDeletions = pendingDeleteIds.value.length > 0
+
+  if (!hasAdditions && !hasDeletions) {
+    ElMessage.info('当前没有可提交的变更')
     return
   }
 
   applyingLoading.value = true
   try {
-    const groupedItems = await buildApplyGroupsFromPreview(previewWeeks.value, previewTaskClassIds.value)
-    if (!groupedItems.size) {
-      ElMessage.info('当前预览没有可应用的建议排程')
-      return
+    // 1. 处理新增项
+    if (hasAdditions) {
+      const groupedItems = await buildApplyGroupsFromPreview(previewWeeks.value!, previewTaskClassIds.value)
+      for (const [taskClassId, items] of groupedItems) {
+        await applyBatchIntoSchedule(taskClassId, items)
+      }
     }
 
-    for (const [taskClassId, items] of groupedItems) {
-      await applyBatchIntoSchedule(taskClassId, items)
+    // 2. 处理删除项
+    if (hasDeletions) {
+      await deleteScheduleEntries(pendingDeleteIds.value.map(id => ({
+        id,
+        delete_course: false,
+        delete_embedded_task: false,
+      })))
     }
 
-    ElMessage.success(previewTaskClassIds.value.length > 1 ? '已正式应用批量粗排结果' : '已正式应用到日程')
+    ElMessage.success('日程安排已保存')
+    manualEditMode.value = false
     clearPreviewState()
     await loadWeekData(currentWeek.value ?? undefined, { force: true })
     await loadTaskClasses()
@@ -857,9 +1056,35 @@ async function handleApplyPreview() {
       await loadTaskClassDetail(expandedTaskClassId.value)
     }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '正式应用失败')
+    ElMessage.error(error instanceof Error ? error.message : '保存失败')
   } finally {
     applyingLoading.value = false
+  }
+}
+
+function handleCancelEdit() {
+  clearPreviewState()
+  manualEditMode.value = false
+}
+
+function toggleManualEditMode() {
+  if (manualEditMode.value && isEditUnsaved.value) {
+    ElMessageBox.confirm('当前有未保存的修改，退出将丢失这些调整，确定继续吗？', '提示', {
+      type: 'warning',
+    }).then(() => {
+      handleCancelEdit()
+    }).catch(() => {})
+    return
+  }
+  
+  manualEditMode.value = !manualEditMode.value
+  if (manualEditMode.value) {
+    // 进入编辑态时，如果没有预览数据，先克隆一份当前的正式数据，方便增量修改
+    if (!previewWeeks.value) {
+      setPreviewState(clonePreviewWeeks(liveWeeks.value), [])
+    }
+  } else {
+    handleCancelEdit()
   }
 }
 
@@ -951,9 +1176,10 @@ onMounted(async () => {
             :loading="taskClassLoading"
             :detail-loading="taskClassDetailLoading"
             :expanded-task-class-id="expandedTaskClassId"
-            :expanded-task-class-detail="expandedTaskClassDetail"
+            :expanded-task-class-detail="augmentedTaskClassDetail"
             :selected-task-class-ids="effectiveSelectedTaskClassIds"
             :task-class-multi-select-mode="taskClassMultiSelectMode"
+            :manual-edit-mode="manualEditMode"
             @activate="handleActivateTaskClass"
             @toggle-multi-mode="handleToggleTaskClassMultiMode"
             @create="createDialogVisible = true"
@@ -964,16 +1190,25 @@ onMounted(async () => {
             <div class="schedule-board__toolbar">
               <div class="schedule-board__toolbar-left">
                 <button
-                  v-if="showDeleteModeButton"
+                  type="button"
+                  class="schedule-board__toolbar-button schedule-board__toolbar-button--ghost"
+                  :class="{ 'schedule-board__toolbar-button--active': manualEditMode }"
+                  @click="toggleManualEditMode"
+                >
+                  {{ manualEditMode ? '退出编排' : '自定义编排' }}
+                </button>
+
+                <button
+                  v-if="showDeleteModeButton && !manualEditMode"
                   type="button"
                   class="schedule-board__toolbar-button schedule-board__toolbar-button--ghost"
                   @click="toggleScheduleSelectionMode"
                 >
-                  多选
+                  多选解除
                 </button>
 
                 <button
-                  v-else-if="scheduleSelectionMode"
+                  v-else-if="scheduleSelectionMode && !manualEditMode"
                   type="button"
                   class="schedule-board__toolbar-button schedule-board__toolbar-button--ghost"
                   @click="toggleScheduleSelectionMode"
@@ -1019,11 +1254,22 @@ onMounted(async () => {
               :schedule-selection-mode="scheduleSelectionMode"
               :selected-schedule-event-ids="selectedScheduleEventIds"
               :preview-drag-enabled="hasPendingPreview"
+              :manual-edit-mode="manualEditMode"
               @toggle-schedule-event="handleToggleScheduleEvent"
               @move-preview-event="handleMovePreviewEvent"
+              @drop-task-item="handleDropTaskItem"
+              @remove-event="handleRemoveEvent"
             />
 
-            <div v-if="showApplyButton || scheduleSelectionMode" class="schedule-board__footer">
+            <div v-if="showApplyButton || scheduleSelectionMode || manualEditMode" class="schedule-board__footer">
+              <button
+                v-if="manualEditMode"
+                type="button"
+                class="schedule-board__footer-button schedule-board__footer-button--ghost"
+                @click="handleCancelEdit"
+              >
+                取消修改
+              </button>
               <button
                 v-if="showApplyButton"
                 type="button"
@@ -1031,7 +1277,7 @@ onMounted(async () => {
                 :disabled="applyingLoading"
                 @click="handleApplyPreview"
               >
-                {{ applyingLoading ? '应用中…' : '正式应用日程' }}
+                {{ applyingLoading ? '保存中…' : '保存日程' }}
               </button>
 
               <button
@@ -1195,10 +1441,11 @@ onMounted(async () => {
   color: #475569;
 }
 
-.schedule-board__toolbar-button--ghost:hover {
-  border-color: #cbd5e1;
-  background: #f8fafc;
-  color: #0f172a;
+.schedule-board__toolbar-button--ghost:hover,
+.schedule-board__toolbar-button--active {
+  border-color: #3b82f6;
+  background: #eff6ff;
+  color: #3b82f6;
 }
 
 .schedule-board__footer {

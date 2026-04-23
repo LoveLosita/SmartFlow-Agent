@@ -9,8 +9,6 @@ const (
 	MemoryTypeConstraint = "constraint"
 	// MemoryTypeFact 表示一般事实类记忆。
 	MemoryTypeFact = "fact"
-	// MemoryTypeTodoHint 表示近期待办线索类记忆。
-	MemoryTypeTodoHint = "todo_hint"
 )
 
 const (
@@ -28,7 +26,6 @@ var validMemoryTypes = map[string]struct{}{
 	MemoryTypePreference: {},
 	MemoryTypeConstraint: {},
 	MemoryTypeFact:       {},
-	MemoryTypeTodoHint:   {},
 }
 
 var validDecisionActions = map[string]struct{}{

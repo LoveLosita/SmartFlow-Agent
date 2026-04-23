@@ -67,13 +67,11 @@ func RenderTypedMemoryContent(items []memorymodel.ItemDTO) string {
 		memorymodel.MemoryTypeConstraint,
 		memorymodel.MemoryTypePreference,
 		memorymodel.MemoryTypeFact,
-		memorymodel.MemoryTypeTodoHint,
 	}
 	sectionTitle := map[string]string{
 		memorymodel.MemoryTypeConstraint: "必守约束",
 		memorymodel.MemoryTypePreference: "用户偏好",
 		memorymodel.MemoryTypeFact:       "当前话题相关事实",
-		memorymodel.MemoryTypeTodoHint:   "近期待办",
 	}
 
 	grouped := make(map[string][]string, len(orderedTypes))
@@ -149,8 +147,6 @@ func localizeMemoryType(memoryType string) string {
 		return "偏好"
 	case memorymodel.MemoryTypeConstraint:
 		return "约束"
-	case memorymodel.MemoryTypeTodoHint:
-		return "待办线索"
 	case memorymodel.MemoryTypeFact:
 		return "事实"
 	default:

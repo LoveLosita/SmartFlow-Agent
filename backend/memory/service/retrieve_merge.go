@@ -267,7 +267,6 @@ func applyTypeBudget(items []memorymodel.ItemDTO, cfg memorymodel.Config, caller
 		memorymodel.MemoryTypeConstraint: cfg.EffectiveReadConstraintLimit(),
 		memorymodel.MemoryTypePreference: cfg.EffectiveReadPreferenceLimit(),
 		memorymodel.MemoryTypeFact:       cfg.EffectiveReadFactLimit(),
-		memorymodel.MemoryTypeTodoHint:   cfg.EffectiveReadTodoHintLimit(),
 	}
 	usedByType := make(map[string]int, len(budgetByType))
 	result := make([]memorymodel.ItemDTO, 0, minInt(len(items), hardCap))
@@ -306,8 +305,6 @@ func renderMemoryTypeLabelForDedup(memoryType string) string {
 		return "偏好"
 	case memorymodel.MemoryTypeConstraint:
 		return "约束"
-	case memorymodel.MemoryTypeTodoHint:
-		return "待办线索"
 	case memorymodel.MemoryTypeFact:
 		return "事实"
 	default:

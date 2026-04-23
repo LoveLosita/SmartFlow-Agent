@@ -108,7 +108,7 @@ func (s *AgentService) runNewAgentGraph(
 	// 5.1. 在 graph 执行前统一补充与当前输入相关的记忆上下文（预取管线模式）。
 	// 5.1.1 先读 Redis 预取缓存注入到 ConversationContext，再启动后台 goroutine 做完整检索；
 	// 5.1.2 返回的 channel 传入 Deps，供 Execute/Plan 节点在启动前消费最新记忆；
-	// 5.1.3 检索失败只降级为”本轮不注入记忆”，不阻断主链路。
+	// 5.1.3 检索失败只降级为"本轮不注入记忆"，不阻断主链路。
 	memoryFuture := s.injectMemoryContext(requestCtx, conversationContext, userID, chatID, userMessage)
 
 	// 5.5 将前端传入的 thinkingMode 写入 CommonState，供 ChatNode 及下游节点读取。
@@ -250,6 +250,19 @@ func (s *AgentService) runNewAgentGraph(
 		eventsvc.PublishAgentStateSnapshot(requestCtx, s.eventPublisher, snapshot, chatID, userID)
 	}
 
+	// 11.6. graph 完成后条件触发记忆抽取。
+	// 说明：
+	// 1. 只有本轮未使用 quick_note_create 时才触发记忆抽取；
+	// 2. 避免随口记创建的 Task 与记忆系统产生语义冲突。
+	if finalState != nil {
+		cs := finalState.EnsureRuntimeState().EnsureCommonState()
+		if cs == nil || !cs.UsedQuickNote {
+			if memErr := eventsvc.PublishMemoryExtractFromGraph(requestCtx, s.eventPublisher, userID, chatID, userMessage); memErr != nil {
+				log.Printf("[WARN] graph 完成后发布记忆抽取事件失败 trace=%s chat=%s err=%v", traceID, chatID, memErr)
+			}
+		}
+	}
+
 	// 排程预览缓存由 Deliver 节点负责写入（通过注入的 WriteSchedulePreview func），
 	// 保证只有任务真正完成时才写，中断路径不写中间态。
 
@@ -310,7 +323,7 @@ func (s *AgentService) loadOrCreateRuntimeState(ctx context.Context, chatID stri
 		if !snapshot.RuntimeState.HasPendingInteraction() && cs.Phase == newagentmodel.PhaseDone {
 			terminalBefore := cs.TerminalStatus()
 			roundBefore := cs.RoundUsed
-			// 1. 仅“正常完成(completed)”写 loop 收口 marker：
+			// 1. 仅"正常完成(completed)"写 loop 收口 marker：
 			// 1.1 下一轮执行时，prompt 会把上一轮 loop 从 msg2 归档到 msg1；
 			// 1.2 异常中断（aborted/exhausted）不写 marker，保留 msg2 便于后续续跑。
 			if terminalBefore == newagentmodel.FlowTerminalStatusCompleted {
@@ -331,7 +344,7 @@ func (s *AgentService) loadOrCreateRuntimeState(ctx context.Context, chatID stri
 		originalScheduleState := snapshot.OriginalScheduleState
 		if snapshot.ScheduleState != nil && originalScheduleState == nil {
 			// 1. 兼容老快照：历史会话可能只存了 ScheduleState，没有 original 副本。
-			// 2. 这里补一份克隆，保证后续节点拿到的仍是“恢复态 + 原始态”成对数据。
+			// 2. 这里补一份克隆，保证后续节点拿到的仍是"恢复态 + 原始态"成对数据。
 			// 3. 即便当前阶段不落库，这里也保留一致性，避免下一轮再出现语义漂移。
 			originalScheduleState = snapshot.ScheduleState.Clone()
 		}
@@ -340,7 +353,7 @@ func (s *AgentService) loadOrCreateRuntimeState(ctx context.Context, chatID stri
 	return newRT()
 }
 
-// appendExecuteLoopClosedMarker 在 ConversationContext 写入“上一轮 loop 正常收口”标记。
+// appendExecuteLoopClosedMarker 在 ConversationContext 写入"上一轮 loop 正常收口"标记。
 //
 // 职责边界：
 // 1. 只追加轻量 marker 供 prompt 分层，不做历史摘要或裁剪；

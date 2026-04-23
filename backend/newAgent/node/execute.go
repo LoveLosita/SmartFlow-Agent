@@ -395,6 +395,7 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 	// 3. 后端强制清空兜底，即使 LLM 误填了 speak 也不会推流到前端。
 	if decision.ToolCall != nil && strings.EqualFold(decision.ToolCall.Name, "quick_note_create") {
 		decision.Speak = ""
+		flowState.UsedQuickNote = true
 	}
 
 	// 自省校验：next_plan / done 必须附带 goal_check，否则不推进，追加修正让 LLM 重试。

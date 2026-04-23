@@ -11,6 +11,7 @@ const props = defineProps<{
   expandedTaskClassDetail: TaskClassDetail | null
   selectedTaskClassIds: number[]
   taskClassMultiSelectMode: boolean
+  manualEditMode: boolean
 }>()
 
 const emit = defineEmits<{
@@ -35,14 +36,45 @@ function isSelected(taskClassId: number) {
 }
 
 function formatEmbeddedTime(value: TaskClassDetail['items'][number]['embedded_time']) {
-  if (!value?.date) {
+  if (!value && !(value as any)?._preview_week) {
     return '未安排'
   }
 
+  const weekDays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+  
+  const weekNum = (value as any)?._preview_week
+  const dayNum = (value as any)?._day_of_week
+  
+  if (weekNum && dayNum) {
+    return `第${weekNum}周 ${weekDays[dayNum - 1]} ${value?.section_from || 0}-${value?.section_to || 0}节`
+  }
+
+  if (!value?.date) return '未安排'
+
   const date = new Date(value.date)
+  // getDay() 返回 0 (周日) 到 6 (周六)。 转换成我们的 1-7。
+  const rawDay = date.getDay()
+  const displayDay = rawDay === 0 ? 6 : rawDay - 1 // 对应 weekDays 索引
+
   const month = `${date.getMonth() + 1}`.padStart(2, '0')
   const day = `${date.getDate()}`.padStart(2, '0')
-  return `${month}.${day} ${value.section_from}-${value.section_to}节`
+  return `${month}.${day} ${weekDays[displayDay]} ${value.section_from}-${value.section_to}节`
+}
+
+function handleDragStart(item: TaskClassDetail['items'][number], dragEvent: DragEvent) {
+  if (!props.manualEditMode) return
+
+  dragEvent.dataTransfer?.setData(
+    'application/task-item',
+    JSON.stringify({
+      id: item.id,
+      content: item.content,
+      taskClassId: props.expandedTaskClassId,
+    }),
+  )
+  if (dragEvent.dataTransfer) {
+    dragEvent.dataTransfer.effectAllowed = 'move'
+  }
 }
 
 function syncViewportHeight() {
@@ -181,6 +213,9 @@ watch(
                 v-for="item in expandedTaskClassDetail.items"
                 :key="item.order"
                 class="task-class-card__detail-item"
+                :class="{ 'task-class-card__detail-item--draggable': manualEditMode }"
+                :draggable="manualEditMode"
+                @dragstart="handleDragStart(item, $event)"
               >
                 <span class="task-class-card__detail-order">{{ item.order }}</span>
                 <span class="task-class-card__detail-text">{{ item.content }}</span>
@@ -469,6 +504,17 @@ watch(
   grid-template-columns: 28px minmax(0, 1fr) auto 24px;
   gap: 10px;
   align-items: center;
+}
+
+.task-class-card__detail-item--draggable {
+  cursor: grab;
+  transition: all 0.2s;
+}
+
+.task-class-card__detail-item--draggable:hover {
+  border-color: #3b82f6;
+  background: #f1f5f9;
+  transform: translateX(4px);
 }
 
 .task-class-card__detail-order {

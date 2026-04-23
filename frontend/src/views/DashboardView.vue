@@ -218,6 +218,10 @@ async function handleLogout() {
   finally { logoutLoading.value = false; await router.push('/auth') }
 }
 
+function handleCourseImportEntry() {
+  void router.push('/schedule')
+}
+
 function syncDashboardMainScale() {
   const main = dashboardMainRef.value
   const inner = dashboardMainInnerRef.value
