@@ -3,6 +3,7 @@ package newagentnode
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -67,7 +68,7 @@ func RunDeliverNode(ctx context.Context, input DeliverNodeInput) error {
 	}
 
 	// 2. 调 LLM 生成交付总结。
-	summary := generateDeliverSummary(ctx, input.Client, flowState, conversationContext, input.ThinkingEnabled, input.CompactionStore, emitter)
+	summary, streamed := generateDeliverSummary(ctx, input.Client, flowState, conversationContext, input.ThinkingEnabled, input.CompactionStore, emitter)
 
 	// 2.1 排程完毕卡片信号：
 	// 1. 仅在流程正常完成且确实产生过日程变更（粗排或写工具）时推送；
@@ -77,20 +78,27 @@ func RunDeliverNode(ctx context.Context, input DeliverNodeInput) error {
 		_ = emitter.EmitScheduleCompleted(deliverStatusBlockID, deliverStageName)
 	}
 
-	// 3. 伪流式推送总结。
+	// 3. 推送总结。LLM 路径已在 generateDeliverSummary 内部真流式推送，
+	//    仅机械/降级路径需要在此伪流式补推。
 	if strings.TrimSpace(summary) != "" {
-		msg := schema.AssistantMessage(summary, nil)
-		if err := emitter.EmitPseudoAssistantText(
-			ctx,
-			deliverSpeakBlockID,
-			deliverStageName,
-			summary,
-			newagentstream.DefaultPseudoStreamOptions(),
-		); err != nil {
-			return fmt.Errorf("交付总结推送失败: %w", err)
+		if !streamed {
+			msg := schema.AssistantMessage(summary, nil)
+			if err := emitter.EmitPseudoAssistantText(
+				ctx,
+				deliverSpeakBlockID,
+				deliverStageName,
+				summary,
+				newagentstream.DefaultPseudoStreamOptions(),
+			); err != nil {
+				return fmt.Errorf("交付总结推送失败: %w", err)
+			}
+			conversationContext.AppendHistory(msg)
+			persistVisibleAssistantMessage(ctx, input.PersistVisibleMessage, flowState, msg)
+		} else {
+			msg := schema.AssistantMessage(summary, nil)
+			conversationContext.AppendHistory(msg)
+			persistVisibleAssistantMessage(ctx, input.PersistVisibleMessage, flowState, msg)
 		}
-		conversationContext.AppendHistory(msg)
-		persistVisibleAssistantMessage(ctx, input.PersistVisibleMessage, flowState, msg)
 	}
 
 	// 4. 推送最终完成状态。
@@ -106,6 +114,10 @@ func RunDeliverNode(ctx context.Context, input DeliverNodeInput) error {
 }
 
 // generateDeliverSummary 尝试调用 LLM 生成交付总结，失败时降级到机械格式化。
+//
+// 返回值：
+//   - summary：完整总结文本（用于历史写入）；
+//   - streamed：true 表示文本已通过 EmitStreamAssistantText 真流式推送到前端，调用方无需再伪流式。
 func generateDeliverSummary(
 	ctx context.Context,
 	client *infrallm.Client,
@@ -114,18 +126,18 @@ func generateDeliverSummary(
 	thinkingEnabled bool,
 	compactionStore newagentmodel.CompactionStore,
 	emitter *newagentstream.ChunkEmitter,
-) string {
+) (string, bool) {
 	if flowState != nil {
 		switch {
 		case flowState.IsAborted():
-			return normalizeSpeak(buildAbortSummary(flowState))
+			return normalizeSpeak(buildAbortSummary(flowState)), false
 		case flowState.IsExhaustedTerminal():
-			return normalizeSpeak(buildExhaustedSummary(flowState))
+			return normalizeSpeak(buildExhaustedSummary(flowState)), false
 		}
 	}
 
 	if client == nil {
-		return buildMechanicalSummary(flowState)
+		return buildMechanicalSummary(flowState), false
 	}
 
 	messages := newagentprompt.BuildDeliverMessages(flowState, conversationContext)
@@ -138,7 +150,8 @@ func generateDeliverSummary(
 		StatusBlockID:   deliverStatusBlockID,
 	})
 	logNodeLLMContext(deliverStageName, "summarizing", flowState, messages)
-	result, err := client.GenerateText(
+
+	reader, err := client.Stream(
 		ctx,
 		messages,
 		infrallm.GenerateOptions{
@@ -150,11 +163,18 @@ func generateDeliverSummary(
 			},
 		},
 	)
-	if err != nil || result == nil || strings.TrimSpace(result.Text) == "" {
-		return buildMechanicalSummary(flowState)
+	if err != nil {
+		log.Printf("[WARN] deliver Stream 调用失败，降级到机械总结: %v", err)
+		return buildMechanicalSummary(flowState), false
 	}
 
-	return normalizeSpeak(result.Text)
+	fullText, streamErr := emitter.EmitStreamAssistantText(ctx, reader, deliverSpeakBlockID, deliverStageName)
+	if streamErr != nil || strings.TrimSpace(fullText) == "" {
+		log.Printf("[WARN] deliver 流式推送失败或结果为空，降级到机械总结: streamErr=%v textLen=%d", streamErr, len(fullText))
+		return buildMechanicalSummary(flowState), false
+	}
+
+	return normalizeSpeak(fullText), true
 }
 
 // buildAbortSummary 生成“流程已终止”的统一交付文案。

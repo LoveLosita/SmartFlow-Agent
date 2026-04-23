@@ -3,6 +3,8 @@ package newagentnode
 import (
 	"context"
 	"fmt"
+	"io"
+	"log"
 	"strings"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
+	newagentrouter "github.com/LoveLosita/smartflow/backend/newAgent/router"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
 	"github.com/cloudwego/eino/schema"
 )
@@ -44,9 +47,9 @@ type PlanNodeInput struct {
 //
 // 步骤说明：
 //  1. 先校验最小依赖，并推送一条"正在规划"的状态，避免用户空等；
-//  2. 单轮深度规划：开 thinking、无 token 上限，让 LLM 一步到位产出完整计划；
-//  3. 若模型先对用户说了话，则先把 speak 伪流式推给前端，并写回 history；
-//  4. 最后按 action 推进流程：
+//  2. 构造本轮规划输入，调用 LLM Stream 接口；
+//  3. 从流中提取 <SMARTFLOW_DECISION> 标签内的 JSON 决策，同时流式推送 speak 正文；
+//  4. 按 action 推进流程：
 //     4.1 continue：继续停留在 planning；
 //     4.2 ask_user：打开 pending interaction，后续交给 interrupt 收口；
 //     4.3 plan_done：固化完整计划，刷新 pinned context，并进入 waiting_confirm。
@@ -80,10 +83,9 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 	})
 	logNodeLLMContext(planStageName, "planning", flowState, messages)
 
-	// 3. 单轮深度规划：由配置决定是否开启 thinking，不做 token 上限约束。
-	decision, rawResult, err := infrallm.GenerateJSON[newagentmodel.PlanDecision](
+	// 3. 两阶段流式规划：从 LLM 流中先提取 <SMARTFLOW_DECISION> 决策标签，再流式推送 speak 正文。
+	reader, err := input.Client.Stream(
 		ctx,
-		input.Client,
 		messages,
 		infrallm.GenerateOptions{
 			Temperature: 0.2,
@@ -95,32 +97,113 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 		},
 	)
 	if err != nil {
-		if rawResult != nil && strings.TrimSpace(rawResult.Text) != "" {
-			return fmt.Errorf("规划解析失败，原始输出=%s，错误=%w", strings.TrimSpace(rawResult.Text), err)
-		}
-		return fmt.Errorf("规划阶段模型调用失败: %w", err)
-	}
-	if err := decision.Validate(); err != nil {
-		return fmt.Errorf("规划决策不合法: %w", err)
+		return fmt.Errorf("规划阶段 Stream 调用失败: %w", err)
 	}
 
-	// 4. 若模型先对用户说了话，且不是 ask_user（ask_user 交给 interrupt 收口），则先以伪流式推送，再写回 history。
-	if strings.TrimSpace(decision.Speak) != "" && decision.Action != newagentmodel.PlanActionAskUser {
-		msg := schema.AssistantMessage(decision.Speak, nil)
-		if err := emitter.EmitPseudoAssistantText(
-			ctx,
-			planSpeakBlockID,
-			planStageName,
-			decision.Speak,
-			newagentstream.DefaultPseudoStreamOptions(),
-		); err != nil {
-			return fmt.Errorf("规划文案推送失败: %w", err)
+	parser := newagentrouter.NewStreamDecisionParser()
+	firstChunk := true
+
+	// 3.1 阶段一：解析决策标签。
+	for {
+		chunk, recvErr := reader.Recv()
+		if recvErr == io.EOF {
+			break
 		}
-		conversationContext.AppendHistory(msg)
-		persistVisibleAssistantMessage(ctx, input.PersistVisibleMessage, flowState, msg)
+		if recvErr != nil {
+			log.Printf("[WARN] plan stream recv error chat=%s err=%v", flowState.ConversationID, recvErr)
+			break
+		}
+
+		// thinking 内容独立推流。
+		if chunk != nil && strings.TrimSpace(chunk.ReasoningContent) != "" {
+			if emitErr := emitter.EmitReasoningText(planSpeakBlockID, planStageName, chunk.ReasoningContent, firstChunk); emitErr != nil {
+				return fmt.Errorf("规划 thinking 推送失败: %w", emitErr)
+			}
+			firstChunk = false
+		}
+
+		content := ""
+		if chunk != nil {
+			content = chunk.Content
+		}
+
+		visible, ready, _ := parser.Feed(content)
+		if !ready {
+			continue
+		}
+
+		result := parser.Result()
+		if result.Fallback || result.ParseFailed {
+			return fmt.Errorf("规划解析失败，原始输出=%s", result.RawBuffer)
+		}
+
+		decision, parseErr := infrallm.ParseJSONObject[newagentmodel.PlanDecision](result.DecisionJSON)
+		if parseErr != nil {
+			return fmt.Errorf("规划决策 JSON 解析失败: %w (raw=%s)", parseErr, result.RawBuffer)
+		}
+		if validateErr := decision.Validate(); validateErr != nil {
+			return fmt.Errorf("规划决策不合法: %w", validateErr)
+		}
+
+		// 3.2 阶段二：流式推送 speak（同一 reader 继续读取）。
+		var fullText strings.Builder
+		if visible != "" {
+			if emitErr := emitter.EmitAssistantText(planSpeakBlockID, planStageName, visible, firstChunk); emitErr != nil {
+				return fmt.Errorf("规划文案推送失败: %w", emitErr)
+			}
+			fullText.WriteString(visible)
+			firstChunk = false
+		}
+		for {
+			chunk2, recvErr2 := reader.Recv()
+			if recvErr2 == io.EOF {
+				break
+			}
+			if recvErr2 != nil {
+				log.Printf("[WARN] plan speak stream error chat=%s err=%v", flowState.ConversationID, recvErr2)
+				break
+			}
+			if chunk2 == nil {
+				continue
+			}
+			if strings.TrimSpace(chunk2.ReasoningContent) != "" {
+				_ = emitter.EmitReasoningText(planSpeakBlockID, planStageName, chunk2.ReasoningContent, false)
+			}
+			if chunk2.Content != "" {
+				if emitErr := emitter.EmitAssistantText(planSpeakBlockID, planStageName, chunk2.Content, firstChunk); emitErr != nil {
+					return fmt.Errorf("规划文案推送失败: %w", emitErr)
+				}
+				fullText.WriteString(chunk2.Content)
+				firstChunk = false
+			}
+		}
+		decision.Speak = fullText.String()
+
+		// 4. 若有 speak 且不是 ask_user（ask_user 交给 interrupt 收口），写入历史。
+		if strings.TrimSpace(decision.Speak) != "" && decision.Action != newagentmodel.PlanActionAskUser {
+			msg := schema.AssistantMessage(decision.Speak, nil)
+			conversationContext.AppendHistory(msg)
+			persistVisibleAssistantMessage(ctx, input.PersistVisibleMessage, flowState, msg)
+		}
+
+		// 5. 按规划动作推进流程状态。
+		return handlePlanAction(ctx, input, runtimeState, conversationContext, emitter, flowState, decision)
 	}
 
-	// 5. 按规划动作推进流程状态。
+	// 流结束但未找到决策标签。
+	return fmt.Errorf("规划阶段流结束但未提取到决策标签")
+}
+
+// handlePlanAction 根据 PlanDecision.Action 推进流程状态。
+func handlePlanAction(
+	ctx context.Context,
+	input PlanNodeInput,
+	runtimeState *newagentmodel.AgentRuntimeState,
+	conversationContext *newagentmodel.ConversationContext,
+	emitter *newagentstream.ChunkEmitter,
+	flowState *newagentmodel.CommonState,
+	decision *newagentmodel.PlanDecision,
+) error {
 	switch decision.Action {
 	case newagentmodel.PlanActionContinue:
 		flowState.Phase = newagentmodel.PhasePlanning
@@ -130,26 +213,16 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 		runtimeState.OpenAskUserInteraction(uuid.NewString(), question, strings.TrimSpace(input.ResumeNode))
 		return nil
 	case newagentmodel.PlanActionDone:
-		// 4.1 直接把结构化 PlanStep 固化到 CommonState，避免 state 层丢失 done_when。
-		// 4.2 再把完整自然语言计划写入 pinned context，保证后续 execute 优先看到。
-		// 4.3 若 LLM 识别到批量排课意图，把 NeedsRoughBuild 标记写入 CommonState，
-		//     Confirm 节点后的路由会据此决定是否跳入 RoughBuild 节点。
-		// 4.4 最后进入 waiting_confirm，等待用户确认整体计划。
 		flowState.FinishPlan(decision.PlanSteps)
 		writePlanPinnedBlocks(conversationContext, decision.PlanSteps)
 		if decision.NeedsRoughBuild {
 			flowState.NeedsRoughBuild = true
-			// 以 LLM 决策中的 task_class_ids 为准（若非空则覆盖前端传入值）。
 			if len(decision.TaskClassIDs) > 0 {
 				flowState.TaskClassIDs = decision.TaskClassIDs
 			}
 		}
 		// always_execute 开启时，计划层跳过确认闸门，直接进入执行阶段。
-		// 这样可以与 Execute 节点的"写工具跳过确认"语义保持一致。
 		if input.AlwaysExecute {
-			// 1. 自动执行模式不会经过 Confirm 卡片，因此这里先把完整计划明确展示给用户。
-			// 2. 摘要格式复用 Confirm 节点，保证"手动确认"和"自动执行"两条链路文案一致。
-			// 3. 推流后同步写入历史，确保后续 Execute 阶段的上下文也能看到这份计划。
 			summary := strings.TrimSpace(buildPlanSummary(decision.PlanSteps))
 			if summary != "" {
 				msg := schema.AssistantMessage(summary, nil)
@@ -177,9 +250,6 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 		}
 		return nil
 	default:
-		// 1. LLM 输出了不支持的 action，不应直接报错终止，而应给它修正机会。
-		// 2. 使用通用修正函数追加错误反馈，让 Graph 继续循环。
-		// 3. LLM 下一轮会看到错误反馈并修正自己的输出。
 		llmOutput := decision.Speak
 		if strings.TrimSpace(llmOutput) == "" {
 			llmOutput = decision.Reason

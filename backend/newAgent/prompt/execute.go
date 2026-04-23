@@ -36,7 +36,7 @@ const executeSystemPromptWithPlan = `
 14. web_search 拿到 summary 后通常已够用；仅当需要页面详细内容时才调用 web_fetch。
 
 执行规则：
-1. 只输出严格 JSON，不要输出 markdown，不要在 JSON 外补充文本。
+1. 输出格式：先输出一行 <SMARTFLOW_DECISION>{JSON 决策}</SMARTFLOW_DECISION>，然后换行输出给用户看的自然语言正文。JSON 中不要包含 speak 字段——用户可见的话放在标签之后。
 2. 读操作：action=continue + tool_call。
 3. 写操作（日程变更，如 place/move/swap/batch_move/unplace/spread_even/min_context_switch）：action=confirm + tool_call。
 4. quick_note_create（记录任务/提醒）：若信息足够，action=continue + tool_call，并显式填写 priority_group；若信息不足且无法可靠推断，action=ask_user 先追问。quick_note_create 调用时和调用后 speak 必须留空，收口由 deliver 阶段统一完成；调用成功后可继续（done/next_plan/continue）处理其他任务，但不要为 quick_note_create 本身补充说明。
@@ -79,7 +79,7 @@ const executeSystemPromptReAct = `
 13. web_search 拿到 summary 后通常已够用；仅当需要页面详细内容时才调用 web_fetch。
 
 执行规则：
-1. 只输出严格 JSON，不要输出 markdown，不要在 JSON 外补充文本。
+1. 输出格式：先输出一行 <SMARTFLOW_DECISION>{JSON 决策}</SMARTFLOW_DECISION>，然后换行输出给用户看的自然语言正文。JSON 中不要包含 speak 字段——用户可见的话放在标签之后。
 2. 读操作：action=continue + tool_call。
 3. 写操作（日程变更，如 place/move/swap/batch_move/unplace/spread_even/min_context_switch）：action=confirm + tool_call。
 4. quick_note_create（记录任务/提醒）：若信息足够，action=continue + tool_call，并显式填写 priority_group；若信息不足且无法可靠推断，action=ask_user 先追问。quick_note_create 调用时和调用后 speak 必须留空，收口由 deliver 阶段统一完成；调用成功后可继续（done/next_plan/continue）处理其他任务，但不要为 quick_note_create 本身补充说明。
@@ -101,37 +101,28 @@ func BuildExecuteReActSystemPrompt() string {
 // BuildExecuteDecisionContractText 返回执行阶段输出协议（有 plan 模式）。
 func BuildExecuteDecisionContractText() string {
 	return strings.TrimSpace(fmt.Sprintf(`
-输出协议（严格 JSON）：
-- speak：给用户看的话
+输出协议（两阶段格式）：
+
+先输出一行决策标签，标签内是 JSON；标签之后换行输出给用户看的自然语言正文。
+决策标签格式：<SMARTFLOW_DECISION>{JSON}</SMARTFLOW_DECISION>
+
+JSON 字段说明：
 - action：只能是 %s / %s / %s / %s / %s
 - reason：给后端和日志看的简短说明
 - goal_check：输出 %s 或 %s 时必填，对照 done_when 逐条验证
-- tool_call：输出 %s（写操作，需 confirm）或 %s（读操作）时可附带
-- tool_call 格式：{"name":"工具名","arguments":{...}}
+- tool_call：输出 %s（写操作，需 confirm）或 %s（读操作）时可附带，格式 {"name":"工具名","arguments":{...}}
+
+注意：JSON 中不要包含 speak 字段。给用户看的话放在 </SMARTFLOW_DECISION> 标签之后。
 
 示例：
-{
-  "speak": "我先查看当前整体安排。",
-  "action": "%s",
-  "reason": "需要先调用 get_overview 获取事实",
-  "tool_call": {
-    "name": "get_overview",
-    "arguments": {}
-  }
-}
 
-{
-  "speak": "当前步骤已完成。",
-  "action": "%s",
-  "reason": "已完成当前步骤所需查询与校验",
-  "goal_check": "已满足当前步骤 done_when 条件"
-}
+<SMARTFLOW_DECISION>{"action":"%s","reason":"需要先调用 get_overview 获取事实","tool_call":{"name":"get_overview","arguments":{}}}</SMARTFLOW_DECISION>
+我先查看当前整体安排。
 
-{
-  "speak": "",
-  "action": "%s",
-  "reason": "整体任务已完成"
-}
+<SMARTFLOW_DECISION>{"action":"%s","reason":"已完成当前步骤所需查询与校验","goal_check":"已满足当前步骤 done_when 条件"}</SMARTFLOW_DECISION>
+当前步骤已完成。
+
+<SMARTFLOW_DECISION>{"action":"%s","reason":"整体任务已完成"}</SMARTFLOW_DECISION>
 `,
 		newagentmodel.ExecuteActionContinue,
 		newagentmodel.ExecuteActionAskUser,
@@ -151,41 +142,29 @@ func BuildExecuteDecisionContractText() string {
 // BuildExecuteReActContractText 返回自由执行模式输出协议。
 func BuildExecuteReActContractText() string {
 	return strings.TrimSpace(fmt.Sprintf(`
-输出协议（严格 JSON）：
-- speak：给用户看的话
+输出协议（两阶段格式）：
+
+先输出一行决策标签，标签内是 JSON；标签之后换行输出给用户看的自然语言正文。
+决策标签格式：<SMARTFLOW_DECISION>{JSON}</SMARTFLOW_DECISION>
+
+JSON 字段说明：
 - action：只能是 %s / %s / %s / %s
 - reason：给后端和日志看的简短说明
 - goal_check：输出 %s 时必填，总结任务完成证据
-- tool_call：输出 %s（写操作，需 confirm）或 %s（读操作）时可附带
-- tool_call 格式：{"name":"工具名","arguments":{...}}
+- tool_call：输出 %s（写操作，需 confirm）或 %s（读操作）时可附带，格式 {"name":"工具名","arguments":{...}}
+
+注意：JSON 中不要包含 speak 字段。给用户看的话放在 </SMARTFLOW_DECISION> 标签之后。
 
 示例：
-{
-  "speak": "我先看一下现在的安排分布。",
-  "action": "%s",
-  "reason": "先读取概览再决定微调方向",
-  "tool_call": {
-    "name": "get_overview",
-    "arguments": {}
-  }
-}
 
-{
-  "speak": "我准备把两项任务对调位置，你确认后执行。",
-  "action": "%s",
-  "reason": "写操作需要确认",
-  "tool_call": {
-    "name": "swap",
-    "arguments": {"task_a": 1, "task_b": 2}
-  }
-}
+<SMARTFLOW_DECISION>{"action":"%s","reason":"先读取概览再决定微调方向","tool_call":{"name":"get_overview","arguments":{}}}</SMARTFLOW_DECISION>
+我先看一下现在的安排分布。
 
-{
-  "speak": "已完成你的请求。",
-  "action": "%s",
-  "reason": "微调执行完毕并已校验结果",
-  "goal_check": "目标任务类已完成微调，且关键约束满足"
-}
+<SMARTFLOW_DECISION>{"action":"%s","reason":"写操作需要确认","tool_call":{"name":"swap","arguments":{"task_a":1,"task_b":2}}}</SMARTFLOW_DECISION>
+我准备把两项任务对调位置，你确认后执行。
+
+<SMARTFLOW_DECISION>{"action":"%s","reason":"微调执行完毕并已校验结果","goal_check":"目标任务类已完成微调，且关键约束满足"}</SMARTFLOW_DECISION>
+已完成你的请求。
 `,
 		newagentmodel.ExecuteActionContinue,
 		newagentmodel.ExecuteActionAskUser,
@@ -203,45 +182,31 @@ func BuildExecuteReActContractText() string {
 // BuildExecuteDecisionContractTextV2 返回补齐 abort 协议后的执行输出契约（有 plan 模式）。
 func BuildExecuteDecisionContractTextV2() string {
 	return strings.TrimSpace(fmt.Sprintf(`
-输出协议（严格 JSON）：
-- speak：给用户看的话；若 action=%s，通常留空
+输出协议（两阶段格式）：
+
+先输出一行决策标签，标签内是 JSON；标签之后换行输出给用户看的自然语言正文。
+决策标签格式：<SMARTFLOW_DECISION>{JSON}</SMARTFLOW_DECISION>
+
+JSON 字段说明：
 - action：只能是 %s / %s / %s / %s / %s / %s
 - reason：给后端和日志看的简短说明
 - goal_check：输出 %s 或 %s 时必填，对照 done_when 逐条验证
-- tool_call：输出 %s（写操作，需 confirm）或 %s（读操作）时可附带
+- tool_call：输出 %s（写操作，需 confirm）或 %s（读操作）时可附带，格式 {"name":"工具名","arguments":{...}}
 - abort：仅在 action=%s 时必填，格式为 {"code":"...","user_message":"...","internal_reason":"..."}
 - tool_call 与 abort 互斥，禁止同时出现
 
+注意：JSON 中不要包含 speak 字段。给用户看的话放在 </SMARTFLOW_DECISION> 标签之后。若 action=%s，标签后通常留空。
+
 示例：
-{
-  "speak": "我先查看当前安排。",
-  "action": "%s",
-  "reason": "先读取事实再决策",
-  "tool_call": {
-    "name": "get_overview",
-    "arguments": {}
-  }
-}
 
-{
-  "speak": "当前步骤完成。",
-  "action": "%s",
-  "reason": "步骤完成条件满足",
-  "goal_check": "已满足当前步骤 done_when"
-}
+<SMARTFLOW_DECISION>{"action":"%s","reason":"先读取事实再决策","tool_call":{"name":"get_overview","arguments":{}}}</SMARTFLOW_DECISION>
+我先查看当前安排。
 
-{
-  "speak": "",
-  "action": "%s",
-  "reason": "流程不应继续执行",
-  "abort": {
-    "code": "execute_abort",
-    "user_message": "当前流程无法继续执行，本轮先终止。",
-    "internal_reason": "execute declared abort"
-  }
-}
+<SMARTFLOW_DECISION>{"action":"%s","reason":"步骤完成条件满足","goal_check":"已满足当前步骤 done_when"}</SMARTFLOW_DECISION>
+当前步骤完成。
+
+<SMARTFLOW_DECISION>{"action":"%s","reason":"流程不应继续执行","abort":{"code":"execute_abort","user_message":"当前流程无法继续执行，本轮先终止。","internal_reason":"execute declared abort"}}</SMARTFLOW_DECISION>
 `,
-		newagentmodel.ExecuteActionAbort,
 		newagentmodel.ExecuteActionContinue,
 		newagentmodel.ExecuteActionAskUser,
 		newagentmodel.ExecuteActionConfirm,
@@ -252,6 +217,7 @@ func BuildExecuteDecisionContractTextV2() string {
 		newagentmodel.ExecuteActionDone,
 		newagentmodel.ExecuteActionConfirm,
 		newagentmodel.ExecuteActionContinue,
+		newagentmodel.ExecuteActionAbort,
 		newagentmodel.ExecuteActionAbort,
 		newagentmodel.ExecuteActionContinue,
 		newagentmodel.ExecuteActionNextPlan,
@@ -262,48 +228,31 @@ func BuildExecuteDecisionContractTextV2() string {
 // BuildExecuteReActContractTextV2 返回补齐 abort 协议后的自由执行输出契约。
 func BuildExecuteReActContractTextV2() string {
 	return strings.TrimSpace(fmt.Sprintf(`
-输出协议（严格 JSON）：
-- speak：给用户看的话；若 action=%s，通常留空
+输出协议（两阶段格式）：
+
+先输出一行决策标签，标签内是 JSON；标签之后换行输出给用户看的自然语言正文。
+决策标签格式：<SMARTFLOW_DECISION>{JSON}</SMARTFLOW_DECISION>
+
+JSON 字段说明：
 - action：只能是 %s / %s / %s / %s / %s
 - reason：给后端和日志看的简短说明
 - goal_check：输出 %s 时必填，总结任务完成证据
-- tool_call：输出 %s（写操作，需 confirm）或 %s（读操作）时可附带
+- tool_call：输出 %s（写操作，需 confirm）或 %s（读操作）时可附带，格式 {"name":"工具名","arguments":{...}}
 - abort：仅在 action=%s 时必填，格式为 {"code":"...","user_message":"...","internal_reason":"..."}
 - tool_call 与 abort 互斥，禁止同时出现
 
+注意：JSON 中不要包含 speak 字段。给用户看的话放在 </SMARTFLOW_DECISION> 标签之后。若 action=%s，标签后通常留空。
+
 示例：
-{
-  "speak": "我先读取当前安排。",
-  "action": "%s",
-  "reason": "先获取事实再决策",
-  "tool_call": {
-    "name": "get_overview",
-    "arguments": {}
-  }
-}
 
-{
-  "speak": "我准备执行写操作，等待你确认。",
-  "action": "%s",
-  "reason": "写操作需要确认",
-  "tool_call": {
-    "name": "move",
-    "arguments": {"task_id": 5, "new_day": 3, "new_slot_start": 1}
-  }
-}
+<SMARTFLOW_DECISION>{"action":"%s","reason":"先获取事实再决策","tool_call":{"name":"get_overview","arguments":{}}}</SMARTFLOW_DECISION>
+我先读取当前安排。
 
-{
-  "speak": "",
-  "action": "%s",
-  "reason": "当前流程不应继续执行",
-  "abort": {
-    "code": "domain_abort",
-    "user_message": "当前流程无法继续执行，本轮先终止。",
-    "internal_reason": "execute declared abort"
-  }
-}
+<SMARTFLOW_DECISION>{"action":"%s","reason":"写操作需要确认","tool_call":{"name":"move","arguments":{"task_id":5,"new_day":3,"new_slot_start":1}}}</SMARTFLOW_DECISION>
+我准备执行写操作，等待你确认。
+
+<SMARTFLOW_DECISION>{"action":"%s","reason":"当前流程不应继续执行","abort":{"code":"domain_abort","user_message":"当前流程无法继续执行，本轮先终止。","internal_reason":"execute declared abort"}}</SMARTFLOW_DECISION>
 `,
-		newagentmodel.ExecuteActionAbort,
 		newagentmodel.ExecuteActionContinue,
 		newagentmodel.ExecuteActionAskUser,
 		newagentmodel.ExecuteActionConfirm,
@@ -312,6 +261,7 @@ func BuildExecuteReActContractTextV2() string {
 		newagentmodel.ExecuteActionDone,
 		newagentmodel.ExecuteActionConfirm,
 		newagentmodel.ExecuteActionContinue,
+		newagentmodel.ExecuteActionAbort,
 		newagentmodel.ExecuteActionAbort,
 		newagentmodel.ExecuteActionContinue,
 		newagentmodel.ExecuteActionConfirm,
@@ -391,7 +341,8 @@ func buildExecutePromptWithFormatGuard(base string) string {
 2. 若输出 tool_call，参数字段名只能是 arguments，禁止写成 parameters。
 3. tool_call 只能是单个对象：{"name":"工具名","arguments":{...}}，不能输出数组。
 4. 只有 action=abort 时才允许输出 abort 字段；非 abort 动作不要输出 abort。
-5. action=continue / ask_user / confirm 时，speak 必须是非空自然语言。`)
+5. action=continue / ask_user / confirm 时，标签后的正文必须是非空自然语言。
+6. <SMARTFLOW_DECISION> 标签内只放 JSON，不要放自然语言。`)
 	if base == "" {
 		return guard
 	}
@@ -401,21 +352,16 @@ func buildExecutePromptWithFormatGuard(base string) string {
 // buildExecuteStrictJSONUserPrompt 统一构造 execute 阶段面向模型的最终用户指令。
 func buildExecuteStrictJSONUserPrompt() string {
 	return strings.TrimSpace(`
-请继续当前任务的执行阶段，严格输出 JSON。
-输出字段：
-- speak
-- action
-- reason
-- goal_check
-- tool_call
-- abort
+请继续当前任务的执行阶段，严格按 SMARTFLOW_DECISION 标签格式输出。
+输出格式：先输出 <SMARTFLOW_DECISION>{JSON 决策}</SMARTFLOW_DECISION>，然后换行输出给用户看的正文。
 
 补充格式要求：
+- JSON 中不要包含 speak 字段，给用户看的话放在 </SMARTFLOW_DECISION> 标签之后
 - 与当前 action 无关的字段直接省略，不要输出空字符串、空对象、空数组或 null 占位
 - tool_call 只能写 {"name":"工具名","arguments":{...}}，且每轮最多一个
 - 不要写 {"tool_call":{"name":"工具名","parameters":{...}}}
 - 非 abort 动作不要输出 abort 字段
-- action 为 continue / ask_user / confirm 时，必须输出非空 speak
+- action 为 continue / ask_user / confirm 时，标签后必须输出非空正文
 - 若读工具结果与已知事实明显冲突，先修正参数并重查一次，再决定是否 ask_user
 - 不要连续两轮调用"同一读工具 + 等价 arguments"；若上一轮已成功返回，下一轮必须换工具或进入 confirm
 - 若用户本轮给了二次微调方向，优先满足该方向，再考虑通用均衡优化
@@ -431,27 +377,15 @@ func buildExecuteStrictJSONUserPrompt() string {
 // BuildExecuteUserPrompt 构造有 plan 模式的用户提示词。
 func BuildExecuteUserPrompt(_ *newagentmodel.CommonState) string {
 	return strings.TrimSpace(`
-请继续当前任务的执行阶段，严格输出 JSON。
-输出字段：
-- speak
-- action
-- reason
-- goal_check
-- tool_call
-- abort
+请继续当前任务的执行阶段，严格按 SMARTFLOW_DECISION 标签格式输出。
+输出格式：先输出 <SMARTFLOW_DECISION>{JSON 决策}</SMARTFLOW_DECISION>，然后换行输出给用户看的正文。
 `)
 }
 
 // BuildExecuteReActUserPrompt 构造自由执行模式的用户提示词。
 func BuildExecuteReActUserPrompt(_ *newagentmodel.CommonState) string {
 	return strings.TrimSpace(`
-请继续当前任务的执行阶段，严格输出 JSON。
-输出字段：
-- speak
-- action
-- reason
-- goal_check
-- tool_call
-- abort
+请继续当前任务的执行阶段，严格按 SMARTFLOW_DECISION 标签格式输出。
+输出格式：先输出 <SMARTFLOW_DECISION>{JSON 决策}</SMARTFLOW_DECISION>，然后换行输出给用户看的正文。
 `)
 }
