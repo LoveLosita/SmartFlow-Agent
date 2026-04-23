@@ -55,8 +55,30 @@ function nextWeek() {
   if (currentWeek.value < weekRange.value.max) currentWeek.value++
 }
 
+// 构建现有可嵌入课程的位置索引，key 为 "week-day-sectionFrom-sectionTo"
+function buildCoursePositionIndex(items: HybridScheduleEntry[]): Map<string, HybridScheduleEntry> {
+  const index = new Map<string, HybridScheduleEntry>()
+  for (const e of items) {
+    if (e.type === 'course' && e.status === 'existing' && e.can_be_embedded) {
+      index.set(`${e.week}-${e.day_of_week}-${e.section_from}-${e.section_to}`, e)
+    }
+  }
+  return index
+}
+
+// 查找 suggested task 同位置的宿主课程 event_id
+function resolveEmbedCourseEventId(
+  task: HybridScheduleEntry,
+  courseIndex: Map<string, HybridScheduleEntry>,
+): number | undefined {
+  if (task.event_id) return task.event_id
+  const host = courseIndex.get(`${task.week}-${task.day_of_week}-${task.section_from}-${task.section_to}`)
+  return host ? host.event_id : undefined
+}
+
 // 转换当前状态为后端要求的 PlacedItem 数组
 function buildPlacedItems(): PlacedItem[] {
+  const courseIndex = buildCoursePositionIndex(suggestedItems.value)
   return suggestedItems.value
     .filter(e => e.type === 'task' && e.status === 'suggested')
     .map(e => ({
@@ -65,7 +87,7 @@ function buildPlacedItems(): PlacedItem[] {
       day_of_week: e.day_of_week,
       start_section: e.section_from,
       end_section: e.section_to,
-      embed_course_event_id: e.event_id || undefined,
+      embed_course_event_id: resolveEmbedCourseEventId(e, courseIndex),
     }))
 }
 
@@ -108,8 +130,8 @@ async function handleOfficialSave() {
 
   isSaving.value = true
   try {
-    const items = buildPlacedItems()
     // 按 task_class_id 分组
+    const courseIndex = buildCoursePositionIndex(suggestedItems.value)
     const groups = new Map<number, PlacedItem[]>()
     suggestedItems.value.forEach(e => {
       if (e.type === 'task' && e.status === 'suggested' && e.task_class_id) {
@@ -120,7 +142,7 @@ async function handleOfficialSave() {
           day_of_week: e.day_of_week,
           start_section: e.section_from,
           end_section: e.section_to,
-          embed_course_event_id: e.event_id || undefined,
+          embed_course_event_id: resolveEmbedCourseEventId(e, courseIndex),
         })
       }
     })
@@ -213,8 +235,28 @@ function getItemStyle(item: HybridScheduleEntry) {
   }
 }
 
+// 被嵌入课程的位置集合：当 suggested task 与 existing course 同位置时，课程不单独渲染
+const embeddedCoursePositions = computed(() => {
+  const positions = new Set<string>()
+  const courseIndex = buildCoursePositionIndex(suggestedItems.value)
+  for (const e of suggestedItems.value) {
+    if (e.type === 'task' && e.status === 'suggested') {
+      const key = `${e.week}-${e.day_of_week}-${e.section_from}-${e.section_to}`
+      if (courseIndex.has(key)) positions.add(key)
+    }
+  }
+  return positions
+})
+
 const currentWeekEntries = computed(() =>
-  suggestedItems.value.filter(e => e.week === currentWeek.value)
+  suggestedItems.value.filter(e => {
+    if (e.week !== currentWeek.value) return false
+    if (e.type === 'course' && e.status === 'existing') {
+      const key = `${e.week}-${e.day_of_week}-${e.section_from}-${e.section_to}`
+      if (embeddedCoursePositions.value.has(key)) return false
+    }
+    return true
+  })
 )
 </script>
 

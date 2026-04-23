@@ -72,6 +72,13 @@ func ScheduleStateToPreview(
 			} else {
 				entry.TaskItemID = t.SourceID
 				entry.TaskClassID = t.TaskClassID
+				// 嵌入任务：将宿主课程的 source_id（即 event_id）桥接到 EventID，
+				// 供前端作为 embed_course_event_id 传递给 BatchApplyPlans 做冲突豁免。
+				if t.EmbedHost != nil {
+					if host := state.TaskByStateID(*t.EmbedHost); host != nil {
+						entry.EventID = host.SourceID
+					}
+				}
 			}
 
 			// 嵌入与阻塞语义。
