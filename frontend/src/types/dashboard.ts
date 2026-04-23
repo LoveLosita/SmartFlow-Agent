@@ -5,6 +5,7 @@ export interface TaskItem {
   priority_group: number
   status: string
   deadline: string
+  urgency_threshold_at?: string | null
   is_completed: boolean
 }
 
@@ -12,6 +13,7 @@ export interface TaskCreatePayload {
   title: string
   priority_group: number
   deadline_at?: string | null
+  urgency_threshold_at?: string | null
 }
 
 export interface TaskCreateResult {
@@ -19,6 +21,7 @@ export interface TaskCreateResult {
   title: string
   priority_group: number
   deadline_at?: string | null
+  urgency_threshold_at?: string | null
   status: string
   created_at: string
 }
@@ -28,6 +31,18 @@ export interface TaskMutationResult {
   is_completed: boolean
   already_completed?: boolean
   status: string
+}
+
+export interface TaskUpdatePayload {
+  task_id: number
+  title?: string | null
+  priority_group?: number | null
+  deadline_at?: string | null
+  urgency_threshold_at?: string | null
+}
+
+export interface TaskDeletePayload {
+  task_id: number
 }
 
 export interface TaskBrief {

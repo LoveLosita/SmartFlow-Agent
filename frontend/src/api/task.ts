@@ -1,6 +1,6 @@
 import http from '@/api/http'
 import type { ApiResponse } from '@/types/api'
-import type { TaskCreatePayload, TaskCreateResult, TaskItem, TaskMutationResult } from '@/types/dashboard'
+import type { TaskUpdatePayload, TaskCreatePayload, TaskCreateResult, TaskItem, TaskMutationResult } from '@/types/dashboard'
 import { createIdempotencyKey } from '@/utils/idempotency'
 import { extractErrorMessage } from '@/utils/http'
 
@@ -57,5 +57,39 @@ export async function undoCompleteTask(taskId: number) {
     return response.data.data
   } catch (error) {
     throw new Error(extractErrorMessage(error, '恢复任务失败，请稍后重试'))
+  }
+}
+
+export async function updateTask(payload: TaskUpdatePayload) {
+  try {
+    const response = await http.put<ApiResponse<TaskItem>>(
+      '/task/update',
+      payload,
+      {
+        headers: {
+          'X-Idempotency-Key': createIdempotencyKey('task-update'),
+        },
+      }
+    )
+    return response.data.data
+  } catch (error) {
+    throw new Error(extractErrorMessage(error, '修改任务失败，请稍后重试'))
+  }
+}
+
+export async function deleteTask(taskId: number) {
+  try {
+    const response = await http.delete<ApiResponse<{ task_id: number }>>(
+      '/task/delete',
+      {
+        data: { task_id: taskId },
+        headers: {
+          'X-Idempotency-Key': createIdempotencyKey('task-delete'),
+        },
+      }
+    )
+    return response.data.data
+  } catch (error) {
+    throw new Error(extractErrorMessage(error, '删除任务失败，请稍后重试'))
   }
 }

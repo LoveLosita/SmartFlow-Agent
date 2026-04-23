@@ -44,16 +44,13 @@ const props = defineProps<{
   loading?: boolean
 }>()
 
-// 1. 时间轴始终固定为 8 个槽位，顺序不再受当天是否有课影响。
-// 2. 课程槽位缺数据时显示“无课”，而不是直接消失，避免把后续块位挤乱。
-// 3. 午休和晚餐是纯占位块，不展示时间文本，只负责占住用户指定的位置。
 const slotBlueprint: TimelineSlot[] = [
   { key: 'slot-1', kind: 'event', title: '1-2节', startTime: '08:00', endTime: '09:40' },
   { key: 'slot-2', kind: 'event', title: '3-4节', startTime: '10:15', endTime: '11:55' },
-  { key: 'slot-noon', kind: 'pause', title: '午休' },
+  { key: 'slot-noon', kind: 'pause', title: '午间' },
   { key: 'slot-4', kind: 'event', title: '5-6节', startTime: '14:00', endTime: '15:40' },
   { key: 'slot-5', kind: 'event', title: '7-8节', startTime: '16:15', endTime: '17:55' },
-  { key: 'slot-dinner', kind: 'pause', title: '晚餐' },
+  { key: 'slot-dinner', kind: 'pause', title: '晚休' },
   { key: 'slot-6', kind: 'event', title: '9-10节', startTime: '19:00', endTime: '20:40' },
   { key: 'slot-7', kind: 'event', title: '11-12节', startTime: '20:50', endTime: '22:30' },
 ]
@@ -70,25 +67,13 @@ const eventMap = computed(() => {
   return map
 })
 
+// 统一色调系统
 function resolveCardTone(event: TodayEvent | null) {
-  if (!event) {
-    return 'neutral'
-  }
-
-  if (event.type === 'course') {
-    return 'course'
-  }
-
-  const orderToneMap: Record<number, string> = {
-    1: 'sky',
-    2: 'violet',
-    4: 'mint',
-    5: 'emerald',
-    6: 'amber',
-    7: 'cyan',
-  }
-
-  return orderToneMap[event.order] ?? 'neutral'
+  if (!event) return 'empty'
+  if (event.type === 'course') return 'primary'
+  
+  const tones = ['sky', 'violet', 'mint', 'amber', 'rose']
+  return tones[event.order % tones.length]
 }
 
 const renderSlots = computed<RenderSlot[]>(() =>
@@ -98,7 +83,7 @@ const renderSlots = computed<RenderSlot[]>(() =>
         key: slot.key,
         kind: 'pause',
         title: slot.title,
-        hint: '为中段留出缓冲与恢复时间',
+        hint: 'Rest Time',
       }
     }
 
@@ -107,7 +92,7 @@ const renderSlots = computed<RenderSlot[]>(() =>
       key: slot.key,
       kind: 'event',
       timeText: formatTimeRange(event?.start_time || slot.startTime, event?.end_time || slot.endTime),
-      title: event?.name || '无课',
+      title: event?.name || '今日无安排',
       locationText: event?.location || '休息时间',
       tone: resolveCardTone(event),
     }
@@ -116,35 +101,39 @@ const renderSlots = computed<RenderSlot[]>(() =>
 </script>
 
 <template>
-  <section class="timeline-card glass-panel">
-    <header class="timeline-card__header">
-      <div>
-        <p class="timeline-card__eyebrow">今日总览</p>
-        <h2>今日日程一览</h2>
+  <section class="pastel-container">
+    <header class="pastel-header">
+      <div class="header-content">
+        <p class="header-label">DAILY TIMELINE</p>
+        <h2>今日日程</h2>
       </div>
-      <span class="timeline-card__caption">按时间顺序展示课程与任务安排</span>
     </header>
 
-    <transition name="fade-switch" mode="out-in">
-      <div v-if="loading" key="loading" class="timeline-skeleton">
-        <div v-for="slot in slotBlueprint" :key="slot.key" class="timeline-skeleton__item" />
+    <transition name="grid-pop" mode="out-in">
+      <div v-if="loading" key="loading" class="pastel-grid">
+        <div v-for="n in 8" :key="n" class="skeleton-pill" />
       </div>
 
-      <div v-else key="content" class="timeline-grid">
+      <div v-else key="content" class="pastel-grid">
         <template v-for="slot in renderSlots" :key="slot.key">
           <article
             v-if="slot.kind === 'event'"
-            class="timeline-event"
-            :class="`timeline-event--${slot.tone}`"
+            class="pastel-item"
+            :class="[`tone--${slot.tone}`]"
           >
-            <span class="timeline-event__time">{{ slot.timeText }}</span>
-            <strong class="timeline-event__title">{{ slot.title }}</strong>
-            <span class="timeline-event__location">{{ slot.locationText }}</span>
+            <div class="item-time">{{ slot.timeText }}</div>
+            <strong class="item-title">{{ slot.title }}</strong>
+            <div class="item-footer">
+              <svg class="location-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"></path>
+                <circle cx="12" cy="10" r="3"></circle>
+              </svg>
+              <span class="location-text">{{ slot.locationText }}</span>
+            </div>
           </article>
 
-          <article v-else class="timeline-placeholder timeline-placeholder--pause">
-            <strong class="timeline-placeholder__title">{{ slot.title }}</strong>
-            <span class="timeline-placeholder__hint">{{ slot.hint }}</span>
+          <article v-else class="pause-item">
+             <span class="pause-tag">{{ slot.title }}</span>
           </article>
         </template>
       </div>
@@ -153,281 +142,150 @@ const renderSlots = computed<RenderSlot[]>(() =>
 </template>
 
 <style scoped>
-.timeline-card {
-  min-width: 0;
-  border-radius: 28px;
-  padding: 22px 22px 20px;
-  border: 1px solid rgba(17, 24, 39, 0.08);
+.pastel-container {
+  padding: 32px;
+  background: #ffffff;
+  border-radius: 32px;
+  border: 1px solid rgba(0, 0, 0, 0.05);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.02);
 }
 
-.timeline-card__header {
+.pastel-header {
   display: flex;
   justify-content: space-between;
-  gap: 18px;
-  align-items: flex-end;
-  margin-bottom: 18px;
+  align-items: center;
+  margin-bottom: 28px;
 }
 
-.timeline-card__eyebrow {
-  margin: 0 0 6px;
-  font-size: 12px;
-  font-weight: 700;
-  color: #2a6fdf;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+.header-label {
+  font-size: 11px;
+  font-weight: 900;
+  color: #c4c9d5;
+  letter-spacing: 0.15em;
+  margin: 0 0 4px;
 }
 
-.timeline-card h2 {
+.header-content h2 {
   margin: 0;
-  font-size: 28px;
-  line-height: 1.1;
-  letter-spacing: -0.03em;
+  font-size: 24px;
+  font-weight: 800;
+  color: #1e293b;
 }
 
-.timeline-card__caption {
-  color: var(--text-secondary);
-  font-size: 13px;
-}
-
-.timeline-grid {
-  min-width: 0;
+.pastel-grid {
   display: grid;
-  /* 1. 使用自适应列数，避免固定列数把左侧主区撑爆。 */
-  /* 2. 但槽位顺序固定，换行只影响视觉换行，不影响时间先后顺序。 */
-  /* 3. 这样无论是否缺课，8 个槽位都会按既定顺序逐个渲染。 */
-  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
-  gap: 12px;
-  overflow: visible;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 14px;
 }
 
-.timeline-event,
-.timeline-placeholder,
-.timeline-skeleton__item {
-  min-width: 0;
-  min-height: 124px;
-  border-radius: 14px;
-}
-
-.timeline-event {
-  padding: 16px 14px;
+/* 核心卡片样式 */
+.pastel-item {
+  position: relative;
+  border-radius: 26px;
+  padding: 20px 18px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  border: 1px solid transparent;
-  position: relative;
-  overflow: hidden;
+  min-height: 140px;
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  cursor: default;
 }
 
-.timeline-event::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 4px;
+.pastel-item:hover {
+  transform: scale(1.03) translateY(-4px);
+  box-shadow: 0 15px 30px -10px rgba(0, 0, 0, 0.1);
+  z-index: 10;
 }
 
-.timeline-event__time {
+.item-time {
   font-size: 12px;
-  font-weight: 700;
-  color: #64748b;
+  font-weight: 800;
+  opacity: 0.6;
+  margin-bottom: 8px;
 }
 
-.timeline-event__title {
-  margin-top: 12px;
+.item-title {
+  font-size: 18px;
+  font-weight: 850;
+  line-height: 1.3;
+  margin-top: 4px;
+  flex: 1;
+}
+
+.item-footer {
+  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.location-svg { 
+  width: 13px; 
+  height: 13px; 
+  opacity: 0.8;
+}
+
+.location-text { 
+  font-size: 13px; 
+  font-weight: 700; 
+  opacity: 0.8; 
+}
+
+/* 莫兰迪色相系统 */
+.tone--primary { background: #eff6ff; color: #1e40af; }
+.tone--sky { background: #f0f9ff; color: #0369a1; }
+.tone--violet { background: #f5f3ff; color: #5b21b6; }
+.tone--mint { background: #ecfdf5; color: #065f46; }
+.tone--amber { background: #fffdf2; color: #92400e; }
+.tone--rose { background: #fff1f2; color: #9f1239; }
+.tone--empty { background: #f8fafc; color: #64748b; }
+
+/* 休息时间样式 */
+.pause-item {
+  background: #f1f5f9;
+  border-radius: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 80px;
+  opacity: 0.7;
+}
+
+.pause-tag {
   font-size: 15px;
-  line-height: 1.35;
-  color: #0f172a;
+  font-weight: 900;
+  color: #94a3b8;
+  letter-spacing: 0.1em;
 }
 
-.timeline-event__location {
-  margin-top: 14px;
-  font-size: 12px;
-  color: #64748b;
+/* 骨架屏 */
+.skeleton-pill {
+  min-height: 140px;
+  background: #f1f5f9;
+  border-radius: 26px;
+  animation: pill-shimmer 1.5s infinite linear;
 }
 
-.timeline-event--course {
-  background: #eff6ff;
+@keyframes pill-shimmer {
+  0% { opacity: 0.5; }
+  50% { opacity: 1; }
+  100% { opacity: 0.5; }
 }
 
-.timeline-event--course::before {
-  background: #3b82f6;
+/* 动画效果 */
+.grid-pop-enter-active {
+  transition: all 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
-
-.timeline-event--course .timeline-event__title,
-.timeline-event--course .timeline-event__time {
-  color: #1d4ed8;
-}
-
-.timeline-event--sky {
-  background: #f0f9ff;
-}
-
-.timeline-event--sky::before {
-  background: #0ea5e9;
-}
-
-.timeline-event--sky .timeline-event__title,
-.timeline-event--sky .timeline-event__time {
-  color: #0369a1;
-}
-
-.timeline-event--violet {
-  background: #f5f3ff;
-}
-
-.timeline-event--violet::before {
-  background: #8b5cf6;
-}
-
-.timeline-event--violet .timeline-event__title,
-.timeline-event--violet .timeline-event__time {
-  color: #6d28d9;
-}
-
-.timeline-event--mint {
-  background: #ecfdf5;
-}
-
-.timeline-event--mint::before {
-  background: #10b981;
-}
-
-.timeline-event--mint .timeline-event__title,
-.timeline-event--mint .timeline-event__time {
-  color: #047857;
-}
-
-.timeline-event--emerald {
-  background: #dcfce7;
-}
-
-.timeline-event--emerald::before {
-  background: #22c55e;
-}
-
-.timeline-event--emerald .timeline-event__title,
-.timeline-event--emerald .timeline-event__time {
-  color: #15803d;
-}
-
-.timeline-event--amber {
-  background: #fffbeb;
-}
-
-.timeline-event--amber::before {
-  background: #f59e0b;
-}
-
-.timeline-event--amber .timeline-event__title,
-.timeline-event--amber .timeline-event__time {
-  color: #b45309;
-}
-
-.timeline-event--cyan {
-  background: #cffafe;
-}
-
-.timeline-event--cyan::before {
-  background: #06b6d4;
-}
-
-.timeline-event--cyan .timeline-event__title,
-.timeline-event--cyan .timeline-event__time {
-  color: #0e7490;
-}
-
-.timeline-event--neutral {
-  background: #f8fafc;
-  border-color: rgba(15, 23, 42, 0.05);
-}
-
-.timeline-event--neutral::before {
-  background: #94a3b8;
-}
-
-.timeline-placeholder {
-  border: 1px dashed rgba(15, 23, 42, 0.15);
-  background: #ffffff;
-  display: grid;
-  align-content: center;
-  justify-items: center;
-  gap: 8px;
-  padding: 14px 12px;
-  text-align: center;
-  color: #64748b;
-}
-
-.timeline-placeholder--pause {
-  background: #f8fafc;
-}
-
-.timeline-placeholder__title {
-  font-size: 16px;
-  color: #22324b;
-}
-
-.timeline-placeholder__hint {
-  font-size: 12px;
-  color: #7a889d;
-  line-height: 1.5;
-}
-
-.timeline-skeleton {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
-  gap: 12px;
-}
-
-.timeline-skeleton__item {
-  background: linear-gradient(90deg, rgba(230, 236, 244, 0.8), rgba(245, 248, 252, 1), rgba(230, 236, 244, 0.8));
-  background-size: 200% 100%;
-  animation: skeleton-shimmer 1.4s linear infinite;
-}
-
-@keyframes skeleton-shimmer {
-  0% {
-    background-position: 200% 0;
-  }
-
-  100% {
-    background-position: -200% 0;
-  }
-}
-
-.fade-switch-enter-active,
-.fade-switch-leave-active {
-  transition: opacity 0.25s ease, transform 0.25s ease;
-}
-
-.fade-switch-enter-from,
-.fade-switch-leave-to {
+.grid-pop-enter-from {
   opacity: 0;
-  transform: translateY(4px);
-}
-.fade-switch-leave-to {
-  transform: translateY(-4px);
+  transform: scale(0.9);
 }
 
-@media (max-width: 1320px) {
-  .timeline-grid,
-  .timeline-skeleton {
-    grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
-  }
+@media (max-width: 1200px) {
+  .pastel-grid { grid-template-columns: repeat(4, 1fr); }
 }
 
-@media (max-width: 1040px) {
-  .timeline-card__header {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-}
-
-@media (max-width: 780px) {
-  .timeline-grid,
-  .timeline-skeleton {
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  }
+@media (max-width: 800px) {
+  .pastel-grid { grid-template-columns: repeat(2, 1fr); }
 }
 </style>

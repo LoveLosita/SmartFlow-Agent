@@ -1,27 +1,28 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 
 import TaskQuadrantCard from '@/components/dashboard/TaskQuadrantCard.vue'
 import TodayTimeline from '@/components/dashboard/TodayTimeline.vue'
-import { completeTask, createTask, getTasks, undoCompleteTask } from '@/api/task'
+import { completeTask, createTask, getTasks, undoCompleteTask, updateTask, deleteTask } from '@/api/task'
 import { getTodaySchedule } from '@/api/schedule'
 import { useAuthStore } from '@/stores/auth'
 import type { TaskItem, TodayEvent } from '@/types/dashboard'
 import { formatHeaderDate } from '@/utils/date'
 
 const router = useRouter()
-const route = useRoute()
 const authStore = useAuthStore()
 
 const pageLoading = ref(true)
 const taskLoading = ref(true)
 const scheduleLoading = ref(true)
-const createTaskLoading = ref(false)
+const saveTaskLoading = ref(false)
 const logoutLoading = ref(false)
-const createTaskDialogVisible = ref(false)
-const dashboardLayoutRef = ref<HTMLElement | null>(null)
+const taskDialogVisible = ref(false)
+const isEditMode = ref(false)
+const editingTaskId = ref<number | null>(null)
+
 const dashboardMainRef = ref<HTMLElement | null>(null)
 const dashboardMainInnerRef = ref<HTMLElement | null>(null)
 const dashboardTopbarRef = ref<HTMLElement | null>(null)
@@ -35,12 +36,13 @@ const taskForm = reactive<{
   title: string
   priority_group: number
   deadline_at: Date | null
+  urgency_threshold_at: Date | null
 }>({
   title: '',
   priority_group: 2,
   deadline_at: null,
+  urgency_threshold_at: null,
 })
-
 
 const quadrantOrder = [1, 2, 3, 4] as const
 
@@ -52,25 +54,25 @@ const quadrantMeta: Record<
     title: '重要且紧急',
     caption: '优先处理',
     tone: 'danger',
-    emptyText: '暂无需要立刻推进的事项',
+    emptyText: '暂无关键紧急任务',
   },
   2: {
     title: '重要不紧急',
     caption: '持续推进',
     tone: 'primary',
-    emptyText: '这里适合放长期投入的关键任务',
+    emptyText: '这里放长期核心任务',
   },
   3: {
     title: '简单不重要',
     caption: '顺手完成',
     tone: 'warning',
-    emptyText: '暂无高频但低价值的小任务',
+    emptyText: '暂无琐碎低价值任务',
   },
   4: {
     title: '不简单不重要',
     caption: '谨慎投入',
     tone: 'slate',
-    emptyText: '这里可以放暂缓事项或后续再评估的任务',
+    emptyText: '这里放辅助或暂缓任务',
   },
 }
 
@@ -109,12 +111,8 @@ async function loadScheduleData() {
 
 async function loadDashboardData() {
   pageLoading.value = true
-  
-  // 锁死最少加载时间，确保骨架屏平稳滑入定型后，再进行内外数据的交叉溶解
   const minLoadingTimer = new Promise((resolve) => setTimeout(resolve, 800))
-  
   await Promise.allSettled([loadTasksData(), loadScheduleData(), minLoadingTimer])
-  
   pageLoading.value = false
 }
 
@@ -135,26 +133,82 @@ async function handleTaskToggle(task: TaskItem) {
 }
 
 function openCreateTaskDialog() {
+  isEditMode.value = false
+  editingTaskId.value = null
   taskForm.title = ''
   taskForm.priority_group = 2
   taskForm.deadline_at = null
-  createTaskDialogVisible.value = true
+  taskForm.urgency_threshold_at = null
+  taskDialogVisible.value = true
 }
 
-async function handleCreateTask() {
-  if (!taskForm.title.trim()) { ElMessage.warning('请先填写任务标题'); return }
-  createTaskLoading.value = true
+function handleTaskEdit(task: TaskItem) {
+  isEditMode.value = true
+  editingTaskId.value = task.id
+  taskForm.title = task.title
+  taskForm.priority_group = task.priority_group
+  taskForm.deadline_at = task.deadline ? new Date(task.deadline) : null
+  taskForm.urgency_threshold_at = task.urgency_threshold_at ? new Date(task.urgency_threshold_at) : null
+  taskDialogVisible.value = true
+}
+
+async function handleTaskDelete(task: TaskItem) {
   try {
-    const created = await createTask({
-      title: taskForm.title.trim(),
-      priority_group: taskForm.priority_group,
-      deadline_at: taskForm.deadline_at ? taskForm.deadline_at.toISOString() : null,
+    await ElMessageBox.confirm('确定要删除该任务吗？操作不可撤销。', '确认删除', {
+      confirmButtonText: '确定删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+      roundButton: true
     })
-    tasks.value.unshift({ id: created.id, user_id: 0, title: created.title, priority_group: created.priority_group, status: created.status, deadline: created.deadline_at ?? '', is_completed: false })
-    createTaskDialogVisible.value = false
-    ElMessage.success('任务已添加')
-  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '创建任务失败') }
-  finally { createTaskLoading.value = false }
+    
+    await deleteTask(task.id)
+    tasks.value = tasks.value.filter(t => t.id !== task.id)
+    ElMessage.success('任务已成功删除')
+  } catch (error) {
+    if (error === 'cancel') return
+    ElMessage.error(error instanceof Error ? error.message : '任务删除失败')
+  }
+}
+
+async function handleSaveTask() {
+  if (!taskForm.title.trim()) { ElMessage.warning('请先填写任务标题'); return }
+  saveTaskLoading.value = true
+  try {
+    if (isEditMode.value && editingTaskId.value) {
+      // 执行更新交互
+      const updated = await updateTask({
+        task_id: editingTaskId.value,
+        title: taskForm.title.trim(),
+        priority_group: taskForm.priority_group,
+        deadline_at: taskForm.deadline_at ? taskForm.deadline_at.toISOString() : null,
+        urgency_threshold_at: taskForm.urgency_threshold_at ? taskForm.urgency_threshold_at.toISOString() : null,
+      })
+      const idx = tasks.value.findIndex(t => t.id === updated.id)
+      if (idx !== -1) tasks.value[idx] = updated
+      ElMessage.success('任务已更新')
+    } else {
+      // 执行创建交互
+      const created = await createTask({
+        title: taskForm.title.trim(),
+        priority_group: taskForm.priority_group,
+        deadline_at: taskForm.deadline_at ? taskForm.deadline_at.toISOString() : null,
+        urgency_threshold_at: taskForm.urgency_threshold_at ? taskForm.urgency_threshold_at.toISOString() : null,
+      })
+      tasks.value.unshift({ 
+        id: created.id, 
+        user_id: 0, 
+        title: created.title, 
+        priority_group: created.priority_group, 
+        status: created.status, 
+        deadline: created.deadline_at ?? '', 
+        is_completed: false,
+        urgency_threshold_at: created.urgency_threshold_at
+      })
+      ElMessage.success('任务已添加')
+    }
+    taskDialogVisible.value = false
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '保存任务失败') }
+  finally { saveTaskLoading.value = false }
 }
 
 async function handleLogout() {
@@ -163,8 +217,6 @@ async function handleLogout() {
   catch (error) { ElMessage.warning(error instanceof Error ? `${error.message}，本地登录态已清除` : '退出接口异常，本地登录态已清除') }
   finally { logoutLoading.value = false; await router.push('/auth') }
 }
-
-function handleCourseImportEntry() { ElMessage.info('课表导入入口已预留') }
 
 function syncDashboardMainScale() {
   const main = dashboardMainRef.value
@@ -241,6 +293,8 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
                 :tasks="groupedTasks[group]"
                 :loading="taskLoading || pageLoading"
                 @toggle="handleTaskToggle"
+                @edit="handleTaskEdit"
+                @delete="handleTaskDelete"
               />
             </section>
 
@@ -261,8 +315,8 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
       </section>
 
     <el-dialog
-      v-model="createTaskDialogVisible"
-      title="添加新任务"
+      v-model="taskDialogVisible"
+      :title="isEditMode ? '编辑任务详情' : '添加新任务'"
       width="440px"
       align-center
       class="dashboard-dialog premium-dialog"
@@ -279,21 +333,32 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
             <el-option :value="4" label="4 - 不简单不重要" />
           </el-select>
         </el-form-item>
-        <el-form-item label="截止时间">
-          <el-date-picker
-            v-model="taskForm.deadline_at"
-            type="datetime"
-            placeholder="可选"
-            class="dashboard-dialog__select"
-            popper-class="premium-select-popper"
-          />
-        </el-form-item>
+        <div class="dialog-double-row">
+          <el-form-item label="截止时间" class="half">
+            <el-date-picker
+              v-model="taskForm.deadline_at"
+              type="datetime"
+              placeholder="截止时间"
+              class="dashboard-dialog__select"
+              popper-class="premium-select-popper"
+            />
+          </el-form-item>
+          <el-form-item label="紧急阈值" class="half">
+            <el-date-picker
+              v-model="taskForm.urgency_threshold_at"
+              type="datetime"
+              placeholder="进入紧急的时间点"
+              class="dashboard-dialog__select"
+              popper-class="premium-select-popper"
+            />
+          </el-form-item>
+        </div>
       </el-form>
       <template #footer>
         <div class="premium-dialog__footer">
-          <button class="premium-btn premium-btn--ghost" @click="createTaskDialogVisible = false">取消</button>
-          <button class="premium-btn premium-btn--primary" :disabled="createTaskLoading" @click="handleCreateTask">
-            {{ createTaskLoading ? '保存中...' : '确认添加' }}
+          <button class="premium-btn premium-btn--ghost" @click="taskDialogVisible = false">取消</button>
+          <button class="premium-btn premium-btn--primary" :disabled="saveTaskLoading" @click="handleSaveTask">
+            {{ saveTaskLoading ? '保存中...' : (isEditMode ? '保存修改' : '确认添加') }}
           </button>
         </div>
       </template>
@@ -424,6 +489,17 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
   border-top: 1px solid #f1f5f9;
 }
 
+.dialog-double-row {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+  overflow: hidden;
+}
+.dialog-double-row .half {
+  flex: 1;
+  min-width: 0; /* 关键：强制子项可收缩 */
+}
+
 .premium-btn {
   height: 40px;
   padding: 0 20px;
@@ -486,11 +562,13 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
 }
 
 :global(.premium-dialog .el-input__wrapper),
-:global(.premium-dialog .el-select__wrapper) {
+:global(.premium-dialog .el-select__wrapper),
+:global(.premium-dialog .el-date-editor.el-input__wrapper) {
   background-color: #f8fafc !important;
   box-shadow: 0 0 0 1px #e2e8f0 inset !important;
   border-radius: 10px !important;
   padding: 4px 12px !important;
+  width: 100% !important;
 }
 
 :global(.premium-dialog .el-input__wrapper.is-focus),

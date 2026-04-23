@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	// taskUrgencyPromoteDedupeTTL 是“同一任务平移请求”的去重锁有效期。
+	// taskUrgencyPromoteDedupeTTL 是"同一任务平移请求"的去重锁有效期。
 	//
 	// 设计考虑：
 	// 1. 太短会导致消费稍慢时被重复投递；
@@ -55,7 +55,7 @@ func NewTaskService(taskDAO *dao.TaskDAO, cacheDAO *dao.CacheDAO, eventPublisher
 //
 // 职责边界：
 // 1. 负责参数转换、优先级合法性校验与写库；
-// 2. 不负责“紧急性自动平移”逻辑（该逻辑发生在任务读取时的懒触发链路）。
+// 2. 不负责"紧急性自动平移"逻辑（该逻辑发生在任务读取时的懒触发链路）。
 func (ts *TaskService) AddTask(ctx context.Context, req *model.UserAddTaskRequest, userID int) (*model.UserAddTaskResponse, error) {
 	// 1. 把用户请求转换为内部模型，避免 API 层结构直接泄漏到 DAO。
 	taskModel := conv.UserAddTaskRequestToModel(req, userID)
@@ -73,7 +73,7 @@ func (ts *TaskService) AddTask(ctx context.Context, req *model.UserAddTaskReques
 	return response, nil
 }
 
-// CompleteTask 将用户指定任务标记为“已完成”。
+// CompleteTask 将用户指定任务标记为"已完成"。
 //
 // 职责边界：
 // 1. 负责入参校验与业务错误映射；
@@ -86,7 +86,7 @@ func (ts *TaskService) CompleteTask(ctx context.Context, req *model.UserComplete
 		return nil, respond.WrongTaskID
 	}
 
-	// 2. 调用 DAO 执行“查询 + 必要时更新”。
+	// 2. 调用 DAO 执行"查询 + 必要时更新"。
 	updatedTask, alreadyCompleted, err := ts.dao.CompleteTaskByID(ctx, userID, req.TaskID)
 	if err != nil {
 		// 2.1 任务不存在或不属于当前用户时，统一映射为 WrongTaskID。
@@ -113,7 +113,7 @@ func (ts *TaskService) CompleteTask(ctx context.Context, req *model.UserComplete
 	return resp, nil
 }
 
-// UndoCompleteTask 取消用户任务的“已完成勾选”。
+// UndoCompleteTask 取消用户任务的"已完成勾选"。
 //
 // 职责边界：
 // 1. 负责入参校验与业务错误映射；
@@ -126,7 +126,7 @@ func (ts *TaskService) UndoCompleteTask(ctx context.Context, req *model.UserUndo
 		return nil, respond.WrongTaskID
 	}
 
-	// 2. 调用 DAO 执行“恢复未完成”逻辑。
+	// 2. 调用 DAO 执行"恢复未完成"逻辑。
 	updatedTask, err := ts.dao.UndoCompleteTaskByID(ctx, userID, req.TaskID)
 	if err != nil {
 		// 2.1 任务不存在或不属于当前用户，统一映射为 WrongTaskID。
@@ -154,12 +154,12 @@ func (ts *TaskService) UndoCompleteTask(ctx context.Context, req *model.UserUndo
 	return resp, nil
 }
 
-// GetUserTasks 获取用户任务列表（含“读时紧急性派生”与“异步平移触发”）。
+// GetUserTasks 获取用户任务列表（含"读时紧急性派生"与"异步平移触发"）。
 //
 // 核心流程（步骤化）：
-// 1. 先读缓存，未命中再回源 DB，并把“原始模型”回填缓存；
-// 2. 在内存里做“读时派生”：仅用于本次返回给前端，不直接改库；
-// 3. 收集“已到紧急分界线且仍处于非紧急象限”的任务 ID；
+// 1. 先读缓存，未命中再回源 DB，并把"原始模型"回填缓存；
+// 2. 在内存里做"读时派生"：仅用于本次返回给前端，不直接改库；
+// 3. 收集"已到紧急分界线且仍处于非紧急象限"的任务 ID；
 // 4. 通过 Redis SETNX 去重后，发布 outbox 事件异步落库；
 // 5. 无论发布成功与否，都优先返回本次派生结果，保证用户读体验。
 //
@@ -189,7 +189,7 @@ func (ts *TaskService) GetTasksWithUrgencyPromotion(ctx context.Context, userID 
 	return derivedTasks, nil
 }
 
-// getRawUserTasks 读取“原始任务模型”。
+// getRawUserTasks 读取"原始任务模型"。
 //
 // 职责边界：
 // 1. 负责缓存命中/回源 DB/回填缓存；
@@ -220,16 +220,16 @@ func (ts *TaskService) getRawUserTasks(ctx context.Context, userID int) ([]model
 	return dbTasks, nil
 }
 
-// deriveTaskUrgencyForRead 对任务做“读时紧急性派生”，并收集需要异步落库的任务 ID。
+// deriveTaskUrgencyForRead 对任务做"读时紧急性派生"，并收集需要异步落库的任务 ID。
 //
 // 职责边界：
 // 1. 只在内存里改本次返回值，不写 DB；
-// 2. 只做“到线且未完成任务”的优先级映射；
+// 2. 只做"到线且未完成任务"的优先级映射；
 // 3. 不处理去重锁和事件发布。
 //
 // 返回语义：
 // 1. 第一个返回值：可直接用于响应前端的派生任务切片；
-// 2. 第二个返回值：需要发“异步平移事件”的任务 ID 列表（可能为空）。
+// 2. 第二个返回值：需要发"异步平移事件"的任务 ID 列表（可能为空）。
 func deriveTaskUrgencyForRead(tasks []model.Task, now time.Time) ([]model.Task, []int) {
 	// 1. 拷贝切片，避免修改调用方持有的原始数据。
 	derived := make([]model.Task, len(tasks))
@@ -237,7 +237,7 @@ func deriveTaskUrgencyForRead(tasks []model.Task, now time.Time) ([]model.Task, 
 
 	pendingPromoteTaskIDs := make([]int, 0, len(derived))
 
-	// 2. 逐条判断是否满足“自动平移”条件。
+	// 2. 逐条判断是否满足"自动平移"条件。
 	for idx := range derived {
 		current := &derived[idx]
 
@@ -254,7 +254,7 @@ func deriveTaskUrgencyForRead(tasks []model.Task, now time.Time) ([]model.Task, 
 			continue
 		}
 
-		// 2.4 到线后，仅把“不紧急象限”平移到对应“紧急象限”。
+		// 2.4 到线后，仅把"不紧急象限"平移到对应"紧急象限"。
 		// 2.4.1 重要不紧急(2) -> 重要且紧急(1)
 		// 2.4.2 不简单不重要(4) -> 简单不重要(3)
 		switch current.Priority {
@@ -271,12 +271,12 @@ func deriveTaskUrgencyForRead(tasks []model.Task, now time.Time) ([]model.Task, 
 	return derived, pendingPromoteTaskIDs
 }
 
-// tryEnqueueTaskUrgencyPromote 尝试发布“任务紧急性平移请求”事件。
+// tryEnqueueTaskUrgencyPromote 尝试发布"任务紧急性平移请求"事件。
 //
 // 职责边界：
 // 1. 负责 Redis 去重锁 + outbox 发布；
 // 2. 不负责真正落库（由消费者负责）；
-// 3. 发布失败时要释放本次抢到的去重锁，避免任务被长时间“误判已投递”。
+// 3. 发布失败时要释放本次抢到的去重锁，避免任务被长时间"误判已投递"。
 func (ts *TaskService) tryEnqueueTaskUrgencyPromote(ctx context.Context, userID int, taskIDs []int) {
 	// 1. 基础兜底：无发布器或无候选任务时直接返回。
 	if ts.eventPublisher == nil || userID <= 0 || len(taskIDs) == 0 {
@@ -312,7 +312,7 @@ func (ts *TaskService) tryEnqueueTaskUrgencyPromote(ctx context.Context, userID 
 		return
 	}
 
-	// 4. 发布 outbox 事件：这里只保证“成功入 outbox 或返回错误”，不等待消费者执行完成。
+	// 4. 发布 outbox 事件：这里只保证"成功入 outbox 或返回错误"，不等待消费者执行完成。
 	publishErr := eventsvc.PublishTaskUrgencyPromoteRequested(ctx, ts.eventPublisher, model.TaskUrgencyPromoteRequestedPayload{
 		UserID:      userID,
 		TaskIDs:     lockedTaskIDs,
@@ -331,7 +331,7 @@ func (ts *TaskService) tryEnqueueTaskUrgencyPromote(ctx context.Context, userID 
 // releaseTaskPromoteLocks 释放任务平移去重锁。
 //
 // 说明：
-// 1. 仅用于“发布失败回滚”场景；
+// 1. 仅用于"发布失败回滚"场景；
 // 2. 使用 Background 避免请求上下文已取消时导致锁释放失败。
 func (ts *TaskService) releaseTaskPromoteLocks(lockKeys []string) {
 	if len(lockKeys) == 0 {
@@ -347,7 +347,7 @@ func (ts *TaskService) releaseTaskPromoteLocks(lockKeys []string) {
 	}
 }
 
-// compactPositiveUniqueTaskIDs 对任务 ID 做“过滤非正数 + 去重”。
+// compactPositiveUniqueTaskIDs 对任务 ID 做"过滤非正数 + 去重"。
 //
 // 职责边界：
 // 1. 只做参数清洗；
@@ -366,4 +366,81 @@ func compactPositiveUniqueTaskIDs(taskIDs []int) []int {
 		result = append(result, taskID)
 	}
 	return result
+}
+
+// UpdateTask 更新用户指定任务的属性（部分更新）。
+//
+// 职责边界：
+// 1. 负责参数校验：task_id 合法性、priority_group 范围；
+// 2. 负责将请求 DTO 转换为 DAO 层的 updates map；
+// 3. 空请求体（无字段需要更新）返回明确业务错误；
+// 4. 不负责缓存删除（由 GORM cache_deleter 回调自动处理）。
+func (ts *TaskService) UpdateTask(ctx context.Context, req *model.UserUpdateTaskRequest, userID int) (model.GetUserTaskResp, error) {
+	// 1. 参数兜底。
+	if req == nil || userID <= 0 || req.TaskID <= 0 {
+		return model.GetUserTaskResp{}, respond.WrongTaskID
+	}
+
+	// 2. 构造 updates map：只有非 nil 的字段才写入。
+	updates := make(map[string]interface{})
+	if req.Title != nil {
+		updates["title"] = *req.Title
+	}
+	if req.PriorityGroup != nil {
+		// 2.1 优先级范围校验：当前任务体系只允许 1~4。
+		if *req.PriorityGroup < 1 || *req.PriorityGroup > 4 {
+			return model.GetUserTaskResp{}, respond.InvalidPriority
+		}
+		// 2.2 JSON 字段名是 priority_group，数据库列名是 priority。
+		updates["priority"] = *req.PriorityGroup
+	}
+	if req.DeadlineAt != nil {
+		updates["deadline_at"] = *req.DeadlineAt
+	}
+	if req.UrgencyThresholdAt != nil {
+		updates["urgency_threshold_at"] = *req.UrgencyThresholdAt
+	}
+
+	// 3. 空更新检测：至少需要一个可更新字段。
+	if len(updates) == 0 {
+		return model.GetUserTaskResp{}, respond.TaskUpdateNoFields
+	}
+
+	// 4. 调用 DAO 执行更新。
+	updatedTask, err := ts.dao.UpdateTaskByID(ctx, userID, req.TaskID, updates)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return model.GetUserTaskResp{}, respond.WrongTaskID
+		}
+		return model.GetUserTaskResp{}, err
+	}
+
+	// 5. 转换为响应 DTO。
+	return conv.ModelToGetUserTaskResp(updatedTask), nil
+}
+
+// DeleteTask 永久删除用户指定任务。
+//
+// 职责边界：
+// 1. 负责入参校验与业务错误映射；
+// 2. 负责调用 DAO 执行硬删除；
+// 3. 任务不存在时返回幂等信息码（TaskAlreadyDeleted）；
+// 4. 不负责缓存删除（由 GORM cache_deleter 回调自动处理）。
+func (ts *TaskService) DeleteTask(ctx context.Context, req *model.UserCompleteTaskRequest, userID int) (int, error) {
+	// 1. 参数兜底。
+	if req == nil || userID <= 0 || req.TaskID <= 0 {
+		return 0, respond.WrongTaskID
+	}
+
+	// 2. 调用 DAO 执行删除。
+	deletedTask, err := ts.dao.DeleteTaskByID(ctx, userID, req.TaskID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// 2.1 任务不存在或不属于当前用户：按幂等语义返回信息码。
+			return 0, respond.TaskAlreadyDeleted
+		}
+		return 0, err
+	}
+
+	return deletedTask.ID, nil
 }

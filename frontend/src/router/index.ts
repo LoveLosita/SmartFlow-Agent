@@ -6,6 +6,7 @@ import AssistantView from '@/views/AssistantView.vue'
 import DashboardView from '@/views/DashboardView.vue'
 import ScheduleView from '@/views/ScheduleView.vue'
 import ToolTracePrototypeView from '@/views/ToolTracePrototypeView.vue'
+import TaskInteractiveDemo from '@/views/TaskInteractiveDemo.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -13,6 +14,11 @@ const router = createRouter({
     {
       path: '/',
       redirect: '/dashboard',
+    },
+    {
+      path: '/demo-task',
+      name: 'demo-task',
+      component: TaskInteractiveDemo,
     },
     {
       path: '/auth',
@@ -57,8 +63,6 @@ const router = createRouter({
 router.beforeEach((to) => {
   const authStore = useAuthStore()
 
-  // 1. 进入受保护页面前，必须先确认 access token 是否存在。
-  // 2. 当前阶段只做“是否登录”的前端兜底，不在这里做 token 过期解析。
   if (to.meta.requiresAuth && !authStore.isAuthenticated) {
     return {
       name: 'auth',

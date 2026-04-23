@@ -46,10 +46,10 @@ func (dao *TaskDAO) GetTasksByUserID(userID int) ([]model.Task, error) {
 	return tasks, nil
 }
 
-// CompleteTaskByID 将指定任务标记为“已完成”。
+// CompleteTaskByID 将指定任务标记为"已完成"。
 //
 // 职责边界：
-// 1. 只负责“当前用户 + 指定 task_id”的完成状态更新；
+// 1. 只负责"当前用户 + 指定 task_id"的完成状态更新；
 // 2. 不负责幂等中间件（由路由层统一挂载）；
 // 3. 不负责业务层响应包装（由 Service 层处理）。
 //
@@ -62,12 +62,12 @@ func (dao *TaskDAO) GetTasksByUserID(userID int) ([]model.Task, error) {
 //     3.1 gorm.ErrRecordNotFound：任务不存在或不属于当前用户；
 //     3.2 其他 error：数据库异常。
 func (dao *TaskDAO) CompleteTaskByID(ctx context.Context, userID int, taskID int) (*model.Task, bool, error) {
-	// 1. 基础兜底：非法参数直接返回“记录不存在”语义，避免下游误写。
+	// 1. 基础兜底：非法参数直接返回"记录不存在"语义，避免下游误写。
 	if userID <= 0 || taskID <= 0 {
 		return nil, false, gorm.ErrRecordNotFound
 	}
 
-	// 2. 先查询目标任务，明确区分“已完成”与“不存在”。
+	// 2. 先查询目标任务，明确区分"已完成"与"不存在"。
 	var target model.Task
 	findErr := dao.db.WithContext(ctx).
 		Where("id = ? AND user_id = ?", taskID, userID).
@@ -116,7 +116,7 @@ func (dao *TaskDAO) CompleteTaskByID(ctx context.Context, userID int, taskID int
 	return &target, false, nil
 }
 
-// UndoCompleteTaskByID 将指定任务从“已完成”恢复为“未完成”。
+// UndoCompleteTaskByID 将指定任务从"已完成"恢复为"未完成"。
 //
 // 职责边界：
 // 1. 只负责当前用户(user_id)下指定 task_id 的状态恢复；
@@ -127,15 +127,15 @@ func (dao *TaskDAO) CompleteTaskByID(ctx context.Context, userID int, taskID int
 //  1. *model.Task：恢复后的任务快照；
 //  2. error：
 //     2.1 gorm.ErrRecordNotFound：任务不存在或不属于当前用户；
-//     2.2 respond.TaskNotCompleted：任务当前不是“已完成”状态，不能执行取消勾选；
+//     2.2 respond.TaskNotCompleted：任务当前不是"已完成"状态，不能执行取消勾选；
 //     2.3 其他 error：数据库异常。
 func (dao *TaskDAO) UndoCompleteTaskByID(ctx context.Context, userID int, taskID int) (*model.Task, error) {
-	// 1. 参数兜底：非法 user/task 参数统一按“记录不存在”处理，避免误写。
+	// 1. 参数兜底：非法 user/task 参数统一按"记录不存在"处理，避免误写。
 	if userID <= 0 || taskID <= 0 {
 		return nil, gorm.ErrRecordNotFound
 	}
 
-	// 2. 先读取目标任务，明确区分“不存在”和“状态不允许恢复”。
+	// 2. 先读取目标任务，明确区分"不存在"和"状态不允许恢复"。
 	var target model.Task
 	findErr := dao.db.WithContext(ctx).
 		Where("id = ? AND user_id = ?", taskID, userID).
@@ -145,7 +145,7 @@ func (dao *TaskDAO) UndoCompleteTaskByID(ctx context.Context, userID int, taskID
 	}
 
 	// 3. 严格业务约束：若任务当前未完成，直接返回业务错误。
-	// 3.1 这是本接口和“标记完成”接口的关键差异：这里不做幂等成功。
+	// 3.1 这是本接口和"标记完成"接口的关键差异：这里不做幂等成功。
 	if !target.IsCompleted {
 		return nil, respond.TaskNotCompleted
 	}
@@ -164,7 +164,7 @@ func (dao *TaskDAO) UndoCompleteTaskByID(ctx context.Context, userID int, taskID
 
 	// 5. 并发兜底：
 	// 5.1 若 RowsAffected=0，说明可能被并发请求先一步恢复；
-	// 5.2 重新读取当前状态，若已是未完成则按业务规则返回“任务未完成”错误。
+	// 5.2 重新读取当前状态，若已是未完成则按业务规则返回"任务未完成"错误。
 	if updateResult.RowsAffected == 0 {
 		var check model.Task
 		checkErr := dao.db.WithContext(ctx).
@@ -184,10 +184,10 @@ func (dao *TaskDAO) UndoCompleteTaskByID(ctx context.Context, userID int, taskID
 	return &target, nil
 }
 
-// PromoteTaskUrgencyByIDs 批量执行“任务紧急性平移”。
+// PromoteTaskUrgencyByIDs 批量执行"任务紧急性平移"。
 //
 // 职责边界：
-//  1. 只负责把满足条件的任务从“不紧急象限”平移到“紧急象限”：
+//  1. 只负责把满足条件的任务从"不紧急象限"平移到"紧急象限"：
 //     1.1 priority=2 -> 1（重要不紧急 -> 重要且紧急）；
 //     1.2 priority=4 -> 3（不简单不重要 -> 简单不重要）；
 //  2. 只更新本次指定 user_id + task_ids 范围内的数据；
@@ -209,7 +209,7 @@ func (dao *TaskDAO) PromoteTaskUrgencyByIDs(ctx context.Context, userID int, tas
 		return 0, nil
 	}
 
-	// 3. 条件更新：只更新“已到紧急分界线且仍处于非紧急象限”的任务。
+	// 3. 条件更新：只更新"已到紧急分界线且仍处于非紧急象限"的任务。
 	result := dao.db.WithContext(ctx).
 		Model(&model.Task{UserID: userID}).
 		Where("user_id = ?", userID).
@@ -225,7 +225,101 @@ func (dao *TaskDAO) PromoteTaskUrgencyByIDs(ctx context.Context, userID int, tas
 	return result.RowsAffected, nil
 }
 
-// compactPositiveIntIDs 对 int 切片做“去重 + 过滤非正数”。
+// UpdateTaskByID 按 task_id + user_id 更新指定字段。
+//
+// 职责边界：
+// 1. 只负责按 updates map 执行 SET 子句更新；
+// 2. 不负责业务规则（如优先级范围校验），由 Service 层处理；
+// 3. 使用 Model(&model.Task{UserID: userID}) 让 cache_deleter 回调拿到 user_id。
+//
+// 返回语义：
+// 1. *model.Task：更新后的完整任务快照；
+// 2. error：
+//    2.1 gorm.ErrRecordNotFound：任务不存在或不属于当前用户；
+//    2.2 其他 error：数据库异常。
+func (dao *TaskDAO) UpdateTaskByID(ctx context.Context, userID int, taskID int, updates map[string]interface{}) (*model.Task, error) {
+	// 1. 参数兜底：非法参数直接返回"记录不存在"语义。
+	if userID <= 0 || taskID <= 0 {
+		return nil, gorm.ErrRecordNotFound
+	}
+
+	// 2. 先查询目标任务，确认存在且归属当前用户。
+	var target model.Task
+	findErr := dao.db.WithContext(ctx).
+		Where("id = ? AND user_id = ?", taskID, userID).
+		First(&target).Error
+	if findErr != nil {
+		return nil, findErr
+	}
+
+	// 3. 执行部分字段更新。
+	// 3.1 使用 Model(&model.Task{UserID: userID}) 触发 cache_deleter。
+	// 3.2 限定 id + user_id 条件，避免误更新。
+	updateResult := dao.db.WithContext(ctx).
+		Model(&model.Task{UserID: userID}).
+		Where("id = ? AND user_id = ?", taskID, userID).
+		Updates(updates)
+	if updateResult.Error != nil {
+		return nil, updateResult.Error
+	}
+
+	// 4. 更新后重新读取，保证返回完整且一致的快照。
+	var updated model.Task
+	if err := dao.db.WithContext(ctx).
+		Where("id = ? AND user_id = ?", taskID, userID).
+		First(&updated).Error; err != nil {
+		return nil, err
+	}
+
+	return &updated, nil
+}
+
+// DeleteTaskByID 永久删除指定任务（硬删除）。
+//
+// 职责边界：
+// 1. 只负责删除 user_id + task_id 对应的记录；
+// 2. 使用 Model(&model.Task{UserID: userID}) 触发 cache_deleter 删除用户任务缓存；
+// 3. 不负责级联清理日程（tasks 与 schedule_events 无直接外键关联）。
+//
+// 返回语义：
+// 1. *model.Task：被删除的任务快照（用于响应前端）；
+// 2. error：
+//    2.1 gorm.ErrRecordNotFound：任务不存在或不属于当前用户；
+//    2.2 其他 error：数据库异常。
+func (dao *TaskDAO) DeleteTaskByID(ctx context.Context, userID int, taskID int) (*model.Task, error) {
+	// 1. 参数兜底。
+	if userID <= 0 || taskID <= 0 {
+		return nil, gorm.ErrRecordNotFound
+	}
+
+	// 2. 先查询目标任务，确认存在且归属当前用户，同时获取快照用于响应。
+	var target model.Task
+	findErr := dao.db.WithContext(ctx).
+		Where("id = ? AND user_id = ?", taskID, userID).
+		First(&target).Error
+	if findErr != nil {
+		return nil, findErr
+	}
+
+	// 3. 执行硬删除。
+	// 3.1 使用 Model(&model.Task{UserID: userID}) 触发 cache_deleter。
+	deleteResult := dao.db.WithContext(ctx).
+		Model(&model.Task{UserID: userID}).
+		Where("id = ? AND user_id = ?", taskID, userID).
+		Delete(&model.Task{})
+	if deleteResult.Error != nil {
+		return nil, deleteResult.Error
+	}
+
+	// 4. 并发兜底：RowsAffected=0 说明被并发请求先一步删除。
+	if deleteResult.RowsAffected == 0 {
+		return nil, gorm.ErrRecordNotFound
+	}
+
+	return &target, nil
+}
+
+// compactPositiveIntIDs 对 int 切片做"去重 + 过滤非正数"。
 //
 // 说明：
 // 1. 该函数是 DAO 内部参数清洗工具，不参与任何业务判定；

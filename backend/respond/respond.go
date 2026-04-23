@@ -37,7 +37,7 @@ func DealWithError(c *gin.Context, err error) { //处理错误，返回对应的
 		return
 	}
 	var resp Response
-	if errors.Is(err, UserTasksEmpty) || errors.Is(err, NoOngoingOrUpcomingSchedule) {
+	if errors.Is(err, UserTasksEmpty) || errors.Is(err, NoOngoingOrUpcomingSchedule) || errors.Is(err, TaskAlreadyDeleted) {
 		c.JSON(http.StatusOK, err)
 		return
 	}
@@ -377,6 +377,16 @@ var ( //请求相关的响应
 	ScheduleStateDuplicateTaskItem = Response{ //请求中包含重复的 task_item_id
 		Status: "40062",
 		Info:   "duplicate task_item_id in request",
+	}
+
+	TaskUpdateNoFields = Response{ //更新任务未指定任何字段
+		Status: "40063",
+		Info:   "no fields to update",
+	}
+
+	TaskAlreadyDeleted = Response{ //任务已删除或不存在（幂等信息码）
+		Status: "10003",
+		Info:   "task already deleted or not found",
 	}
 
 	RouteControlInternalError = Response{ //路由控制码内部错误

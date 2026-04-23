@@ -55,3 +55,24 @@ func ModelToGetUserTasksResp(tasks []model.Task) []model.GetUserTaskResp {
 	}
 	return resp
 }
+
+// ModelToGetUserTaskResp 将单个 Task 模型转换为 GetUserTaskResp。
+func ModelToGetUserTaskResp(task *model.Task) model.GetUserTaskResp {
+	status := "incomplete"
+	if task.IsCompleted {
+		status = "completed"
+	}
+	deadline := ""
+	if task.DeadlineAt != nil {
+		deadline = task.DeadlineAt.Format("2006-01-02 15:04:05")
+	}
+	return model.GetUserTaskResp{
+		ID:            task.ID,
+		UserID:        task.UserID,
+		Title:         task.Title,
+		PriorityGroup: task.Priority,
+		Status:        status,
+		Deadline:      deadline,
+		IsCompleted:   task.IsCompleted,
+	}
+}

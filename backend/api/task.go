@@ -85,7 +85,7 @@ func (th *TaskHandler) CompleteTask(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
 	defer cancel()
 
-	// 4. 调用 Service 执行“标记完成”逻辑。
+	// 4. 调用 Service 执行"标记完成"逻辑。
 	resp, err := th.svc.CompleteTask(ctx, &req, userID)
 	if err != nil {
 		respond.DealWithError(c, err)
@@ -96,12 +96,12 @@ func (th *TaskHandler) CompleteTask(c *gin.Context) {
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
 }
 
-// UndoCompleteTask 取消任务“已完成”勾选。
+// UndoCompleteTask 取消任务"已完成"勾选。
 //
 // 职责边界：
 // 1. 负责解析请求与读取 user_id；
 // 2. 负责调用 Service 执行业务恢复；
-// 3. 不负责“任务是否已完成”的业务判断（由 Service/DAO 负责）。
+// 3. 不负责"任务是否已完成"的业务判断（由 Service/DAO 负责）。
 func (th *TaskHandler) UndoCompleteTask(c *gin.Context) {
 	// 1. 绑定请求参数。
 	var req model.UserUndoCompleteTaskRequest
@@ -118,7 +118,7 @@ func (th *TaskHandler) UndoCompleteTask(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
 	defer cancel()
 
-	// 4. 调用 Service 执行“取消已完成勾选”逻辑。
+	// 4. 调用 Service 执行"取消已完成勾选"逻辑。
 	resp, err := th.svc.UndoCompleteTask(ctx, &req, userID)
 	if err != nil {
 		respond.DealWithError(c, err)
@@ -127,4 +127,70 @@ func (th *TaskHandler) UndoCompleteTask(c *gin.Context) {
 
 	// 5. 返回统一响应结构。
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
+}
+
+// UpdateTask 更新任务属性（部分更新）。
+//
+// 职责边界：
+// 1. 负责解析请求与读取 user_id；
+// 2. 负责调用 Service 执行业务；
+// 3. 不负责幂等校验（幂等由路由中间件处理）。
+func (th *TaskHandler) UpdateTask(c *gin.Context) {
+	// 1. 绑定请求参数。
+	var req model.UserUpdateTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		fmt.Println(err)
+		return
+	}
+
+	// 2. 从鉴权上下文读取 user_id，保证只操作当前用户任务。
+	userID := c.GetInt("user_id")
+
+	// 3. 设置短超时，避免该写接口占用连接过久。
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel()
+
+	// 4. 调用 Service 执行更新逻辑。
+	resp, err := th.svc.UpdateTask(ctx, &req, userID)
+	if err != nil {
+		respond.DealWithError(c, err)
+		return
+	}
+
+	// 5. 返回统一响应结构。
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
+}
+
+// DeleteTask 永久删除指定任务。
+//
+// 职责边界：
+// 1. 负责解析请求与读取 user_id；
+// 2. 负责调用 Service 执行删除；
+// 3. 不负责幂等校验（幂等由路由中间件处理）。
+func (th *TaskHandler) DeleteTask(c *gin.Context) {
+	// 1. 绑定请求参数。
+	var req model.UserCompleteTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		fmt.Println(err)
+		return
+	}
+
+	// 2. 从鉴权上下文读取 user_id，保证只操作当前用户任务。
+	userID := c.GetInt("user_id")
+
+	// 3. 设置短超时，避免该写接口占用连接过久。
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	defer cancel()
+
+	// 4. 调用 Service 执行删除逻辑。
+	taskID, err := th.svc.DeleteTask(ctx, &req, userID)
+	if err != nil {
+		respond.DealWithError(c, err)
+		return
+	}
+
+	// 5. 返回统一响应结构。
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, gin.H{"task_id": taskID}))
 }

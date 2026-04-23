@@ -55,6 +55,8 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, userRepo *d
 			taskGroup.POST("/create", middleware.IdempotencyMiddleware(cache), handlers.TaskHandler.AddTask)
 			taskGroup.PUT("/complete", middleware.IdempotencyMiddleware(cache), handlers.TaskHandler.CompleteTask)
 			taskGroup.PUT("/undo-complete", middleware.IdempotencyMiddleware(cache), handlers.TaskHandler.UndoCompleteTask)
+			taskGroup.PUT("/update", middleware.IdempotencyMiddleware(cache), handlers.TaskHandler.UpdateTask)
+			taskGroup.DELETE("/delete", middleware.IdempotencyMiddleware(cache), handlers.TaskHandler.DeleteTask)
 			taskGroup.GET("/get", handlers.TaskHandler.GetUserTasks)
 		}
 		courseGroup := apiGroup.Group("/course")
