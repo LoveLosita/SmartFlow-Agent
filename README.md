@@ -142,13 +142,13 @@ flowchart TD
 
 ## 2.2 页面展示
 
-![登录页](D:\SmartFlow-Agent\docs\pics\登录页.png)
+![登录页](./docs/pics/登录页.png)
 
 ![平台首页_已登录](./docs/pics/主页.png)
 
-![课程表页面](D:\SmartFlow-Agent\docs\pics\课程表页面.png)
+![课程表页面](./docs/pics/课程表页面.png)
 
-![AI-工具调用中](D:\SmartFlow-Agent\docs\pics\AI-工具调用中.png)
+![AI-工具调用中](./docs/pics/AI-工具调用中.png)
 
 # 3 后端数据架构
 

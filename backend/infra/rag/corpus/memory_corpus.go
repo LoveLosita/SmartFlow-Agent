@@ -116,7 +116,6 @@ func (c *MemoryCorpus) BuildRetrieveFilter(_ context.Context, req any) (map[stri
 	}
 	filter := map[string]any{
 		"user_id": input.UserID,
-		"status":  "active",
 	}
 	if v := strings.TrimSpace(input.ConversationID); v != "" {
 		filter["conversation_id"] = v
