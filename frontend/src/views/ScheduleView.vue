@@ -17,6 +17,7 @@ import {
 import CreateTaskClassDialog from '@/components/schedule/CreateTaskClassDialog.vue'
 import TaskClassSidebar from '@/components/schedule/TaskClassSidebar.vue'
 import WeekPlanningBoard from '@/components/schedule/WeekPlanningBoard.vue'
+import CourseImageImportDialog from '@/components/schedule/CourseImageImportDialog.vue'
 import type { ApplyBatchIntoScheduleItem, ScheduleWeekData, ScheduleWeekEvent, TaskClassDetail, TaskClassListItem } from '@/types/schedule'
 import { formatHeaderDate } from '@/utils/date'
 
@@ -130,6 +131,7 @@ const applyingLoading = ref(false)
 const deletingLoading = ref(false)
 const createDialogVisible = ref(false)
 const createDialogLoading = ref(false)
+const courseImportDialogVisible = ref(false)
 
 const taskClasses = ref<TaskClassListItem[]>([])
 const expandedTaskClassId = ref<number | null>(null)
@@ -1217,6 +1219,15 @@ onMounted(async () => {
                 </button>
 
                 <button
+                  v-if="!manualEditMode && !scheduleSelectionMode"
+                  type="button"
+                  class="schedule-board__toolbar-button schedule-board__toolbar-button--ghost"
+                  @click="courseImportDialogVisible = true"
+                >
+                  导入课表
+                </button>
+
+                <button
                   v-if="showSmartPlanningButton"
                   type="button"
                   class="schedule-board__toolbar-button schedule-board__toolbar-button--primary"
@@ -1298,6 +1309,11 @@ onMounted(async () => {
         v-model="createDialogVisible"
         :loading="createDialogLoading"
         @submit="handleCreateTaskClass"
+      />
+
+      <CourseImageImportDialog
+        v-model="courseImportDialogVisible"
+        @success="loadWeekData(currentWeek ?? undefined, { force: true })"
       />
 </template>
 

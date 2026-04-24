@@ -1,18 +1,12 @@
 # SmartFlow 后端配置示例
 #
-# 使用说明：
-# 1. 请复制为 config.yaml 后再按实际环境填写。
-# 2. 示例文件强调“结构清晰”和“字段语义明确”，不是生产推荐值。
-# 3. 若你只想看 memory 相关配置，优先看本文件下半部分的 memory / rag / websearch 段。
+# 说明：
+# 1. 请复制为 config.yaml 后按实际环境填写。
+# 2. 本示例只保留当前代码仍会读取的配置项，避免示例与运行配置持续漂移。
 
-# 服务启动与 HTTP 行为。
+# 服务启动配置。
 server:
-  # HTTP 监听端口。
   port: 8080
-  # gin 运行模式：debug / release。
-  mode: debug
-  # 单次请求默认超时时间。
-  timeout: 30s
 
 # MySQL 主库配置。
 database:
@@ -21,30 +15,19 @@ database:
   user: smartflow_user
   password: "put_your_database_password_here"
   dbname: "put_your_database_name_here"
-  charset: utf8mb4
-  parseTime: true
-  loc: Local
 
 # 登录态与鉴权令牌配置。
 jwt:
   accessSecret: "put_your_jwt_access_secret_here"
   refreshSecret: "put_your_jwt_refresh_secret_here"
-  # access token 有效期，面向接口鉴权。
   accessTokenExpire: 15min
-  # refresh token 有效期，面向续签。
   refreshTokenExpire: 7d
 
-# 应用日志输出配置。
-log:
-  level: info
-  path: logs/
-
-# Redis 缓存与轻量状态存储。
+# Redis 配置。
 redis:
   host: localhost
   port: 6379
   password: ""
-  db: 0
 
 # Kafka outbox 事件总线配置。
 kafka:
@@ -60,156 +43,91 @@ kafka:
 # 时间与学期边界配置。
 time:
   zone: "Asia/Shanghai"
-  # 学期开始日期，一定要设定为周一，以便于计算周数。
   semesterStartDate: "2026-03-02"
-  # 学期结束日期，一定要设定为周日，确保最后一周完整。
   semesterEndDate: "2026-07-19"
 
-# 智能体模型与规划参数。
+# 智能体模型配置。
 agent:
-  # 轻量模型：标题生成等低复杂度、低延迟场景。
   liteModel: "doubao-seed-2-0-code-preview-260215"
-  # 标准模型：Chat 路由/闲聊/深度回答/Deliver 总结。
   proModel: "doubao-seed-2-0-code-preview-260215"
-  # 高能力模型：Plan 规划 + Execute ReAct 等深度推理场景。
   maxModel: "doubao-seed-2-0-code-preview-260215"
-  # 模型服务根路径。
   baseURL: "https://ark.cn-beijing.volces.com/api/v3"
-  # 日内并发优化并发度，建议按模型配额调整。
-  dailyRefineConcurrency: 7
-  # 周级跨天配平额度上限，防止过度调整。
-  weeklyAdjustBudget: 5
   thinking:
-    # plan 节点（单轮深度规划），默认开 thinking。
     plan: true
-    # execute 节点（ReAct 深度推理），默认开 thinking。
     execute: true
-    # deliver 节点（交付总结），默认关 thinking。
     deliver: false
-    # 记忆模块（决策比对 + 抽取），默认关 thinking。
     memory: false
+
+# 课表图片导入识别配置。
+courseImport:
+  visionModel: ""
+  maxImageBytes: 5242880
+  maxTokens: 8192
 
 # 通用 RAG 配置。
 rag:
-  # 总开关；关闭后不再走通用向量检索链路。
   enabled: true
-  # 当前向量存储类型，可选：inmemory / milvus。
   store: "milvus"
-  # 召回候选上限。
   topK: 8
-  # 召回相似度阈值。
   threshold: 0.55
   retrieve:
-    # 单次检索超时时间，避免主链路长时间阻塞。
     timeoutMs: 1500
   ingest:
-    # 文档切块大小；过大影响召回精度，过小影响上下文完整度。
     chunkSize: 400
-    # 相邻 chunk 重叠字符数。
     chunkOverlap: 80
   embed:
-    # embedding 供应商实现，可选：mock / eino。
     provider: "eino"
-    # embedding 模型名。
     model: "doubao-embedding-vision-251215"
-    # embedding 服务根路径；API Key 统一从环境变量读取。
     baseURL: "https://ark.cn-beijing.volces.com/api/v3"
     timeoutMs: 1200
-    # 向量维度，必须与向量库 collection 配置一致。
     dimension: 1024
   reranker:
-    # 是否启用重排。
     enabled: false
-    # 当前默认 noop，后续可扩展。
     provider: "noop"
+    timeoutMs: 1200
   milvus:
-    # Milvus REST 地址，不要填健康检查口。
     address: "http://localhost:19530"
     token: "root:Milvus"
     dbName: ""
-    # 通用 RAG chunk collection。
     collectionName: "smartflow_rag_chunks"
     metricType: "COSINE"
     requestTimeoutMs: 1500
 
 # 记忆模块配置。
 memory:
-  # memory 总开关；关闭后不做抽取、写入、召回、注入。
   enabled: true
   rag:
-    # 是否允许 memory 读写链路使用向量召回能力。
-    # 关闭后，memory 里的“语义候选”会退回 MySQL 路径，不等于整个 memory 模块关闭。
     enabled: true
   read:
-    # 读取模式：
-    # 1. legacy：旧读链路，语义上是“RAG 优先，失败再走 legacy”。
-    # 2. hybrid：新读链路，先取强约束，再补语义候选，再统一去重/排序/预算裁剪。
-    # 3. 如果你想强制纯 MySQL 召回，建议同时设置 read.mode=legacy 且 memory.rag.enabled=false。
     mode: legacy
-    # constraint 类型最大注入条数。
     constraintLimit: 5
-    # preference 类型最大注入条数。
     preferenceLimit: 5
-    # fact 类型最大注入条数。
     factLimit: 5
   inject:
-    # 注入渲染模式：
-    # flat 为旧扁平列表；typed_v2 为按类型分段，便于模型区分“硬约束”和“参考事实”。
     renderMode: flat
   prompt:
-    # 留空表示走代码内默认抽取 prompt。
     extract: ""
-    # 留空表示走代码内默认决策 prompt。
     decision: ""
-  # memory 向量召回阈值。
   threshold: 0.55
-  # 是否启用重排；当前默认关闭。
   enableReranker: false
   llm:
-    # 记忆抽取/决策使用的 LLM 随机度，默认尽量保守，提升可复现性。
     temperature: 0.1
     topP: 0.2
   job:
-    # 异步记忆任务最大重试次数。
     maxRetry: 6
   worker:
-    # worker 轮询间隔。
     pollEvery: 2s
-    # 单次认领任务数。
     claimBatch: 1
   decision:
-    # 决策层总开关。
-    # 开启后，写入链路会从”直接新增”升级成”召回旧记忆 -> 比对 -> 决策动作”。
     enabled: true
-    # 决策层语义候选数上限。
     candidateTopK: 5
-    # 决策层语义候选最低相似度阈值。
     candidateMinScore: 0.6
-    # 决策流程整体失败时的降级策略：
-    # legacy_add：退回旧路径直接新增
-    # drop：直接丢弃本次写入
     fallbackMode: legacy_add
   write:
-    # 写入模式：
-    # legacy：沿用旧写入路径
-    # decision：启用决策式写入
-    # 注意：只有 decision.enabled=true 时，这个值才真正生效。
     mode: legacy
-    # 写入最低置信度阈值，抽取结果 confidence 低于此值直接丢弃。
     minConfidence: 0.5
 
 # 联网搜索能力配置。
 websearch:
-  # 可选：mock | bocha。
   provider: bocha
-  # 搜索供应商 API Key；bocha 模式必填，否则会降级为 mock。
   apiKey: ""
-  # 单次搜索请求超时。
-  timeout: 10s
-  # 单次 URL 抓取超时。
-  fetchTimeout: 15s
-  # 抓取正文最大字符数。
-  fetchMaxChars: 4000
-  rag:
-    # 是否把 websearch 结果继续送入 RAG 处理。
-    enabled: false

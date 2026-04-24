@@ -1189,7 +1189,9 @@ function shouldShowDisplayReasoningBox(dm: DisplayMessage): boolean {
 }
 
 function shouldShowDisplayAnsweringIndicator(dm: DisplayMessage): boolean {
-  return isDisplayStreaming(dm) && dm.sources.every(m => thinkingMessageMap[m.id] !== true)
+  return isDisplayStreaming(dm) && 
+         dm.sources.every(m => thinkingMessageMap[m.id] !== true) &&
+         !dm.content.trim()
 }
 
 function isDisplayReasoningCollapsed(dm: DisplayMessage): boolean {
@@ -2714,10 +2716,8 @@ onBeforeUnmount(() => {
                       v-html="renderMessageMarkdown(block.text)"
                     />
                     <div v-else class="chat-message__streaming chat-message__streaming--reasoning">
-                      <div class="typing-indicator">
-                        <span />
-                        <span />
-                        <span />
+                      <div class="thinking-indicator">
+                        <span class="thinking-indicator__text">正在思考</span>
                       </div>
                     </div>
                   </div>
@@ -2735,10 +2735,8 @@ onBeforeUnmount(() => {
                 </template>
 
                 <div v-else-if="block.type === 'content_indicator'" class="assistant-timeline__answering-indicator">
-                  <div class="typing-indicator">
-                    <span />
-                    <span />
-                    <span />
+                  <div class="thinking-indicator">
+                    <span class="thinking-indicator__text">正在思考</span>
                   </div>
                 </div>
                 </div>
@@ -4652,36 +4650,38 @@ onBeforeUnmount(() => {
   border-color: rgba(15, 23, 42, 0.08);
 }
 
-.typing-indicator {
-  display: flex;
+.thinking-indicator {
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
 }
 
-.typing-indicator span {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: #86a9dd;
-  animation: typing-bounce 1.2s ease-in-out infinite;
+.thinking-indicator__text {
+  font-size: 15px;
+  font-weight: 600;
+  color: #64748b;
+  background: linear-gradient(
+    90deg, 
+    #64748b 0%, 
+    #64748b 25%, 
+    #e2e8f0 50%, 
+    #64748b 75%, 
+    #64748b 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: thinking-shimmer 2s infinite linear;
 }
 
-.typing-indicator span:nth-child(2) {
-  animation-delay: 0.12s;
-}
-
-.typing-indicator span:nth-child(3) {
-  animation-delay: 0.24s;
+@keyframes thinking-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: 0% 0; }
 }
 
 @keyframes confirm-card-enter {
   0% { opacity: 0; transform: translateY(10px) scale(0.985); }
   100% { opacity: 1; transform: translateY(0) scale(1); }
-}
-
-@keyframes typing-bounce {
-  0%, 80%, 100% { transform: translateY(0); opacity: 0.5; }
-  40% { transform: translateY(-4px); opacity: 1; }
 }
 
 @keyframes pulse-dot {

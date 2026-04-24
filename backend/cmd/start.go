@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/api"
@@ -148,7 +149,21 @@ func Start() {
 	// Service 层初始化。
 	userService := service.NewUserService(userRepo, cacheRepo)
 	taskSv := service.NewTaskService(taskRepo, cacheRepo, eventBus)
-	courseService := service.NewCourseService(courseRepo, scheduleRepo)
+	courseImageResponsesClient := infrallm.NewArkResponsesClient(
+		os.Getenv("ARK_API_KEY"),
+		viper.GetString("agent.baseURL"),
+		viper.GetString("courseImport.visionModel"),
+	)
+	courseService := service.NewCourseService(
+		courseRepo,
+		scheduleRepo,
+		courseImageResponsesClient,
+		service.NewCourseImageParseConfig(
+			viper.GetInt64("courseImport.maxImageBytes"),
+			viper.GetInt("courseImport.maxTokens"),
+		),
+		viper.GetString("courseImport.visionModel"),
+	)
 	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo, manager)
 	scheduleService := service.NewScheduleService(scheduleRepo, userRepo, taskClassRepo, manager, cacheRepo)
 	agentService := service.NewAgentServiceWithSchedule(aiHub, agentRepo, taskRepo, cacheRepo, agentCacheRepo, eventBus, scheduleService, taskSv)

@@ -1,3 +1,4 @@
+import axios from 'axios'
 import http from '@/api/http'
 import type { ApiResponse, PlainResponse } from '@/types/api'
 import type {
@@ -7,6 +8,9 @@ import type {
   TaskClassCreatePayload,
   TaskClassDetail,
   TaskClassListItem,
+  CourseDraftRow,
+  CourseImportPayload,
+  CourseImageParseResponse,
 } from '@/types/schedule'
 import { extractErrorMessage } from '@/utils/http'
 import { createIdempotencyKey } from '@/utils/idempotency'
@@ -145,5 +149,35 @@ export async function deleteTaskClassItem(taskItemId: number, idempotencyKey = c
     return response.data
   } catch (error) {
     throw new Error(extractErrorMessage(error, '\u5220\u9664\u4efb\u52a1\u5757\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5'))
+  }
+}
+
+export async function parseCourseImage(file: File, signal?: AbortSignal) {
+  try {
+    const formData = new FormData()
+    formData.append('image', file)
+    const response = await http.post<ApiResponse<CourseImageParseResponse>>('/course/parse-image', formData, {
+      timeout: 300000,
+      signal,
+    })
+    return response.data.data
+  } catch (error) {
+    if (axios.isCancel(error)) {
+      throw new Error('\u8bc6\u522b\u5df2\u53d6\u6d88')
+    }
+    throw new Error(extractErrorMessage(error, '\u8bfe\u8868\u56fe\u7247\u8bc6\u522b\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5'))
+  }
+}
+
+export async function importCourses(payload: CourseImportPayload, idempotencyKey = createIdempotencyKey('course-import')) {
+  try {
+    const response = await http.post<PlainResponse>('/course/import', payload, {
+      headers: {
+        'X-Idempotency-Key': idempotencyKey,
+      },
+    })
+    return response.data
+  } catch (error) {
+    throw new Error(extractErrorMessage(error, '\u8bfe\u7a0b\u5bfc\u5165\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5'))
   }
 }

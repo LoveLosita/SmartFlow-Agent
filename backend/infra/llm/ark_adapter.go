@@ -32,7 +32,19 @@ func WrapArkClient(arkChatModel *ark.ChatModel) *Client {
 		if msg == nil {
 			return nil, errors.New("ark model returned nil message")
 		}
-		return &TextResult{Text: msg.Content}, nil
+
+		var usage *schema.TokenUsage
+		finishReason := ""
+		if msg.ResponseMeta != nil {
+			usage = CloneUsage(msg.ResponseMeta.Usage)
+			finishReason = msg.ResponseMeta.FinishReason
+		}
+
+		return &TextResult{
+			Text:         msg.Content,
+			Usage:        usage,
+			FinishReason: finishReason,
+		}, nil
 	}
 
 	// 流式文本生成。

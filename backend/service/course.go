@@ -6,21 +6,34 @@ import (
 
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
+	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
 )
 
 type CourseService struct {
 	// 伸出手：准备接住 DAO
-	courseDAO   *dao.CourseDAO
-	scheduleDAO *dao.ScheduleDAO
+	courseDAO                  *dao.CourseDAO
+	scheduleDAO                *dao.ScheduleDAO
+	courseImageResponsesClient *infrallm.ArkResponsesClient
+	courseImageConfig          CourseImageParseConfig
+	courseImageModel           string
 }
 
 // NewCourseService 创建 CourseService 实例
-func NewCourseService(courseDAO *dao.CourseDAO, scheduleDAO *dao.ScheduleDAO) *CourseService {
+func NewCourseService(
+	courseDAO *dao.CourseDAO,
+	scheduleDAO *dao.ScheduleDAO,
+	courseImageResponsesClient *infrallm.ArkResponsesClient,
+	courseImageConfig CourseImageParseConfig,
+	courseImageModel string,
+) *CourseService {
 	return &CourseService{
-		courseDAO:   courseDAO,
-		scheduleDAO: scheduleDAO,
+		courseDAO:                  courseDAO,
+		scheduleDAO:                scheduleDAO,
+		courseImageResponsesClient: courseImageResponsesClient,
+		courseImageConfig:          courseImageConfig,
+		courseImageModel:           strings.TrimSpace(courseImageModel),
 	}
 }
 

@@ -66,3 +66,25 @@ a {
   box-shadow: var(--shadow-soft);
   backdrop-filter: blur(10px);
 }
+
+/* Element Plus Overrides for Flat Modern Style */
+.el-dialog, .el-message-box {
+  border-radius: 24px !important;
+  border: 1px solid rgba(15, 23, 42, 0.05) !important;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.1) !important;
+}
+
+.el-message-box__headerbtn, .el-dialog__headerbtn {
+  top: 16px !important;
+  right: 16px !important;
+}
+
+.el-button {
+  border-radius: 12px !important;
+  font-weight: 600 !important;
+}
+
+.el-button--primary {
+  background: #3b82f6 !important;
+  border-color: #3b82f6 !important;
+}

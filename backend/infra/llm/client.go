@@ -45,6 +45,8 @@ type GenerateOptions struct {
 type TextResult struct {
 	Text  string
 	Usage *schema.TokenUsage
+	// FinishReason 透传 provider 的停止原因，便于上层判断是否因 length 等原因被截断。
+	FinishReason string
 }
 
 // StreamReader 抽象了“可逐块 Recv 的流式返回器”。

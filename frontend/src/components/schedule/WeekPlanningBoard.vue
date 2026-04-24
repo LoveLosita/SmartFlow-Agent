@@ -64,6 +64,54 @@ const eventLookup = computed(() => {
   return map
 })
 
+// isFullyCovered 负责判断一个 Slot (2节课) 是否被之前的跨行事件完全遮挡。
+// 如果只是部分遮挡（如 span=3 占用了下一 Slot 的第一节），则不视为完全遮挡，允许渲染以维持布局完整性。
+function isFullyCovered(dayOfWeek: number, order: number) {
+  const endSectionOfOrder = order * 2
+  
+  for (let prevOrder = 1; prevOrder < order; prevOrder++) {
+    const event = resolveEvent(dayOfWeek, prevOrder)
+    if (event && event.type !== 'empty') {
+      const eventEndSection = (prevOrder - 1) * 2 + (event.span || 2)
+      if (eventEndSection >= endSectionOfOrder) {
+        return true
+      }
+    }
+  }
+  return false
+}
+
+// resolveGridRow 负责计算格子的精确 Grid 布局位置。
+// 特别处理了“部分遮挡”的情况：如果一个空格子被上方的长课时占用了第一节，则该格子会自动下移并缩短，从而紧贴在课程下方。
+function resolveGridRow(dayOfWeek: number, order: number) {
+  const event = resolveEvent(dayOfWeek, order)
+  const startRow = (order - 1) * 2 + 2 // 该 Slot 默认的起始行（Header 占 1 行，每节课 1 行）
+  
+  // 1. 如果是真实课程/任务，遵循其原始 order 对应的起点，并按其实际 span 拉伸。
+  if (event && event.type !== 'empty') {
+    return `${startRow} / span ${event.span || 2}`
+  }
+  
+  // 2. 如果是空格子，检查上方是否有跨行事件侵入了当前 Slot。
+  let currentStartRow = startRow
+  const currentEndRow = startRow + 2 // 一个 Slot 默认占 2 行
+  
+  for (let prevOrder = 1; prevOrder < order; prevOrder++) {
+    const prevEvent = resolveEvent(dayOfWeek, prevOrder)
+    if (prevEvent && prevEvent.type !== 'empty') {
+      // 计算上方事件在网格中的结束行
+      const prevEndRow = (prevOrder - 1) * 2 + 2 + (prevEvent.span || 2)
+      // 如果上方事件的结束行超过了当前格子的起始行，则需要将起点下移
+      if (prevEndRow > currentStartRow) {
+        currentStartRow = prevEndRow
+      }
+    }
+  }
+  
+  const finalSpan = currentEndRow - currentStartRow
+  return `${currentStartRow} / span ${Math.max(0, finalSpan)}`
+}
+
 function resolveEvent(dayOfWeek: number, order: number) {
   return eventLookup.value.get(`${dayOfWeek}-${order}`)
 }
@@ -346,21 +394,30 @@ function handlePreviewDragEnd() {
     </header>
 
     <div class="planning-board__grid" @dragover="handleExternalDragOver">
-      <div class="planning-board__corner" />
+      <div class="planning-board__corner" style="grid-row: 1; grid-column: 1;" />
 
-      <div v-for="header in weekHeaders" :key="header.dayOfWeek" class="planning-board__day-head">
+      <div 
+        v-for="header in weekHeaders" 
+        :key="header.dayOfWeek" 
+        class="planning-board__day-head"
+        :style="{ gridRow: 1, gridColumn: header.dayOfWeek + 1 }"
+      >
         <span>{{ header.label }}</span>
         <small>{{ header.dateLabel }}</small>
       </div>
 
       <template v-for="slot in sectionSlots" :key="slot.order">
-        <div class="planning-board__time-cell">
+        <div 
+          class="planning-board__time-cell"
+          :style="{ gridRow: `${(slot.order - 1) * 2 + 2} / span 2`, gridColumn: 1 }"
+        >
           <strong>{{ slot.title }}</strong>
           <small>{{ slot.timeRange }}</small>
         </div>
 
         <article
           v-for="header in weekHeaders"
+          v-show="!isFullyCovered(header.dayOfWeek, slot.order)"
           :key="`${weekData?.week ?? 0}-${header.dayOfWeek}-${slot.order}`"
           class="planning-board__cell"
           :class="[
@@ -375,7 +432,12 @@ function handlePreviewDragEnd() {
               'planning-board__cell--dragover': dragOverCellKey === buildCellKey(header.dayOfWeek, slot.order),
             },
           ]"
-          :style="{ '--anim-delay': (header.dayOfWeek - 1) * 0.035 + (slot.order - 1) * 0.045 + 's' }"
+          :style="{ 
+            '--anim-delay': (header.dayOfWeek - 1) * 0.035 + (slot.order - 1) * 0.045 + 's',
+            gridRow: resolveGridRow(header.dayOfWeek, slot.order),
+            gridColumn: header.dayOfWeek + 1,
+            zIndex: (resolveEvent(header.dayOfWeek, slot.order) && resolveEvent(header.dayOfWeek, slot.order)!.type !== 'empty') ? 2 : 1
+          }"
           :draggable="isWholeCellDraggable(resolveEvent(header.dayOfWeek, slot.order))"
           @dragstart="handlePreviewDragStart(header.dayOfWeek, slot.order, $event)"
           @dragover="handlePreviewDragOver(header.dayOfWeek, slot.order, $event)"
@@ -467,6 +529,7 @@ function handlePreviewDragEnd() {
   --planning-time-column-width: 68px;
   --planning-day-column-min: 96px;
   --planning-cell-height: clamp(72px, 9.2vh, 112px);
+  --planning-section-height: calc(var(--planning-cell-height) / 2);
   min-width: 0;
   min-height: 0;
   border-radius: 20px;
@@ -490,6 +553,7 @@ function handlePreviewDragEnd() {
   min-height: 0;
   display: grid;
   grid-template-columns: var(--planning-time-column-width) repeat(7, minmax(var(--planning-day-column-min), 1fr));
+  grid-template-rows: auto repeat(12, var(--planning-section-height));
   gap: var(--planning-grid-gap-y) var(--planning-grid-gap-x);
   padding: var(--planning-grid-padding-y) var(--planning-grid-padding-x) 24px;
   overflow: auto;
@@ -518,7 +582,7 @@ function handlePreviewDragEnd() {
 }
 
 .planning-board__time-cell {
-  min-height: var(--planning-cell-height);
+  min-height: 0;
   display: grid;
   align-content: center;
   justify-items: end;
@@ -541,7 +605,7 @@ function handlePreviewDragEnd() {
 
 .planning-board__cell {
   position: relative;
-  min-height: var(--planning-cell-height);
+  min-height: 0;
   border-radius: 14px;
   border: 1px solid transparent;
   padding: 14px;
@@ -857,7 +921,7 @@ function handlePreviewDragEnd() {
 
   .planning-board__time-cell,
   .planning-board__cell {
-    min-height: 98px;
+    min-height: 0;
   }
 
   .planning-board__cell {
