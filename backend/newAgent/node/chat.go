@@ -244,6 +244,12 @@ func streamAndDispatch(
 		case newagentmodel.ChatRoutePlan:
 			return handleRoutePlanStream(reader, emitter, flowState, effectiveThinking, visible)
 
+		case newagentmodel.ChatRouteQuickTask:
+			// 关闭路由流，后续由 QuickTask 节点自行处理。
+			_ = reader.Close()
+			flowState.Phase = newagentmodel.PhaseQuickTask
+			return nil
+
 		default:
 			flowState.Phase = newagentmodel.PhasePlanning
 			return nil

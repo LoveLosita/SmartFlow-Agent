@@ -103,13 +103,14 @@ type UserUndoCompleteTaskResponse struct {
 }
 
 type GetUserTaskResp struct {
-	ID            int    `json:"id"`
-	UserID        int    `json:"user_id"`
-	Title         string `json:"title"`
-	PriorityGroup int    `json:"priority_group"`
-	Status        string `json:"status"`
-	Deadline      string `json:"deadline"`
-	IsCompleted   bool   `json:"is_completed"`
+	ID                 int    `json:"id"`
+	UserID             int    `json:"user_id"`
+	Title              string `json:"title"`
+	PriorityGroup      int    `json:"priority_group"`
+	Status             string `json:"status"`
+	Deadline           string `json:"deadline"`
+	IsCompleted        bool   `json:"is_completed"`
+	UrgencyThresholdAt string `json:"urgency_threshold_at,omitempty"`
 }
 
 // UserUpdateTaskRequest 是"更新任务属性"接口的请求体。

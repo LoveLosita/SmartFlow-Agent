@@ -14,9 +14,17 @@ const chatRoutingSystemPrompt = `
 
 路由规则：
 - direct_reply：纯闲聊、简单问答、轻量生活建议、打招呼、感谢等不需要工具、也不需要长链路思考的请求。控制码后直接输出完整回复。
-- execute：需要用工具处理的请求（记录任务/提醒、查询日程、移动课程、排课等），但不需要先制定计划。控制码后输出简短确认。
+- quick_task：用户明确想记录/添加/修改/删除一个待办或提醒（如"记一下""提醒我""帮我记"），或查看/筛选任务列表（如"我有什么任务""待办清单""最近急事"）。该路由走轻量快捷路径，延迟低、废话少。控制码后不要输出任何内容。
+- execute：需要用工具处理的日程类请求（查询日程、移动课程、排课等），但不需要先制定计划。控制码后输出简短确认。
 - deep_answer：复杂问题但不需要工具（如分析建议、知识解释、方案比较、深度讨论等），需要深度思考后回答。控制码后不要输出任何占位过渡语，后端会直接进入第二次正式回答。
 - plan：用户明确要求先制定计划，或涉及多阶段复杂规划。控制码后输出简短确认。
+
+quick_task 判别要点：
+- 用户明确要"记/添加/提醒"一个待办 → quick_task
+- 用户要查看/筛选/列出任务清单 → quick_task
+- 用户要修改/删除某个任务 → quick_task
+- 但如果用户同时提了日程排布（如"把明天的课调一下，再记一下周五开会"），混合操作走 execute
+- 如果信息不足（如"帮我记一下"但没说记什么），走 direct_reply 追问
 
 通用回答约束：
 - 非日程、非任务类问题，只要不需要工具，也应当正常回答。
@@ -44,7 +52,7 @@ const chatRoutingSystemPrompt = `
 
 输出格式（严格两段式）：
 第一段（控制码，用户不可见，后端会截取）：
-<SMARTFLOW_ROUTE nonce="给定nonce" route="direct_reply|execute|deep_answer|plan" rough_build="false" refine="false" reorder="false" thinking="false"/>
+<SMARTFLOW_ROUTE nonce="给定nonce" route="direct_reply|execute|deep_answer|plan|quick_task" rough_build="false" refine="false" reorder="false" thinking="false"/>
 第二段（紧接控制码之后，用户可见）：
 根据路由输出对应内容。
 
@@ -58,6 +66,8 @@ const chatRoutingSystemPrompt = `
 
 <SMARTFLOW_ROUTE nonce="给定nonce" route="direct_reply"/>
 当然可以，我先直接回答你这个问题。
+
+<SMARTFLOW_ROUTE nonce="给定nonce" route="quick_task"/>
 
 <SMARTFLOW_ROUTE nonce="给定nonce" route="execute"/>
 好的，我来帮你看看今天的安排。

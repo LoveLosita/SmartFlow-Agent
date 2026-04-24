@@ -43,14 +43,20 @@ func ModelToGetUserTasksResp(tasks []model.Task) []model.GetUserTaskResp {
 			deadline = task.DeadlineAt.Format("2006-01-02 15:04:05")
 		}
 
+		urgencyThreshold := ""
+		if task.UrgencyThresholdAt != nil {
+			urgencyThreshold = task.UrgencyThresholdAt.Format("2006-01-02 15:04:05")
+		}
+
 		resp = append(resp, model.GetUserTaskResp{
-			ID:            task.ID,
-			UserID:        task.UserID,
-			Title:         task.Title,
-			PriorityGroup: task.Priority,
-			Status:        status,
-			Deadline:      deadline,
-			IsCompleted:   task.IsCompleted,
+			ID:                 task.ID,
+			UserID:             task.UserID,
+			Title:              task.Title,
+			PriorityGroup:      task.Priority,
+			Status:             status,
+			Deadline:           deadline,
+			IsCompleted:        task.IsCompleted,
+			UrgencyThresholdAt: urgencyThreshold,
 		})
 	}
 	return resp
@@ -66,13 +72,18 @@ func ModelToGetUserTaskResp(task *model.Task) model.GetUserTaskResp {
 	if task.DeadlineAt != nil {
 		deadline = task.DeadlineAt.Format("2006-01-02 15:04:05")
 	}
+	urgencyThreshold := ""
+	if task.UrgencyThresholdAt != nil {
+		urgencyThreshold = task.UrgencyThresholdAt.Format("2006-01-02 15:04:05")
+	}
 	return model.GetUserTaskResp{
-		ID:            task.ID,
-		UserID:        task.UserID,
-		Title:         task.Title,
-		PriorityGroup: task.Priority,
-		Status:        status,
-		Deadline:      deadline,
-		IsCompleted:   task.IsCompleted,
+		ID:                 task.ID,
+		UserID:             task.UserID,
+		Title:              task.Title,
+		PriorityGroup:      task.Priority,
+		Status:             status,
+		Deadline:           deadline,
+		IsCompleted:        task.IsCompleted,
+		UrgencyThresholdAt: urgencyThreshold,
 	}
 }

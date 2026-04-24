@@ -20,6 +20,9 @@ const (
 
 	// ChatRoutePlan 复杂规划：需要先制定计划，进 Plan 节点。
 	ChatRoutePlan ChatRoute = "plan"
+
+	// ChatRouteQuickTask 快捷任务：随口记增查改删等轻量任务操作，走 QuickTask 轻量路径。
+	ChatRouteQuickTask ChatRoute = "quick_task"
 )
 
 // ChatRoutingDecision 是 Chat 节点单次路由决策的结构化输出。
@@ -59,7 +62,7 @@ func (d *ChatRoutingDecision) Validate() error {
 	d.Normalize()
 
 	switch d.Route {
-	case ChatRouteDirectReply, ChatRouteExecute, ChatRouteDeepAnswer, ChatRoutePlan:
+	case ChatRouteDirectReply, ChatRouteExecute, ChatRouteDeepAnswer, ChatRoutePlan, ChatRouteQuickTask:
 		// ok
 	case "":
 		return fmt.Errorf("chat routing decision.route 不能为空")

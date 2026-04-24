@@ -20,6 +20,7 @@ const (
 	NodeOrderGuard = "order_guard"
 	NodeInterrupt  = "interrupt"
 	NodeDeliver    = "deliver"
+	NodeQuickTask  = "quick_task"
 )
 
 func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) (*newagentmodel.AgentGraphState, error) {
@@ -55,6 +56,9 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	if err := g.AddLambdaNode(NodeOrderGuard, compose.InvokableLambda(nodes.OrderGuard)); err != nil {
 		return nil, err
 	}
+	if err := g.AddLambdaNode(NodeQuickTask, compose.InvokableLambda(nodes.QuickTask)); err != nil {
+		return nil, err
+	}
 	if err := g.AddLambdaNode(NodeInterrupt, compose.InvokableLambda(nodes.Interrupt)); err != nil {
 		return nil, err
 	}
@@ -68,7 +72,7 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	if err := g.AddEdge(compose.START, NodeChat); err != nil {
 		return nil, err
 	}
-	// Chat -> END / Plan / Confirm / RoughBuild / Execute / Deliver / Interrupt
+	// Chat -> END / Plan / Confirm / RoughBuild / Execute / QuickTask / Deliver / Interrupt
 	if err := g.AddBranch(NodeChat, compose.NewGraphBranch(
 		branchAfterChat,
 		map[string]bool{
@@ -76,6 +80,7 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 			NodeConfirm:    true,
 			NodeRoughBuild: true,
 			NodeExecute:    true,
+			NodeQuickTask:  true,
 			NodeDeliver:    true,
 			NodeInterrupt:  true,
 			compose.END:    true,
@@ -150,6 +155,10 @@ func RunAgentGraph(ctx context.Context, input newagentmodel.AgentGraphRunInput) 
 	if err := g.AddEdge(NodeDeliver, compose.END); err != nil {
 		return nil, err
 	}
+	// QuickTask -> END：轻量路径，直接返回结果。
+	if err := g.AddEdge(NodeQuickTask, compose.END); err != nil {
+		return nil, err
+	}
 
 	// --- 编译运行 ---
 	maxSteps := flowState.MaxRounds + 10
@@ -186,6 +195,8 @@ func branchAfterChat(_ context.Context, st *newagentmodel.AgentGraphState) (stri
 		return NodePlan, nil
 	case newagentmodel.PhaseWaitingConfirm:
 		return NodeConfirm, nil
+	case newagentmodel.PhaseQuickTask:
+		return NodeQuickTask, nil
 	case newagentmodel.PhaseExecuting:
 		if flowState.NeedsRoughBuild && st.Deps.RoughBuildFunc != nil {
 			return NodeRoughBuild, nil

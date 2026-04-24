@@ -31,12 +31,6 @@ type DefaultRegistryDeps struct {
 
 	// WebSearchProvider Web 搜索供应商。为 nil 时 web_search / web_fetch 返回"暂未启用"，不阻断主流程。
 	WebSearchProvider web.SearchProvider
-
-	// QuickNote 随口记工具依赖。CreateTask 为 nil 时 quick_note_create 返回错误提示，不阻断主流程。
-	QuickNote QuickNoteDeps
-
-	// TaskQuery 任务查询工具依赖。QueryTasks 为 nil 时 query_tasks 不注册，不影响其他工具。
-	TaskQuery TaskQueryDeps
 }
 
 // ToolRegistry 管理工具注册、查找与执行。
@@ -129,10 +123,8 @@ var writeTools = map[string]bool{
 // 调用目的：这些工具不需要日程状态即可执行，execute 节点在 ScheduleState 为 nil 时允许调用。
 
 var scheduleFreeTools = map[string]bool{
-	"quick_note_create": true,
-	"query_tasks":       true,
-	"web_search":        true,
-	"web_fetch":         true,
+	"web_search": true,
+	"web_fetch":  true,
 }
 
 // ==================== 默认注册表 ====================
@@ -331,30 +323,6 @@ func NewDefaultRegistryWithDeps(deps DefaultRegistryDeps) *ToolRegistry {
 			return schedule.Unplace(state, taskID)
 		},
 	)
-
-	// --- 随口记工具 ---
-	// 调用目的：将"帮我记一下明天开会"等随口任务请求直接写入数据库，无需 ScheduleState。
-	// 不加入 writeTools：随口记是用户明确指令，不需要 confirm 节点二次确认。
-	if deps.QuickNote.CreateTask != nil {
-		quickNoteHandler := NewQuickNoteToolHandler(deps.QuickNote)
-		r.Register("quick_note_create",
-			"记录一条任务/提醒/待办事项到用户的任务列表。支持中文相对时间（如“明天下午3点”、“下周一”）。title 必填。记录成功后，回复时应包含一句与任务内容相关的轻松跟进话术（不超过30字），类似朋友间的友好调侃。",
-			`{"name":"quick_note_create","parameters":{"title":{"type":"string","required":true,"description":"任务标题，简洁明确"},"deadline_at":{"type":"string","description":"可选截止时间，支持 yyyy-MM-dd HH:mm 或中文相对时间（明天/下周一/后天等）"},"priority_group":{"type":"int","description":"优先级(1重要且紧急,2重要不紧急,3简单不重要,4复杂不重要)；信息足够时请显式填写，不确定时可不填，由工具层自动推断"}}}`,
-			quickNoteHandler,
-		)
-	}
-
-	// --- 任务查询读工具 ---
-	// 调用目的：将"帮我看看有什么任务""最近有什么急事"等查询请求直接查库返回结构化结果，无需 ScheduleState。
-	// 不加入 writeTools：查询是只读操作，不需要 confirm 节点二次确认。
-	if deps.TaskQuery.QueryTasks != nil {
-		taskQueryHandler := NewTaskQueryToolHandler(deps.TaskQuery)
-		r.Register("query_tasks",
-			"按象限、关键词、截止时间筛选并排序任务列表，返回结构化结果。所有参数均为可选。",
-			`{"name":"query_tasks","parameters":{"quadrant":{"type":"int","description":"可选象限筛选(1~4)"},"keyword":{"type":"string","description":"可选标题关键词，模糊匹配"},"deadline_before":{"type":"string","description":"可选截止时间上界，支持 yyyy-MM-dd HH:mm 或 yyyy-MM-dd"},"deadline_after":{"type":"string","description":"可选截止时间下界，支持 yyyy-MM-dd HH:mm 或 yyyy-MM-dd"},"sort_by":{"type":"string","description":"排序字段(deadline|priority|id)，默认deadline"},"order":{"type":"string","description":"排序方向(asc|desc)，默认asc"},"limit":{"type":"int","description":"返回条数，默认5，上限20"},"include_completed":{"type":"bool","description":"是否包含已完成任务，默认false"}}}`,
-			taskQueryHandler,
-		)
-	}
 
 	// --- Web 搜索读工具 ---
 	// 1. provider 为 nil 时 handler 返回"暂未启用"的 observation，不会阻断主流程；

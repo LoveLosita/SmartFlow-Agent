@@ -198,6 +198,31 @@ func (n *AgentNodes) OrderGuard(ctx context.Context, st *newagentmodel.AgentGrap
 	return st, nil
 }
 
+// QuickTask 负责把 graph 的 quick_task 节点请求转给 RunQuickTaskNode。
+func (n *AgentNodes) QuickTask(ctx context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
+	if st == nil {
+		return nil, errors.New("quick_task node: state is nil")
+	}
+
+	// QuickTask 不需要工具目录，直接复用 ChatClient。
+	st.EnsureConversationContext().SetToolSchemas(nil)
+
+	if err := RunQuickTaskNode(ctx, QuickTaskNodeInput{
+		RuntimeState:          st.EnsureRuntimeState(),
+		ConversationContext:   st.EnsureConversationContext(),
+		UserInput:             st.Request.UserInput,
+		Client:                st.Deps.ResolveChatClient(),
+		ChunkEmitter:          st.EnsureChunkEmitter(),
+		QuickTaskDeps:         st.Deps.QuickTaskDeps,
+		PersistVisibleMessage: st.Deps.PersistVisibleMessage,
+	}); err != nil {
+		return nil, err
+	}
+
+	saveAgentState(ctx, st)
+	return st, nil
+}
+
 // Deliver 负责把 graph 的 deliver 节点请求转给 RunDeliverNode。
 func (n *AgentNodes) Deliver(ctx context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
 	if st == nil {

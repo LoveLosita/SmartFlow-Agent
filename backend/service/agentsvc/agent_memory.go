@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	newAgentMemoryRetrieveLimit = 5
+	newAgentMemoryRetrieveLimit = 10
 	newAgentMemoryIntroLine     = "以下是与当前对话相关的用户记忆，仅在自然且确实有帮助时参考，不要生硬复述。"
 )
 

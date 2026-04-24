@@ -182,60 +182,57 @@ func Start() {
 	agentService.SetToolRegistry(newagenttools.NewDefaultRegistryWithDeps(newagenttools.DefaultRegistryDeps{
 		RAGRuntime:        ragRuntime,
 		WebSearchProvider: webSearchProvider,
-		QuickNote: newagenttools.QuickNoteDeps{
-			CreateTask: func(userID int, title string, priorityGroup int, deadlineAt *time.Time) (int, error) {
-				// 调用目的：随口记工具通过此闭包写库，捕获 start 层 taskRepo 实例。
-				created, err := taskRepo.AddTask(&model.Task{
-					UserID:      userID,
-					Title:       title,
-					Priority:    priorityGroup,
-					IsCompleted: false,
-					DeadlineAt:  deadlineAt,
-				})
-				if err != nil {
-					return 0, err
-				}
-				return created.ID, nil
-			},
-		},
-		TaskQuery: newagenttools.TaskQueryDeps{
-			// 调用目的：桥接新工具参数到旧 service 层查询能力，复用已有的过滤/排序/紧急度提升逻辑。
-			QueryTasks: func(ctx context.Context, userID int, params newagenttools.TaskQueryParams) ([]newagenttools.TaskQueryResult, error) {
-				req := newagentmodel.TaskQueryRequest{
-					UserID:           userID,
-					Quadrant:         params.Quadrant,
-					SortBy:           params.SortBy,
-					Order:            params.Order,
-					Limit:            params.Limit,
-					IncludeCompleted: params.IncludeCompleted,
-					Keyword:          params.Keyword,
-					DeadlineBefore:   params.DeadlineBefore,
-					DeadlineAfter:    params.DeadlineAfter,
-				}
-				records, err := agentService.QueryTasksForTool(ctx, req)
-				if err != nil {
-					return nil, err
-				}
-				results := make([]newagenttools.TaskQueryResult, 0, len(records))
-				for _, r := range records {
-					deadlineStr := ""
-					if r.DeadlineAt != nil {
-						deadlineStr = r.DeadlineAt.In(time.Local).Format("2006-01-02 15:04")
-					}
-					results = append(results, newagenttools.TaskQueryResult{
-						ID:            r.ID,
-						Title:         r.Title,
-						PriorityGroup: r.PriorityGroup,
-						IsCompleted:   r.IsCompleted,
-						DeadlineAt:    deadlineStr,
-					})
-				}
-				return results, nil
-			},
-		},
 	}))
 	agentService.SetScheduleProvider(newagentconv.NewScheduleProvider(scheduleRepo, taskClassRepo))
 	agentService.SetCompactionStore(agentRepo)
+	agentService.SetQuickTaskDeps(newagentmodel.QuickTaskDeps{
+		CreateTask: func(userID int, title string, priorityGroup int, deadlineAt *time.Time, urgencyThresholdAt *time.Time) (int, error) {
+			created, err := taskRepo.AddTask(&model.Task{
+				UserID:             userID,
+				Title:              title,
+				Priority:           priorityGroup,
+				IsCompleted:        false,
+				DeadlineAt:         deadlineAt,
+				UrgencyThresholdAt: urgencyThresholdAt,
+			})
+			if err != nil {
+				return 0, err
+			}
+			return created.ID, nil
+		},
+		QueryTasks: func(ctx context.Context, userID int, params newagenttools.TaskQueryParams) ([]newagenttools.TaskQueryResult, error) {
+			req := newagentmodel.TaskQueryRequest{
+				UserID:           userID,
+				Quadrant:         params.Quadrant,
+				SortBy:           params.SortBy,
+				Order:            params.Order,
+				Limit:            params.Limit,
+				IncludeCompleted: params.IncludeCompleted,
+				Keyword:          params.Keyword,
+				DeadlineBefore:   params.DeadlineBefore,
+				DeadlineAfter:    params.DeadlineAfter,
+			}
+			records, err := agentService.QueryTasksForTool(ctx, req)
+			if err != nil {
+				return nil, err
+			}
+			results := make([]newagenttools.TaskQueryResult, 0, len(records))
+			for _, r := range records {
+				deadlineStr := ""
+				if r.DeadlineAt != nil {
+					deadlineStr = r.DeadlineAt.In(time.Local).Format("2006-01-02 15:04")
+				}
+				results = append(results, newagenttools.TaskQueryResult{
+					ID:            r.ID,
+					Title:         r.Title,
+					PriorityGroup: r.PriorityGroup,
+					IsCompleted:   r.IsCompleted,
+					DeadlineAt:    deadlineStr,
+				})
+			}
+			return results, nil
+		},
+	})
 	agentService.SetMemoryReader(memoryModule, memoryCfg)
 
 	// API 层初始化。

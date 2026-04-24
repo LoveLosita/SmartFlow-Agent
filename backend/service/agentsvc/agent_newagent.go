@@ -209,6 +209,7 @@ func (s *AgentService) runNewAgentGraph(
 		ThinkingExecute:       viper.GetBool("agent.thinking.execute"),
 		ThinkingDeliver:       viper.GetBool("agent.thinking.deliver"),
 		PersistVisibleMessage: persistVisibleMessage,
+		QuickTaskDeps:         s.quickTaskDeps,
 	}
 
 	// 10. 构造 AgentGraphRunInput 并运行 graph。
@@ -703,4 +704,9 @@ func (s *AgentService) SetAgentStateStore(store newagentmodel.AgentStateStore) {
 // compactionStore 由 cmd/start.go 注入
 func (s *AgentService) SetCompactionStore(store newagentmodel.CompactionStore) {
 	s.compactionStore = store
+}
+
+// quickTaskDeps 由 cmd/start.go 注入
+func (s *AgentService) SetQuickTaskDeps(deps newagentmodel.QuickTaskDeps) {
+	s.quickTaskDeps = deps
 }

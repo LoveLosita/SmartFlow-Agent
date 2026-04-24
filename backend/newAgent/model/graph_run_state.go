@@ -96,6 +96,21 @@ type AgentGraphDeps struct {
 	// PersistVisibleMessage 按 Service 注入，newAgent 每个节点产出的可见 speak
 	// 都会在 AppendHistory 之后立刻调用这个回调，把消息同步落到 Redis + MySQL。
 	PersistVisibleMessage PersistVisibleMessageFunc
+
+	// QuickTaskDeps 快捷任务节点的直接依赖，绕过 ToolRegistry 走轻量路径。
+	QuickTaskDeps QuickTaskDeps
+}
+
+// QuickTaskDeps 描述快捷任务节点所需的服务层依赖。
+//
+// 职责边界：
+// 1. QuickTask 节点直接调这些函数，不经过 ToolRegistry，不走 ReAct 循环；
+// 2. CreateTask 和 QueryTasks 的签名与 tools 包的 QuickNoteDeps / TaskQueryDeps 一致。
+type QuickTaskDeps struct {
+	// CreateTask 创建一条四象限任务，返回 task_id。
+	CreateTask func(userID int, title string, priorityGroup int, deadlineAt *time.Time, urgencyThresholdAt *time.Time) (taskID int, err error)
+	// QueryTasks 按条件查询用户任务列表。
+	QueryTasks func(ctx context.Context, userID int, params newagenttools.TaskQueryParams) ([]newagenttools.TaskQueryResult, error)
 }
 
 // --- 记忆 pinned block 常量（供 agentsvc 和 node 层共享） ---

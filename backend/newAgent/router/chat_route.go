@@ -24,7 +24,7 @@ var (
 	chatRouteHeaderRegex = regexp.MustCompile(
 		`(?is)<\s*SMARTFLOW_ROUTE\b` +
 			`[^>]*\bnonce\s*=\s*["']?([a-zA-Z0-9\-]+)["']?` +
-			`[^>]*\broute\s*=\s*["']?(direct_reply|execute|deep_answer|plan)["']?` +
+			`[^>]*\broute\s*=\s*["']?(direct_reply|execute|deep_answer|plan|quick_task)["']?` +
 			`(?:[^>]*\brough_build\s*=\s*["']?(true|false)["']?)?` +
 			`(?:[^>]*\brefine\s*=\s*["']?(true|false)["']?)?` +
 			`(?:[^>]*\breorder\s*=\s*["']?(true|false)["']?)?` +

@@ -13,6 +13,7 @@ const (
 	PhasePlanning       Phase = "planning"
 	PhaseWaitingConfirm Phase = "waiting_confirm"
 	PhaseExecuting      Phase = "executing"
+	PhaseQuickTask      Phase = "quick_task"
 	PhaseDone           Phase = "done"
 )
 

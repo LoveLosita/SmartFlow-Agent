@@ -389,15 +389,6 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		decision.Action = newagentmodel.ExecuteActionContinue
 	}
 
-	// 随口记工具 speak 清空：
-	// 1. quick_note_create 是轻量记录操作，不需要 execute 阶段向用户输出任何文案；
-	// 2. 收口统一由 deliver 阶段完成，避免 execute + deliver 重复输出导致废话；
-	// 3. 后端强制清空兜底，即使 LLM 误填了 speak 也不会推流到前端。
-	if decision.ToolCall != nil && strings.EqualFold(decision.ToolCall.Name, "quick_note_create") {
-		decision.Speak = ""
-		flowState.UsedQuickNote = true
-	}
-
 	// 自省校验：next_plan / done 必须附带 goal_check，否则不推进，追加修正让 LLM 重试。
 	if decision.Action == newagentmodel.ExecuteActionNextPlan ||
 		decision.Action == newagentmodel.ExecuteActionDone {
@@ -2026,8 +2017,6 @@ func resolveToolDisplayNameCN(toolName string) string {
 		"query_target_tasks":    "查询目标任务",
 		"query_available_slots": "查询可用时间段",
 		"get_task_info":         "查看任务详情",
-		"quick_note_create":     "创建提醒任务",
-		"query_tasks":           "查询任务列表",
 		"web_search":            "网页搜索",
 		"web_fetch":             "网页抓取",
 		"move":                  "移动任务",
