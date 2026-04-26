@@ -82,18 +82,27 @@ func handleInterruptAskUser(
 		text = "请补充更多信息。"
 	}
 
-	// 伪流式输出，和 chatReply 一样的体感。
-	if err := emitter.EmitPseudoAssistantText(
-		ctx, interruptSpeakBlockID, interruptStageName,
-		text,
-		newagentstream.DefaultPseudoStreamOptions(),
-	); err != nil {
-		return fmt.Errorf("追问消息推送失败: %w", err)
+	speakStreamed := readPendingMetadataBool(pending, newagentmodel.PendingMetaAskUserSpeakStreamed)
+	historyAppended := readPendingMetadataBool(pending, newagentmodel.PendingMetaAskUserHistoryAppended)
+
+	// 1. 若上游节点已流式推送过 ask_user 文本，则这里跳过二次正文推送；
+	// 2. 这样既保留 interrupt 的统一收口状态，又避免前端出现重复气泡。
+	if !speakStreamed {
+		// 伪流式输出，和 chatReply 一样的体感。
+		if err := emitter.EmitPseudoAssistantText(
+			ctx, interruptSpeakBlockID, interruptStageName,
+			text,
+			newagentstream.DefaultPseudoStreamOptions(),
+		); err != nil {
+			return fmt.Errorf("追问消息推送失败: %w", err)
+		}
 	}
 
 	// 写入对话历史，下一轮 resume 时 LLM 能看到这个上下文。
 	msg := schema.AssistantMessage(text, nil)
-	conversationContext.AppendHistory(msg)
+	if !historyAppended {
+		conversationContext.AppendHistory(msg)
+	}
 	persistVisibleAssistantMessage(ctx, persist, runtimeState.EnsureCommonState(), msg)
 
 	// 状态持久化已由 agent_nodes 层统一处理，此处不再需要自行存快照。
@@ -103,6 +112,21 @@ func handleInterruptAskUser(
 		"ask_user", "已追问用户，等待回复。", false,
 	)
 	return nil
+}
+
+func readPendingMetadataBool(pending *newagentmodel.PendingInteraction, key string) bool {
+	if pending == nil || pending.Metadata == nil {
+		return false
+	}
+	raw, exists := pending.Metadata[key]
+	if !exists {
+		return false
+	}
+	value, ok := raw.(bool)
+	if !ok {
+		return false
+	}
+	return value
 }
 
 // handleInterruptConfirm 处理确认型中断。

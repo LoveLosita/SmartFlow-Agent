@@ -49,6 +49,7 @@ func LoadScheduleState(
 	// 2.1 先放 extraItemCategories（低优先级，兜底）；
 	// 2.2 再用 taskClasses 覆盖（高优先级，确保本轮排课分类准确）。
 	itemCategoryLookup := make(map[int]string)
+	itemOrderLookup := buildTaskItemOrderLookup(taskClasses)
 	for id, name := range extraItemCategories {
 		itemCategoryLookup[id] = name
 	}
@@ -222,6 +223,7 @@ func LoadScheduleState(
 					Slots:       hostSlots,
 					CategoryID:  tc.ID,
 					TaskClassID: tc.ID,
+					TaskOrder:   itemOrderLookup[item.ID],
 				})
 				itemStateIDs[item.ID] = stateID
 				nextStateID++
@@ -240,6 +242,7 @@ func LoadScheduleState(
 					Slots:       slots,
 					CategoryID:  tc.ID,
 					TaskClassID: tc.ID,
+					TaskOrder:   itemOrderLookup[item.ID],
 				})
 				itemStateIDs[item.ID] = stateID
 				nextStateID++
@@ -261,6 +264,7 @@ func LoadScheduleState(
 				Duration:    defaultDuration,
 				CategoryID:  tc.ID,
 				TaskClassID: tc.ID,
+				TaskOrder:   itemOrderLookup[item.ID],
 			})
 			itemStateIDs[item.ID] = stateID
 			nextStateID++
@@ -285,11 +289,23 @@ func LoadScheduleState(
 			if tc.ExcludedSlots != nil {
 				meta.ExcludedSlots = []int(tc.ExcludedSlots)
 			}
+			if tc.ExcludedDaysOfWeek != nil {
+				meta.ExcludedDaysOfWeek = []int(tc.ExcludedDaysOfWeek)
+			}
 			if tc.StartDate != nil {
 				meta.StartDate = tc.StartDate.Format("2006-01-02")
 			}
 			if tc.EndDate != nil {
 				meta.EndDate = tc.EndDate.Format("2006-01-02")
+			}
+			if tc.SubjectType != nil {
+				meta.SubjectType = *tc.SubjectType
+			}
+			if tc.DifficultyLevel != nil {
+				meta.DifficultyLevel = *tc.DifficultyLevel
+			}
+			if tc.CognitiveIntensity != nil {
+				meta.CognitiveIntensity = *tc.CognitiveIntensity
 			}
 			state.TaskClasses = append(state.TaskClasses, meta)
 		}
@@ -343,6 +359,7 @@ func LoadScheduleState(
 				Slots:       hostSlots,
 				CategoryID:  categoryID,
 				TaskClassID: taskClassID,
+				TaskOrder:   itemOrderLookup[itemID],
 			})
 			itemStateIDs[itemID] = guestStateID
 			nextStateID++
@@ -383,6 +400,26 @@ func isTaskItemPending(item model.TaskClassItem) bool {
 		return true
 	}
 	return *item.Status == model.TaskItemStatusUnscheduled
+}
+
+// buildTaskItemOrderLookup 为每个 task_item 构建稳定顺序号。
+//
+// 职责边界：
+// 1. 优先使用数据库里的 item.Order，保持用户或上游生成的显式顺序；
+// 2. 若历史数据缺少 order，则退回 TaskClass.Items 当前顺序，保证写工具层仍有稳定边界；
+// 3. 只负责构建运行态映射，不回写数据库。
+func buildTaskItemOrderLookup(taskClasses []model.TaskClass) map[int]int {
+	lookup := make(map[int]int)
+	for _, tc := range taskClasses {
+		for idx, item := range tc.Items {
+			order := idx + 1
+			if item.Order != nil && *item.Order > 0 {
+				order = *item.Order
+			}
+			lookup[item.ID] = order
+		}
+	}
+	return lookup
 }
 
 // estimateTaskItemDuration 估算 pending 任务默认时长。

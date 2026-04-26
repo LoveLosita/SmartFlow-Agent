@@ -13,16 +13,20 @@ type TaskClass struct {
 	ID     int  `gorm:"column:id;primaryKey;autoIncrement"`
 	UserID *int `gorm:"column:user_id;index:idx_task_classes_user_id"`
 	//section 2
-	Name      *string    `gorm:"column:name;size:255"`
-	Mode      *string    `gorm:"column:mode;type:enum('auto','manual')"`
-	StartDate *time.Time `gorm:"column:start_date"`
-	EndDate   *time.Time `gorm:"column:end_date"`
+	Name               *string    `gorm:"column:name;size:255"`
+	Mode               *string    `gorm:"column:mode;type:enum('auto','manual')"`
+	StartDate          *time.Time `gorm:"column:start_date"`
+	EndDate            *time.Time `gorm:"column:end_date"`
+	SubjectType        *string    `gorm:"column:subject_type;size:32;comment:学科类型 quantitative|memory|reading|mixed"`
+	DifficultyLevel    *string    `gorm:"column:difficulty_level;size:16;comment:难度等级 low|medium|high"`
+	CognitiveIntensity *string    `gorm:"column:cognitive_intensity;size:16;comment:认知强度 low|medium|high"`
 	//section 3
-	TotalSlots        *int            `gorm:"column:total_slots;comment:分配的总节数"`
-	AllowFillerCourse *bool           `gorm:"column:allow_filler_course;default:true"`
-	Strategy          *string         `gorm:"column:strategy;type:enum('steady','rapid')"`
-	ExcludedSlots     IntSlice        `gorm:"column:excluded_slots;type:json;comment:不想要的时段切片"`
-	Items             []TaskClassItem `gorm:"foreignKey:CategoryID;references:ID"` // 一对多关联：一个 TaskClass 有多个 TaskClassItem
+	TotalSlots         *int            `gorm:"column:total_slots;comment:分配的总节数"`
+	AllowFillerCourse  *bool           `gorm:"column:allow_filler_course;default:true"`
+	Strategy           *string         `gorm:"column:strategy;type:enum('steady','rapid')"`
+	ExcludedSlots      IntSlice        `gorm:"column:excluded_slots;type:json;comment:不想要的时段切片"`
+	ExcludedDaysOfWeek IntSlice        `gorm:"column:excluded_days_of_week;type:json;comment:不想要的星期几切片(1-7)"`
+	Items              []TaskClassItem `gorm:"foreignKey:CategoryID;references:ID"` // 一对多关联：一个 TaskClass 有多个 TaskClassItem
 }
 
 // IntSlice 用于把 []int 以 JSON 形式存入/读出数据库 json 字段
@@ -74,20 +78,24 @@ type TaskClassItem struct {
 
 // UserAddTaskClassRequest 用于处理用户添加任务类别的请求
 type UserAddTaskClassRequest struct {
-	Name      string                        `json:"name" binding:"required"`
-	StartDate string                        `json:"start_date" binding:"required"` // YYYY-MM-DD
-	EndDate   string                        `json:"end_date" binding:"required"`   // YYYY-MM-DD
-	Mode      string                        `json:"mode" binding:"required,oneof=auto manual"`
-	Config    UserAddTaskClassConfig        `json:"config" binding:"required"`
-	Items     []UserAddTaskClassItemRequest `json:"items" binding:"required"`
+	Name               string                        `json:"name" binding:"required"`
+	StartDate          string                        `json:"start_date" binding:"required"` // YYYY-MM-DD
+	EndDate            string                        `json:"end_date" binding:"required"`   // YYYY-MM-DD
+	Mode               string                        `json:"mode" binding:"required,oneof=auto manual"`
+	SubjectType        string                        `json:"subject_type,omitempty"`
+	DifficultyLevel    string                        `json:"difficulty_level,omitempty"`
+	CognitiveIntensity string                        `json:"cognitive_intensity,omitempty"`
+	Config             UserAddTaskClassConfig        `json:"config" binding:"required"`
+	Items              []UserAddTaskClassItemRequest `json:"items" binding:"required"`
 }
 
 // UserAddTaskClassConfig 用于处理用户添加任务类别时的配置部分
 type UserAddTaskClassConfig struct {
-	TotalSlots        int    `json:"total_slots" binding:"required,min=1"`
-	AllowFillerCourse bool   `json:"allow_filler_course"`
-	Strategy          string `json:"strategy" binding:"required,oneof=steady rapid"`
-	ExcludedSlots     []int  `json:"excluded_slots"`
+	TotalSlots         int    `json:"total_slots" binding:"required,min=1"`
+	AllowFillerCourse  bool   `json:"allow_filler_course"`
+	Strategy           string `json:"strategy" binding:"required,oneof=steady rapid"`
+	ExcludedSlots      []int  `json:"excluded_slots"`
+	ExcludedDaysOfWeek []int  `json:"excluded_days_of_week"`
 }
 
 // UserAddTaskClassItemRequest 用于处理用户添加任务类别时的任务块部分
@@ -113,13 +121,16 @@ type UserGetTaskClassesResponse struct {
 
 // TaskClassSummary 提供任务类别的简要信息
 type TaskClassSummary struct {
-	ID         int       `json:"id"`
-	Name       string    `json:"name"`
-	Mode       string    `json:"mode"`
-	Strategy   string    `json:"strategy"`
-	StartDate  time.Time `json:"start_date"`
-	EndDate    time.Time `json:"end_date"`
-	TotalSlots int       `json:"total_slots"`
+	ID                 int       `json:"id"`
+	Name               string    `json:"name"`
+	Mode               string    `json:"mode"`
+	Strategy           string    `json:"strategy"`
+	StartDate          time.Time `json:"start_date"`
+	EndDate            time.Time `json:"end_date"`
+	TotalSlots         int       `json:"total_slots"`
+	SubjectType        string    `json:"subject_type,omitempty"`
+	DifficultyLevel    string    `json:"difficulty_level,omitempty"`
+	CognitiveIntensity string    `json:"cognitive_intensity,omitempty"`
 }
 
 type UserInsertTaskClassItemToScheduleRequest struct {

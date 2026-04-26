@@ -20,17 +20,25 @@ type TaskSlot struct {
 	SlotEnd   int `json:"slot_end"`
 }
 
-// TaskClassMeta 是任务类级别的调度约束，供 LLM 在排课时参考。
-// 只记录影响排课决策的字段，不暴露数据库内部细节。
+// TaskClassMeta 是任务类级别的调度与认知画像元数据。
+//
+// 职责边界：
+// 1. 负责向 LLM 暴露会影响粗排与主动优化判断的高价值字段；
+// 2. 不负责暴露数据库内部细节，也不承载 task_item 级别的数据；
+// 3. 这些字段会被 prompt、analyze_health、analyze_rhythm 共同消费，因此要保持轻量且稳定。
 type TaskClassMeta struct {
-	ID                int    `json:"id"`
-	Name              string `json:"name"`
-	Strategy          string `json:"strategy"`             // "steady"=均匀分布 | "rapid"=集中突击
-	TotalSlots        int    `json:"total_slots"`          // 该任务类总时段预算
-	AllowFillerCourse bool   `json:"allow_filler_course"`  // 是否允许嵌入水课时段
-	ExcludedSlots     []int  `json:"excluded_slots"`       // 排除的半天时段索引（空=无限制）
-	StartDate         string `json:"start_date,omitempty"` // 排程起始日期（YYYY-MM-DD）
-	EndDate           string `json:"end_date,omitempty"`   // 排程截止日期（YYYY-MM-DD）
+	ID                 int    `json:"id"`
+	Name               string `json:"name"`
+	Strategy           string `json:"strategy"`               // "steady"=均匀分布 | "rapid"=集中突击
+	TotalSlots         int    `json:"total_slots"`            // 该任务类总时段预算
+	AllowFillerCourse  bool   `json:"allow_filler_course"`    // 是否允许嵌入水课时段
+	ExcludedSlots      []int  `json:"excluded_slots"`         // 排除的半天时段索引（空=无限制）
+	ExcludedDaysOfWeek []int  `json:"excluded_days_of_week"`  // 排除的星期几（1-7，空=无限制）
+	StartDate          string `json:"start_date,omitempty"`   // 排程起始日期（YYYY-MM-DD）
+	EndDate            string `json:"end_date,omitempty"`     // 排程截止日期（YYYY-MM-DD）
+	SubjectType        string `json:"subject_type,omitempty"` // "quantitative" | "memory" | "reading" | "mixed"
+	DifficultyLevel    string `json:"difficulty_level,omitempty"`
+	CognitiveIntensity string `json:"cognitive_intensity,omitempty"`
 }
 
 // ScheduleTask is a unified task representation in the tool state.
@@ -51,6 +59,9 @@ type ScheduleTask struct {
 	Duration int `json:"duration,omitempty"`
 	// source=task_item only: TaskClass.ID，用于反查任务类约束。
 	TaskClassID int `json:"task_class_id,omitempty"`
+	// source=task_item only: 任务在所属任务类内的稳定顺序。
+	// 该字段只用于写工具层的“同任务类内部顺序约束”，不直接暴露给 LLM 做决策。
+	TaskOrder int `json:"task_order,omitempty"`
 	// source=task_item only: TaskClass.ID for category lookup (internal alias).
 	CategoryID int `json:"category_id,omitempty"`
 	// source=event only: whether this slot allows embedding other tasks.
@@ -68,7 +79,7 @@ type ScheduleTask struct {
 type ScheduleState struct {
 	Window      ScheduleWindow  `json:"window"`
 	Tasks       []ScheduleTask  `json:"tasks"`
-	TaskClasses []TaskClassMeta `json:"task_classes,omitempty"` // 任务类约束元数据，供 LLM 排课参考
+	TaskClasses []TaskClassMeta `json:"task_classes,omitempty"` // 任务类约束与语义画像，供 LLM 排课参考
 	// RuntimeQueue 是“本轮 execute 微调”的临时待处理队列。
 	//
 	// 职责边界：

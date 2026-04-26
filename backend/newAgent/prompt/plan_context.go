@@ -127,7 +127,25 @@ func renderPlanTaskClassMeta(state *newagentmodel.CommonState) string {
 		if tc.StartDate != "" || tc.EndDate != "" {
 			line += fmt.Sprintf("；日期范围：%s ~ %s", tc.StartDate, tc.EndDate)
 		}
+		if len(tc.ExcludedDaysOfWeek) > 0 {
+			line += fmt.Sprintf("；排除星期：%v", tc.ExcludedDaysOfWeek)
+		}
+		if tc.SubjectType != "" || tc.DifficultyLevel != "" || tc.CognitiveIntensity != "" {
+			line += fmt.Sprintf("；语义画像：%s/%s/%s",
+				planSemanticValue(tc.SubjectType),
+				planSemanticValue(tc.DifficultyLevel),
+				planSemanticValue(tc.CognitiveIntensity),
+			)
+		}
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func planSemanticValue(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "未标注"
+	}
+	return trimmed
 }

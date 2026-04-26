@@ -337,6 +337,17 @@ func buildTimeGrid(schedules []model.Schedule, taskClass *model.TaskClass) *grid
 			}
 		}
 	}
+	// 标记整天屏蔽：
+	// 1. excluded_days_of_week 表示“这些星期几整天都不允许粗排”；
+	// 2. 与 excluded_slots 一样属于硬约束，因此直接写入 Blocked；
+	// 3. 一旦工作日容量不足，粗排应直接失败，而不是偷偷排到被排除的星期里。
+	for _, blockedDay := range taskClass.ExcludedDaysOfWeek {
+		for w := startW; w <= endW; w++ {
+			for s := 1; s <= 12; s++ {
+				g.setNode(w, blockedDay, s, slotNode{Status: Blocked})
+			}
+		}
+	}
 
 	// 映射日程 (尊重 Blocked 且只处理范围内的数据)
 	for _, s := range schedules {
@@ -448,6 +459,146 @@ type planningSlotCandidate struct {
 	dayOfWeek   int
 	sectionFrom int
 	sectionTo   int
+}
+
+// countDayAvailable 统计某一天当前还可用于粗排的节次数。
+//
+// 职责边界：
+// 1. 只把 Free/Filler 视为“仍可消费”的资源；
+// 2. 不区分其来源是纯空位还是可嵌入课程，因为对粗排而言二者都代表后续还能放任务；
+// 3. 仅用于候选打分，不直接参与最终合法性判断。
+func (g *grid) countDayAvailable(week, day int) int {
+	if g == nil {
+		return 0
+	}
+	count := 0
+	for section := 1; section <= 12; section++ {
+		node := g.getNode(week, day, section)
+		if node.Status == Free || node.Status == Filler {
+			count++
+		}
+	}
+	return count
+}
+
+// countDayOccupied 统计某一天当前已被 existing/virtual/task 占住的节次数。
+func (g *grid) countDayOccupied(week, day int) int {
+	if g == nil {
+		return 0
+	}
+	count := 0
+	for section := 1; section <= 12; section++ {
+		if g.getNode(week, day, section).Status == Occupied {
+			count++
+		}
+	}
+	return count
+}
+
+// collectPlanningCandidatesFromCursor 收集从给定游标开始仍然合法的候选落位。
+//
+// 设计说明：
+// 1. 这里复用现有 findNextCandidateFromCursor 的合法性规则，避免复制一套“什么叫合法双节”的判断；
+// 2. 通过跳过已命中候选的跨度，减少同一课程块被重复返回；
+// 3. 保留快照上的 coordIndex，供 steady 策略计算“距离目标位置有多远”。
+func (g *grid) collectPlanningCandidatesFromCursor(coords []slotCoord, startCursor int) []planningSlotCandidate {
+	if g == nil || startCursor >= len(coords) {
+		return nil
+	}
+	candidates := make([]planningSlotCandidate, 0, 16)
+	seen := make(map[string]struct{})
+	for cursor := startCursor; cursor < len(coords); {
+		candidate, found := g.findNextCandidateFromCursor(coords, cursor)
+		if !found {
+			break
+		}
+		key := fmt.Sprintf("%d-%d-%d-%d", candidate.week, candidate.dayOfWeek, candidate.sectionFrom, candidate.sectionTo)
+		if _, exists := seen[key]; !exists {
+			seen[key] = struct{}{}
+			candidates = append(candidates, candidate)
+		}
+		nextCursor := candidate.coordIndex + (candidate.sectionTo - candidate.sectionFrom + 1)
+		if nextCursor <= cursor {
+			nextCursor = cursor + 1
+		}
+		cursor = nextCursor
+	}
+	return candidates
+}
+
+func computeSteadyTargetCursor(totalAvailable, totalItems, itemIndex int) int {
+	if totalAvailable <= 1 || totalItems <= 1 {
+		return 0
+	}
+	target := ((itemIndex + 1) * totalAvailable) / (totalItems + 1)
+	if target < 0 {
+		return 0
+	}
+	if target >= totalAvailable {
+		return totalAvailable - 1
+	}
+	return target
+}
+
+func planningDayOrdinal(week, day int) int {
+	return week*7 + day
+}
+
+func absInt(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
+// chooseSteadyCandidate 为 steady 策略挑选“更均衡、更分散、更留余地”的候选位。
+//
+// 评分原则：
+// 1. 先尽量接近本任务在窗口中的目标分布位置；
+// 2. 再偏好当前已占用更少的天，避免单日继续堆高；
+// 3. 再惩罚与同任务类既有落位过近或同日重复，降低同科过度集中；
+// 4. 最后惩罚吃掉当天最后一小段缓冲，给后续调整保留容错空间。
+func (g *grid) chooseSteadyCandidate(
+	coords []slotCoord,
+	targetCursor int,
+	placedDayOrdinals []int,
+) (planningSlotCandidate, bool) {
+	candidates := g.collectPlanningCandidatesFromCursor(coords, 0)
+	if len(candidates) == 0 {
+		return planningSlotCandidate{}, false
+	}
+
+	best := candidates[0]
+	bestScore := int(^uint(0) >> 1)
+	for _, candidate := range candidates {
+		slotSpan := candidate.sectionTo - candidate.sectionFrom + 1
+		distancePenalty := absInt(candidate.coordIndex-targetCursor) * 10
+		dayOccupiedPenalty := g.countDayOccupied(candidate.week, candidate.dayOfWeek) * 25
+		remainingAvailable := g.countDayAvailable(candidate.week, candidate.dayOfWeek) - slotSpan
+		bufferPenalty := 0
+		if remainingAvailable < 2 {
+			bufferPenalty = 80
+		}
+
+		dayOrdinal := planningDayOrdinal(candidate.week, candidate.dayOfWeek)
+		rhythmPenalty := 0
+		for _, placed := range placedDayOrdinals {
+			diff := absInt(dayOrdinal - placed)
+			switch {
+			case diff == 0:
+				rhythmPenalty += 180
+			case diff == 1:
+				rhythmPenalty += 60
+			}
+		}
+
+		score := distancePenalty + dayOccupiedPenalty + bufferPenalty + rhythmPenalty + candidate.coordIndex
+		if score < bestScore {
+			bestScore = score
+			best = candidate
+		}
+	}
+	return best, true
 }
 
 // getAllAvailable 获取窗口内所有可用的原子节次坐标（逻辑一维化）。
@@ -604,8 +755,8 @@ func computeAllocation(g *grid, items []model.TaskClassItem, strategy string) ([
 	}
 
 	// 2. 计算间隔策略：
-	// 2.1 rapid：gap=0，尽快塞满；
-	// 2.2 steady：按剩余可用位均匀留白。
+	// 2.1 rapid：沿用“尽快塞满”的线性前进；
+	// 2.2 steady：不再只靠 gap 跳格子，而是结合目标位置、单日负载、同科分散和缓冲保留做候选打分。
 	gap := 0
 	if strategy == "steady" {
 		gap = (totalAvailable - totalRequired) / (len(items) + 1)
@@ -617,16 +768,22 @@ func computeAllocation(g *grid, items []model.TaskClassItem, strategy string) ([
 	// 3.3 若当前位置不满足约束（例如后继节被占），继续向后扫描，不降级为 1 节。
 	cursor := gap
 	lastPlacedIndex := -1
+	placedDayOrdinals := make([]int, 0, len(items))
 
 	for i := range items {
-		if cursor >= totalAvailable {
-			break
+		var (
+			candidate planningSlotCandidate
+			found     bool
+		)
+		if strategy == "steady" {
+			targetCursor := computeSteadyTargetCursor(totalAvailable, len(items), i)
+			candidate, found = g.chooseSteadyCandidate(coords, targetCursor, placedDayOrdinals)
+		} else {
+			if cursor >= totalAvailable {
+				break
+			}
+			candidate, found = g.findNextCandidateFromCursor(coords, cursor)
 		}
-
-		// 4. 先找候选，不立即写入：
-		// 4.1 找不到候选时提前结束；
-		// 4.2 最终统一通过 lastPlacedIndex 判断是否完整排完。
-		candidate, found := g.findNextCandidateFromCursor(coords, cursor)
 		if !found {
 			break
 		}
@@ -648,7 +805,10 @@ func computeAllocation(g *grid, items []model.TaskClassItem, strategy string) ([
 
 		// 7. 推进游标并记录成功位置。
 		slotLen := candidate.sectionTo - candidate.sectionFrom + 1
-		cursor = candidate.coordIndex + slotLen + gap
+		if strategy != "steady" {
+			cursor = candidate.coordIndex + slotLen + gap
+		}
+		placedDayOrdinals = append(placedDayOrdinals, planningDayOrdinal(candidate.week, candidate.dayOfWeek))
 		lastPlacedIndex = i
 	}
 

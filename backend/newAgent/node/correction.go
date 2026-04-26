@@ -42,15 +42,10 @@ func AppendLLMCorrection(
 	}
 
 	// 1. 构造 assistant 消息，让 LLM 知道自己刚才输出了什么。
-	//    如果 llmOutput 为空，则生成一个占位描述。
+	// 2. 空输出不回灌，避免把占位文本写进历史造成噪音。
+	// 3. 与最近一条 assistant 完全相同则跳过，避免重复回灌放大复读。
 	assistantContent := strings.TrimSpace(llmOutput)
-	if assistantContent == "" {
-		assistantContent = "[LLM 输出为空或无法解析]"
-	}
-	conversationContext.AppendHistory(&schema.Message{
-		Role:    schema.Assistant,
-		Content: assistantContent,
-	})
+	appendCorrectionAssistantIfNeeded(conversationContext, assistantContent)
 
 	// 2. 构造纠正提示，明确告知 LLM 哪里错了、合法选项有哪些。
 	//    不做硬编码的错误类型，由调用方通过 validOptionsDesc 传入。
@@ -88,13 +83,7 @@ func AppendLLMCorrectionWithHint(
 	}
 
 	assistantContent := strings.TrimSpace(llmOutput)
-	if assistantContent == "" {
-		assistantContent = "[LLM 输出为空或无法解析]"
-	}
-	conversationContext.AppendHistory(&schema.Message{
-		Role:    schema.Assistant,
-		Content: assistantContent,
-	})
+	appendCorrectionAssistantIfNeeded(conversationContext, assistantContent)
 
 	correctionContent := fmt.Sprintf(
 		"%s %s 请重新分析当前状态，输出正确的内容。",
@@ -107,5 +96,41 @@ func AppendLLMCorrectionWithHint(
 		Extra: map[string]any{
 			correctionHistoryKindKey: correctionHistoryKindCorrectionUser,
 		},
+	})
+}
+
+// appendCorrectionAssistantIfNeeded 在纠错回灌前做最小降噪。
+//
+// 1. 空文本直接跳过，避免写入“占位噪音”；
+// 2. 若与“最近一条 assistant 文本”完全一致则跳过，避免同句反复回灌；
+// 3. 仅负责“是否回灌”判定，不负责生成纠错 user 提示。
+func appendCorrectionAssistantIfNeeded(
+	conversationContext *newagentmodel.ConversationContext,
+	assistantContent string,
+) {
+	if conversationContext == nil {
+		return
+	}
+	assistantContent = strings.TrimSpace(assistantContent)
+	if assistantContent == "" {
+		return
+	}
+
+	history := conversationContext.HistorySnapshot()
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i]
+		if msg == nil || msg.Role != schema.Assistant {
+			continue
+		}
+		if strings.TrimSpace(msg.Content) == assistantContent {
+			return
+		}
+		// 只看最近一条 assistant，避免误去重很久以前的正常重复表达。
+		break
+	}
+
+	conversationContext.AppendHistory(&schema.Message{
+		Role:    schema.Assistant,
+		Content: assistantContent,
 	})
 }

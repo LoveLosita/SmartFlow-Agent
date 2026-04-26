@@ -71,6 +71,24 @@ type CommonState struct {
 	TraceID        string `json:"trace_id"`
 	UserID         int    `json:"user_id"`
 	ConversationID string `json:"conversation_id"`
+	// ActiveToolDomain 记录当前 msg0 动态区激活的业务工具域。
+	// 说明：
+	// 1. 空字符串表示仅保留 context 管理工具，不注入业务工具定义；
+	// 2. 非空时仅允许注入对应域的工具（如 schedule/taskclass）；
+	// 3. 该字段由 context_tools_add/remove 工具结果驱动更新。
+	ActiveToolDomain string `json:"active_tool_domain,omitempty"`
+	// ActiveToolPacks 记录当前激活域下的可选二级包（不含 core 固定包）。
+	// 说明：
+	// 1. 仅对 schedule 域生效（queue/mutation/analyze/web）；
+	// 2. 为空时按域默认策略解释（schedule 兼容为“全可选包”）；
+	// 3. 该字段与 ActiveToolDomain 一起由 context_tools_add/remove 结果更新。
+	ActiveToolPacks []string `json:"active_tool_packs,omitempty"`
+	// PendingContextHook 保存 plan 阶段给 execute 阶段的一次性注入建议。
+	// 说明：
+	// 1. 可由 plan_done 或 rough_build->execute 分支写入；
+	// 2. execute 首轮消费一次后清空；
+	// 3. 该字段只表达建议，不直接触发工具调用。
+	PendingContextHook *ContextHook `json:"pending_context_hook,omitempty"`
 
 	// 流程阶段
 	Phase Phase `json:"phase"`
@@ -106,12 +124,70 @@ type CommonState struct {
 	NeedsRefineAfterRoughBuild bool `json:"needs_refine_after_rough_build,omitempty"`
 	// AllowReorder 表示本轮是否允许打乱 suggested 任务的相对顺序。
 	// 默认 false，只有用户明确说明"可以打乱顺序/顺序不重要"才会为 true。
-	AllowReorder bool `json:"allow_reorder,omitempty"`
-	// SuggestedOrderBaseline 保存"本轮 execute 启动前"的 suggested 任务相对顺序基线。
-	// OrderGuard 节点会基于该基线判断微调是否破坏顺序约束。
-	SuggestedOrderBaseline []int `json:"suggested_order_baseline,omitempty"`
+	AllowReorder     bool   `json:"allow_reorder,omitempty"`
+	OptimizationMode string `json:"optimization_mode,omitempty"`
+	// ActiveOptimizeOnly 标记“当前是否处于粗排后主动优化专用模式”。
+	// 1. true 时，execute 只向 LLM 暴露 analyze_health + move + swap 这组最小闭环工具；
+	// 2. 该开关只用于首次粗排后的自动微调，不影响用户后续明确提出的日程调整请求；
+	// 3. 流程收口、重开新请求或切换业务域后，必须重置为 false。
+	ActiveOptimizeOnly bool   `json:"active_optimize_only,omitempty"`
+	HealthCheckDone    bool   `json:"health_check_done,omitempty"`
+	HealthIsFeasible   bool   `json:"health_is_feasible,omitempty"`
+	HealthCapacityGap  int    `json:"health_capacity_gap,omitempty"`
+	HealthReasonCode   string `json:"health_reason_code,omitempty"`
+	// HealthShouldContinueOptimize 记录最近一次 analyze_health 是否认为“还值得继续优化”。
+	// 调用目的：
+	// 1. 让 execute prompt 直接读取后端诊断结论，而不是只根据 issues 猜下一步；
+	// 2. 该字段只表达“是否值得继续动”，不替 LLM 决定具体写参数；
+	// 3. 默认 false，只有 analyze_health 明确判定后才会更新。
+	HealthShouldContinueOptimize bool `json:"health_should_continue_optimize,omitempty"`
+	// HealthTightnessLevel 记录最近一次诊断得到的优化空间等级：loose / tight / locked。
+	// 调用目的：
+	// 1. 用于提示 LLM 区分“还能优化”和“已经是被迫不完美”；
+	// 2. 该字段只服务主动优化链路，不参与粗排可行性判断；
+	// 3. 空字符串表示尚未拿到有效诊断。
+	HealthTightnessLevel string `json:"health_tightness_level,omitempty"`
+	// HealthPrimaryProblem 保存最近一次诊断的主要局部问题摘要。
+	// 调用目的：
+	// 1. 帮助 execute 聚焦当前最值得处理的那个点，避免全局乱搜；
+	// 2. 只保存短摘要，不保存完整工具原文，避免状态膨胀；
+	// 3. 为空表示当前没有明确主问题或诊断失败。
+	HealthPrimaryProblem string `json:"health_primary_problem,omitempty"`
+	// HealthRecommendedOperation 保存最近一次诊断建议优先考虑的动作类型。
+	// 允许值由 analyze_health 控制，当前主要为 swap / move / close / ask_user。
+	HealthRecommendedOperation string `json:"health_recommended_operation,omitempty"`
+	// HealthIsForcedImperfection 标记当前剩余问题是否更像“约束代价”而非“仍值得修”的问题。
+	// 调用目的：
+	// 1. 给 LLM 一个明确的收口信号；
+	// 2. 仅在 analyze_health 返回结构化 decision 时更新；
+	// 3. false 不代表一定要继续优化，只代表“不是明确的被迫不完美”。
+	HealthIsForcedImperfection bool `json:"health_is_forced_imperfection,omitempty"`
+	// HealthImprovementSignal 保存最近一次诊断的紧凑对比信号，用于判断是否连续停滞。
+	// 调用目的：
+	// 1. execute 可基于该字段识别“连续两轮几乎没改善”；
+	// 2. 信号由 analyze_health 生成，格式稳定但不面向用户展示；
+	// 3. 若诊断失败则保持空字符串。
+	HealthImprovementSignal string `json:"health_improvement_signal,omitempty"`
+	// HealthStagnationCount 记录连续多少次 analyze_health 给出了相同的 improvement_signal。
+	// 调用目的：
+	// 1. 让 prompt 可以在“继续磨也没明显改善”时提醒 LLM 主动收口；
+	// 2. 仅在两次连续有效诊断的信号完全相同时递增；
+	// 3. 只做软提醒，不做后端硬拦截。
+	HealthStagnationCount int `json:"health_stagnation_count,omitempty"`
+	// TaskClassUpsertLastTried 标记本轮是否至少调用过一次 upsert_task_class。
+	// 调用目的：execute_context 仅在该标记为 true 时注入“最近一次任务类写入结果”，避免噪音。
+	TaskClassUpsertLastTried bool `json:"task_class_upsert_last_tried,omitempty"`
+	// TaskClassUpsertLastSuccess 记录最近一次 upsert_task_class 是否成功。
+	// 调用目的：为 prompt 提供“是否需要继续追问补字段”的明确信号。
+	TaskClassUpsertLastSuccess bool `json:"task_class_upsert_last_success,omitempty"`
+	// TaskClassUpsertLastIssues 记录最近一次写入返回的校验问题（validation.issues）。
+	// 调用目的：让 LLM 直接按缺失字段追问，减少泛化提问。
+	TaskClassUpsertLastIssues []string `json:"task_class_upsert_last_issues,omitempty"`
+	// TaskClassUpsertConsecutiveFailures 记录连续写入失败次数。
+	// 调用目的：给 prompt 注入“避免空转”的软提示，不做硬拦截。
+	TaskClassUpsertConsecutiveFailures int `json:"task_class_upsert_consecutive_failures,omitempty"`
 	// HasScheduleWriteOps 标记本轮 execute 循环是否执行过日程写工具。
-	// 调用目的：graph 分支函数据此判断是否需要走 order_guard，非日程操作跳过守卫。
+	// 调用目的：为 prompt/收口层提供“本轮是否真的动过日程写工具”的运行态信号。
 	HasScheduleWriteOps bool `json:"has_schedule_write_ops,omitempty"`
 	// UsedQuickNote 标记本轮是否调用过 quick_note_create 工具。
 	// 调用目的：graph 完成后据此决定是否跳过记忆抽取，避免随口记内容被错误归类。
@@ -164,8 +240,12 @@ func (s *CommonState) FinishPlan(steps []PlanStep) {
 	s.PlanSteps = steps
 	s.CurrentStep = 0
 	s.Phase = PhaseWaitingConfirm
+	s.ActiveToolDomain = ""
+	s.ActiveToolPacks = nil
+	s.PendingContextHook = nil
 	s.NeedsRefineAfterRoughBuild = false
-	s.SuggestedOrderBaseline = nil
+	s.ActiveOptimizeOnly = false
+	s.resetTaskClassUpsertSnapshot()
 	s.ClearTerminalOutcome()
 }
 
@@ -173,7 +253,8 @@ func (s *CommonState) FinishPlan(steps []PlanStep) {
 func (s *CommonState) ConfirmPlan() {
 	s.Phase = PhaseExecuting
 	s.NeedsRefineAfterRoughBuild = false
-	s.SuggestedOrderBaseline = nil
+	s.ActiveOptimizeOnly = false
+	s.resetTaskClassUpsertSnapshot()
 	s.ClearTerminalOutcome()
 }
 
@@ -185,9 +266,13 @@ func (s *CommonState) StartDirectExecute() {
 	s.PlanSteps = nil
 	s.CurrentStep = 0
 	s.Phase = PhaseExecuting
+	s.ActiveToolDomain = ""
+	s.ActiveToolPacks = nil
+	s.PendingContextHook = nil
 	s.NeedsRoughBuild = false
 	s.NeedsRefineAfterRoughBuild = false
-	s.SuggestedOrderBaseline = nil
+	s.ActiveOptimizeOnly = false
+	s.resetTaskClassUpsertSnapshot()
 	s.ClearTerminalOutcome()
 }
 
@@ -196,8 +281,12 @@ func (s *CommonState) RejectPlan() {
 	s.PlanSteps = nil
 	s.CurrentStep = 0
 	s.Phase = PhasePlanning
+	s.ActiveToolDomain = ""
+	s.ActiveToolPacks = nil
+	s.PendingContextHook = nil
 	s.NeedsRefineAfterRoughBuild = false
-	s.SuggestedOrderBaseline = nil
+	s.ActiveOptimizeOnly = false
+	s.resetTaskClassUpsertSnapshot()
 	s.ClearTerminalOutcome()
 }
 
@@ -223,16 +312,48 @@ func (s *CommonState) ResetForNextRun() {
 	// 4. 清理计划执行游标与粗排相关临时标记，确保新请求不会误沿用旧计划。
 	s.PlanSteps = nil
 	s.CurrentStep = 0
+	s.ActiveToolDomain = ""
+	s.ActiveToolPacks = nil
+	s.PendingContextHook = nil
 	s.NeedsRoughBuild = false
 	s.NeedsRefineAfterRoughBuild = false
+	s.ActiveOptimizeOnly = false
 
 	// 5. 重置顺序约束临时态与终止结果，避免上一轮 completed/aborted/exhausted 语义串到下一轮。
 	s.AllowReorder = false
+	s.OptimizationMode = ""
+	s.HealthCheckDone = false
+	s.HealthIsFeasible = true
+	s.HealthCapacityGap = 0
+	s.HealthReasonCode = ""
+	s.HealthShouldContinueOptimize = false
+	s.HealthTightnessLevel = ""
+	s.HealthPrimaryProblem = ""
+	s.HealthRecommendedOperation = ""
+	s.HealthIsForcedImperfection = false
+	s.HealthImprovementSignal = ""
+	s.HealthStagnationCount = 0
 	s.HasScheduleWriteOps = false
 	s.HasScheduleChanges = false
 	s.UsedQuickNote = false
-	s.SuggestedOrderBaseline = nil
+	s.resetTaskClassUpsertSnapshot()
 	s.ClearTerminalOutcome()
+}
+
+// resetTaskClassUpsertSnapshot 清理“任务类写入回盘”运行态。
+//
+// 职责边界：
+// 1. 仅清理 upsert_task_class 相关的临时回盘字段；
+// 2. 不影响 Health/Plan/Phase 等其他执行状态；
+// 3. 作为新一轮入口统一调用，避免旧失败信息污染本轮追问。
+func (s *CommonState) resetTaskClassUpsertSnapshot() {
+	if s == nil {
+		return
+	}
+	s.TaskClassUpsertLastTried = false
+	s.TaskClassUpsertLastSuccess = false
+	s.TaskClassUpsertLastIssues = nil
+	s.TaskClassUpsertConsecutiveFailures = 0
 }
 
 // AdvanceStep 推进到下一个计划步骤，并返回是否仍有剩余步骤。
@@ -248,6 +369,12 @@ func (s *CommonState) AdvanceStep() bool {
 // 2. 只有在尚未写入任何终止结果时，才默认补成 completed。
 func (s *CommonState) Done() {
 	s.Phase = PhaseDone
+	// 收口时自动清空工具域，确保下一轮 msg0 动态区回到最小集合（仅 context 管理工具）。
+	// 调用目的：把“收尾清理”从 LLM 决策中剥离，减少 done 阶段无关 tool_call 噪音。
+	s.ActiveToolDomain = ""
+	s.ActiveToolPacks = nil
+	s.PendingContextHook = nil
+	s.ActiveOptimizeOnly = false
 	if s.TerminalOutcome != nil {
 		s.TerminalOutcome.Normalize()
 		return

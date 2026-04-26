@@ -123,17 +123,35 @@ func renderStateSummary(state *newagentmodel.CommonState) string {
 			if tc.StartDate != "" || tc.EndDate != "" {
 				line += fmt.Sprintf("，日期范围=%s ~ %s", tc.StartDate, tc.EndDate)
 			}
+			if tc.SubjectType != "" || tc.DifficultyLevel != "" || tc.CognitiveIntensity != "" {
+				line += fmt.Sprintf("，语义画像=%s/%s/%s",
+					defaultSemanticValue(tc.SubjectType),
+					defaultSemanticValue(tc.DifficultyLevel),
+					defaultSemanticValue(tc.CognitiveIntensity),
+				)
+			}
 			if tc.AllowFillerCourse {
 				line += "，允许嵌入水课"
 			}
 			if len(tc.ExcludedSlots) > 0 {
 				line += fmt.Sprintf("，排除时段=%v", tc.ExcludedSlots)
 			}
+			if len(tc.ExcludedDaysOfWeek) > 0 {
+				line += fmt.Sprintf("，排除星期=%v", tc.ExcludedDaysOfWeek)
+			}
 			sb.WriteString(line + "\n")
 		}
 	}
 
 	return sb.String()
+}
+
+func defaultSemanticValue(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "未标注"
+	}
+	return trimmed
 }
 
 // renderPinnedBlocks 把 ConversationContext 中的置顶块渲染成独立的 system 文本。

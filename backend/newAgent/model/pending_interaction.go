@@ -12,6 +12,15 @@ const (
 
 const PendingInteractionSnapshotVersion = 1
 
+const (
+	// PendingMetaAskUserSpeakStreamed 表示 ask_user 文本已在上游节点流式推送过。
+	// interrupt 节点据此决定是否跳过二次正文推送，避免前端出现重复气泡。
+	PendingMetaAskUserSpeakStreamed = "ask_user_speak_streamed"
+	// PendingMetaAskUserHistoryAppended 表示 ask_user 文本已在上游写入过 history。
+	// interrupt 节点据此避免二次追加历史，防止上下文重复。
+	PendingMetaAskUserHistoryAppended = "ask_user_history_appended"
+)
+
 // PendingInteractionType 表示当前挂起交互的类型。
 type PendingInteractionType string
 
@@ -177,6 +186,26 @@ func (s *AgentRuntimeState) ClearPendingInteraction() {
 	}
 	s.PendingInteraction.Status = PendingInteractionStatusCanceled
 	s.PendingInteraction = nil
+}
+
+// SetPendingInteractionMetadata 为当前 open 状态的 pending interaction 写入元信息。
+//
+// 职责边界：
+// 1. 仅对当前挂起交互打运行态标记，不参与业务语义判断；
+// 2. 若当前没有 pending interaction，则静默跳过；
+// 3. metadata 仅用于节点间协作（如避免 ask_user 重复推送）。
+func (s *AgentRuntimeState) SetPendingInteractionMetadata(key string, value any) {
+	if s == nil || s.PendingInteraction == nil || s.PendingInteraction.Status != PendingInteractionStatusOpen {
+		return
+	}
+	trimmedKey := strings.TrimSpace(key)
+	if trimmedKey == "" {
+		return
+	}
+	if s.PendingInteraction.Metadata == nil {
+		s.PendingInteraction.Metadata = make(map[string]any)
+	}
+	s.PendingInteraction.Metadata[trimmedKey] = value
 }
 
 func (s *AgentRuntimeState) openPendingInteraction(

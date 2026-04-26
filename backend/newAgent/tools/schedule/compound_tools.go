@@ -134,6 +134,13 @@ func MinContextSwitch(state *ScheduleState, taskIDs []int) string {
 			)
 		}
 	}
+	minContextProposals := make(map[int][]TaskSlot, len(afterByID))
+	for taskID, after := range afterByID {
+		minContextProposals[taskID] = []TaskSlot{after.Slot}
+	}
+	if err := validateLocalOrderBatchPlacement(state, minContextProposals); err != nil {
+		return fmt.Sprintf("减少上下文切换失败：%s。", err.Error())
+	}
 
 	// 4. 全量通过后再原子提交，避免半成品状态。
 	clone := state.Clone()
@@ -255,6 +262,13 @@ func SpreadEven(state *ScheduleState, taskIDs []int, args map[string]any) string
 				conflict.Name,
 			)
 		}
+	}
+	spreadEvenProposals := make(map[int][]TaskSlot, len(afterByID))
+	for taskID, after := range afterByID {
+		spreadEvenProposals[taskID] = []TaskSlot{after.Slot}
+	}
+	if err := validateLocalOrderBatchPlacement(state, spreadEvenProposals); err != nil {
+		return fmt.Sprintf("均匀化调整失败：%s。", err.Error())
 	}
 
 	clone := state.Clone()

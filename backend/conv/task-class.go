@@ -32,11 +32,14 @@ func ProcessUserAddTaskClassRequest(req *model.UserAddTaskClassRequest, userID i
 	}
 	//1.填充section1,2
 	taskClass := model.TaskClass{
-		Name:      &req.Name,
-		Mode:      &req.Mode,
-		StartDate: startDate,
-		EndDate:   endDate,
-		UserID:    &userID,
+		Name:               &req.Name,
+		Mode:               &req.Mode,
+		StartDate:          startDate,
+		EndDate:            endDate,
+		SubjectType:        stringPtrOrNil(req.SubjectType),
+		DifficultyLevel:    stringPtrOrNil(req.DifficultyLevel),
+		CognitiveIntensity: stringPtrOrNil(req.CognitiveIntensity),
+		UserID:             &userID,
 	}
 	//2.填充section3
 	taskClass.TotalSlots = &req.Config.TotalSlots
@@ -59,6 +62,7 @@ func ProcessUserAddTaskClassRequest(req *model.UserAddTaskClassRequest, userID i
 		taskClass.ExcludedSlots = &emptyJSON
 	}*/
 	taskClass.ExcludedSlots = req.Config.ExcludedSlots // 直接复用 IntSlice 类型，前端也能正确解析为 []int
+	taskClass.ExcludedDaysOfWeek = req.Config.ExcludedDaysOfWeek
 	//3.开始构建 items
 	var items []model.TaskClassItem
 	for _, itemReq := range req.Items {
@@ -84,13 +88,16 @@ func TaskClassModelToResponse(taskClasses []model.TaskClass) *model.UserGetTaskC
 	var resp model.UserGetTaskClassesResponse
 	for _, tc := range taskClasses {
 		tcResp := model.TaskClassSummary{
-			ID:         tc.ID,
-			Name:       *tc.Name,
-			Mode:       *tc.Mode,
-			StartDate:  timeOrZero(tc.StartDate),
-			EndDate:    timeOrZero(tc.EndDate),
-			TotalSlots: *tc.TotalSlots,
-			Strategy:   *tc.Strategy,
+			ID:                 tc.ID,
+			Name:               *tc.Name,
+			Mode:               *tc.Mode,
+			StartDate:          timeOrZero(tc.StartDate),
+			EndDate:            timeOrZero(tc.EndDate),
+			TotalSlots:         *tc.TotalSlots,
+			Strategy:           *tc.Strategy,
+			SubjectType:        safeStr(tc.SubjectType),
+			DifficultyLevel:    safeStr(tc.DifficultyLevel),
+			CognitiveIntensity: safeStr(tc.CognitiveIntensity),
 		}
 		resp.TaskClasses = append(resp.TaskClasses, tcResp)
 	}
@@ -103,10 +110,13 @@ func ProcessUserGetCompleteTaskClassRequest(taskClass *model.TaskClass) (*model.
 	}
 	// 1. 映射基础信息 (处理指针解引用)
 	req := &model.UserAddTaskClassRequest{
-		Name:      safeStr(taskClass.Name),
-		Mode:      safeStr(taskClass.Mode),
-		StartDate: formatTime(taskClass.StartDate),
-		EndDate:   formatTime(taskClass.EndDate),
+		Name:               safeStr(taskClass.Name),
+		Mode:               safeStr(taskClass.Mode),
+		StartDate:          formatTime(taskClass.StartDate),
+		EndDate:            formatTime(taskClass.EndDate),
+		SubjectType:        safeStr(taskClass.SubjectType),
+		DifficultyLevel:    safeStr(taskClass.DifficultyLevel),
+		CognitiveIntensity: safeStr(taskClass.CognitiveIntensity),
 	}
 	// 2. 映射配置信息 (Config Section)
 	req.Config = model.UserAddTaskClassConfig{
@@ -123,6 +133,7 @@ func ProcessUserGetCompleteTaskClassRequest(taskClass *model.TaskClass) (*model.
 		}
 	}*/
 	req.Config.ExcludedSlots = taskClass.ExcludedSlots // 直接复用 IntSlice 类型，前端也能正确解析为 []int
+	req.Config.ExcludedDaysOfWeek = taskClass.ExcludedDaysOfWeek
 	// 4. 映射子项信息 (Items Section)
 	// 此时 items 已经通过 Preload 加载到了 taskClass.Items 中
 	req.Items = make([]model.UserAddTaskClassItemRequest, 0, len(taskClass.Items))
@@ -182,6 +193,13 @@ func safeInt(i *int) int {
 		return 0
 	}
 	return *i
+}
+
+func stringPtrOrNil(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func safeBool(b *bool) bool {

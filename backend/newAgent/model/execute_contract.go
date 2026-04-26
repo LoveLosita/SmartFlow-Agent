@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -61,7 +62,7 @@ func (d *ExecuteDecision) UnmarshalJSON(data []byte) error {
 		Speak     string          `json:"speak,omitempty"`
 		Action    ExecuteAction   `json:"action"`
 		Reason    string          `json:"reason,omitempty"`
-		GoalCheck string          `json:"goal_check,omitempty"`
+		GoalCheck json.RawMessage `json:"goal_check,omitempty"`
 		ToolCall  json.RawMessage `json:"tool_call,omitempty"`
 		Abort     json.RawMessage `json:"abort,omitempty"`
 	}
@@ -74,7 +75,11 @@ func (d *ExecuteDecision) UnmarshalJSON(data []byte) error {
 	d.Speak = raw.Speak
 	d.Action = raw.Action
 	d.Reason = raw.Reason
-	d.GoalCheck = raw.GoalCheck
+	goalCheck, err := decodeGoalCheckText(raw.GoalCheck)
+	if err != nil {
+		return fmt.Errorf("goal_check 解析失败: %w", err)
+	}
+	d.GoalCheck = goalCheck
 
 	toolCall, err := decodeOptionalJSONObject[ToolCallIntent](raw.ToolCall)
 	if err != nil {
@@ -89,6 +94,124 @@ func (d *ExecuteDecision) UnmarshalJSON(data []byte) error {
 	d.Abort = abortIntent
 
 	return nil
+}
+
+// decodeGoalCheckText 兼容 goal_check 的字符串/对象写法，统一降级为字符串。
+//
+// 步骤化说明：
+// 1. 字符串：直接使用，保持主协议不变；
+// 2. 对象：按 done_when/evidence 提取并拼接为单行证据文本；
+// 3. 数组或其他标量：尽量转成可读字符串，避免仅因格式漂移导致整轮失败。
+func decodeGoalCheckText(raw json.RawMessage) (string, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return "", nil
+	}
+
+	// 1. 标准写法：goal_check 为字符串。
+	if strings.HasPrefix(trimmed, "\"") {
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(text), nil
+	}
+
+	// 2. 兼容写法：goal_check 被模型写成对象。
+	if strings.HasPrefix(trimmed, "{") {
+		var obj map[string]any
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return "", err
+		}
+		return compactGoalCheckObject(obj), nil
+	}
+
+	// 3. 兜底：数组/标量场景，尽量保留可读信息。
+	var generic any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(formatGoalCheckValue(generic)), nil
+}
+
+// compactGoalCheckObject 将对象型 goal_check 压缩为可读单行文本，优先提取 done_when/evidence。
+func compactGoalCheckObject(obj map[string]any) string {
+	if len(obj) == 0 {
+		return ""
+	}
+
+	doneWhen := strings.TrimSpace(formatGoalCheckValue(obj["done_when"]))
+	evidence := strings.TrimSpace(formatGoalCheckValue(obj["evidence"]))
+
+	parts := make([]string, 0, 2)
+	if doneWhen != "" {
+		parts = append(parts, "已满足 done_when："+doneWhen)
+	}
+	if evidence != "" {
+		parts = append(parts, "证据："+evidence)
+	}
+	if len(parts) > 0 {
+		return strings.Join(parts, "；")
+	}
+
+	// done_when/evidence 缺失时，按 key 排序拼接，保证日志稳定可读。
+	keys := make([]string, 0, len(obj))
+	for key := range obj {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	fallback := make([]string, 0, len(keys))
+	for _, key := range keys {
+		text := strings.TrimSpace(formatGoalCheckValue(obj[key]))
+		if text == "" {
+			continue
+		}
+		fallback = append(fallback, key+"="+text)
+	}
+	return strings.Join(fallback, "；")
+}
+
+// formatGoalCheckValue 将任意值转成单行可读文本，用于 goal_check 压缩拼接。
+func formatGoalCheckValue(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(typed)
+	case bool:
+		if typed {
+			return "true"
+		}
+		return "false"
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text := strings.TrimSpace(formatGoalCheckValue(item))
+			if text == "" {
+				continue
+			}
+			parts = append(parts, text)
+		}
+		return strings.Join(parts, "，")
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, key := range keys {
+			text := strings.TrimSpace(formatGoalCheckValue(typed[key]))
+			if text == "" {
+				continue
+			}
+			parts = append(parts, key+"="+text)
+		}
+		return strings.Join(parts, "，")
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", typed))
+	}
 }
 
 // Normalize 统一清洗 execute 决策中的字符串字段。

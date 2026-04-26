@@ -55,6 +55,22 @@ func (sv *TaskClassService) AddOrUpdateTaskClass(ctx context.Context, req *model
 	if req.Mode == "" || req.Name == "" || len(req.Items) == 0 {
 		return respond.MissingParam
 	}
+	// 1. excluded_slots 属于“半天块索引”，每个索引映射 2 节（1->1-2，...，6->11-12）；
+	// 2. 若允许 7~12，会在粗排网格展开时产生越界节次，触发运行时 panic；
+	// 3. 这里统一在写入入口拦截，避免脏数据落库后污染后续排程链路。
+	for _, slot := range req.Config.ExcludedSlots {
+		if slot < 1 || slot > 6 {
+			return respond.WrongParamType
+		}
+	}
+	// 1. excluded_days_of_week 表示“整天不可排”的硬约束，粗排时会直接整天屏蔽；
+	// 2. 只允许 1~7，对应周一到周日；
+	// 3. 若写入非法值，会导致粗排过滤口径和前端展示口径不一致，因此入口直接拦截。
+	for _, dayOfWeek := range req.Config.ExcludedDaysOfWeek {
+		if dayOfWeek < 1 || dayOfWeek > 7 {
+			return respond.WrongParamType
+		}
+	}
 	//2.写数据库（事务内）
 	if err := sv.taskClassRepo.Transaction(func(txDAO *dao.TaskClassDAO) error {
 		taskClass, items, err := conv.ProcessUserAddTaskClassRequest(req, userID)

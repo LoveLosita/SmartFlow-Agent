@@ -214,6 +214,10 @@ func streamAndDispatch(
 			decision.NeedsRoughBuild = false
 			decision.NeedsRefineAfterRoughBuild = false
 		}
+		// 首次粗排兜底：若用户未明确要求"只要初稿不优化"，则粗排后默认进入主动微调。
+		if shouldForceRefineAfterFirstRoughBuild(conversationContext, input.UserInput, decision) {
+			decision.NeedsRefineAfterRoughBuild = true
+		}
 
 		log.Printf(
 			"[DEBUG] chat routing chat=%s route=%s needs_rough_build=%v needs_refine_after_rough_build=%v allow_reorder=%v thinking=%v has_rough_build_done=%v task_class_count=%d raw=%s",
@@ -445,6 +449,7 @@ func handleRouteExecuteStream(
 	}
 
 	flowState.ExecuteThinking = effectiveThinking
+	flowState.OptimizationMode = resolveOptimizationMode(userInput, decision, flowState)
 
 	return nil
 }
@@ -510,6 +515,45 @@ func detectReorderPreference(userInput string) reorderPreference {
 	return reorderUnknown
 }
 
+// resolveOptimizationMode 统一确定当前 execute 的优化模式。
+func resolveOptimizationMode(
+	userInput string,
+	decision *newagentmodel.ChatRoutingDecision,
+	flowState *newagentmodel.CommonState,
+) string {
+	if decision != nil && decision.NeedsRoughBuild && flowState != nil && len(flowState.TaskClassIDs) > 0 {
+		return "first_full"
+	}
+	if isExplicitGlobalReoptRequest(userInput) {
+		return "global_reopt"
+	}
+	return "local_adjust"
+}
+
+// isExplicitGlobalReoptRequest 识别用户是否明确要求全局重优化。
+func isExplicitGlobalReoptRequest(userInput string) bool {
+	text := strings.ToLower(strings.TrimSpace(userInput))
+	if text == "" {
+		return false
+	}
+	keywords := []string{
+		"全局优化",
+		"整体优化",
+		"全局重排",
+		"整体重排",
+		"重新优化全部",
+		"重新优化整体",
+		"全面优化",
+		"整体体检",
+		"全局体检",
+		"重新体检",
+		"global optimize",
+		"global reopt",
+		"overall optimize",
+	}
+	return containsAnyPhrase(text, keywords)
+}
+
 func containsAnyPhrase(text string, phrases []string) bool {
 	for _, phrase := range phrases {
 		if strings.Contains(text, phrase) {
@@ -537,6 +581,27 @@ func shouldDisableRoughBuildForRefine(
 		return false
 	}
 	return !isExplicitRoughBuildRequest(userInput)
+}
+
+// shouldForceRefineAfterFirstRoughBuild 判断是否应在"首次粗排"场景下强制开启 refine。
+//
+// 判定规则：
+// 1. 仅在当前决策仍然请求粗排时生效；
+// 2. 仅在首次粗排（上下文不存在 rough_build_done）时生效；
+// 3. 若用户明确表达"只要初稿/先不优化"，则不强制开启；
+// 4. 其余首次粗排场景一律开启，确保符合 PRD 的默认主动优化策略。
+func shouldForceRefineAfterFirstRoughBuild(
+	conversationContext *newagentmodel.ConversationContext,
+	userInput string,
+	decision *newagentmodel.ChatRoutingDecision,
+) bool {
+	if decision == nil || !decision.NeedsRoughBuild {
+		return false
+	}
+	if hasRoughBuildDoneMarker(conversationContext) {
+		return false
+	}
+	return !isExplicitNoRefineAfterRoughBuildRequest(userInput)
 }
 
 func hasRoughBuildDoneMarker(conversationContext *newagentmodel.ConversationContext) bool {
@@ -571,6 +636,31 @@ func isExplicitRoughBuildRequest(userInput string) bool {
 		"重新生成初稿",
 		"rebuild",
 		"from scratch",
+	}
+	return containsAnyPhrase(text, keywords)
+}
+
+// isExplicitNoRefineAfterRoughBuildRequest 识别用户是否明确要求"粗排后先不要自动微调"。
+func isExplicitNoRefineAfterRoughBuildRequest(userInput string) bool {
+	text := strings.ToLower(strings.TrimSpace(userInput))
+	if text == "" {
+		return false
+	}
+	keywords := []string{
+		"只要初稿",
+		"先给初稿",
+		"先排进去就行",
+		"先排进去",
+		"先不优化",
+		"先别优化",
+		"先不微调",
+		"先别微调",
+		"排完就收口",
+		"粗排就行",
+		"草稿就行",
+		"draft only",
+		"no refine",
+		"no optimization",
 	}
 	return containsAnyPhrase(text, keywords)
 }

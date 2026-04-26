@@ -56,6 +56,9 @@ func Place(state *ScheduleState, taskID, day, slotStart int) string {
 	if err := validateSlotRange(slotStart, slotEnd); err != nil {
 		return fmt.Sprintf("放置失败：%s", err.Error())
 	}
+	if err := validateLocalOrderForSinglePlacement(state, taskID, []TaskSlot{{Day: day, SlotStart: slotStart, SlotEnd: slotEnd}}); err != nil {
+		return fmt.Sprintf("放置失败：%s", err.Error())
+	}
 
 	// 4. 冲突检测。
 	conflict := findConflict(state, day, slotStart, slotEnd)
@@ -136,6 +139,9 @@ func Move(state *ScheduleState, taskID, newDay, newSlotStart int) string {
 	if err := validateSlotRange(newSlotStart, newSlotEnd); err != nil {
 		return fmt.Sprintf("移动失败：%s", err.Error())
 	}
+	if err := validateLocalOrderForSinglePlacement(state, taskID, []TaskSlot{{Day: newDay, SlotStart: newSlotStart, SlotEnd: newSlotEnd}}); err != nil {
+		return fmt.Sprintf("移动失败：%s", err.Error())
+	}
 
 	// 5. 冲突检测（排除自身）。
 	conflict := findConflict(state, newDay, newSlotStart, newSlotEnd, taskID)
@@ -213,6 +219,12 @@ func Swap(state *ScheduleState, taskAID, taskBID int) string {
 	copy(oldSlotsA, taskA.Slots)
 	oldSlotsB := make([]TaskSlot, len(taskB.Slots))
 	copy(oldSlotsB, taskB.Slots)
+	if err := validateLocalOrderBatchPlacement(state, map[int][]TaskSlot{
+		taskAID: cloneScheduleTaskSlots(oldSlotsB),
+		taskBID: cloneScheduleTaskSlots(oldSlotsA),
+	}); err != nil {
+		return fmt.Sprintf("交换失败：%s", err.Error())
+	}
 
 	// 6. 交换 Slots。
 	taskA.Slots, taskB.Slots = taskB.Slots, taskA.Slots
@@ -302,6 +314,22 @@ func BatchMove(state *ScheduleState, moves []MoveRequest) string {
 		if err := validateSlotRange(m.NewSlotStart, newSlotEnd); err != nil {
 			return fmt.Sprintf("批量移动失败，全部回滚，无任何变更。\n%s（第%d条移动请求）", err.Error(), i+1)
 		}
+	}
+	proposals := make(map[int][]TaskSlot, len(moves))
+	for _, m := range moves {
+		task := state.TaskByStateID(m.TaskID)
+		if task == nil {
+			continue
+		}
+		duration := taskDuration(*task)
+		proposals[m.TaskID] = []TaskSlot{{
+			Day:       m.NewDay,
+			SlotStart: m.NewSlotStart,
+			SlotEnd:   m.NewSlotStart + duration - 1,
+		}}
+	}
+	if err := validateLocalOrderBatchPlacement(state, proposals); err != nil {
+		return fmt.Sprintf("批量移动失败，全部回滚，无任何变更。\n%s", err.Error())
 	}
 
 	// 2. 克隆 state，在克隆上执行。

@@ -12,9 +12,8 @@ import (
 )
 
 const (
-	// executeHistoryKindKey 用于在 history 中打运行态标记，供 prompt 分层识别。
-	// 说明：loop_closed / step_advanced 等边界标记仍由节点层写入，但 prompt 层已不再消费它们——
-	// 因为 msg1/msg2 已经按"真实对话流 + 当前活跃 ReAct 记录"重构，不再做 msg2→msg1 的归档搬运。
+	// executeHistoryKindKey 用于在 history 里区分普通用户消息与后端注入的纠错提示。
+	// 这里负责“识别并过滤”，不负责写入该标记。
 	executeHistoryKindKey            = "newagent_history_kind"
 	executeHistoryKindCorrectionUser = "llm_correction_prompt"
 )
@@ -31,20 +30,29 @@ type executeLoopRecord struct {
 	Observation string
 }
 
-// buildExecuteStageMessages 组装 execute 阶段 4 条消息骨架。
+type conversationTurn struct {
+	Role    string
+	Content string
+}
+
+type executeLatestToolRecord struct {
+	ToolName    string
+	Observation string
+}
+
+// buildExecuteStageMessages 组装 execute 阶段的四段式消息。
 //
-// 消息结构（固定）：
-// 1. message[0] 固定 prompt（规则 + 微调硬引导 + 输出约束 + 工具简表）
-// 2. message[1] 历史上下文（真实对话流 + 早期 ReAct 摘要）
-// 3. message[2] 当轮 ReAct Loop 窗口（thought/reason + tool_call + observation 绑定展示）
-// 4. message[3] 当前执行状态（轮次、模式、plan 步骤、任务类、相关记忆等）
+// 1. msg0：系统提示 + 动态规则包 + 工具简表。
+// 2. msg1：真实对话流，只保留 user 和 assistant speak。
+// 3. msg2：当前 ReAct tool loop 记录。
+// 4. msg3：执行状态、阶段约束、记忆和本轮指令。
 func buildExecuteStageMessages(
 	stageSystemPrompt string,
 	state *newagentmodel.CommonState,
 	ctx *newagentmodel.ConversationContext,
 	runtimeUserPrompt string,
 ) []*schema.Message {
-	msg0 := buildExecuteMessage0(stageSystemPrompt, ctx)
+	msg0 := buildExecuteMessage0(stageSystemPrompt, state, ctx)
 	msg1 := buildExecuteMessage1V3(ctx)
 	msg2 := buildExecuteMessage2V3(ctx)
 	msg3 := buildExecuteMessage3(state, ctx, runtimeUserPrompt)
@@ -57,27 +65,30 @@ func buildExecuteStageMessages(
 	}
 }
 
-// buildExecuteMessage0 生成固定规则消息，并附带工具简表。
-func buildExecuteMessage0(stageSystemPrompt string, ctx *newagentmodel.ConversationContext) string {
+// buildExecuteMessage0 生成 execute 阶段的固定规则消息。
+//
+// 1. 先拼基础 system prompt，保证身份和输出协议稳定。
+// 2. 再按当前 domain / packs 注入动态规则包，让模型先读到边界。
+// 3. 最后再附工具简表，避免模型只看到工具不看到纪律。
+func buildExecuteMessage0(stageSystemPrompt string, state *newagentmodel.CommonState, ctx *newagentmodel.ConversationContext) string {
 	base := strings.TrimSpace(mergeSystemPrompts(ctx, stageSystemPrompt))
 	if base == "" {
-		base = "你是 SmartMate 执行器，请继续 execute 阶段。"
+		base = "你是 SmartMate 执行器，请继续当前执行阶段。"
 	}
 
-	toolCatalog := renderExecuteToolCatalogCompact(ctx)
-	if toolCatalog == "" {
-		return base
+	rulePackSection, _ := renderExecuteRulePackSection(state, ctx)
+	if rulePackSection != "" {
+		base += "\n\n" + rulePackSection
 	}
-	return base + "\n\n" + toolCatalog
+
+	toolCatalog := renderExecuteToolCatalogCompact(ctx, state)
+	if toolCatalog != "" {
+		base += "\n\n" + toolCatalog
+	}
+	return base
 }
 
-// buildExecuteMessage1V3 只渲染"真实对话流 + 阶段锚点"。
-//
-// 改造说明：
-// 1. msg1 只保留 user + assistant speak 组成的真实对话历史，全量注入；
-// 2. tool_call / observation 一律由 msg2 承载，这里不再重复；
-// 3. 不再从历史中"归档"上一轮 ReAct 结果到 msg1——归档搬运逻辑已随 splitExecuteLoopRecordsByBoundary 一并移除；
-// 4. token 预算由统一压缩层兜底，prompt 层不做提前裁剪。
+// buildExecuteMessage1V3 只渲染真实对话流，不混入 tool observation。
 func buildExecuteMessage1V3(ctx *newagentmodel.ConversationContext) string {
 	lines := []string{"历史上下文："}
 	if ctx == nil {
@@ -105,16 +116,13 @@ func buildExecuteMessage1V3(ctx *newagentmodel.ConversationContext) string {
 	} else {
 		lines = append(lines, "- 阶段锚点：按当前工具事实推进，不做无依据操作。")
 	}
-
 	return strings.Join(lines, "\n")
 }
 
-// buildExecuteMessage2V3 承载当前会话中全部 ReAct Loop 记录。
+// buildExecuteMessage2V3 只承载当轮 ReAct loop。
 //
-// 改造说明：
-// 1. 不再按 execute_loop_closed / execute_step_advanced 边界切分"归档/活跃"两段；
-// 2. 直接从 history 提取全部 assistant tool_call + 对应 observation 作为当前 Loop 视图；
-// 3. 新一轮刚开始（尚未产生 tool_call）时返回明确占位，方便模型识别"干净起点"。
+// 1. 每条记录固定展示 thought / tool_call / observation，方便模型做局部闭环。
+// 2. 如果当前还没有任何 tool loop，明确给“新一轮”占位，避免模型误判缺上下文。
 func buildExecuteMessage2V3(ctx *newagentmodel.ConversationContext) string {
 	lines := []string{"当轮 ReAct Loop 记录："}
 	if ctx == nil {
@@ -136,11 +144,19 @@ func buildExecuteMessage2V3(ctx *newagentmodel.ConversationContext) string {
 	return strings.Join(lines, "\n")
 }
 
+// buildExecuteMessage3 汇总当前执行状态和本轮指令。
+//
+// 1. 这里只放“当前轮真正会影响决策”的状态，避免 msg3 继续膨胀。
+// 2. 读工具最近结果只给最新一条摘要，避免旧 observation 重复占上下文。
+// 3. 最后一行固定落到“本轮指令”，保证模型收尾时注意力还在执行目标上。
 func buildExecuteMessage3(state *newagentmodel.CommonState, ctx *newagentmodel.ConversationContext, runtimeUserPrompt string) string {
 	lines := []string{"当前执行状态："}
+	roughBuildDone := hasExecuteRoughBuildDone(ctx)
 
 	roundUsed, maxRounds := 0, newagentmodel.DefaultMaxRounds
 	modeText := "自由执行（无预定义步骤）"
+	activeDomain := ""
+	activePacks := []string{}
 	if state != nil {
 		roundUsed = state.RoundUsed
 		if state.MaxRounds > 0 {
@@ -149,15 +165,23 @@ func buildExecuteMessage3(state *newagentmodel.CommonState, ctx *newagentmodel.C
 		if state.HasPlan() {
 			modeText = "计划执行（有预定义步骤）"
 		}
+		activeDomain = strings.TrimSpace(state.ActiveToolDomain)
+		activePacks = readExecuteActiveToolPacks(state)
 	}
+
 	lines = append(lines,
 		fmt.Sprintf("- 当前轮次：%d/%d", roundUsed, maxRounds),
 		"- 当前模式："+modeText,
 	)
 
-	// 1. 有 plan 时，把当前步骤与完成判定强制写入 msg3。
-	// 2. 该锚点用于约束模型只推进当前步骤，避免退化成泛化 ReAct。
-	// 3. 当前步骤不可读时给出兜底指引，避免引用旧步骤。
+	if activeDomain == "" {
+		lines = append(lines, "- 动态工具区：当前仅激活 context 管理工具。")
+	} else if len(activePacks) == 0 {
+		lines = append(lines, fmt.Sprintf("- 动态工具区：domain=%s，未显式激活 packs。", activeDomain))
+	} else {
+		lines = append(lines, fmt.Sprintf("- 动态工具区：domain=%s，packs=[%s]。", activeDomain, strings.Join(activePacks, ",")))
+	}
+
 	if state != nil && state.HasPlan() {
 		current, total := state.PlanProgress()
 		lines = append(lines, "计划步骤锚点（强约束）：")
@@ -170,26 +194,41 @@ func buildExecuteMessage3(state *newagentmodel.CommonState, ctx *newagentmodel.C
 			if doneWhen == "" {
 				doneWhen = "（未提供 done_when，需基于步骤目标给出可验证完成证据）"
 			}
-			lines = append(lines, fmt.Sprintf("- 当前步骤：第 %d/%d 步", current, total))
-			lines = append(lines, "- 当前步骤内容："+stepContent)
-			lines = append(lines, "- 当前步骤完成判定(done_when)："+doneWhen)
-			lines = append(lines, "- 动作纪律1：未满足 done_when 时，只能 continue / confirm / ask_user，禁止 next_plan")
-			lines = append(lines, "- 动作纪律2：满足 done_when 时，优先 next_plan，并在 goal_check 对照 done_when 给证据")
-			lines = append(lines, "- 动作纪律3：禁止跳到后续步骤执行")
+			lines = append(lines,
+				fmt.Sprintf("- 当前步骤：第 %d/%d 步", current, total),
+				"- 当前步骤内容："+stepContent,
+				"- 当前步骤完成判定(done_when)："+doneWhen,
+				"- 动作纪律1：未满足 done_when 时，只能 continue / confirm / ask_user，禁止 next_plan。",
+				"- 动作纪律2：满足 done_when 时，优先 next_plan，并在 goal_check 对照 done_when 给证据。",
+				"- 动作纪律3：禁止跳到后续步骤执行。",
+			)
 		} else {
-			lines = append(lines, "- 当前计划步骤不可读；请先判断是否已完成全部计划")
-			lines = append(lines, "- 若已完成全部计划，输出 done 并给出 goal_check 证据")
+			lines = append(lines,
+				"- 当前计划步骤不可读；请先判断是否已完成全部计划。",
+				"- 若已完成全部计划，输出 done 并给出 goal_check 证据。",
+			)
 		}
+	}
+
+	if latestAnalyze := renderExecuteLatestAnalyzeSummary(ctx); latestAnalyze != "" {
+		lines = append(lines, "- 最近一次诊断："+latestAnalyze)
+	}
+	if latestMutation := renderExecuteLatestMutationSummary(ctx); latestMutation != "" {
+		lines = append(lines, "- 最近一次写操作："+latestMutation)
 	}
 	if taskClassText := renderExecuteTaskClassIDs(state); taskClassText != "" {
 		lines = append(lines, "- 目标任务类："+taskClassText)
 	}
-	lines = append(lines, "- 啥时候结束Loop：你可以根据工具调用记录自行判断。")
-	lines = append(lines, "- 非目标：不重新粗排、不修改无关任务类。")
-	if hasExecuteRoughBuildDone(ctx) {
+
+	lines = append(lines,
+		"- 啥时候结束Loop：你可以根据工具调用记录自行判断。",
+		"- 非目标：不重新粗排、不修改无关任务类。",
+	)
+	if roughBuildDone {
 		lines = append(lines, "- 阶段约束：粗排已完成，本轮只微调 suggested；existing 仅作已安排事实参考，不作为可移动目标。")
 	}
-	lines = append(lines, "- 参数纪律：工具参数必须严格使用 schema 字段；若返回'参数非法'，需先改参再继续。")
+	lines = append(lines, "- 参数纪律：工具参数必须严格使用 schema 字段；若返回“参数非法”，需先改参再继续。")
+
 	if state != nil {
 		if state.AllowReorder {
 			lines = append(lines, "- 顺序策略：用户已明确允许打乱顺序，可在必要时使用 min_context_switch。")
@@ -197,15 +236,27 @@ func buildExecuteMessage3(state *newagentmodel.CommonState, ctx *newagentmodel.C
 			lines = append(lines, "- 顺序策略：默认保持 suggested 相对顺序，禁止调用 min_context_switch。")
 		}
 	}
+
+	if upsertRuntime := renderTaskClassUpsertRuntime(state); upsertRuntime != "" {
+		lines = append(lines, "任务类写入运行态：")
+		lines = append(lines, upsertRuntime)
+	}
+
 	if memoryText := renderExecuteMemoryContext(ctx); memoryText != "" {
 		lines = append(lines, "相关记忆（仅在确有帮助时参考，不要机械复述）：")
 		lines = append(lines, memoryText)
 	}
 
-	// 兼容上层传入的执行指令；若为空则使用固定收口指令。
+	latestAnalyze := renderExecuteLatestAnalyzeSummary(ctx)
+	latestMutation := renderExecuteLatestMutationSummary(ctx)
+	if nextStep := renderExecuteNextStepHintV2(state, latestAnalyze, latestMutation, roughBuildDone); nextStep != "" {
+		lines = append(lines, "下一步提示：")
+		lines = append(lines, "- "+nextStep)
+	}
+
 	instruction := strings.TrimSpace(runtimeUserPrompt)
 	if instruction == "" {
-		instruction = "请继续当前任务执行阶段，严格输出 JSON。"
+		instruction = "请继续当前任务执行阶段，严格按 SMARTFLOW_DECISION 标签格式输出。"
 	} else {
 		instruction = firstExecuteLine(instruction)
 	}
@@ -214,8 +265,12 @@ func buildExecuteMessage3(state *newagentmodel.CommonState, ctx *newagentmodel.C
 	return strings.Join(lines, "\n")
 }
 
-// renderExecuteToolCatalogCompact 将工具 schema 渲染成简表，避免大段 JSON 示例占用上下文。
-func renderExecuteToolCatalogCompact(ctx *newagentmodel.ConversationContext) string {
+// renderExecuteToolCatalogCompact 将当前 tool schemas 渲染为紧凑简表。
+//
+// 1. 这里只给模型最低必要的参数和返回值感知，不重复塞完整 schema JSON。
+// 2. 对复杂工具额外给一条调用示例，降低“参数字段写错”的概率。
+// 3. P1 阶段隐藏 min_context_switch，避免模型误用已禁能力。
+func renderExecuteToolCatalogCompact(ctx *newagentmodel.ConversationContext, state *newagentmodel.CommonState) string {
 	if ctx == nil {
 		return ""
 	}
@@ -225,36 +280,79 @@ func renderExecuteToolCatalogCompact(ctx *newagentmodel.ConversationContext) str
 	}
 
 	lines := []string{"可用工具（简表）："}
-	for i, schemaItem := range schemas {
+	index := 0
+	for _, schemaItem := range schemas {
 		name := strings.TrimSpace(schemaItem.Name)
-		desc := strings.TrimSpace(schemaItem.Desc)
 		if name == "" {
 			continue
 		}
+		if shouldHideMinContextSwitchForP1(state, name) {
+			continue
+		}
+
+		index++
+		desc := strings.TrimSpace(schemaItem.Desc)
 		if desc == "" {
 			desc = "无描述"
 		}
-		lines = append(lines, fmt.Sprintf("%d. %s：%s", i+1, name, desc))
+		lines = append(lines, fmt.Sprintf("%d. %s：%s", index, name, desc))
 
 		doc := parseExecuteToolSchema(schemaItem.SchemaText)
 		paramSummary := renderExecuteToolParamSummary(doc.Parameters)
 		lines = append(lines, "   参数："+paramSummary)
+
 		returnType, returnSample := renderExecuteToolReturnHint(name)
 		lines = append(lines, "   返回类型："+returnType)
-		lines = append(lines, "   返回示例："+returnSample)
+		if shouldRenderExecuteToolReturnSample(name) {
+			lines = append(lines, "   返回示例："+returnSample)
+		}
+		if callSample := renderExecuteToolCallHint(name); strings.TrimSpace(callSample) != "" {
+			lines = append(lines, "   调用示例："+callSample)
+		}
 	}
 
+	if index == 0 {
+		return ""
+	}
 	return strings.Join(lines, "\n")
 }
 
-// renderExecuteToolReturnHint 返回工具的返回类型 + 最小示例。
+func shouldRenderExecuteToolReturnSample(toolName string) bool {
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "query_available_slots",
+		"query_target_tasks",
+		"queue_pop_head",
+		"queue_status",
+		"queue_apply_head_move",
+		"queue_skip_head",
+		"web_search",
+		"web_fetch",
+		"analyze_health",
+		"analyze_rhythm",
+		"analyze_tolerance",
+		"upsert_task_class":
+		return true
+	default:
+		return false
+	}
+}
+
+func renderExecuteToolCallHint(toolName string) string {
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "upsert_task_class":
+		return `{"name":"upsert_task_class","arguments":{"task_class":{"name":"线性代数复习","mode":"auto","start_date":"2026-06-01","end_date":"2026-06-20","subject_type":"quantitative","difficulty_level":"high","cognitive_intensity":"high","config":{"total_slots":8,"strategy":"steady","allow_filler_course":false,"excluded_slots":[1,11],"excluded_days_of_week":[6,7]},"items":[{"order":1,"content":"行列式定义与基础计算"},{"order":2,"content":"矩阵及其运算规则"},{"order":3,"content":"逆矩阵与矩阵的秩"}]}}}`
+	default:
+		return ""
+	}
+}
+
 func renderExecuteToolReturnHint(toolName string) (returnType string, sample string) {
 	returnType = "string（自然语言文本）"
 	switch strings.ToLower(strings.TrimSpace(toolName)) {
 	case "get_overview":
-		return returnType, "规划窗口共27天...课程占位条目34个...任务清单（全量，已过滤课程）..."
+		return returnType, "规划窗口共27天...课程占位条目34个...任务清单（已过滤课程）..."
 	case "get_task_info":
-		return returnType, "[35]第一章随机事件与概率 | 状态：已预排(suggested) | 占用时段：第3天第5-6节"
+		return returnType, "[35] 第一章随机事件与概率 | 状态：已预排(suggested) | 占用时段：第3天第5-6节"
 	case "query_available_slots":
 		return "string（JSON字符串）", `{"tool":"query_available_slots","count":12,"strict_count":8,"embedded_count":4,"slots":[{"day":5,"week":12,"day_of_week":3,"slot_start":1,"slot_end":2,"slot_type":"empty"}]}`
 	case "query_target_tasks":
@@ -276,7 +374,7 @@ func renderExecuteToolReturnHint(toolName string) (returnType string, sample str
 	case "swap":
 		return returnType, "交换完成：[35]... ↔ [36]..."
 	case "batch_move":
-		return returnType, "批量移动完成，2个任务全部成功。（单次最多2条）"
+		return returnType, "批量移动完成，2 个任务全部成功。"
 	case "spread_even":
 		return returnType, "均匀化调整完成：共处理 6 个任务，候选坑位 24 个。"
 	case "min_context_switch":
@@ -287,6 +385,14 @@ func renderExecuteToolReturnHint(toolName string) (returnType string, sample str
 		return "string（JSON字符串）", `{"tool":"web_search","query":"检索关键词","count":2,"items":[{"title":"搜索结果标题","url":"https://example.com/page","snippet":"摘要片段...","domain":"example.com","published_at":"2025-04-10"}]}`
 	case "web_fetch":
 		return "string（JSON字符串）", `{"tool":"web_fetch","url":"https://example.com/page","title":"页面标题","content":"正文内容...","truncated":false}`
+	case "analyze_health":
+		return "string（JSON字符串）", `{"tool":"analyze_health","success":true,"metrics":{"rhythm":{"avg_switches_per_day":1.1,"max_switch_count":4,"heavy_adjacent_days":2,"same_type_transition_ratio":0.58,"block_balance":0,"fragmented_count":0,"compressed_run_count":0},"tightness":{"locally_movable_task_count":3,"avg_local_alternative_slots":1.7,"cross_class_swap_options":1,"forced_heavy_adjacent_days":0,"tightness_level":"tight"},"can_close":false},"decision":{"should_continue_optimize":true,"recommended_operation":"swap","primary_problem":"第4天存在高认知背靠背","candidates":[{"candidate_id":"swap_35_44","tool":"swap","arguments":{"task_a":35,"task_b":44}}]}}`
+	case "analyze_rhythm":
+		return "string（JSON字符串）", `{"tool":"analyze_rhythm","success":true,"metrics":{"overview":{"avg_switches_per_day":3.4,"max_switch_day":4,"max_switch_count":5,"heavy_adjacent_days":2,"long_high_intensity_days":1,"same_type_transition_ratio":0.42}}}`
+	case "analyze_tolerance":
+		return "string（JSON字符串）", `{"tool":"analyze_tolerance","success":true,"metrics":{"overall":{"fragmentation_rate":0.52,"days_without_buffer":1}}}`
+	case "upsert_task_class":
+		return "string（JSON字符串）", `{"tool":"upsert_task_class","success":true,"task_class_id":123,"created":true,"validation":{"ok":true,"issues":[]},"error":"","error_code":""}`
 	default:
 		return returnType, "自然语言结果（成功/失败原因/关键数据摘要）。"
 	}
@@ -353,12 +459,11 @@ func renderExecuteToolParamSummary(parameters map[string]any) string {
 	return strings.Join(parts, "；")
 }
 
-// collectExecuteLoopRecords 从历史中提取 ReAct 记录。
+// collectExecuteLoopRecords 从 history 里提取 thought + tool_call + observation 三元组。
 //
-// 提取策略：
-// 1. 以 assistant tool_call 消息为主键；
-// 2. 关联同 ToolCallID 的 tool result 作为 observation；
-// 3. 向前回溯最近一条 assistant 文本消息作为 thought/reason。
+// 1. 以 assistant tool_call 为主记录。
+// 2. 用 ToolCallID 去关联 tool observation，保证同轮绑定。
+// 3. thought 只向前取最近一条 assistant 纯文本消息，不跨越到更早的工具调用之前做复杂回溯。
 func collectExecuteLoopRecords(history []*schema.Message) []executeLoopRecord {
 	if len(history) == 0 {
 		return nil
@@ -381,12 +486,14 @@ func collectExecuteLoopRecords(history []*schema.Message) []executeLoopRecord {
 		if msg == nil || msg.Role != schema.Assistant || len(msg.ToolCalls) == 0 {
 			continue
 		}
+
 		thought := findExecuteThoughtBefore(history, i)
 		for _, call := range msg.ToolCalls {
 			toolName := strings.TrimSpace(call.Function.Name)
 			if toolName == "" {
 				toolName = "unknown_tool"
 			}
+
 			toolArgs := compactExecuteText(call.Function.Arguments, 160)
 			if toolArgs == "" {
 				toolArgs = "{}"
@@ -424,10 +531,9 @@ func findExecuteThoughtBefore(history []*schema.Message, index int) string {
 			continue
 		}
 		content := compactExecuteText(msg.Content, 140)
-		if content == "" {
-			continue
+		if content != "" {
+			return content
 		}
-		return content
 	}
 	return "（未记录）"
 }
@@ -456,18 +562,116 @@ func hasExecuteRoughBuildDone(ctx *newagentmodel.ConversationContext) bool {
 	return false
 }
 
-// conversationTurn 表示对话历史中的一轮交互（user 或 assistant speak）。
-type conversationTurn struct {
-	Role    string
-	Content string
+func renderExecuteLatestAnalyzeSummary(ctx *newagentmodel.ConversationContext) string {
+	record, ok := findExecuteLatestToolRecord(ctx, map[string]struct{}{
+		"analyze_health":    {},
+		"analyze_rhythm":    {},
+		"analyze_tolerance": {},
+	})
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%s -> %s", record.ToolName, record.Observation)
 }
 
-// collectExecuteConversationTurns 从历史消息中提取 user + assistant speak 对话流。
+func renderExecuteLatestMutationSummary(ctx *newagentmodel.ConversationContext) string {
+	record, ok := findExecuteLatestToolRecord(ctx, map[string]struct{}{
+		"place":                 {},
+		"move":                  {},
+		"swap":                  {},
+		"batch_move":            {},
+		"unplace":               {},
+		"queue_apply_head_move": {},
+		"spread_even":           {},
+		"min_context_switch":    {},
+	})
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%s -> %s", record.ToolName, record.Observation)
+}
+
+func findExecuteLatestToolRecord(ctx *newagentmodel.ConversationContext, allowSet map[string]struct{}) (executeLatestToolRecord, bool) {
+	if ctx == nil || len(allowSet) == 0 {
+		return executeLatestToolRecord{}, false
+	}
+	history := ctx.HistorySnapshot()
+	if len(history) == 0 {
+		return executeLatestToolRecord{}, false
+	}
+
+	toolNameByCallID := make(map[string]string, len(history))
+	for _, msg := range history {
+		if msg == nil || msg.Role != schema.Assistant || len(msg.ToolCalls) == 0 {
+			continue
+		}
+		for _, call := range msg.ToolCalls {
+			callID := strings.TrimSpace(call.ID)
+			toolName := strings.TrimSpace(call.Function.Name)
+			if callID == "" || toolName == "" {
+				continue
+			}
+			toolNameByCallID[callID] = toolName
+		}
+	}
+
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i]
+		if msg == nil || msg.Role != schema.Tool {
+			continue
+		}
+		callID := strings.TrimSpace(msg.ToolCallID)
+		if callID == "" {
+			continue
+		}
+		toolName := strings.TrimSpace(toolNameByCallID[callID])
+		if toolName == "" {
+			continue
+		}
+		if _, ok := allowSet[toolName]; !ok {
+			continue
+		}
+		return executeLatestToolRecord{
+			ToolName:    toolName,
+			Observation: summarizeExecuteToolObservation(msg.Content),
+		}, true
+	}
+
+	return executeLatestToolRecord{}, false
+}
+
+func summarizeExecuteToolObservation(raw string) string {
+	content := strings.TrimSpace(raw)
+	if content == "" {
+		return "无返回内容。"
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(content), &payload); err == nil && len(payload) > 0 {
+		if toolName := strings.TrimSpace(asExecuteString(payload["tool"])); toolName == "analyze_health" {
+			return summarizeExecuteAnalyzeHealthObservationV2(payload)
+		}
+		for _, key := range []string{"result", "message", "reason", "error"} {
+			if text := strings.TrimSpace(asExecuteString(payload[key])); text != "" {
+				return compactExecuteText(text, 120)
+			}
+		}
+		if success, ok := payload["success"].(bool); ok {
+			if success {
+				return "执行成功。"
+			}
+			return "执行失败。"
+		}
+	}
+
+	return compactExecuteText(content, 120)
+}
+
+// collectExecuteConversationTurns 只提取 user 和 assistant speak。
 //
-// 提取规则：
-// 1. 只保留 user 消息（排除 correction prompt）和 assistant speak 消息（非空 Content 且无 ToolCalls）；
-// 2. 全量保留，不再限制轮数和单条长度（token 预算由 execute 层统一管理）；
-// 3. 返回的条目按原始时间顺序排列。
+// 1. 过滤 correction prompt，避免把后端纠错提示伪装成用户真实意图。
+// 2. 过滤 assistant tool_call 消息，避免 msg1 和 msg2 重复。
+// 3. 保持原始顺序，不在这里裁剪长度。
 func collectExecuteConversationTurns(history []*schema.Message) []conversationTurn {
 	if len(history) == 0 {
 		return nil
@@ -556,11 +760,44 @@ func renderExecuteTaskClassIDs(state *newagentmodel.CommonState) string {
 	return fmt.Sprintf("task_class_ids=[%s]", strings.Join(parts, ","))
 }
 
-// renderExecuteMemoryContext 提取 execute 阶段要注入 msg3 的记忆文本。
-//
-// 1. 只读取统一的 memory_context，避免把其他 pinned block 误塞进 prompt。
-// 2. 为空时直接返回空串，保持 msg3 干净。
-// 3. 复用统一记忆渲染逻辑，保证各阶段记忆入口一致。
+// renderExecuteMemoryContext 复用统一记忆入口，避免 execute 私自拼接其他 pinned block。
 func renderExecuteMemoryContext(ctx *newagentmodel.ConversationContext) string {
 	return renderUnifiedMemoryContext(ctx)
+}
+
+func renderTaskClassUpsertRuntime(state *newagentmodel.CommonState) string {
+	if state == nil || !state.TaskClassUpsertLastTried {
+		return ""
+	}
+
+	lines := make([]string, 0, 4)
+	if state.TaskClassUpsertLastSuccess {
+		lines = append(lines, "- 最近一次 upsert_task_class 成功。")
+	} else {
+		lines = append(lines, "- 最近一次 upsert_task_class 失败。")
+	}
+	if state.TaskClassUpsertConsecutiveFailures > 0 {
+		lines = append(lines, fmt.Sprintf("- 连续失败次数：%d", state.TaskClassUpsertConsecutiveFailures))
+	}
+	if len(state.TaskClassUpsertLastIssues) > 0 {
+		lines = append(lines, "- 需要优先处理 validation.issues：")
+		for _, issue := range state.TaskClassUpsertLastIssues {
+			trimmed := strings.TrimSpace(issue)
+			if trimmed == "" {
+				continue
+			}
+			lines = append(lines, "  - "+trimmed)
+		}
+	}
+	if !state.TaskClassUpsertLastSuccess {
+		lines = append(lines, "- 在 issues 处理完之前，不要用 done 收口。")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func shouldHideMinContextSwitchForP1(state *newagentmodel.CommonState, toolName string) bool {
+	if strings.TrimSpace(toolName) != "min_context_switch" {
+		return false
+	}
+	return true
 }

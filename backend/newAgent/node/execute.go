@@ -28,6 +28,7 @@ const (
 	executeSpeakBlockID            = "execute.speak"
 	executePinnedKey               = "execution_context"
 	toolMinContextSwitch           = "min_context_switch"
+	toolAnalyzeHealth              = "analyze_health"
 	executeHistoryKindKey          = "newagent_history_kind"
 	executeHistoryKindStepAdvanced = "execute_step_advanced"
 
@@ -105,6 +106,7 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		return err
 	}
 	flowState := runtimeState.EnsureCommonState()
+	applyPendingContextHook(flowState)
 
 	// 1.5. 确认执行分支：如果用户已确认写操作，直接执行工具。
 	if runtimeState.PendingConfirmTool != nil {
@@ -131,9 +133,6 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 	// 2. 此时清理不会影响断线恢复中的中间进度（恢复场景通常 RoundUsed>0）。
 	if input.ScheduleState != nil && flowState.RoundUsed == 0 {
 		schedule.ResetTaskProcessingQueue(input.ScheduleState)
-	}
-	if !flowState.AllowReorder && len(flowState.SuggestedOrderBaseline) == 0 {
-		flowState.SuggestedOrderBaseline = buildSuggestedOrderSnapshot(input.ScheduleState)
 	}
 
 	// 1. 每轮 execute 开始前先刷新一次执行锚点，避免 LLM 继续读取旧的当前步骤。
@@ -201,8 +200,9 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		messages,
 		infrallm.GenerateOptions{
 			Temperature: 1.0,
-			MaxTokens:   16000,
-			Thinking:    resolveThinkingMode(input.ThinkingEnabled),
+			// 注意：当前模型接口 max_tokens 上限为 131072，超过会 400。
+			MaxTokens: 131072,
+			Thinking:  resolveThinkingMode(input.ThinkingEnabled),
 			Metadata: map[string]any{
 				"stage":      executeStageName,
 				"step_index": flowState.CurrentStep,
@@ -216,9 +216,13 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 
 	parser := newagentrouter.NewStreamDecisionParser()
 	firstChunk := true
+	speakStreamed := false
+	askUserHistoryAppended := false
 	var decision *newagentmodel.ExecuteDecision
 	var fullText strings.Builder
 	rawText := ""
+	parsedBeforeText := ""
+	parsedAfterText := ""
 
 	// 阶段一：解析决策标签。
 	for {
@@ -250,6 +254,8 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 
 		result := parser.Result()
 		rawText = result.RawBuffer
+		parsedBeforeText = result.BeforeText
+		parsedAfterText = result.AfterText
 
 		if result.Fallback || result.ParseFailed {
 			log.Printf("[DEBUG] execute LLM 输出解析失败 chat=%s round=%d raw=%s",
@@ -281,9 +287,11 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 				return fmt.Errorf("连续 %d 次输出非 JSON，终止执行: 原始输出=%s",
 					flowState.ConsecutiveCorrections, rawText)
 			}
-			AppendLLMCorrectionWithHint(conversationContext, rawText,
+			// 1. parseErr 场景不回灌原始错误 JSON，避免把错误模板（如 goal_check 对象）再次灌回 msg1；
+			// 2. 明确补充 goal_check 类型要求，降低模型在 plan 模式下再次输出对象格式的概率。
+			AppendLLMCorrectionWithHint(conversationContext, "",
 				"决策标签内的 JSON 格式不合法。",
-				"请确保 <SMARTFLOW_DECISION> 标签内是合法 JSON，然后用标签后输出正文。")
+				"请确保 <SMARTFLOW_DECISION> 标签内是合法 JSON；当 action=next_plan/done 时，goal_check 必须是字符串（不要输出对象）。")
 			return nil
 		}
 
@@ -292,6 +300,7 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 			if emitErr := emitter.EmitAssistantText(executeSpeakBlockID, executeStageName, visible, firstChunk); emitErr != nil {
 				return fmt.Errorf("执行文案推送失败: %w", emitErr)
 			}
+			speakStreamed = true
 			fullText.WriteString(visible)
 			firstChunk = false
 		}
@@ -314,6 +323,7 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 				if emitErr := emitter.EmitAssistantText(executeSpeakBlockID, executeStageName, chunk2.Content, firstChunk); emitErr != nil {
 					return fmt.Errorf("执行文案推送失败: %w", emitErr)
 				}
+				speakStreamed = true
 				fullText.WriteString(chunk2.Content)
 				firstChunk = false
 			}
@@ -342,12 +352,28 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		return fmt.Errorf("执行阶段流结束但未提取到决策标签")
 	}
 
-	decision.Speak = fullText.String()
+	decision.Speak = pickExecuteVisibleSpeak(
+		fullText.String(),
+		parsedAfterText,
+		parsedBeforeText,
+		decision,
+	)
 
 	// 调试日志：输出解析后的决策，方便排查。
 	log.Printf("[DEBUG] execute LLM 响应 chat=%s round=%d action=%s speak_len=%d raw_len=%d raw_preview=%.200s",
 		flowState.ConversationID, flowState.RoundUsed,
 		decision.Action, len(decision.Speak), len(rawText), rawText)
+
+	// done 收尾兼容：若模型在 done 时顺手带了 context_tools_remove，直接忽略该 tool_call。
+	//
+	// 1. done 语义是“结束本轮”，不应再发起工具调用；
+	// 2. 动态区清理由系统在 Done() 自动完成，不依赖 LLM 显式 remove；
+	// 3. 仅对 context_tools_remove 放宽，其他 done+tool_call 仍按非法决策处理。
+	if decision.Action == newagentmodel.ExecuteActionDone &&
+		decision.ToolCall != nil &&
+		strings.EqualFold(strings.TrimSpace(decision.ToolCall.Name), newagenttools.ToolNameContextToolsRemove) {
+		decision.ToolCall = nil
+	}
 
 	if err := decision.Validate(); err != nil {
 		flowState.ConsecutiveCorrections++
@@ -358,10 +384,17 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 			return fmt.Errorf("连续 %d 次决策不合法，终止执行: %s (原始输出: %s)",
 				flowState.ConsecutiveCorrections, err.Error(), rawText)
 		}
+		_ = emitter.EmitStatus(
+			executeStatusBlockID,
+			executeStageName,
+			"executing",
+			fmt.Sprintf("执行校验：决策不合法（%s），已请求模型重试。", err.Error()),
+			false,
+		)
 		// 给 LLM 修正机会。
 		AppendLLMCorrectionWithHint(
 			conversationContext,
-			rawText,
+			"",
 			fmt.Sprintf("你的执行决策不合法：%s", err.Error()),
 			"合法的 action 包括：continue（继续当前步骤）、ask_user（追问用户）、confirm（写操作确认）、next_plan（推进到下一步）、done（任务完成）、abort（正式终止本轮流程）。",
 		)
@@ -371,9 +404,16 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 	// 决策合法，重置连续修正计数。
 	flowState.ConsecutiveCorrections = 0
 
-	// speak 兜底：continue / ask_user / confirm 三类动作对前端可读文案是强依赖。
-	// 若模型漏填 speak，这里回退到 reason 或默认短句，避免前端出现“静默一轮”。
-	decision.Speak = buildExecuteSpeakWithFallback(decision)
+	// speak 兜底：
+	// 1. 优先使用标签后正文（主协议）；
+	// 2. 若标签后无正文，则回退到标签前前言；
+	// 3. 前后都没有时，再使用 reason / 默认短句，避免前端出现“静默一轮”。
+	decision.Speak = pickExecuteVisibleSpeak(
+		decision.Speak,
+		parsedAfterText,
+		parsedBeforeText,
+		decision,
+	)
 
 	// speak 后处理：补列表序号换行 + 末尾加 \n 防止连续 speak 在前端粘连。
 	decision.Speak = normalizeSpeak(decision.Speak) // 末尾已含 \n
@@ -389,28 +429,56 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		decision.Action = newagentmodel.ExecuteActionContinue
 	}
 
-	// 自省校验：next_plan / done 必须附带 goal_check，否则不推进，追加修正让 LLM 重试。
-	if decision.Action == newagentmodel.ExecuteActionNextPlan ||
-		decision.Action == newagentmodel.ExecuteActionDone {
+	// 1. context_tools_add/remove 属于“工具准备步”，不应在历史里保留完整追问文案；
+	// 2. 若该类动作携带了较长 speak，会在下一轮被 msg1/msg2 双重回灌，导致模型复读；
+	// 3. 这里统一清空 speak，仅保留工具调用事实，避免“同一句 ask_user 文案”被连续输出两次。
+	if decision.Action == newagentmodel.ExecuteActionContinue &&
+		decision.ToolCall != nil &&
+		newagenttools.IsContextManagementTool(decision.ToolCall.Name) {
+		decision.Speak = ""
+	}
+
+	// 若模型把自然语言放在标签前，或完全漏掉了标签后正文，
+	// 这里在“本轮尚未真正向前端推过正文”时补发最终 speak，
+	// 保证前端和历史都能看到同一份可见文案。
+	if !speakStreamed && strings.TrimSpace(decision.Speak) != "" {
+		if emitErr := emitter.EmitAssistantText(
+			executeSpeakBlockID,
+			executeStageName,
+			decision.Speak,
+			firstChunk,
+		); emitErr != nil {
+			return fmt.Errorf("执行文案兜底推送失败: %w", emitErr)
+		}
+		speakStreamed = true
+		firstChunk = false
+	}
+
+	// 自省校验（仅 Plan 模式）：next_plan / done 必须附带 goal_check，否则不推进，追加修正让 LLM 重试。
+	//
+	// 1. ReAct（无预定义步骤）下不强制 goal_check，避免 done 被错误拦截后进入循环；
+	// 2. Plan（有 done_when）下才要求 goal_check，对齐“按步骤验收”的语义；
+	// 3. 校验失败时推送一条可见状态，避免前端观察到“静默继续下一轮”。
+	if flowState.HasPlan() &&
+		(decision.Action == newagentmodel.ExecuteActionNextPlan ||
+			decision.Action == newagentmodel.ExecuteActionDone) {
 		if strings.TrimSpace(decision.GoalCheck) == "" {
 			flowState.ConsecutiveCorrections++
 			if flowState.ConsecutiveCorrections >= maxConsecutiveCorrections {
 				return fmt.Errorf("连续 %d 次 goal_check 为空，终止执行", flowState.ConsecutiveCorrections)
 			}
-			// hint 区分有 plan / ReAct 两种模式：
-			// - 有 plan：要求对照 done_when 逐条验证；
-			// - ReAct：没有 done_when，只要求总结完成事实。
-			var goalCheckHint string
-			if flowState.HasPlan() {
-				goalCheckHint = fmt.Sprintf("输出 %s 时，必须在 goal_check 中对照 done_when 逐条说明完成依据。", decision.Action)
-			} else {
-				goalCheckHint = fmt.Sprintf("输出 %s 时，必须在 goal_check 中总结任务已完成的事实证据（调用了哪些工具、得到了什么结果）。", decision.Action)
-			}
+			_ = emitter.EmitStatus(
+				executeStatusBlockID,
+				executeStageName,
+				"executing",
+				fmt.Sprintf("执行校验：action=%s 缺少 goal_check，已请求模型重试。", decision.Action),
+				false,
+			)
 			AppendLLMCorrectionWithHint(
 				conversationContext,
-				decision.Speak,
+				"",
 				fmt.Sprintf("你输出了 action=%s，但 goal_check 为空。", decision.Action),
-				goalCheckHint,
+				fmt.Sprintf("输出 %s 时，必须在 goal_check 中对照 done_when 逐条说明完成依据。", decision.Action),
 			)
 			return nil
 		}
@@ -434,6 +502,9 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 				Role:    schema.Assistant,
 				Content: speakText,
 			})
+			if isAskUser {
+				askUserHistoryAppended = true
+			}
 		}
 	}
 
@@ -443,6 +514,48 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		// 继续当前步骤的 ReAct 循环。
 		// 若有工具调用意图，则执行工具并记录证据。
 		if decision.ToolCall != nil {
+			// 1. 写工具必须走 confirm；continue 只允许读工具。
+			// 2. 若模型误输出 continue+写工具，这里先做纠偏，不直接执行写操作。
+			if input.ToolRegistry != nil && input.ToolRegistry.IsWriteTool(decision.ToolCall.Name) {
+				flowState.ConsecutiveCorrections++
+				log.Printf(
+					"[WARN] execute 决策协议违规 chat=%s round=%d action=continue tool=%s consecutive=%d/%d",
+					flowState.ConversationID,
+					flowState.RoundUsed,
+					strings.TrimSpace(decision.ToolCall.Name),
+					flowState.ConsecutiveCorrections,
+					maxConsecutiveCorrections,
+				)
+				if flowState.ConsecutiveCorrections >= maxConsecutiveCorrections {
+					return fmt.Errorf("连续 %d 次输出 continue+写工具，终止执行", flowState.ConsecutiveCorrections)
+				}
+				_ = emitter.EmitStatus(
+					executeStatusBlockID,
+					executeStageName,
+					"executing",
+					fmt.Sprintf("执行校验：写工具 %q 未执行。原因：模型输出了 action=continue；日程修改工具必须使用 action=confirm。", strings.TrimSpace(decision.ToolCall.Name)),
+					false,
+				)
+				llmOutput := decision.Speak
+				if strings.TrimSpace(llmOutput) == "" {
+					llmOutput = decision.Reason
+				}
+				AppendLLMCorrectionWithHint(
+					conversationContext,
+					llmOutput,
+					fmt.Sprintf("你输出了 action=continue，但工具 %q 属于写操作。", decision.ToolCall.Name),
+					"写操作必须输出 action=confirm，并附带同一个 tool_call；continue 仅用于读工具。这次写操作没有执行，请直接重发 confirm。",
+				)
+				return nil
+			}
+			if shouldForceFeasibilityNegotiation(flowState, input.ToolRegistry, decision.ToolCall.Name) {
+				runtimeState.OpenAskUserInteraction(
+					uuid.NewString(),
+					buildInfeasibleNegotiationQuestion(flowState),
+					strings.TrimSpace(input.ResumeNode),
+				)
+				return nil
+			}
 			return executeToolCall(
 				ctx,
 				flowState,
@@ -469,10 +582,23 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		// LLM 判定缺少关键信息，打开追问交互。
 		question := resolveExecuteAskUserText(decision)
 		runtimeState.OpenAskUserInteraction(uuid.NewString(), question, strings.TrimSpace(input.ResumeNode))
+		// 1. execute 阶段可能已流式推送 ask_user 文本；
+		// 2. interrupt 节点读取该元信息后可跳过二次正文推送，避免前端重复显示；
+		// 3. history 是否已写入也一并标记，防止上下文重复追加。
+		runtimeState.SetPendingInteractionMetadata(newagentmodel.PendingMetaAskUserSpeakStreamed, speakStreamed)
+		runtimeState.SetPendingInteractionMetadata(newagentmodel.PendingMetaAskUserHistoryAppended, askUserHistoryAppended)
 		return nil
 
 	case newagentmodel.ExecuteActionConfirm:
 		// AlwaysExecute=true：跳过确认闸门，直接执行内存写工具，不走 confirm 节点。
+		if decision.ToolCall != nil && shouldForceFeasibilityNegotiation(flowState, input.ToolRegistry, decision.ToolCall.Name) {
+			runtimeState.OpenAskUserInteraction(
+				uuid.NewString(),
+				buildInfeasibleNegotiationQuestion(flowState),
+				strings.TrimSpace(input.ResumeNode),
+			)
+			return nil
+		}
 		if input.AlwaysExecute && decision.ToolCall != nil {
 			return executeToolCall(
 				ctx,
@@ -712,6 +838,30 @@ func resolveExecuteAskUserText(decision *newagentmodel.ExecuteDecision) string {
 		return strings.TrimSpace(decision.Reason)
 	}
 	return "执行过程中遇到不确定的情况，需要向你确认。"
+}
+
+// pickExecuteVisibleSpeak 统一按“后文 -> 前言 -> fallback”选择最终可见文案。
+//
+// 规则：
+// 1. streamed / afterText 对应 </SMARTFLOW_DECISION> 后的正文，优先级最高；
+// 2. beforeText 对应标签前前言，仅在后文为空时兜底使用；
+// 3. 三者都为空时，再回退到 reason / 默认短句。
+func pickExecuteVisibleSpeak(
+	streamed string,
+	afterText string,
+	beforeText string,
+	decision *newagentmodel.ExecuteDecision,
+) string {
+	if text := strings.TrimSpace(streamed); text != "" {
+		return text
+	}
+	if text := strings.TrimSpace(afterText); text != "" {
+		return text
+	}
+	if text := strings.TrimSpace(beforeText); text != "" {
+		return text
+	}
+	return buildExecuteSpeakWithFallback(decision)
 }
 
 // buildExecuteSpeakWithFallback 统一为需要面向用户展示的动作补齐 speak 文案。
@@ -1358,6 +1508,33 @@ func parseAnyToIntSlice(value any) []int {
 	}
 }
 
+func parseAnyToStringSlice(value any) []string {
+	switch values := value.(type) {
+	case []string:
+		result := make([]string, 0, len(values))
+		for _, item := range values {
+			text := strings.TrimSpace(item)
+			if text == "" {
+				continue
+			}
+			result = append(result, text)
+		}
+		return result
+	case []any:
+		result := make([]string, 0, len(values))
+		for _, item := range values {
+			text := strings.TrimSpace(fmt.Sprintf("%v", item))
+			if text == "" || text == "<nil>" {
+				continue
+			}
+			result = append(result, text)
+		}
+		return result
+	default:
+		return nil
+	}
+}
+
 // appendToolCallResultHistory 统一把“assistant tool_call + tool observation”写回历史。
 //
 // 设计说明：
@@ -1447,6 +1624,31 @@ func executeToolCall(
 	if scheduleState == nil && registry.RequiresScheduleState(toolName) {
 		return fmt.Errorf("日程状态未加载，无法执行工具 %q", toolName)
 	}
+	if registry.IsToolTemporarilyDisabled(toolName) {
+		flowState.ConsecutiveCorrections++
+		if flowState.ConsecutiveCorrections >= maxConsecutiveCorrections {
+			return fmt.Errorf("连续 %d 次调用临时禁用工具，终止执行: %s",
+				flowState.ConsecutiveCorrections, toolName)
+		}
+		blockedResult := buildTemporarilyDisabledToolResult(toolName)
+		_ = emitter.EmitToolCallResult(
+			executeStatusBlockID,
+			executeStageName,
+			toolName,
+			"blocked",
+			blockedResult,
+			buildToolArgumentsPreviewCN(toolCall.Arguments),
+			false,
+		)
+		appendToolCallResultHistory(conversationContext, toolName, toolCall.Arguments, blockedResult)
+		AppendLLMCorrectionWithHint(
+			conversationContext,
+			"",
+			fmt.Sprintf("工具 %q 当前暂时禁用。", toolName),
+			"请改用 move/swap/batch_move/unplace 等基础微调工具继续推进。",
+		)
+		return nil
+	}
 	if !registry.HasTool(toolName) {
 		// LLM 拼错或编造了工具名，走 correction 机制给重试机会，而非直接 fatal。
 		// 与 action 不合法、决策校验失败等路径一致：追加错误反馈 → Graph 循环 → LLM 修正。
@@ -1463,6 +1665,35 @@ func executeToolCall(
 			"",
 			fmt.Sprintf("你调用的工具 \"%s\" 不存在。", toolName),
 			fmt.Sprintf("可用工具：%s。请检查拼写后重新输出。", strings.Join(registry.ToolNames(), "、")),
+		)
+		return nil
+	}
+	if !isToolVisibleForCurrentExecuteMode(flowState, registry, toolName) {
+		flowState.ConsecutiveCorrections++
+		if flowState.ConsecutiveCorrections >= maxConsecutiveCorrections {
+			return fmt.Errorf("连续 %d 次调用未激活域工具，终止执行: %s（active_domain=%q active_packs=%v）",
+				flowState.ConsecutiveCorrections,
+				toolName,
+				flowState.ActiveToolDomain,
+				newagenttools.ResolveEffectiveToolPacks(flowState.ActiveToolDomain, flowState.ActiveToolPacks))
+		}
+
+		addHint := `请先调用 context_tools_add 激活目标工具域后再继续。`
+		if flowState != nil && flowState.ActiveOptimizeOnly {
+			addHint = `当前处于“粗排后主动优化专用模式”，只允许使用 analyze_health、move、swap；不要再尝试 query_target_tasks / query_available_slots 等全窗搜索工具。`
+		} else if domain, pack, ok := newagenttools.ResolveToolDomainPack(toolName); ok {
+			if newagenttools.IsFixedToolPack(domain, pack) {
+				addHint = fmt.Sprintf(`请先调用 context_tools_add，参数 domain="%s"。`, domain)
+			} else {
+				addHint = fmt.Sprintf(`请先调用 context_tools_add，参数 domain="%s", packs=["%s"]。`, domain, pack)
+			}
+		}
+
+		AppendLLMCorrectionWithHint(
+			conversationContext,
+			"",
+			fmt.Sprintf("你调用的工具 %q 当前不在已激活工具域内。", toolName),
+			addHint,
 		)
 		return nil
 	}
@@ -1490,6 +1721,20 @@ func executeToolCall(
 		appendToolCallResultHistory(conversationContext, toolName, toolCall.Arguments, blockedResult)
 		return nil
 	}
+	if shouldForceFeasibilityNegotiation(flowState, registry, toolName) {
+		blockedResult := buildInfeasibleBlockedResult(flowState)
+		_ = emitter.EmitToolCallResult(
+			executeStatusBlockID,
+			executeStageName,
+			toolName,
+			"blocked",
+			blockedResult,
+			buildToolArgumentsPreviewCN(toolCall.Arguments),
+			false,
+		)
+		appendToolCallResultHistory(conversationContext, toolName, toolCall.Arguments, blockedResult)
+		return nil
+	}
 
 	beforeDigest := summarizeScheduleStateForDebug(scheduleState)
 	// 调用目的：为不依赖 ScheduleState 的工具注入用户身份，工具层通过 args["_user_id"] 提取。
@@ -1500,6 +1745,9 @@ func executeToolCall(
 		toolCall.Arguments["_user_id"] = flowState.UserID
 	}
 	result := registry.Execute(scheduleState, toolName, toolCall.Arguments)
+	updateHealthSnapshotV2(flowState, toolName, result)
+	updateTaskClassUpsertSnapshot(flowState, toolName, result)
+	updateActiveToolDomainSnapshot(flowState, toolName, result)
 	afterDigest := summarizeScheduleStateForDebug(scheduleState)
 	log.Printf(
 		"[DEBUG] execute tool chat=%s round=%d tool=%s args=%s before=%s after=%s result_preview=%.200s",
@@ -1524,8 +1772,9 @@ func executeToolCall(
 	// 3. 以标准 assistant+tool 消息对写回历史，避免消息链断裂。
 	appendToolCallResultHistory(conversationContext, toolName, toolCall.Arguments, result)
 
-	// 3.1 标记本轮执行过日程写工具，graph 分支据此决定是否走 order_guard。
-	if registry.IsWriteTool(toolName) {
+	// 3.1 仅“日程修改工具”才算日程变更。
+	// 任务类写库（如 upsert_task_class）不应触发顺序守卫与排程完成卡片。
+	if registry.IsScheduleMutationTool(toolName) {
 		flowState.HasScheduleWriteOps = true
 		flowState.HasScheduleChanges = true
 	}
@@ -1539,6 +1788,61 @@ func executeToolCall(
 	tryWritePreviewAfterWriteTool(ctx, flowState, scheduleState, registry, toolName, writePreview)
 
 	return nil
+}
+
+// applyPendingContextHook 在 execute 轮次开始时消费一次 plan 传递的 context_hook。
+//
+// 步骤化说明：
+// 1. 仅在存在 PendingContextHook 时生效，避免无意义状态写入；
+// 2. 域与 packs 按工具映射规则归一化，保证和 context_tools_add 的结果语义一致；
+// 3. 消费后立即清空 PendingContextHook，避免每轮重复覆盖造成噪声。
+func applyPendingContextHook(flowState *newagentmodel.CommonState) {
+	if flowState == nil || flowState.PendingContextHook == nil {
+		return
+	}
+	hook := flowState.PendingContextHook
+	domain := newagenttools.NormalizeToolDomain(hook.Domain)
+	if domain == "" {
+		flowState.PendingContextHook = nil
+		return
+	}
+	flowState.ActiveToolDomain = domain
+	flowState.ActiveToolPacks = newagenttools.ResolveEffectiveToolPacks(domain, hook.Packs)
+	flowState.PendingContextHook = nil
+}
+
+// isToolVisibleForCurrentExecuteMode 统一判定“当前 execute 轮次里，这个工具到底能不能被调”。
+//
+// 步骤化说明：
+// 1. 先走原有的 domain + pack 可见性校验，保证普通链路行为不变；
+// 2. 若当前开启了主动优化专用模式，再叠加一道更强的白名单裁剪；
+// 3. 这样可以做到“工具定义仍保留，但主动优化场景只露最小闭环”，且不影响普通服务链路。
+func isToolVisibleForCurrentExecuteMode(
+	flowState *newagentmodel.CommonState,
+	registry *newagenttools.ToolRegistry,
+	toolName string,
+) bool {
+	if registry == nil {
+		return false
+	}
+	activeDomain := ""
+	var activePacks []string
+	if flowState != nil {
+		activeDomain = flowState.ActiveToolDomain
+		activePacks = flowState.ActiveToolPacks
+	}
+	if !registry.IsToolVisibleInDomain(activeDomain, activePacks, toolName) {
+		return false
+	}
+	if flowState != nil && flowState.ActiveOptimizeOnly && !newagenttools.IsToolAllowedInActiveOptimize(toolName) {
+		return false
+	}
+	return true
+}
+
+// buildTemporarilyDisabledToolResult 统一生成“工具临时禁用”的观察文本。
+func buildTemporarilyDisabledToolResult(toolName string) string {
+	return fmt.Sprintf("工具 %q 当前暂时禁用。请改用 move/swap/batch_move/unplace 等基础微调工具。", strings.TrimSpace(toolName))
 }
 
 // shouldBlockMinContextSwitch 判断是否要拦截 min_context_switch 工具。
@@ -1600,10 +1904,40 @@ func executePendingTool(
 		return fmt.Errorf("日程状态未加载，无法执行已确认的写工具 %s", pending.ToolName)
 	}
 	flowState := runtimeState.EnsureCommonState()
+	if registry.IsToolTemporarilyDisabled(pending.ToolName) {
+		blockedResult := buildTemporarilyDisabledToolResult(pending.ToolName)
+		_ = emitter.EmitToolCallResult(
+			executeStatusBlockID,
+			executeStageName,
+			pending.ToolName,
+			"blocked",
+			blockedResult,
+			buildToolArgumentsPreviewCN(args),
+			false,
+		)
+		appendToolCallResultHistory(conversationContext, pending.ToolName, args, blockedResult)
+		runtimeState.PendingConfirmTool = nil
+		return nil
+	}
 
 	// 3.1 顺序护栏在确认执行路径同样生效，避免绕过前置约束。
 	if shouldBlockMinContextSwitch(flowState, pending.ToolName) {
 		blockedResult := "已拒绝执行 min_context_switch：当前未授权打乱顺序。如需使用该工具，请先由用户明确说明“允许打乱顺序”。"
+		_ = emitter.EmitToolCallResult(
+			executeStatusBlockID,
+			executeStageName,
+			pending.ToolName,
+			"blocked",
+			blockedResult,
+			buildToolArgumentsPreviewCN(args),
+			false,
+		)
+		appendToolCallResultHistory(conversationContext, pending.ToolName, args, blockedResult)
+		runtimeState.PendingConfirmTool = nil
+		return nil
+	}
+	if shouldForceFeasibilityNegotiation(flowState, registry, pending.ToolName) {
+		blockedResult := buildInfeasibleBlockedResult(flowState)
 		_ = emitter.EmitToolCallResult(
 			executeStatusBlockID,
 			executeStageName,
@@ -1628,6 +1962,9 @@ func executePendingTool(
 		args["_user_id"] = flowState.UserID
 	}
 	result := registry.Execute(scheduleState, pending.ToolName, args)
+	updateHealthSnapshotV2(flowState, pending.ToolName, result)
+	updateTaskClassUpsertSnapshot(flowState, pending.ToolName, result)
+	updateActiveToolDomainSnapshot(flowState, pending.ToolName, result)
 	afterDigest := summarizeScheduleStateForDebug(scheduleState)
 	log.Printf(
 		"[DEBUG] execute pending tool chat=%s round=%d tool=%s args=%s before=%s after=%s result_preview=%.200s",
@@ -1652,8 +1989,8 @@ func executePendingTool(
 	// 5. 将工具调用和结果写回历史，维持标准 tool_call 配对格式。
 	appendToolCallResultHistory(conversationContext, pending.ToolName, args, result)
 
-	// 5.1 标记本轮执行过日程写工具，graph 分支据此决定是否走 order_guard。
-	if registry.IsWriteTool(pending.ToolName) {
+	// 5.1 仅“日程修改工具”才算日程变更。
+	if registry.IsScheduleMutationTool(pending.ToolName) {
 		flowState.HasScheduleWriteOps = true
 		flowState.HasScheduleChanges = true
 	}
@@ -1684,7 +2021,7 @@ func tryWritePreviewAfterWriteTool(
 	if flowState == nil || scheduleState == nil || registry == nil || writePreview == nil {
 		return
 	}
-	if !registry.IsWriteTool(toolName) {
+	if !registry.IsScheduleMutationTool(toolName) {
 		return
 	}
 
@@ -1864,6 +2201,13 @@ func tryExtractToolResultSummaryCN(raw string) (string, bool) {
 	toolRaw := strings.TrimSpace(readStringAnyFromMap(payload, "tool"))
 	toolName := resolveToolDisplayNameCN(toolRaw)
 
+	// 任务类写入工具优先走结构化提炼，确保前端摘要直接暴露“是否缺字段”。
+	if strings.EqualFold(toolRaw, "upsert_task_class") {
+		if summary, ok := buildUpsertTaskClassSummaryCN(payload); ok {
+			return truncateToolSummaryCN(summary), true
+		}
+	}
+
 	if errText := strings.TrimSpace(readStringAnyFromMap(payload, "error", "err")); errText != "" {
 		return truncateToolSummaryCN(fmt.Sprintf("%s失败：%s", toolName, errText)), true
 	}
@@ -1906,6 +2250,37 @@ func tryExtractToolResultSummaryCN(raw string) (string, bool) {
 
 	if toolRaw != "" {
 		return fmt.Sprintf("已完成「%s」。", toolName), true
+	}
+
+	return "", false
+}
+
+func buildUpsertTaskClassSummaryCN(payload map[string]any) (string, bool) {
+	validationRaw, hasValidation := payload["validation"]
+	if !hasValidation {
+		return "", false
+	}
+	validation, ok := validationRaw.(map[string]any)
+	if !ok {
+		return "", false
+	}
+
+	validationOK, hasValidationOK := validation["ok"].(bool)
+	issues := parseAnyToStringSlice(validation["issues"])
+
+	if hasValidationOK && !validationOK {
+		if len(issues) > 0 {
+			return fmt.Sprintf("任务类写入未通过校验：%s。", strings.Join(issues, "；")), true
+		}
+		return "任务类写入未通过校验，请先补齐缺失字段。", true
+	}
+
+	success, hasSuccess := payload["success"].(bool)
+	if hasSuccess && success {
+		if taskClassID, ok := readIntAnyFromMap(payload, "task_class_id"); ok && taskClassID > 0 {
+			return fmt.Sprintf("任务类写入成功，task_class_id=%d。", taskClassID), true
+		}
+		return "任务类写入成功。", true
 	}
 
 	return "", false
@@ -1975,6 +2350,9 @@ func buildToolArgumentsPreviewCN(args map[string]any) string {
 		{Key: "task_item_ids", Label: "任务条目列表"},
 		{Key: "query", Label: "搜索词"},
 		{Key: "keyword", Label: "关键词"},
+		{Key: "domain", Label: "工具域"},
+		{Key: "mode", Label: "注入模式"},
+		{Key: "all", Label: "清空全部"},
 		{Key: "top_k", Label: "返回数量"},
 		{Key: "url", Label: "链接"},
 		{Key: "reason", Label: "原因"},
@@ -2017,6 +2395,9 @@ func resolveToolDisplayNameCN(toolName string) string {
 		"query_target_tasks":    "查询目标任务",
 		"query_available_slots": "查询可用时间段",
 		"get_task_info":         "查看任务详情",
+		"analyze_health":        "综合体检",
+		"analyze_rhythm":        "分析学习节奏",
+		"analyze_tolerance":     "分析容错空间",
 		"web_search":            "网页搜索",
 		"web_fetch":             "网页抓取",
 		"move":                  "移动任务",
@@ -2026,6 +2407,9 @@ func resolveToolDisplayNameCN(toolName string) string {
 		"spread_even":           "均匀分散任务",
 		"min_context_switch":    "减少上下文切换",
 		"unplace":               "移除任务安排",
+		"upsert_task_class":     "写入任务类",
+		"context_tools_add":     "激活工具域",
+		"context_tools_remove":  "移除工具域",
 	}
 
 	if label, ok := displayNameMap[name]; ok {
@@ -2134,4 +2518,350 @@ func formatToolArgValueCN(value any) string {
 		}
 		return text
 	}
+}
+
+// shouldForceFeasibilityNegotiation 判定是否需要先协商再继续写操作。
+func shouldForceFeasibilityNegotiation(
+	flowState *newagentmodel.CommonState,
+	registry *newagenttools.ToolRegistry,
+	toolName string,
+) bool {
+	if flowState == nil || registry == nil {
+		return false
+	}
+	if !flowState.HealthCheckDone || flowState.HealthIsFeasible {
+		return false
+	}
+	// 仅拦截“依赖日程状态”的写工具，避免影响 upsert_task_class 等独立写库能力。
+	if !registry.IsWriteTool(toolName) || !registry.RequiresScheduleState(toolName) {
+		return false
+	}
+	return true
+}
+
+// buildInfeasibleNegotiationQuestion 生成不可行场景下的协商提示。
+func buildInfeasibleNegotiationQuestion(flowState *newagentmodel.CommonState) string {
+	capacityGap := 0
+	reasonCode := "capacity_insufficient"
+	if flowState != nil {
+		capacityGap = flowState.HealthCapacityGap
+		if strings.TrimSpace(flowState.HealthReasonCode) != "" {
+			reasonCode = strings.TrimSpace(flowState.HealthReasonCode)
+		}
+	}
+	return fmt.Sprintf(
+		"当前方案在现有约束下不可行（capacity_gap=%d，reason=%s），继续挪动任务无法消除根因。请告诉我你希望哪种处理方向：扩展时间窗、放宽约束、缩减范围/预算，或接受风险并先收口。",
+		capacityGap,
+		reasonCode,
+	)
+}
+
+// buildInfeasibleBlockedResult 构造写工具被不可行约束拦截后的 observation。
+func buildInfeasibleBlockedResult(flowState *newagentmodel.CommonState) string {
+	capacityGap := 0
+	reasonCode := "capacity_insufficient"
+	if flowState != nil {
+		capacityGap = flowState.HealthCapacityGap
+		if strings.TrimSpace(flowState.HealthReasonCode) != "" {
+			reasonCode = strings.TrimSpace(flowState.HealthReasonCode)
+		}
+	}
+	return fmt.Sprintf(
+		"已阻断本次写操作：analyze_health 判定当前约束不可行（capacity_gap=%d，reason=%s）。请先与用户协商：扩展时间窗 / 放宽约束 / 缩减范围或预算 / 接受风险收口。",
+		capacityGap,
+		reasonCode,
+	)
+}
+
+type contextToolsResultEnvelope struct {
+	Tool    string   `json:"tool"`
+	Success bool     `json:"success"`
+	Domain  string   `json:"domain,omitempty"`
+	Packs   []string `json:"packs,omitempty"`
+	Mode    string   `json:"mode,omitempty"`
+	All     bool     `json:"all,omitempty"`
+}
+
+type analyzeHealthResultEnvelope struct {
+	Tool        string                         `json:"tool"`
+	Success     bool                           `json:"success"`
+	Feasibility *analyzeHealthFeasibilityBrief `json:"feasibility,omitempty"`
+	Decision    *analyzeHealthDecisionBrief    `json:"decision,omitempty"`
+}
+
+type analyzeHealthFeasibilityBrief struct {
+	IsFeasible  bool   `json:"is_feasible"`
+	CapacityGap int    `json:"capacity_gap"`
+	ReasonCode  string `json:"reason_code"`
+}
+
+type analyzeHealthDecisionBrief struct {
+	ShouldContinueOptimize bool   `json:"should_continue_optimize"`
+	PrimaryProblem         string `json:"primary_problem,omitempty"`
+	RecommendedOperation   string `json:"recommended_operation,omitempty"`
+	IsForcedImperfection   bool   `json:"is_forced_imperfection"`
+	ImprovementSignal      string `json:"improvement_signal,omitempty"`
+}
+
+type upsertTaskClassResultEnvelope struct {
+	Tool       string                         `json:"tool"`
+	Success    bool                           `json:"success"`
+	Validation *upsertTaskClassValidationPart `json:"validation,omitempty"`
+	Error      string                         `json:"error,omitempty"`
+	ErrorCode  string                         `json:"error_code,omitempty"`
+}
+
+type upsertTaskClassValidationPart struct {
+	OK     bool     `json:"ok"`
+	Issues []string `json:"issues"`
+}
+
+// updateActiveToolDomainSnapshot 根据 context 管理工具结果回写激活工具域与二级包。
+//
+// 步骤化说明：
+// 1. 仅处理 context_tools_add/remove，其他工具直接跳过；
+// 2. 仅在 success=true 且结果可解析时更新，解析失败时保持旧值，避免误删关键域；
+// 3. add 成功时覆盖域并写入 packs；remove 成功时按 all/domain/packs 精确回收。
+func updateActiveToolDomainSnapshot(flowState *newagentmodel.CommonState, toolName string, result string) {
+	if flowState == nil || !newagenttools.IsContextManagementTool(toolName) {
+		return
+	}
+
+	var envelope contextToolsResultEnvelope
+	if err := json.Unmarshal([]byte(result), &envelope); err != nil {
+		return
+	}
+	if !envelope.Success {
+		return
+	}
+
+	switch strings.TrimSpace(toolName) {
+	case newagenttools.ToolNameContextToolsAdd:
+		domain := newagenttools.NormalizeToolDomain(envelope.Domain)
+		if domain == "" {
+			return
+		}
+		nextPacks := newagenttools.ResolveEffectiveToolPacks(domain, envelope.Packs)
+		mode := strings.ToLower(strings.TrimSpace(envelope.Mode))
+		if mode == "merge" && newagenttools.NormalizeToolDomain(flowState.ActiveToolDomain) == domain {
+			merged := make([]string, 0, len(flowState.ActiveToolPacks)+len(nextPacks))
+			seen := make(map[string]struct{}, len(flowState.ActiveToolPacks)+len(nextPacks))
+			current := newagenttools.ResolveEffectiveToolPacks(domain, flowState.ActiveToolPacks)
+			for _, pack := range current {
+				if _, exists := seen[pack]; exists {
+					continue
+				}
+				seen[pack] = struct{}{}
+				merged = append(merged, pack)
+			}
+			for _, pack := range nextPacks {
+				if _, exists := seen[pack]; exists {
+					continue
+				}
+				seen[pack] = struct{}{}
+				merged = append(merged, pack)
+			}
+			nextPacks = merged
+		}
+		flowState.ActiveToolDomain = domain
+		flowState.ActiveToolPacks = nextPacks
+	case newagenttools.ToolNameContextToolsRemove:
+		if envelope.All {
+			flowState.ActiveToolDomain = ""
+			flowState.ActiveToolPacks = nil
+			return
+		}
+		domain := newagenttools.NormalizeToolDomain(envelope.Domain)
+		if domain == "" {
+			return
+		}
+		currentDomain := newagenttools.NormalizeToolDomain(flowState.ActiveToolDomain)
+		if currentDomain != domain {
+			return
+		}
+
+		removedPacks := newagenttools.NormalizeToolPacks(domain, envelope.Packs)
+		if len(removedPacks) == 0 {
+			flowState.ActiveToolDomain = ""
+			flowState.ActiveToolPacks = nil
+			return
+		}
+
+		currentEffective := newagenttools.ResolveEffectiveToolPacks(domain, flowState.ActiveToolPacks)
+		if len(currentEffective) == 0 {
+			flowState.ActiveToolDomain = ""
+			flowState.ActiveToolPacks = nil
+			return
+		}
+
+		removedSet := make(map[string]struct{}, len(removedPacks))
+		for _, pack := range removedPacks {
+			removedSet[pack] = struct{}{}
+		}
+		remaining := make([]string, 0, len(currentEffective))
+		for _, pack := range currentEffective {
+			if _, shouldRemove := removedSet[pack]; shouldRemove {
+				continue
+			}
+			remaining = append(remaining, pack)
+		}
+		if len(remaining) == 0 {
+			flowState.ActiveToolDomain = ""
+			flowState.ActiveToolPacks = nil
+			return
+		}
+		flowState.ActiveToolPacks = remaining
+	}
+}
+
+// updateHealthFeasibilitySnapshot 从 analyze_health 的结构化返回中更新可行性快照。
+func updateHealthFeasibilitySnapshot(flowState *newagentmodel.CommonState, toolName string, result string) {
+	if flowState == nil || !strings.EqualFold(strings.TrimSpace(toolName), toolAnalyzeHealth) {
+		return
+	}
+
+	// 先重置成“未知”状态，避免沿用旧快照误导后续决策。
+	flowState.HealthCheckDone = false
+	flowState.HealthIsFeasible = true
+	flowState.HealthCapacityGap = 0
+	flowState.HealthReasonCode = ""
+
+	var envelope analyzeHealthResultEnvelope
+	if err := json.Unmarshal([]byte(result), &envelope); err != nil {
+		return
+	}
+	if !envelope.Success || envelope.Feasibility == nil {
+		return
+	}
+
+	flowState.HealthCheckDone = true
+	flowState.HealthIsFeasible = envelope.Feasibility.IsFeasible
+	flowState.HealthCapacityGap = envelope.Feasibility.CapacityGap
+	flowState.HealthReasonCode = strings.TrimSpace(envelope.Feasibility.ReasonCode)
+}
+
+// updateTaskClassUpsertSnapshot 从 upsert_task_class 返回中更新“任务类写入回盘”运行态。
+//
+// 步骤化说明：
+// 1. 仅在工具名命中 upsert_task_class 时更新，避免污染其他链路；
+// 2. 每次先标记 last_tried=true，再根据 success/validation 更新成功态与缺失项；
+// 3. 连续失败计数仅用于软提示：成功归零，失败递增，不做硬拦截。
+func updateTaskClassUpsertSnapshot(flowState *newagentmodel.CommonState, toolName string, result string) {
+	if flowState == nil || !strings.EqualFold(strings.TrimSpace(toolName), "upsert_task_class") {
+		return
+	}
+
+	flowState.TaskClassUpsertLastTried = true
+	flowState.TaskClassUpsertLastSuccess = false
+	flowState.TaskClassUpsertLastIssues = nil
+
+	var envelope upsertTaskClassResultEnvelope
+	if err := json.Unmarshal([]byte(result), &envelope); err != nil {
+		flowState.TaskClassUpsertConsecutiveFailures++
+		return
+	}
+
+	success := envelope.Success
+	issues := make([]string, 0)
+	if envelope.Validation != nil {
+		issues = append(issues, parseAnyToStringSlice(any(envelope.Validation.Issues))...)
+		if !envelope.Validation.OK {
+			success = false
+		}
+	}
+	if !success && strings.TrimSpace(envelope.Error) != "" && len(issues) == 0 {
+		issues = append(issues, strings.TrimSpace(envelope.Error))
+	}
+	issues = uniqueNonEmptyStrings(issues)
+
+	flowState.TaskClassUpsertLastSuccess = success
+	flowState.TaskClassUpsertLastIssues = issues
+	if success {
+		flowState.TaskClassUpsertConsecutiveFailures = 0
+		return
+	}
+	flowState.TaskClassUpsertConsecutiveFailures++
+}
+
+func uniqueNonEmptyStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		text := strings.TrimSpace(value)
+		if text == "" {
+			continue
+		}
+		if _, exists := seen[text]; exists {
+			continue
+		}
+		seen[text] = struct{}{}
+		result = append(result, text)
+	}
+	return result
+}
+
+// updateHealthSnapshotV2 从 analyze_health 的结构化返回中同步“是否继续优化”的业务快照。
+//
+// 职责边界：
+// 1. 只负责把 analyze_health 的关键结论回写到 CommonState，供 execute prompt 直接消费；
+// 2. 不负责替 LLM 生成下一步参数，也不做写工具硬拦截；
+// 3. 若结果解析失败，则回到保守默认值，避免沿用旧结论误导本轮判断。
+func updateHealthSnapshotV2(flowState *newagentmodel.CommonState, toolName string, result string) {
+	if flowState == nil || !strings.EqualFold(strings.TrimSpace(toolName), toolAnalyzeHealth) {
+		return
+	}
+
+	prevSignal := strings.TrimSpace(flowState.HealthImprovementSignal)
+	flowState.HealthCheckDone = false
+	flowState.HealthIsFeasible = true
+	flowState.HealthCapacityGap = 0
+	flowState.HealthReasonCode = ""
+	flowState.HealthShouldContinueOptimize = false
+	flowState.HealthTightnessLevel = ""
+	flowState.HealthPrimaryProblem = ""
+	flowState.HealthRecommendedOperation = ""
+	flowState.HealthIsForcedImperfection = false
+	flowState.HealthImprovementSignal = ""
+
+	var envelope struct {
+		Success     bool                           `json:"success"`
+		Feasibility *analyzeHealthFeasibilityBrief `json:"feasibility,omitempty"`
+		Metrics     struct {
+			Tightness *struct {
+				TightnessLevel string `json:"tightness_level"`
+			} `json:"tightness,omitempty"`
+		} `json:"metrics"`
+		Decision *analyzeHealthDecisionBrief `json:"decision,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(result), &envelope); err != nil {
+		flowState.HealthStagnationCount = 0
+		return
+	}
+	if !envelope.Success || envelope.Feasibility == nil {
+		flowState.HealthStagnationCount = 0
+		return
+	}
+
+	flowState.HealthCheckDone = true
+	flowState.HealthIsFeasible = envelope.Feasibility.IsFeasible
+	flowState.HealthCapacityGap = envelope.Feasibility.CapacityGap
+	flowState.HealthReasonCode = strings.TrimSpace(envelope.Feasibility.ReasonCode)
+	if envelope.Metrics.Tightness != nil {
+		flowState.HealthTightnessLevel = strings.TrimSpace(envelope.Metrics.Tightness.TightnessLevel)
+	}
+	if envelope.Decision != nil {
+		flowState.HealthShouldContinueOptimize = envelope.Decision.ShouldContinueOptimize
+		flowState.HealthPrimaryProblem = strings.TrimSpace(envelope.Decision.PrimaryProblem)
+		flowState.HealthRecommendedOperation = strings.TrimSpace(envelope.Decision.RecommendedOperation)
+		flowState.HealthIsForcedImperfection = envelope.Decision.IsForcedImperfection
+		flowState.HealthImprovementSignal = strings.TrimSpace(envelope.Decision.ImprovementSignal)
+	}
+	if signal := strings.TrimSpace(flowState.HealthImprovementSignal); signal != "" && prevSignal != "" && signal == prevSignal {
+		flowState.HealthStagnationCount++
+		return
+	}
+	flowState.HealthStagnationCount = 0
 }

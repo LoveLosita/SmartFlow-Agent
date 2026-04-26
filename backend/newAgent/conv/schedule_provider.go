@@ -46,7 +46,8 @@ func (p *ScheduleProvider) LoadScheduleState(ctx context.Context, userID int) (*
 		return nil, err
 	}
 
-	return p.loadScheduleStateWithTaskClasses(ctx, userID, taskClasses)
+	// 2. 全量读场景保留“当前周兜底”，兼容“只看本周课表/微调”类请求。
+	return p.loadScheduleStateWithTaskClasses(ctx, userID, taskClasses, true)
 }
 
 // LoadScheduleStateForTaskClasses 按“本轮请求的任务类范围”加载 ScheduleState。
@@ -69,7 +70,9 @@ func (p *ScheduleProvider) LoadScheduleStateForTaskClasses(
 		return nil, err
 	}
 
-	return p.loadScheduleStateWithTaskClasses(ctx, userID, taskClasses)
+	// 1. 粗排/主动编排场景必须严格按任务类时间窗加载；
+	// 2. 若任务类缺少起止日期，则返回错误，交给上层 ask_user 补齐，而不是静默退回当前周。
+	return p.loadScheduleStateWithTaskClasses(ctx, userID, taskClasses, false)
 }
 
 // loadScheduleStateWithTaskClasses 负责把“指定任务类集合”装配成可操作的 ScheduleState。
@@ -82,10 +85,14 @@ func (p *ScheduleProvider) loadScheduleStateWithTaskClasses(
 	ctx context.Context,
 	userID int,
 	taskClasses []model.TaskClass,
+	allowCurrentWeekFallback bool,
 ) (*schedule.ScheduleState, error) {
 	// 1. 确定规划窗口：优先使用 task class 日期范围，降级到当前周。
 	windowDays, weeks := buildWindowFromTaskClasses(taskClasses)
 	if len(windowDays) == 0 {
+		if !allowCurrentWeekFallback {
+			return nil, fmt.Errorf("任务类缺少有效时间窗：请补充 start_date/end_date 后再进行智能编排")
+		}
 		var err error
 		windowDays, weeks, err = buildCurrentWeekWindow()
 		if err != nil {
@@ -262,11 +269,23 @@ func (p *ScheduleProvider) LoadTaskClassMetas(ctx context.Context, userID int, t
 		if tc.ExcludedSlots != nil {
 			meta.ExcludedSlots = []int(tc.ExcludedSlots)
 		}
+		if tc.ExcludedDaysOfWeek != nil {
+			meta.ExcludedDaysOfWeek = []int(tc.ExcludedDaysOfWeek)
+		}
 		if tc.StartDate != nil {
 			meta.StartDate = tc.StartDate.Format("2006-01-02")
 		}
 		if tc.EndDate != nil {
 			meta.EndDate = tc.EndDate.Format("2006-01-02")
+		}
+		if tc.SubjectType != nil {
+			meta.SubjectType = *tc.SubjectType
+		}
+		if tc.DifficultyLevel != nil {
+			meta.DifficultyLevel = *tc.DifficultyLevel
+		}
+		if tc.CognitiveIntensity != nil {
+			meta.CognitiveIntensity = *tc.CognitiveIntensity
 		}
 		metas = append(metas, meta)
 	}

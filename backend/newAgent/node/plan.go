@@ -89,7 +89,10 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 		messages,
 		infrallm.GenerateOptions{
 			Temperature: 0.2,
-			Thinking:    resolveThinkingMode(input.ThinkingEnabled),
+			// 显式设置上限，避免依赖框架默认值（默认 4096）导致长决策被截断。
+			// 注意：当前模型接口 max_tokens 上限为 131072，超过会 400。
+			MaxTokens: 131072,
+			Thinking:  resolveThinkingMode(input.ThinkingEnabled),
 			Metadata: map[string]any{
 				"stage": planStageName,
 				"phase": "planning",
@@ -102,6 +105,7 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 
 	parser := newagentrouter.NewStreamDecisionParser()
 	firstChunk := true
+	speakStreamed := false
 
 	// 3.1 阶段一：解析决策标签。
 	for {
@@ -151,6 +155,7 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 			if emitErr := emitter.EmitAssistantText(planSpeakBlockID, planStageName, visible, firstChunk); emitErr != nil {
 				return fmt.Errorf("规划文案推送失败: %w", emitErr)
 			}
+			speakStreamed = true
 			fullText.WriteString(visible)
 			firstChunk = false
 		}
@@ -173,6 +178,7 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 				if emitErr := emitter.EmitAssistantText(planSpeakBlockID, planStageName, chunk2.Content, firstChunk); emitErr != nil {
 					return fmt.Errorf("规划文案推送失败: %w", emitErr)
 				}
+				speakStreamed = true
 				fullText.WriteString(chunk2.Content)
 				firstChunk = false
 			}
@@ -187,7 +193,7 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 		}
 
 		// 5. 按规划动作推进流程状态。
-		return handlePlanAction(ctx, input, runtimeState, conversationContext, emitter, flowState, decision)
+		return handlePlanAction(ctx, input, runtimeState, conversationContext, emitter, flowState, decision, speakStreamed)
 	}
 
 	// 流结束但未找到决策标签。
@@ -203,6 +209,7 @@ func handlePlanAction(
 	emitter *newagentstream.ChunkEmitter,
 	flowState *newagentmodel.CommonState,
 	decision *newagentmodel.PlanDecision,
+	askUserSpeakStreamed bool,
 ) error {
 	switch decision.Action {
 	case newagentmodel.PlanActionContinue:
@@ -211,9 +218,14 @@ func handlePlanAction(
 	case newagentmodel.PlanActionAskUser:
 		question := resolvePlanAskUserText(decision)
 		runtimeState.OpenAskUserInteraction(uuid.NewString(), question, strings.TrimSpace(input.ResumeNode))
+		// 1. plan 阶段若已流式推送过 ask_user 文本，interrupt 侧应避免重复正文输出；
+		// 2. plan 阶段 ask_user 不会提前写入 history，这里显式标记为 false。
+		runtimeState.SetPendingInteractionMetadata(newagentmodel.PendingMetaAskUserSpeakStreamed, askUserSpeakStreamed)
+		runtimeState.SetPendingInteractionMetadata(newagentmodel.PendingMetaAskUserHistoryAppended, false)
 		return nil
 	case newagentmodel.PlanActionDone:
 		flowState.FinishPlan(decision.PlanSteps)
+		flowState.PendingContextHook = clonePlanContextHook(decision.ContextHook)
 		writePlanPinnedBlocks(conversationContext, decision.PlanSteps)
 		if decision.NeedsRoughBuild {
 			flowState.NeedsRoughBuild = true
@@ -293,6 +305,21 @@ func resolvePlanAskUserText(decision *newagentmodel.PlanDecision) string {
 		return strings.TrimSpace(decision.Reason)
 	}
 	return "我还缺一点关键信息，想先向你确认一下。"
+}
+
+func clonePlanContextHook(hook *newagentmodel.ContextHook) *newagentmodel.ContextHook {
+	if hook == nil {
+		return nil
+	}
+	cloned := *hook
+	if len(hook.Packs) > 0 {
+		cloned.Packs = append([]string(nil), hook.Packs...)
+	}
+	cloned.Normalize()
+	if cloned.Domain == "" {
+		return nil
+	}
+	return &cloned
 }
 
 func writePlanPinnedBlocks(ctx *newagentmodel.ConversationContext, steps []newagentmodel.PlanStep) {

@@ -17,6 +17,10 @@ var (
 	// 非贪婪 (.*?) 避免匹配到多个标签时过度消耗。
 	decisionTagRegex = regexp.MustCompile(
 		`(?s)<\s*SMARTFLOW_DECISION\s*>(.*?)</\s*SMARTFLOW_DECISION\s*>`)
+	// decisionTagHeadRegex 仅用于识别“起始标签是否已经出现”。
+	// 目的：避免模型已经输出了 <SMARTFLOW_DECISION 开头但尚未输出闭合标签时，
+	// 被长度阈值误判为 fallback（即“假截断”）。
+	decisionTagHeadRegex = regexp.MustCompile(`(?i)<\s*SMARTFLOW_DECISION\b`)
 )
 
 // StreamDecisionResult 描述解析器的最终输出状态。
@@ -24,6 +28,14 @@ type StreamDecisionResult struct {
 	// DecisionJSON 是标签内提取的完整 JSON 字符串。
 	// 调用方应使用 infrallm.ParseJSONObject[T] 将其解析为具体决策类型。
 	DecisionJSON string
+
+	// BeforeText 是 <SMARTFLOW_DECISION> 标签之前的自然语言前言。
+	// 仅用于“标签后正文为空”时的兜底展示，不参与 JSON 解析。
+	BeforeText string
+
+	// AfterText 是 </SMARTFLOW_DECISION> 标签之后的自然语言正文。
+	// 这是主协议约定的用户可见文本来源。
+	AfterText string
 
 	// Fallback=true 表示流中未找到决策标签（超过 500 字符阈值），
 	// RawBuffer 包含全部累积文本，调用方应走 correction 路径。
@@ -51,6 +63,8 @@ type StreamDecisionParser struct {
 	buf           strings.Builder
 	decisionFound bool
 	decisionJSON  string
+	beforeText    string
+	afterText     string
 	rawBuf        string // 用于 fallback/correction
 }
 
@@ -81,8 +95,13 @@ func (p *StreamDecisionParser) Feed(content string) (visible string, ready bool,
 	text := p.buf.String()
 	match := decisionTagRegex.FindStringSubmatchIndex(text)
 	if match == nil {
-		// 标签尚未完整，检查 fallback 阈值。
+		// 1. 标签尚未完整，检查 fallback 阈值。
+		// 2. 仅当“完全没有出现起始标签”时才允许 fallback。
+		// 3. 若已经出现起始标签但还没闭合，则继续等待后续 chunk，避免早退。
 		if len(text) > 500 {
+			if decisionTagHeadRegex.MatchString(text) {
+				return "", false, nil
+			}
 			p.decisionFound = true
 			p.rawBuf = text
 			return text, true, fmt.Errorf("决策标签解析超时，未找到 SMARTFLOW_DECISION 标签")
@@ -110,13 +129,18 @@ func (p *StreamDecisionParser) Feed(content string) (visible string, ready bool,
 	p.decisionJSON = jsonStr
 	p.rawBuf = text
 
-	// 提取标签之后的文本作为 visible。
+	// 1. 同时提取标签前/标签后的自然语言片段。
+	// 2. 标签后正文仍然作为主协议 visible 返回，保持现有流式链路不变。
+	// 3. 标签前前言只记入 Result，供 execute 在“后文为空”时兜底补发。
 	fullMatch := groups[0]
 	tagEndIdx := strings.Index(text, fullMatch)
 	if tagEndIdx >= 0 {
+		beforeTag := strings.TrimSpace(text[:tagEndIdx])
 		afterTag := text[tagEndIdx+len(fullMatch):]
 		afterTag = strings.TrimPrefix(afterTag, "\r\n")
 		afterTag = strings.TrimPrefix(afterTag, "\n")
+		p.beforeText = beforeTag
+		p.afterText = afterTag
 		return afterTag, true, nil
 	}
 
@@ -138,6 +162,8 @@ func (p *StreamDecisionParser) DecisionJSON() string {
 func (p *StreamDecisionParser) Result() *StreamDecisionResult {
 	r := &StreamDecisionResult{
 		DecisionJSON: p.decisionJSON,
+		BeforeText:   p.beforeText,
+		AfterText:    p.afterText,
 		RawBuffer:    p.rawBuf,
 	}
 	if p.rawBuf != "" && p.decisionJSON == "" {

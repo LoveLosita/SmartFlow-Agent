@@ -9,6 +9,7 @@ import (
 	"time"
 
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
+	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 	"github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
 )
 
@@ -146,7 +147,15 @@ func (n *AgentNodes) Execute(ctx context.Context, st *newagentmodel.AgentGraphSt
 
 	// 2. 把工具 schema 注入上下文，供 LLM 看到真实工具边界。
 	if st.Deps.ToolRegistry != nil {
-		schemas := st.Deps.ToolRegistry.Schemas()
+		activeDomain := ""
+		var activePacks []string
+		if flowState := st.EnsureFlowState(); flowState != nil {
+			activeDomain, activePacks = resolveEffectiveExecuteToolDomain(flowState)
+		}
+		schemas := st.Deps.ToolRegistry.SchemasForActiveDomain(activeDomain, activePacks)
+		if flowState := st.EnsureFlowState(); flowState != nil && flowState.ActiveOptimizeOnly {
+			schemas = newagenttools.FilterSchemasForActiveOptimize(schemas)
+		}
 		toolSchemas := make([]newagentmodel.ToolSchemaContext, len(schemas))
 		for i, s := range schemas {
 			toolSchemas[i] = newagentmodel.ToolSchemaContext{
@@ -177,20 +186,6 @@ func (n *AgentNodes) Execute(ctx context.Context, st *newagentmodel.AgentGraphSt
 		ThinkingEnabled:       st.Deps.ThinkingExecute,
 		PersistVisibleMessage: st.Deps.PersistVisibleMessage,
 	}); err != nil {
-		return nil, err
-	}
-
-	saveAgentState(ctx, st)
-	return st, nil
-}
-
-// OrderGuard 负责把 graph 的 order_guard 节点请求转给 RunOrderGuardNode。
-func (n *AgentNodes) OrderGuard(ctx context.Context, st *newagentmodel.AgentGraphState) (*newagentmodel.AgentGraphState, error) {
-	if st == nil {
-		return nil, errors.New("order_guard node: state is nil")
-	}
-
-	if err := RunOrderGuardNode(ctx, st); err != nil {
 		return nil, err
 	}
 
@@ -336,4 +331,32 @@ func deleteAgentState(ctx context.Context, st *newagentmodel.AgentGraphState) {
 	}
 
 	_ = store.Delete(ctx, flowState.ConversationID)
+}
+
+// resolveEffectiveExecuteToolDomain 计算“本轮 execute 真正应看到”的工具域快照。
+//
+// 职责边界：
+// 1. 优先读取 PendingContextHook，让首轮 execute 的 schema 注入与即将生效的规则包保持一致；
+// 2. 只做只读推导，不消费 PendingContextHook，真正的状态更新仍由 RunExecuteNode 统一处理；
+// 3. hook 非法或为空时，回退到已持久化的 ActiveToolDomain/ActiveToolPacks，保持历史链路兼容。
+func resolveEffectiveExecuteToolDomain(flowState *newagentmodel.CommonState) (string, []string) {
+	if flowState == nil {
+		return "", nil
+	}
+
+	// 1. 若 plan / rough_build 已写入待生效 hook，则首轮 execute 必须优先按它推导工具域，
+	//    否则 prompt 里的规则包和注入的工具 schema 会错位，模型第一轮看不到该用的工具。
+	if hook := flowState.PendingContextHook; hook != nil {
+		domain := newagenttools.NormalizeToolDomain(hook.Domain)
+		if domain != "" {
+			return domain, newagenttools.ResolveEffectiveToolPacks(domain, hook.Packs)
+		}
+	}
+
+	// 2. hook 不可用时回退到当前已激活域，保持老链路与恢复链路的行为不变。
+	domain := newagenttools.NormalizeToolDomain(flowState.ActiveToolDomain)
+	if domain == "" {
+		return "", nil
+	}
+	return domain, newagenttools.ResolveEffectiveToolPacks(domain, flowState.ActiveToolPacks)
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
+	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 	"github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
 )
 
@@ -69,30 +70,57 @@ func RunRoughBuildNode(ctx context.Context, st *newagentmodel.AgentGraphState) e
 		return nil
 	}
 
-	// 4. 加载 ScheduleState（含 DayMapping，用于坐标转换）。
+	// 4. 粗排前强制刷新 ScheduleState，避免复用旧快照窗口。
+	// 4.1 设计意图：当用户做“超前规划”时，窗口必须跟随本轮 task_class_ids，而不是沿用历史“当前周”窗口。
+	// 4.2 做法：主动丢弃内存中的旧 state，让 EnsureScheduleState 走 provider 重新加载。
+	// 4.3 失败策略：若任务类缺少有效起止日期，provider 会返回错误，由上层统一透传并让用户补齐字段。
+	st.ScheduleState = nil
+	st.OriginalScheduleState = nil
+
+	// 5. 加载 ScheduleState（含 DayMapping，用于坐标转换）。
 	scheduleState, err := st.EnsureScheduleState(ctx)
 	if err != nil {
+		// 1. 当任务类时间窗缺失时，按“可恢复失败”收口：提示用户先补齐起止日期，再重试粗排。
+		// 2. 不把这类输入缺失上抛为系统错误，避免整条链路直接 fallback 到普通聊天。
+		if strings.Contains(err.Error(), "任务类缺少有效时间窗") {
+			failureMessage := "开始智能编排前，我需要任务类的起止日期（start_date / end_date）。请先补齐时间窗，再让我继续排课。"
+			_ = emitter.EmitStatus(
+				roughBuildStatusBlock,
+				roughBuildStageName,
+				"rough_build_need_time_window",
+				failureMessage,
+				true,
+			)
+			flowState.NeedsRoughBuild = false
+			flowState.Abort(
+				roughBuildStageName,
+				"rough_build_window_missing",
+				failureMessage,
+				err.Error(),
+			)
+			return nil
+		}
 		return fmt.Errorf("rough build node: 加载日程状态失败: %w", err)
 	}
 	if scheduleState == nil {
 		return fmt.Errorf("rough build node: ScheduleState 为空，无法执行粗排")
 	}
 
-	// 5. 调用粗排算法。
+	// 6. 调用粗排算法。
 	placements, err := st.Deps.RoughBuildFunc(ctx, flowState.UserID, taskClassIDs)
 	if err != nil {
 		return fmt.Errorf("rough build node: 粗排算法失败: %w", err)
 	}
 
-	// 6. 把粗排结果写入 ScheduleState。
+	// 7. 把粗排结果写入 ScheduleState。
 	applyStats := applyRoughBuildPlacements(scheduleState, placements)
 
-	// 6.1 标记本轮产生过日程变更，供 deliver 节点判断是否推送"排程完毕"卡片。
+	// 7.1 标记本轮产生过日程变更，供 deliver 节点判断是否推送“排程完毕”卡片。
 	if applyStats.AppliedCount > 0 {
 		flowState.HasScheduleChanges = true
 	}
 
-	// 7. 先校验粗排后是否仍有真实 pending。
+	// 8. 先校验粗排后是否仍有真实 pending。
 	stillPending := countPendingTasks(scheduleState, taskClassIDs)
 	log.Printf(
 		"[DEBUG] rough_build scope_task_classes=%v placements=%d applied=%d day_mapping_miss=%d task_item_match_miss=%d pending_in_scope=%d total_tasks=%d window_days=%d",
@@ -197,8 +225,30 @@ func RunRoughBuildNode(ctx context.Context, st *newagentmodel.AgentGraphState) e
 	flowState.NeedsRoughBuild = false
 	flowState.NeedsRefineAfterRoughBuild = false
 	if !shouldRefineAfterRoughBuild {
+		flowState.ActiveOptimizeOnly = false
 		flowState.Done()
 		return nil
+	}
+	if strings.TrimSpace(flowState.OptimizationMode) == "" {
+		flowState.OptimizationMode = "first_full"
+	}
+	// 1. 仅“粗排后自动进入微调”的链路打开主动优化专用模式。
+	// 2. 该模式会把 execute 裁成 analyze_health + move + swap 的最小工具面，
+	//    迫使 LLM 基于候选做选择，而不是重新全窗乱搜。
+	// 3. 用户后续重开新请求时，会在 CommonState 的重置入口统一清掉这个标记。
+	flowState.ActiveOptimizeOnly = true
+	// 12. 粗排后进入 execute 微调时，补一条一次性 context hook。
+	//
+	// 1. 目的：即使这条链路不回 plan，也能在 execute 首轮拿到建议工具面（analyze + mutation）。
+	// 2. 边界：这里只写“建议激活域/包”，不直接执行 context_tools_add，仍由 execute 按统一入口消费。
+	// 3. 回退：hook 无效时 execute 会自动忽略并清空，不影响主流程。
+	flowState.PendingContextHook = &newagentmodel.ContextHook{
+		Domain: newagenttools.ToolDomainSchedule,
+		Packs: []string{
+			newagenttools.ToolPackAnalyze,
+			newagenttools.ToolPackMutation,
+		},
+		Reason: "rough_build_post_refine",
 	}
 	flowState.Phase = newagentmodel.PhaseExecuting
 	return nil

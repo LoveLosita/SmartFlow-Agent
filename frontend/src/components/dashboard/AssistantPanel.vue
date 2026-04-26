@@ -153,6 +153,10 @@ interface DisplayAssistantBlock {
   event?: ToolTraceEvent
   statusEvent?: StatusTraceEvent
   schedulePreview?: SchedulePreviewData
+  /** 所属的源消息 ID，用于状态查询 */
+  sourceId?: string
+  /** 所属的源消息引用，用于渲染辅助信息 */
+  source?: AssistantMessage
 }
 
 interface AssistantContentBlock {
@@ -223,6 +227,7 @@ const statusTraceEventsMap = reactive<Record<string, StatusTraceEvent[]>>({})
 const toolTraceExpandedMap = reactive<Record<string, boolean>>({})
 const assistantReasoningSeqMap = reactive<Record<string, number>>({})
 const assistantContentBlocksMap = reactive<Record<string, AssistantContentBlock[]>>({})
+const assistantReasoningBlocksMap = reactive<Record<string, AssistantContentBlock[]>>({})
 const assistantTimelineLastKindMap = reactive<Record<string, 'content' | 'tool' | 'status' | 'reasoning' | 'other'>>({})
 const conversationContextStatsMap = reactive<Record<string, ConversationContextStats | null>>({})
 const conversationContextStatsLoadingMap = reactive<Record<string, boolean>>({})
@@ -502,6 +507,11 @@ function appendToolTraceEvent(
   const eventSeq = nextAssistantTimelineSeq()
   const eventId = `${messageId}:tool:${eventSeq}`
 
+  // 如果上一个阶段是推理，则结束并折叠它
+  if (assistantTimelineLastKindMap[messageId] === 'reasoning') {
+    finishCurrentReasoningBlock(messageId)
+  }
+
   toolTraceEventsMap[messageId].push({
     id: eventId,
     seq: eventSeq,
@@ -536,6 +546,11 @@ function appendStatusTraceEvent(
   }
 
   const eventSeq = nextAssistantTimelineSeq()
+  // 如果上一个阶段是推理，则结束并折叠它
+  if (assistantTimelineLastKindMap[messageId] === 'reasoning') {
+    finishCurrentReasoningBlock(messageId)
+  }
+
   statusEvents.push({
     id: `${messageId}:status:${eventSeq}`,
     seq: eventSeq,
@@ -554,6 +569,11 @@ function appendAssistantContentChunk(messageId: string, chunk: string) {
   const blocks = assistantContentBlocksMap[messageId]
   const lastKind = assistantTimelineLastKindMap[messageId]
 
+  // 如果是从推理切换到正文，则结束并折叠推理块
+  if (lastKind === 'reasoning') {
+    finishCurrentReasoningBlock(messageId)
+  }
+
   if (lastKind === 'content' && blocks.length > 0) {
     blocks[blocks.length - 1]!.text += chunk
     return
@@ -566,6 +586,41 @@ function appendAssistantContentChunk(messageId: string, chunk: string) {
     text: chunk,
   })
   assistantTimelineLastKindMap[messageId] = 'content'
+}
+
+/**
+ * 追加助理推理片段到特定消息的块映射中
+ * 1. 采用与正文相同的块化存储逻辑，确保推理片段能按 sequence 与工具等交错排序
+ * 2. 如果当前时间线最后一种类型就是 'reasoning'，则追加到最后一个块，避免碎片化
+ */
+function appendAssistantReasoningChunk(messageId: string, chunk: string) {
+  if (!chunk) {
+    return
+  }
+  if (!assistantReasoningBlocksMap[messageId]) {
+    assistantReasoningBlocksMap[messageId] = []
+  }
+  const blocks = assistantReasoningBlocksMap[messageId]
+  const lastKind = assistantTimelineLastKindMap[messageId]
+
+  if (lastKind === 'reasoning' && blocks.length > 0) {
+    blocks[blocks.length - 1]!.text += chunk
+    return
+  }
+
+  const seq = nextAssistantTimelineSeq()
+  const blockId = `${messageId}:reasoning:${seq}`
+  blocks.push({
+    id: blockId,
+    seq,
+    text: chunk,
+  })
+  
+  // 记录块级别的起始时间和初始折叠状态
+  reasoningStartedAtMap[blockId] = Date.now()
+  reasoningCollapsedMap[blockId] = false
+  
+  assistantTimelineLastKindMap[messageId] = 'reasoning'
 }
 
 function mapToolEventState(rawStatus?: string): ToolTraceState {
@@ -993,22 +1048,21 @@ function markReasoningStart(message: AssistantMessage) {
   reasoningStartedAtMap[message.id] = Date.now()
 }
 
-function markReasoningFinished(message: AssistantMessage) {
-  const startedAt = reasoningStartedAtMap[message.id]
-  if (startedAt && !reasoningDurationMap[message.id]) {
-    reasoningDurationMap[message.id] = Math.max(1, Math.round((Date.now() - startedAt) / 1000))
+function markReasoningFinished(blockId: string, messageId: string) {
+  const startedAt = reasoningStartedAtMap[blockId]
+  if (startedAt && !reasoningDurationMap[blockId]) {
+    reasoningDurationMap[blockId] = Math.max(1, Math.round((Date.now() - startedAt) / 1000))
   }
-
-  thinkingMessageMap[message.id] = false
+  thinkingMessageMap[messageId] = false
 }
 
-function getReasoningDurationSeconds(message: AssistantMessage) {
-  const fixedDuration = reasoningDurationMap[message.id]
+function getReasoningDurationSeconds(blockId: string) {
+  const fixedDuration = reasoningDurationMap[blockId]
   if (fixedDuration) {
     return fixedDuration
   }
 
-  const startedAt = reasoningStartedAtMap[message.id]
+  const startedAt = reasoningStartedAtMap[blockId]
   if (!startedAt) {
     return 0
   }
@@ -1016,13 +1070,28 @@ function getReasoningDurationSeconds(message: AssistantMessage) {
   return Math.max(1, Math.round((reasoningDisplayNow.value - startedAt) / 1000))
 }
 
-function getReasoningStatusLabel(message: AssistantMessage) {
-  const durationSeconds = getReasoningDurationSeconds(message)
+function getReasoningStatusLabel(block: DisplayAssistantBlock) {
+  const durationSeconds = getReasoningDurationSeconds(block.id)
   if (durationSeconds > 0) {
     return `已思考（用时 ${durationSeconds} 秒）`
   }
 
-  return isStreamingMessage(message) && isThinkingMessage(message) ? '思考中' : '已思考'
+  const isThinking = block.sourceId === activeStreamingMessageId.value && thinkingMessageMap[block.sourceId]
+  return isThinking ? '思考中' : '已思考'
+}
+
+/**
+ * 结束当前消息正在进行的推理块
+ * 1. 计算耗时
+ * 2. 自动折叠
+ */
+function finishCurrentReasoningBlock(messageId: string) {
+  const blocks = assistantReasoningBlocksMap[messageId] || []
+  if (blocks.length === 0) return
+  const lastBlock = blocks[blocks.length - 1]
+  
+  markReasoningFinished(lastBlock.id, messageId)
+  reasoningCollapsedMap[lastBlock.id] = true
 }
 
 function isReasoningCollapsed(messageId: string) {
@@ -1086,6 +1155,8 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
         type: 'tool',
         seq: event.seq,
         event,
+        sourceId: source.id,
+        source,
       })
     }
 
@@ -1096,6 +1167,32 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
         type: 'status',
         seq: statusEvent.seq,
         statusEvent,
+        sourceId: source.id,
+        source,
+      })
+    }
+
+    // 从推理块映射中提取所有独立的推理片段
+    const reasoningBlocks = assistantReasoningBlocksMap[source.id] || []
+    if (reasoningBlocks.length > 0) {
+      for (const rb of reasoningBlocks) {
+        blocks.push({
+          id: rb.id,
+          type: 'reasoning',
+          seq: rb.seq,
+          text: rb.text,
+          sourceId: source.id,
+          source,
+        })
+      }
+    } else if (source.id === activeStreamingMessageId.value && thinkingMessageMap[source.id]) {
+      // 流式过程中尚未有实质文本产出时的“思考中”占位块
+      blocks.push({
+        id: `${source.id}:reasoning:streaming`,
+        type: 'reasoning',
+        seq: assistantReasoningSeqMap[source.id] || 10,
+        sourceId: source.id,
+        source,
       })
     }
 
@@ -1108,6 +1205,8 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
           type: 'content',
           seq: contentBlock.seq,
           text: contentBlock.text,
+          sourceId: source.id,
+          source,
         })
       }
       continue
@@ -1121,6 +1220,8 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
         type: 'content',
         seq: fallbackSeq,
         text: source.content,
+        sourceId: source.id,
+        source,
       })
     }
   }
@@ -1132,16 +1233,6 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
       type: 'schedule_card',
       seq: nextAssistantTimelineSeq(),
       schedulePreview,
-    })
-  }
-
-  if (shouldShowDisplayReasoningBox(dm)) {
-    const reasoningSeq = getDisplayReasoningSeq(dm)
-    blocks.push({
-      id: `${dm.id}:reasoning`,
-      type: 'reasoning',
-      seq: reasoningSeq > 0 ? reasoningSeq : 10,
-      text: dm.reasoning,
     })
   }
 
@@ -1180,38 +1271,16 @@ function getToolTraceStateLabel(state: ToolTraceState): string {
   return '已完成'
 }
 
-function shouldShowDisplayReasoningBox(dm: DisplayMessage): boolean {
-  if (dm.role !== 'assistant') return false
-  return dm.sources.some(m =>
-    Boolean(m.reasoning?.trim()) ||
-    (m.id === activeStreamingMessageId.value && thinkingMessageMap[m.id] === true),
-  )
-}
-
 function shouldShowDisplayAnsweringIndicator(dm: DisplayMessage): boolean {
   return isDisplayStreaming(dm) && 
          dm.sources.every(m => thinkingMessageMap[m.id] !== true) &&
          !dm.content.trim()
 }
 
-function isDisplayReasoningCollapsed(dm: DisplayMessage): boolean {
-  return dm.sources.every(m => reasoningCollapsedMap[m.id] === true)
-}
-
-function toggleDisplayReasoningCollapse(dm: DisplayMessage): void {
-  const newCollapsed = !isDisplayReasoningCollapsed(dm)
-  dm.sources.forEach(m => { reasoningCollapsedMap[m.id] = newCollapsed })
-}
-
 function getDisplayReasoningStatusLabel(dm: DisplayMessage): string {
-  const totalSeconds = dm.sources.reduce(
-    (sum, m) => sum + (reasoningDurationMap[m.id] ?? 0), 0,
-  )
-  if (totalSeconds > 0) return `已思考（用时 ${totalSeconds} 秒）`
-  const hasActiveThinking = dm.sources.some(
-    m => m.id === activeStreamingMessageId.value && thinkingMessageMap[m.id] === true,
-  )
-  return hasActiveThinking ? '思考中' : '已思考'
+  // 此函数已废弃，推理状态现已下沉到各 source 块处理。
+  // 仅保留空实现以防意外调用。
+  return '已思考'
 }
 
 function isMessageViewportAtBottom(viewport: HTMLElement) {
@@ -1576,7 +1645,8 @@ function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[
           
           if (reasoningChunk) {
             currentAssistantMessage.reasoning = oldReasoning + reasoningChunk
-            // 记录推理块的 seq 环境
+            // 时序化存储推理内容
+            appendAssistantReasoningChunk(mid, reasoningChunk)
             if (!assistantReasoningSeqMap[mid]) {
               assistantReasoningSeqMap[mid] = event.seq
             }
@@ -1867,8 +1937,8 @@ async function submitConfirmRejectMessage() {
     requestExtra: {
       resume: {
         interaction_id: interactionId,
-        type: 'ask_user',
-        action: 'reply'
+        type: 'confirm',
+        action: 'reject'
       }
     }
   })
@@ -2107,10 +2177,9 @@ function processSseBlock(block: string, assistantMessage: AssistantMessage) {
 
   if (payload === '[DONE]') {
     if (isThinkingMessage(assistantMessage)) {
-      markReasoningFinished(assistantMessage)
+      finishCurrentReasoningBlock(assistantMessage.id)
     }
     activeStreamingMessageId.value = ''
-    reasoningCollapsedMap[assistantMessage.id] = true
     // 整个 SSE 流结束信号
     void loadConversationContextStats(selectedConversationId.value, true)
     return
@@ -2150,27 +2219,23 @@ function processSseBlock(block: string, assistantMessage: AssistantMessage) {
     if (!assistantReasoningSeqMap[assistantMessage.id]) {
       assistantReasoningSeqMap[assistantMessage.id] = nextAssistantTimelineSeq()
     }
-    assistantTimelineLastKindMap[assistantMessage.id] = 'reasoning'
+    appendAssistantReasoningChunk(assistantMessage.id, delta.reasoning_content)
     assistantMessage.reasoning = `${assistantMessage.reasoning || ''}${delta.reasoning_content}`
   }
 
   if (!shouldSuppressVisibleDelta && typeof delta?.content === 'string' && delta.content) {
     appendAssistantContentChunk(assistantMessage.id, delta.content)
     if (isThinkingMessage(assistantMessage)) {
-      // 1. 一旦正文开始回流，立刻结束“思考中”阶段，避免两个等待动画同时出现。
-      // 2. 这样视觉上始终保持“先思考，再输出正文”的单阶段感知。
-      // 3. 若后端偶发交错发送 reasoning/content，也以前端阶段机兜底，优先保证阅读一致性。
-      markReasoningFinished(assistantMessage)
+      finishCurrentReasoningBlock(assistantMessage.id)
     }
     assistantMessage.content += delta.content
   }
 
   if (finishReason) {
     if (isThinkingMessage(assistantMessage)) {
-      markReasoningFinished(assistantMessage)
+      finishCurrentReasoningBlock(assistantMessage.id)
     }
     activeStreamingMessageId.value = ''
-    reasoningCollapsedMap[assistantMessage.id] = true
     // 单条消息结束标志
     void loadConversationContextStats(selectedConversationId.value, true)
   }
@@ -2681,18 +2746,18 @@ onBeforeUnmount(() => {
                           />
                         </svg>
                       </span>
-                      <span class="chat-message__reasoning-status">{{ getDisplayReasoningStatusLabel(dm) }}</span>
+                      <span class="chat-message__reasoning-status">{{ getReasoningStatusLabel(block) }}</span>
                     </div>
                     <button
                       type="button"
                       class="chat-message__reasoning-toggle"
-                      :aria-label="isDisplayReasoningCollapsed(dm) ? '展开深度思考' : '折叠深度思考'"
-                      @click="toggleDisplayReasoningCollapse(dm)"
+                      :aria-label="isReasoningCollapsed(block.id) ? '展开深度思考' : '折叠深度思考'"
+                      @click="toggleReasoningCollapse(block.id)"
                     >
                       <span class="chat-message__reasoning-chevron">
                         <svg
                           class="chat-message__reasoning-chevron-icon"
-                          :class="{ 'chat-message__reasoning-chevron-icon--expanded': !isDisplayReasoningCollapsed(dm) }"
+                          :class="{ 'chat-message__reasoning-chevron-icon--expanded': !isReasoningCollapsed(block.id) }"
                           width="14"
                           height="14"
                           viewBox="0 0 14 14"
@@ -2709,11 +2774,11 @@ onBeforeUnmount(() => {
                     </button>
                   </div>
 
-                  <div v-if="!isDisplayReasoningCollapsed(dm)" class="chat-message__reasoning-body">
+                  <div v-if="isReasoningCollapsed(block.id) === false" class="chat-message__reasoning-body">
                     <div
                       v-if="block.text"
                       class="chat-message__markdown chat-message__markdown--reasoning"
-                      v-html="renderMessageMarkdown(block.text)"
+                      v-html="renderMessageMarkdown(block.text || '')"
                     />
                     <div v-else class="chat-message__streaming chat-message__streaming--reasoning">
                       <div class="thinking-indicator">

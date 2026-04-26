@@ -380,7 +380,7 @@ func QueryTargetTasks(state *ScheduleState, args map[string]any) string {
 	// 5. 队列化（可选）：将筛选结果自动纳入“待处理队列”。
 	//
 	// 步骤化说明：
-	// 1. 默认 enqueue=true，让 LLM 优先走“逐项处理”而不是一次性批量组合；
+	// 1. 默认保持纯读，不自动入队；只有显式 enqueue=true 时才进入队列链路；
 	// 2. reset_queue=true 时会清空旧队列后再入队，适合开启新一轮筛选；
 	// 3. 入队仅保存 task_id，不复制任务全文，避免队列状态膨胀。
 	queueInfo := (*queryTargetQueueInfo)(nil)
@@ -566,7 +566,7 @@ func parseQueryTargetOptions(state *ScheduleState, args map[string]any) (queryTa
 		Limit:        limit,
 		TaskIDSet:    intSliceToSet(taskIDs),
 		Category:     strings.TrimSpace(readStringAny(args, "category", "")),
-		Enqueue:      readBoolAnyWithDefault(args, true, "enqueue"),
+		Enqueue:      readBoolAnyWithDefault(args, false, "enqueue"),
 		ResetQueue:   readBoolAnyWithDefault(args, false, "reset_queue"),
 	}, nil
 }

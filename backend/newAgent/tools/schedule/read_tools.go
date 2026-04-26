@@ -92,6 +92,13 @@ func GetOverview(state *ScheduleState) string {
 				}
 				line += fmt.Sprintf(" 排除时段=[%s]", strings.Join(parts, ","))
 			}
+			if len(tc.ExcludedDaysOfWeek) > 0 {
+				parts := make([]string, len(tc.ExcludedDaysOfWeek))
+				for i, d := range tc.ExcludedDaysOfWeek {
+					parts[i] = fmt.Sprintf("%d", d)
+				}
+				line += fmt.Sprintf(" 排除星期=[%s]", strings.Join(parts, ","))
+			}
 			sb.WriteString(line + "\n")
 		}
 	}

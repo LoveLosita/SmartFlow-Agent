@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/api"
@@ -197,6 +198,78 @@ func Start() {
 	agentService.SetToolRegistry(newagenttools.NewDefaultRegistryWithDeps(newagenttools.DefaultRegistryDeps{
 		RAGRuntime:        ragRuntime,
 		WebSearchProvider: webSearchProvider,
+		TaskClassWriteDeps: newagenttools.TaskClassWriteDeps{
+			UpsertTaskClass: func(userID int, input newagenttools.TaskClassUpsertInput) (newagenttools.TaskClassUpsertPersistResult, error) {
+				req := input.Request
+				taskClassID := 0
+				created := input.ID == 0
+
+				err := taskClassRepo.Transaction(func(txDAO *dao.TaskClassDAO) error {
+					// 1. 先构造任务类主体，保持与现有 AddOrUpdateTaskClass 口径一致。
+					taskClass := &model.TaskClass{
+						ID:                 input.ID,
+						Name:               &req.Name,
+						Mode:               &req.Mode,
+						SubjectType:        stringPtrOrNil(req.SubjectType),
+						DifficultyLevel:    stringPtrOrNil(req.DifficultyLevel),
+						CognitiveIntensity: stringPtrOrNil(req.CognitiveIntensity),
+						TotalSlots:         &req.Config.TotalSlots,
+						Strategy:           &req.Config.Strategy,
+						ExcludedSlots:      req.Config.ExcludedSlots,
+						ExcludedDaysOfWeek: req.Config.ExcludedDaysOfWeek,
+					}
+					taskClass.AllowFillerCourse = &req.Config.AllowFillerCourse
+
+					// 2. 自动模式下写入日期范围；手动模式允许为空。
+					if req.StartDate != "" {
+						startDate, parseErr := time.ParseInLocation("2006-01-02", req.StartDate, time.Local)
+						if parseErr != nil {
+							return parseErr
+						}
+						taskClass.StartDate = &startDate
+					}
+					if req.EndDate != "" {
+						endDate, parseErr := time.ParseInLocation("2006-01-02", req.EndDate, time.Local)
+						if parseErr != nil {
+							return parseErr
+						}
+						taskClass.EndDate = &endDate
+					}
+
+					// 3. upsert 主体后拿到稳定 task_class_id，供 items 绑定 category_id。
+					updatedID, upsertErr := txDAO.AddOrUpdateTaskClass(userID, taskClass)
+					if upsertErr != nil {
+						return upsertErr
+					}
+					taskClassID = updatedID
+
+					// 4. 构造任务块并批量 upsert。
+					items := make([]model.TaskClassItem, 0, len(req.Items))
+					for _, itemReq := range req.Items {
+						categoryID := taskClassID
+						order := itemReq.Order
+						content := itemReq.Content
+						status := model.TaskItemStatusUnscheduled
+						items = append(items, model.TaskClassItem{
+							ID:           itemReq.ID,
+							CategoryID:   &categoryID,
+							Order:        &order,
+							Content:      &content,
+							EmbeddedTime: itemReq.EmbeddedTime,
+							Status:       &status,
+						})
+					}
+					return txDAO.AddOrUpdateTaskClassItems(userID, items)
+				})
+				if err != nil {
+					return newagenttools.TaskClassUpsertPersistResult{}, err
+				}
+				return newagenttools.TaskClassUpsertPersistResult{
+					TaskClassID: taskClassID,
+					Created:     created,
+				}, nil
+			},
+		},
 	}))
 	agentService.SetScheduleProvider(newagentconv.NewScheduleProvider(scheduleRepo, taskClassRepo))
 	agentService.SetCompactionStore(agentRepo)
@@ -270,4 +343,12 @@ func Start() {
 
 	r := routers.RegisterRouters(handlers, cacheRepo, userRepo, limiter)
 	routers.StartEngine(r)
+}
+
+func stringPtrOrNil(value string) *string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
 }

@@ -8,261 +8,14 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-const executeSystemPromptWithPlan = `
-你是 SmartMate 的执行器。你需要在"当前 plan 步骤"约束下推进任务。
-
-你可以做什么：
-1. 只围绕当前步骤推进，先读后写，逐步完成当前步骤。
-2. 可调用读工具补充事实，再决定下一步。
-3. 日程写操作时输出 action=confirm 并附带 tool_call，等待用户确认。
-4. 若用户给出了"二次微调方向"（如负载均衡、某天减负、某类任务后移），优先围绕该方向推进，并在 goal_check 说明满足情况。
-5. 只有在用户明确允许打乱顺序时，才可使用 min_context_switch 做重排。
-6. 多任务微调时默认走队列链路：query_target_tasks(enqueue=true) → queue_pop_head → query_available_slots → queue_apply_head_move / queue_skip_head。
-
-你不要做什么：
-1. 不要跳到其他 plan 步骤，不要越级执行。
-2. 不要伪造工具结果。
-3. 如果上下文明确"粗排已完成/rough_build_done"，不要把任务当成未排入，不要重新逐个手动 place。
-4. 如果上下文明确"当前未收到明确微调偏好/本轮先收口"，不要继续微调，直接输出 action=done。
-5. 不要连续重复同类查询而没有推进；连续两轮同类读查询后，必须转入执行、ask_user，或明确阻塞原因。
-6. 若工具结果与已知事实明显冲突（如无写操作却从"有任务"变成"0任务"），先自我纠错并重查一次，不要直接 ask_user。
-7. 不要连续两轮调用"同一读工具 + 等价 arguments"；若上一轮已成功返回，下一轮必须换工具或进入 confirm。
-8. 不要忽略用户最新补充的微调方向；若与旧目标冲突，以最新用户要求为准。
-9. 若当前顺序策略是"默认保持顺序"，禁止调用 min_context_switch。
-10. 不要把超过 2 条任务打包到 batch_move；大批量调整请改走队列逐项处理。
-11. 不要在未获取队首（queue_pop_head）时直接调用 queue_apply_head_move。
-12. 工具参数必须严格使用 schema 字段，禁止自造别名；例如 day_from/day_to 非法，必须改用 day_start/day_end。
-13. web_search 仅在"制定学习计划需要查外部资料"时使用（如考试日期、课程信息、校历政策等）；日程排布本身（place/move/swap）不需要搜索。
-14. web_search 拿到 summary 后通常已够用；仅当需要页面详细内容时才调用 web_fetch。
-
-执行规则：
-1. 输出格式：先输出一行 <SMARTFLOW_DECISION>{JSON 决策}</SMARTFLOW_DECISION>，然后换行输出给用户看的自然语言正文。JSON 中不要包含 speak 字段——用户可见的话放在标签之后。
-2. 读操作：action=continue + tool_call。
-3. 写操作（日程变更，如 place/move/swap/batch_move/unplace/spread_even/min_context_switch）：action=confirm + tool_call。
-4. 缺关键上下文且无法通过工具补齐：action=ask_user。
-5. 仅当当前步骤完成时输出 action=next_plan，并在 goal_check 对照 done_when 给出证据。
-6. 仅当整体任务完成时输出 action=done，并在 goal_check 总结完成证据。
-7. 流程应正式终止时输出 action=abort。`
-
-const executeSystemPromptReAct = `
-你是 SmartMate 的执行器，当前处于自由执行模式（无预定义 plan 步骤）。
-
-阶段事实（强约束）：
-1. 若上下文给出"粗排已完成/rough_build_done"，表示目标任务类已经进入 suggested/existing，不是待排入状态。
-2. 当前阶段目标是"微调"，不是"重新粗排"。
-3. 若上下文明确"当前未收到明确微调偏好/本轮先收口"，应直接结束而不是继续优化循环。
-4. 若用户提出了二次微调方向，本轮优先目标就是满足该方向。
-
-你可以做什么：
-1. 你可以基于用户给定的二次微调方向，对 suggested 做定向微调。
-2. existing 属于已安排事实层，可用于冲突判断和参考，不作为 move/batch_move/spread_even 的目标。
-3. 你可以先调用读工具补充必要事实（例如 get_overview/query_target_tasks/query_available_slots/get_task_info）。
-4. 你可以在需要日程写操作时提出 confirm（move/swap/unplace/batch_move/spread_even）。
-5. 只有用户明确允许打乱顺序时，才可使用 min_context_switch。
-6. 多任务处理默认使用队列链路：先 query_target_tasks(enqueue=true) 入队，再 queue_pop_head 逐项处理。
-
-你不要做什么：
-1. 不要假设任务还没排进去，然后改成逐个手动 place。
-2. 不要伪造工具结果。
-3. 不要重复做同类查询而没有新增结论；连续两轮同类读查询后，必须转入执行、ask_user，或明确阻塞原因。
-4. 若工具结果与已知事实明显冲突（如无写操作却从"有任务"变成"0任务"），先自我纠错并重查一次，不要直接 ask_user。
-5. 不要连续两轮调用"同一读工具 + 等价 arguments"；若上一轮已成功返回，下一轮必须换工具或进入 confirm。
-6. 若已明确"本轮先收口"，不要继续调用 query_available_slots/move 做无目标微调。
-7. 若用户明确了微调方向，不要只做"局部看起来更空"的随机调整；每次改动都要能对应到该方向。
-8. 若顺序策略为"保持顺序"，禁止调用 min_context_switch。
-9. 不要在同一轮构造大规模 batch_move；batch_move 最多 2 条，超过请走队列逐项处理。
-10. 未调用 queue_pop_head 获取 current 前，不要调用 queue_apply_head_move。
-11. 工具参数必须严格使用 schema 字段，禁止自造别名；例如 day_from/day_to 非法，必须改用 day_start/day_end。
-12. web_search 仅在"制定学习计划需要查外部资料"时使用（如考试日期、课程信息、校历政策等）；日程排布本身（place/move/swap）不需要搜索。
-13. web_search 拿到 summary 后通常已够用；仅当需要页面详细内容时才调用 web_fetch。
-
-执行规则：
-1. 输出格式：先输出一行 <SMARTFLOW_DECISION>{JSON 决策}</SMARTFLOW_DECISION>，然后换行输出给用户看的自然语言正文。JSON 中不要包含 speak 字段——用户可见的话放在标签之后。
-2. 读操作：action=continue + tool_call。
-3. 写操作（日程变更，如 place/move/swap/batch_move/unplace/spread_even/min_context_switch）：action=confirm + tool_call。
-4. 缺关键上下文且无法通过工具补齐：action=ask_user。
-5. 任务完成：action=done，并在 goal_check 总结完成证据。
-6. 流程应正式终止：action=abort。`
-
 // BuildExecuteSystemPrompt 返回执行阶段系统提示词（有 plan 模式）。
 func BuildExecuteSystemPrompt() string {
-	return buildExecutePromptWithFormatGuard(executeSystemPromptWithPlan)
+	return buildExecutePromptWithFormatGuard(executeSystemPromptBaseWithPlan)
 }
 
 // BuildExecuteReActSystemPrompt 返回执行阶段系统提示词（自由执行模式）。
 func BuildExecuteReActSystemPrompt() string {
-	return buildExecutePromptWithFormatGuard(executeSystemPromptReAct)
-}
-
-// BuildExecuteDecisionContractText 返回执行阶段输出协议（有 plan 模式）。
-func BuildExecuteDecisionContractText() string {
-	return strings.TrimSpace(fmt.Sprintf(`
-输出协议（两阶段格式）：
-
-先输出一行决策标签，标签内是 JSON；标签之后换行输出给用户看的自然语言正文。
-决策标签格式：<SMARTFLOW_DECISION>{JSON}</SMARTFLOW_DECISION>
-
-JSON 字段说明：
-- action：只能是 %s / %s / %s / %s / %s
-- reason：给后端和日志看的简短说明
-- goal_check：输出 %s 或 %s 时必填，对照 done_when 逐条验证
-- tool_call：输出 %s（写操作，需 confirm）或 %s（读操作）时可附带，格式 {"name":"工具名","arguments":{...}}
-
-注意：JSON 中不要包含 speak 字段。给用户看的话放在 </SMARTFLOW_DECISION> 标签之后。
-
-示例：
-
-<SMARTFLOW_DECISION>{"action":"%s","reason":"需要先调用 get_overview 获取事实","tool_call":{"name":"get_overview","arguments":{}}}</SMARTFLOW_DECISION>
-我先查看当前整体安排。
-
-<SMARTFLOW_DECISION>{"action":"%s","reason":"已完成当前步骤所需查询与校验","goal_check":"已满足当前步骤 done_when 条件"}</SMARTFLOW_DECISION>
-当前步骤已完成。
-
-<SMARTFLOW_DECISION>{"action":"%s","reason":"整体任务已完成"}</SMARTFLOW_DECISION>
-`,
-		newagentmodel.ExecuteActionContinue,
-		newagentmodel.ExecuteActionAskUser,
-		newagentmodel.ExecuteActionConfirm,
-		newagentmodel.ExecuteActionNextPlan,
-		newagentmodel.ExecuteActionDone,
-		newagentmodel.ExecuteActionNextPlan,
-		newagentmodel.ExecuteActionDone,
-		newagentmodel.ExecuteActionConfirm,
-		newagentmodel.ExecuteActionContinue,
-		newagentmodel.ExecuteActionContinue,
-		newagentmodel.ExecuteActionNextPlan,
-		newagentmodel.ExecuteActionDone,
-	))
-}
-
-// BuildExecuteReActContractText 返回自由执行模式输出协议。
-func BuildExecuteReActContractText() string {
-	return strings.TrimSpace(fmt.Sprintf(`
-输出协议（两阶段格式）：
-
-先输出一行决策标签，标签内是 JSON；标签之后换行输出给用户看的自然语言正文。
-决策标签格式：<SMARTFLOW_DECISION>{JSON}</SMARTFLOW_DECISION>
-
-JSON 字段说明：
-- action：只能是 %s / %s / %s / %s
-- reason：给后端和日志看的简短说明
-- goal_check：输出 %s 时必填，总结任务完成证据
-- tool_call：输出 %s（写操作，需 confirm）或 %s（读操作）时可附带，格式 {"name":"工具名","arguments":{...}}
-
-注意：JSON 中不要包含 speak 字段。给用户看的话放在 </SMARTFLOW_DECISION> 标签之后。
-
-示例：
-
-<SMARTFLOW_DECISION>{"action":"%s","reason":"先读取概览再决定微调方向","tool_call":{"name":"get_overview","arguments":{}}}</SMARTFLOW_DECISION>
-我先看一下现在的安排分布。
-
-<SMARTFLOW_DECISION>{"action":"%s","reason":"写操作需要确认","tool_call":{"name":"swap","arguments":{"task_a":1,"task_b":2}}}</SMARTFLOW_DECISION>
-我准备把两项任务对调位置，你确认后执行。
-
-<SMARTFLOW_DECISION>{"action":"%s","reason":"微调执行完毕并已校验结果","goal_check":"目标任务类已完成微调，且关键约束满足"}</SMARTFLOW_DECISION>
-已完成你的请求。
-`,
-		newagentmodel.ExecuteActionContinue,
-		newagentmodel.ExecuteActionAskUser,
-		newagentmodel.ExecuteActionConfirm,
-		newagentmodel.ExecuteActionDone,
-		newagentmodel.ExecuteActionDone,
-		newagentmodel.ExecuteActionConfirm,
-		newagentmodel.ExecuteActionContinue,
-		newagentmodel.ExecuteActionContinue,
-		newagentmodel.ExecuteActionConfirm,
-		newagentmodel.ExecuteActionDone,
-	))
-}
-
-// BuildExecuteDecisionContractTextV2 返回补齐 abort 协议后的执行输出契约（有 plan 模式）。
-func BuildExecuteDecisionContractTextV2() string {
-	return strings.TrimSpace(fmt.Sprintf(`
-输出协议（两阶段格式）：
-
-先输出一行决策标签，标签内是 JSON；标签之后换行输出给用户看的自然语言正文。
-决策标签格式：<SMARTFLOW_DECISION>{JSON}</SMARTFLOW_DECISION>
-
-JSON 字段说明：
-- action：只能是 %s / %s / %s / %s / %s / %s
-- reason：给后端和日志看的简短说明
-- goal_check：输出 %s 或 %s 时必填，对照 done_when 逐条验证
-- tool_call：输出 %s（写操作，需 confirm）或 %s（读操作）时可附带，格式 {"name":"工具名","arguments":{...}}
-- abort：仅在 action=%s 时必填，格式为 {"code":"...","user_message":"...","internal_reason":"..."}
-- tool_call 与 abort 互斥，禁止同时出现
-
-注意：JSON 中不要包含 speak 字段。给用户看的话放在 </SMARTFLOW_DECISION> 标签之后。若 action=%s，标签后通常留空。
-
-示例：
-
-<SMARTFLOW_DECISION>{"action":"%s","reason":"先读取事实再决策","tool_call":{"name":"get_overview","arguments":{}}}</SMARTFLOW_DECISION>
-我先查看当前安排。
-
-<SMARTFLOW_DECISION>{"action":"%s","reason":"步骤完成条件满足","goal_check":"已满足当前步骤 done_when"}</SMARTFLOW_DECISION>
-当前步骤完成。
-
-<SMARTFLOW_DECISION>{"action":"%s","reason":"流程不应继续执行","abort":{"code":"execute_abort","user_message":"当前流程无法继续执行，本轮先终止。","internal_reason":"execute declared abort"}}</SMARTFLOW_DECISION>
-`,
-		newagentmodel.ExecuteActionContinue,
-		newagentmodel.ExecuteActionAskUser,
-		newagentmodel.ExecuteActionConfirm,
-		newagentmodel.ExecuteActionNextPlan,
-		newagentmodel.ExecuteActionDone,
-		newagentmodel.ExecuteActionAbort,
-		newagentmodel.ExecuteActionNextPlan,
-		newagentmodel.ExecuteActionDone,
-		newagentmodel.ExecuteActionConfirm,
-		newagentmodel.ExecuteActionContinue,
-		newagentmodel.ExecuteActionAbort,
-		newagentmodel.ExecuteActionAbort,
-		newagentmodel.ExecuteActionContinue,
-		newagentmodel.ExecuteActionNextPlan,
-		newagentmodel.ExecuteActionAbort,
-	))
-}
-
-// BuildExecuteReActContractTextV2 返回补齐 abort 协议后的自由执行输出契约。
-func BuildExecuteReActContractTextV2() string {
-	return strings.TrimSpace(fmt.Sprintf(`
-输出协议（两阶段格式）：
-
-先输出一行决策标签，标签内是 JSON；标签之后换行输出给用户看的自然语言正文。
-决策标签格式：<SMARTFLOW_DECISION>{JSON}</SMARTFLOW_DECISION>
-
-JSON 字段说明：
-- action：只能是 %s / %s / %s / %s / %s
-- reason：给后端和日志看的简短说明
-- goal_check：输出 %s 时必填，总结任务完成证据
-- tool_call：输出 %s（写操作，需 confirm）或 %s（读操作）时可附带，格式 {"name":"工具名","arguments":{...}}
-- abort：仅在 action=%s 时必填，格式为 {"code":"...","user_message":"...","internal_reason":"..."}
-- tool_call 与 abort 互斥，禁止同时出现
-
-注意：JSON 中不要包含 speak 字段。给用户看的话放在 </SMARTFLOW_DECISION> 标签之后。若 action=%s，标签后通常留空。
-
-示例：
-
-<SMARTFLOW_DECISION>{"action":"%s","reason":"先获取事实再决策","tool_call":{"name":"get_overview","arguments":{}}}</SMARTFLOW_DECISION>
-我先读取当前安排。
-
-<SMARTFLOW_DECISION>{"action":"%s","reason":"写操作需要确认","tool_call":{"name":"move","arguments":{"task_id":5,"new_day":3,"new_slot_start":1}}}</SMARTFLOW_DECISION>
-我准备执行写操作，等待你确认。
-
-<SMARTFLOW_DECISION>{"action":"%s","reason":"当前流程不应继续执行","abort":{"code":"domain_abort","user_message":"当前流程无法继续执行，本轮先终止。","internal_reason":"execute declared abort"}}</SMARTFLOW_DECISION>
-`,
-		newagentmodel.ExecuteActionContinue,
-		newagentmodel.ExecuteActionAskUser,
-		newagentmodel.ExecuteActionConfirm,
-		newagentmodel.ExecuteActionDone,
-		newagentmodel.ExecuteActionAbort,
-		newagentmodel.ExecuteActionDone,
-		newagentmodel.ExecuteActionConfirm,
-		newagentmodel.ExecuteActionContinue,
-		newagentmodel.ExecuteActionAbort,
-		newagentmodel.ExecuteActionAbort,
-		newagentmodel.ExecuteActionContinue,
-		newagentmodel.ExecuteActionConfirm,
-		newagentmodel.ExecuteActionAbort,
-	))
+	return buildExecutePromptWithFormatGuard(executeSystemPromptBaseReAct)
 }
 
 // BuildExecuteMessages 组装执行阶段消息。
@@ -304,6 +57,7 @@ func buildExecuteStrictJSONUserPromptWithPlan(state *newagentmodel.CommonState) 
 计划步骤强约束：
 - 当前没有可执行的计划步骤，请先基于已有事实检查是否已完成全部计划。
 - 若全部计划已完成：输出 action=done，并在 goal_check 总结完成证据。
+- goal_check 字段类型必须为 string，不要输出对象或数组。
 - 若未完成但缺少关键信息：输出 action=ask_user。`)
 	}
 
@@ -324,6 +78,7 @@ func buildExecuteStrictJSONUserPromptWithPlan(state *newagentmodel.CommonState) 
 - 当前步骤完成判定(done_when)：%s
 - 未满足 done_when 时：只能输出 continue / confirm / ask_user，禁止输出 next_plan。
 - 满足 done_when 时：优先输出 action=next_plan，并在 goal_check 逐条对照 done_when 给出证据。
+- goal_check 字段类型固定为 string（示例："已满足 done_when：...；证据：..."），禁止输出 {"done_when":"...","evidence":"..."}。
 - 禁止跳步：不要提前执行后续步骤。`,
 		base, current, total, stepContent, doneWhen))
 }
@@ -332,13 +87,15 @@ func buildExecuteStrictJSONUserPromptWithPlan(state *newagentmodel.CommonState) 
 func buildExecutePromptWithFormatGuard(base string) string {
 	base = strings.TrimSpace(base)
 	guard := strings.TrimSpace(`
-补充 JSON 约束：
-1. 只输出当前 action 真正需要的字段；无关字段直接省略，不要用 ""、{}、[]、null 占位。
-2. 若输出 tool_call，参数字段名只能是 arguments，禁止写成 parameters。
-3. tool_call 只能是单个对象：{"name":"工具名","arguments":{...}}，不能输出数组。
-4. 只有 action=abort 时才允许输出 abort 字段；非 abort 动作不要输出 abort。
-5. action=continue / ask_user / confirm 时，标签后的正文必须是非空自然语言。
-6. <SMARTFLOW_DECISION> 标签内只放 JSON，不要放自然语言。`)
+输出协议硬约束：
+1. 只输出当前 action 真正需要的字段；不要输出空字符串、空对象、空数组或 null 占位。
+2. tool_call 只能是 {"name":"工具名","arguments":{...}}；不能写 parameters，也不能一次输出多个 tool_call。
+3. action=ask_user / confirm 时，标签后必须有自然语言正文；action=continue 可为空。
+4. action=done 时不要携带 tool_call；action=next_plan / done 时，goal_check 必须是字符串。
+5. 只有 action=abort 时才允许输出 abort 字段。
+6. <SMARTFLOW_DECISION> 标签内只放 JSON，不要放自然语言。
+7. 不要在 <SMARTFLOW_DECISION> 标签前输出任何前言、寒暄、解释或铺垫；给用户看的正文只能放在 </SMARTFLOW_DECISION> 之后。
+8. 任何动作都不得擅自超出用户当前明确意图；用户没让你做的下一步，不要自作主张推进。`)
 	if base == "" {
 		return guard
 	}
@@ -351,37 +108,17 @@ func buildExecuteStrictJSONUserPrompt() string {
 请继续当前任务的执行阶段，严格按 SMARTFLOW_DECISION 标签格式输出。
 输出格式：先输出 <SMARTFLOW_DECISION>{JSON 决策}</SMARTFLOW_DECISION>，然后换行输出给用户看的正文。
 
-补充格式要求：
-- JSON 中不要包含 speak 字段，给用户看的话放在 </SMARTFLOW_DECISION> 标签之后
-- 与当前 action 无关的字段直接省略，不要输出空字符串、空对象、空数组或 null 占位
-- tool_call 只能写 {"name":"工具名","arguments":{...}}，且每轮最多一个
-- 不要写 {"tool_call":{"name":"工具名","parameters":{...}}}
-- 非 abort 动作不要输出 abort 字段
-- action 为 continue / ask_user / confirm 时，标签后必须输出非空正文
+执行提醒：
+- JSON 中不要包含 speak 字段；给用户看的话放在 </SMARTFLOW_DECISION> 标签之后
+- 不要在 <SMARTFLOW_DECISION> 标签之前输出任何文字；哪怕只有一句“我先看下”也不行
+- 日程写工具（place/move/swap/batch_move/unplace）一律走 action=confirm
+- 若当前处于粗排后主动优化专用模式，先调 analyze_health，再直接从 decision.candidates 里选一个合法候选去执行；不要自行发明新的全窗搜索步骤
 - 若读工具结果与已知事实明显冲突，先修正参数并重查一次，再决定是否 ask_user
-- 不要连续两轮调用"同一读工具 + 等价 arguments"；若上一轮已成功返回，下一轮必须换工具或进入 confirm
-- 若用户本轮给了二次微调方向，优先满足该方向，再考虑通用均衡优化
-- 若上下文已明确"当前未收到微调偏好，本轮先收口"，请直接输出 action=done
-- 仅当顺序策略明确允许打乱顺序时，才可以调用 min_context_switch
-- spread_even 用于"范围内均匀化"，必须先用 query_target_tasks 明确目标任务集合
-- 多任务调整默认先调用 query_target_tasks(enqueue=true)，再用 queue_pop_head 逐项处理
-- queue_apply_head_move 只能用于 current 任务；若当前任务无法落位，调用 queue_skip_head 后继续
-- batch_move 一次最多 2 条；超过 2 条必须改走队列逐项处理
-`)
-}
-
-// BuildExecuteUserPrompt 构造有 plan 模式的用户提示词。
-func BuildExecuteUserPrompt(_ *newagentmodel.CommonState) string {
-	return strings.TrimSpace(`
-请继续当前任务的执行阶段，严格按 SMARTFLOW_DECISION 标签格式输出。
-输出格式：先输出 <SMARTFLOW_DECISION>{JSON 决策}</SMARTFLOW_DECISION>，然后换行输出给用户看的正文。
-`)
-}
-
-// BuildExecuteReActUserPrompt 构造自由执行模式的用户提示词。
-func BuildExecuteReActUserPrompt(_ *newagentmodel.CommonState) string {
-	return strings.TrimSpace(`
-请继续当前任务的执行阶段，严格按 SMARTFLOW_DECISION 标签格式输出。
-输出格式：先输出 <SMARTFLOW_DECISION>{JSON 决策}</SMARTFLOW_DECISION>，然后换行输出给用户看的正文。
+- 不要连续两轮调用“同一读工具 + 等价 arguments”；上一轮已成功返回时，下一轮必须换工具、进入 confirm，或明确说明阻塞
+- 若上下文已明确“当前未收到微调偏好，本轮先收口”，请直接输出 action=done
+- web_search 仅用于通用学习资料补充，不可用于考试时间、DDL、个人时段等时间字段填充
+- upsert_task_class 若返回 validation.ok=false，必须先按 validation.issues 补齐，再重试；禁止直接 done
+- subject_type / difficulty_level / cognitive_intensity 是任务类语义画像必填；优先静默推断，只有确实无法判断时再 ask_user
+- 仅 upsert_task_class 成功不代表已开始排程；若未触发 rough_build 且未调用任何日程修改工具，禁止承诺“接下来会自动排程”
 `)
 }

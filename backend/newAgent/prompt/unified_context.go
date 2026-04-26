@@ -1,6 +1,7 @@
 package newagentprompt
 
 import (
+	"fmt"
 	"strings"
 
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
@@ -45,6 +46,13 @@ type StageMessagesConfig struct {
 	// Msg3Role 指定第 4 条消息的角色。
 	// Execute 继续使用 system，其余节点一般使用 user。
 	Msg3Role schema.RoleType
+
+	// SkipBaseSystemPrompt 为 true 时，msg0 只使用节点自己的 SystemPrompt，
+	// 不再拼接 ConversationContext.SystemPrompt。
+	SkipBaseSystemPrompt bool
+
+	// UseLiteToolCatalogMsg 为 true 时，msg0 工具目录采用轻量模式（仅名称与职责）。
+	UseLiteToolCatalogMsg bool
 }
 
 // buildUnifiedStageMessages 组装统一 4 段式消息骨架。
@@ -58,7 +66,7 @@ func buildUnifiedStageMessages(
 	ctx *newagentmodel.ConversationContext,
 	config StageMessagesConfig,
 ) []*schema.Message {
-	msg0 := buildUnifiedMsg0(config.SystemPrompt, ctx)
+	msg0 := buildUnifiedMsg0(config.SystemPrompt, ctx, config.SkipBaseSystemPrompt, config.UseLiteToolCatalogMsg)
 	msg1 := buildUnifiedMsg1(config.Msg1Content)
 	msg2 := buildUnifiedMsg2(config.Msg2Content)
 	msg3 := buildUnifiedMsg3(ctx, config)
@@ -85,17 +93,70 @@ func buildUnifiedMsg3Message(content string, role schema.RoleType) *schema.Messa
 // 1. 先合并基础系统提示与节点系统提示，保证模型身份稳定；
 // 2. 若当前节点注入了工具 schema，则附加紧凑工具目录；
 // 3. 若两部分都为空，则回退到最小兜底提示，避免出现空消息。
-func buildUnifiedMsg0(stageSystemPrompt string, ctx *newagentmodel.ConversationContext) string {
-	base := strings.TrimSpace(mergeSystemPrompts(ctx, stageSystemPrompt))
+func buildUnifiedMsg0(stageSystemPrompt string, ctx *newagentmodel.ConversationContext, skipBaseSystemPrompt bool, useLiteToolCatalog bool) string {
+	base := ""
+	if skipBaseSystemPrompt {
+		base = strings.TrimSpace(stageSystemPrompt)
+	} else {
+		base = strings.TrimSpace(mergeSystemPrompts(ctx, stageSystemPrompt))
+	}
 	if base == "" {
 		base = "你是 SmartMate 助手，请继续当前阶段。"
 	}
 
-	toolCatalog := renderExecuteToolCatalogCompact(ctx)
+	toolCatalog := renderExecuteToolCatalogCompact(ctx, nil)
+	if useLiteToolCatalog {
+		toolCatalog = renderUnifiedToolCatalogLite(ctx)
+	}
 	if toolCatalog == "" {
 		return base
 	}
 	return base + "\n\n" + toolCatalog
+}
+
+// renderUnifiedToolCatalogLite 渲染统一阶段可用工具的轻量目录。
+//
+// 1. 只展示工具名和一句话职责，避免把 execute 的参数/返回示例污染到 plan/chat/deliver。
+// 2. 目录信息仅用于“能力边界感知”，不承担具体参数指导。
+// 3. 当工具数量过多时保留前若干项并给出省略提示，控制 msg0 体积。
+func renderUnifiedToolCatalogLite(ctx *newagentmodel.ConversationContext) string {
+	if ctx == nil {
+		return ""
+	}
+
+	schemas := ctx.ToolSchemasSnapshot()
+	if len(schemas) == 0 {
+		return ""
+	}
+
+	const maxItems = 18
+	lines := []string{"当前可用工具（轻量目录）："}
+	added := 0
+
+	for _, item := range schemas {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			continue
+		}
+		desc := strings.TrimSpace(item.Desc)
+		if desc == "" {
+			lines = append(lines, fmt.Sprintf("- %s", name))
+		} else {
+			lines = append(lines, fmt.Sprintf("- %s：%s", name, desc))
+		}
+		added++
+		if added >= maxItems {
+			break
+		}
+	}
+
+	if added == 0 {
+		return ""
+	}
+	if len(schemas) > added {
+		lines = append(lines, fmt.Sprintf("- 其余 %d 个工具已省略（按需再看）。", len(schemas)-added))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // buildUnifiedMsg1 返回节点自行提供的历史视图。

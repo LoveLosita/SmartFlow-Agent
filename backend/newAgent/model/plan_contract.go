@@ -55,6 +55,19 @@ type PlanDecision struct {
 	PlanSteps       []PlanStep     `json:"plan_steps,omitempty"`
 	NeedsRoughBuild bool           `json:"needs_rough_build,omitempty"`
 	TaskClassIDs    []int          `json:"task_class_ids,omitempty"`
+	ContextHook     *ContextHook   `json:"context_hook,omitempty"`
+}
+
+// ContextHook 表示 plan 阶段给 execute 阶段的上下文注入建议。
+//
+// 职责边界：
+// 1. 仅承载“建议激活哪个 domain/packs”，不负责真正执行 context_tools_add/remove；
+// 2. domain 仅允许 schedule/taskclass，packs 仅允许 schedule 的可选包；
+// 3. 该结构会在 execute 首轮被消费一次，消费后由后端清空。
+type ContextHook struct {
+	Domain string   `json:"domain,omitempty"`
+	Packs  []string `json:"packs,omitempty"`
+	Reason string   `json:"reason,omitempty"`
 }
 
 // Normalize 统一清洗规划决策中的字符串字段。
@@ -68,6 +81,9 @@ func (d *PlanDecision) Normalize() {
 	d.Complexity = PlanComplexity(strings.TrimSpace(string(d.Complexity)))
 	for i := range d.PlanSteps {
 		d.PlanSteps[i].Normalize()
+	}
+	if d.ContextHook != nil {
+		d.ContextHook.Normalize()
 	}
 }
 
@@ -102,6 +118,9 @@ func (d *PlanDecision) Validate() error {
 		if len(d.PlanSteps) > 0 {
 			return fmt.Errorf("%s 动作不应携带 plan_steps", d.Action)
 		}
+		if d.ContextHook != nil {
+			return fmt.Errorf("%s 动作不应携带 context_hook", d.Action)
+		}
 		return nil
 	case PlanActionDone:
 		if len(d.PlanSteps) == 0 {
@@ -110,6 +129,11 @@ func (d *PlanDecision) Validate() error {
 		for i := range d.PlanSteps {
 			if err := d.PlanSteps[i].Validate(); err != nil {
 				return fmt.Errorf("plan_steps[%d] 非法: %w", i, err)
+			}
+		}
+		if d.ContextHook != nil {
+			if err := d.ContextHook.Validate(); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -148,4 +172,74 @@ func (s *PlanStep) Validate() error {
 		return fmt.Errorf("plan step.content 不能为空")
 	}
 	return nil
+}
+
+// Normalize 统一清洗 context hook 字段。
+func (h *ContextHook) Normalize() {
+	if h == nil {
+		return
+	}
+	h.Domain = normalizeContextHookDomain(h.Domain)
+	h.Reason = strings.TrimSpace(h.Reason)
+	h.Packs = normalizeContextHookPacks(h.Domain, h.Packs)
+}
+
+// Validate 校验 context hook 最小合法性。
+func (h *ContextHook) Validate() error {
+	if h == nil {
+		return nil
+	}
+	h.Normalize()
+	if h.Domain == "" {
+		return fmt.Errorf("context_hook.domain 非法，仅支持 schedule/taskclass")
+	}
+	if h.Domain == "taskclass" && len(h.Packs) > 0 {
+		return fmt.Errorf("context_hook.taskclass 暂不支持 packs")
+	}
+	return nil
+}
+
+func normalizeContextHookDomain(domain string) string {
+	switch strings.ToLower(strings.TrimSpace(domain)) {
+	case "schedule":
+		return "schedule"
+	case "taskclass":
+		return "taskclass"
+	default:
+		return ""
+	}
+}
+
+func normalizeContextHookPacks(domain string, packs []string) []string {
+	if domain != "schedule" || len(packs) == 0 {
+		return nil
+	}
+	allowed := map[string]struct{}{
+		"queue":        {},
+		"mutation":     {},
+		"analyze":      {},
+		"detail_read":  {},
+		"deep_analyze": {},
+		"web":          {},
+	}
+	seen := make(map[string]struct{}, len(packs))
+	result := make([]string, 0, len(packs))
+	for _, raw := range packs {
+		pack := strings.ToLower(strings.TrimSpace(raw))
+		if pack == "" || pack == "core" {
+			continue
+		}
+		if _, ok := allowed[pack]; !ok {
+			continue
+		}
+		if _, exists := seen[pack]; exists {
+			continue
+		}
+		seen[pack] = struct{}{}
+		result = append(result, pack)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
