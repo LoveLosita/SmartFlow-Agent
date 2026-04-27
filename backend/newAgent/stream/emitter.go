@@ -358,6 +358,18 @@ func (e *ChunkEmitter) EmitScheduleCompleted(blockID, stage string) error {
 	return e.emitExtraOnly(NewScheduleCompletedExtra(blockID, stage))
 }
 
+// EmitBusinessCard 输出一次业务结果卡片事件。
+//
+// 协议约束：
+// 1. 只走 extra，不附带 content/reasoning；
+// 2. card 为空时直接跳过，避免发出缺少关键字段的空卡片。
+func (e *ChunkEmitter) EmitBusinessCard(blockID, stage string, card *StreamBusinessCardExtra) error {
+	if e == nil || e.emit == nil || card == nil {
+		return nil
+	}
+	return e.emitExtraOnly(NewBusinessCardExtra(blockID, stage, card))
+}
+
 // EmitFinish 统一输出 stop 结束块，并带上 finish extra。
 func (e *ChunkEmitter) EmitFinish(blockID, stage string) error {
 	if e == nil || e.emit == nil {

@@ -14,6 +14,7 @@ const (
 	AgentTimelineKindToolCall          = "tool_call"
 	AgentTimelineKindToolResult        = "tool_result"
 	AgentTimelineKindConfirmRequest    = "confirm_request"
+	AgentTimelineKindBusinessCard      = "business_card"
 	AgentTimelineKindScheduleCompleted = "schedule_completed"
 )
 

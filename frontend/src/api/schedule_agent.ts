@@ -25,8 +25,23 @@ export interface TaskQueryCardTaskItem {
   is_completed?: boolean
 }
 
+export interface TaskQueryCardFilter {
+  key:
+    | 'quadrant'
+    | 'keyword'
+    | 'deadline_after'
+    | 'deadline_before'
+    | 'include_completed'
+    | 'sort'
+  label: string
+  value: string | number | boolean
+  operator?: 'eq' | 'contains' | 'gte' | 'lt'
+  display_text: string
+}
+
 export interface TaskQueryCardData {
   query_summary?: string
+  query_filters?: TaskQueryCardFilter[]
   result_count: number
   shown_count: number
   has_more?: boolean

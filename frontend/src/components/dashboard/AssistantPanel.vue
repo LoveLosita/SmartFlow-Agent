@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, provide } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 import ContextWindowMeter from '@/components/assistant/ContextWindowMeter.vue'
 import TaskClassPlanningPicker from '@/components/assistant/TaskClassPlanningPicker.vue'
@@ -9,6 +10,13 @@ import {
   getConversationList,
   getConversationMeta,
 } from '@/api/agent'
+import {
+  completeTask,
+  undoCompleteTask,
+  getTaskBatchStatus,
+  updateTask,
+  deleteTask
+} from '@/api/task'
 import {
   getSchedulePreview,
   getConversationTimeline,
@@ -33,7 +41,11 @@ import ScheduleFineTuneModal from '@/components/assistant/ScheduleFineTuneModal.
 import { formatConversationTime, formatMessageTime } from '@/utils/date'
 import { renderMarkdown } from '@/utils/markdown'
 import BusinessCardRenderer from '@/components/assistant/cards/BusinessCardRenderer.vue'
-import type { TimelineBusinessCardPayload } from '@/api/schedule_agent'
+import type { 
+  TimelineBusinessCardPayload, 
+  TaskQueryCardData, 
+  TaskRecordCardData 
+} from '@/api/schedule_agent'
 
 interface StreamDeltaPayload {
   content?: string
@@ -74,6 +86,7 @@ interface StreamExtraPayload {
   status?: StreamStatusExtraPayload
   tool?: StreamToolExtraPayload
   confirm?: StreamConfirmPayload
+  business_card?: TimelineBusinessCardPayload
 }
 
 interface StreamEventPayload {
@@ -180,6 +193,8 @@ const props = withDefaults(
 )
 
 const authStore = useAuthStore()
+const route = useRoute()
+const router = useRouter()
 
 const assistantBodyRef = ref<HTMLElement | null>(null)
 const messageViewportRef = ref<HTMLElement | null>(null)
@@ -189,7 +204,8 @@ const conversationLoading = ref(true)
 const conversationLoadingMore = ref(false)
 const chatLoading = ref(false)
 const historyExpanded = ref(true)
-const selectedConversationId = ref('')
+const isStandaloneMode = computed(() => props.viewMode === 'standalone')
+const selectedConversationId = ref(isStandaloneMode.value && route.params.id ? (route.params.id as string) : '')
 
 const selectedThinkingMode = ref<ThinkingModeType>('auto')
 const selectedExecutionMode = ref<'manual' | 'always'>('manual')
@@ -208,6 +224,18 @@ const confirmOverlayState = reactive<ConfirmOverlayState>({
   interactionId: '',
   title: '',
   summary: '',
+})
+
+// 任务编辑相关状态（同首页看板）
+const taskDialogVisible = ref(false)
+const isEditMode = ref(false)
+const editingTaskId = ref<number | null>(null)
+const saveTaskLoading = ref(false)
+const taskForm = reactive({
+  title: '',
+  priority_group: 2,
+  deadline_at: null as Date | null,
+  urgency_threshold_at: null as Date | null,
 })
 
 const conversationPage = ref(1)
@@ -242,6 +270,169 @@ const isFineTuneModalVisible = ref(false)
 const fineTuneLoading = ref(false)
 const activeFineTuneData = ref<SchedulePreviewData | null>(null)
 
+// 任务状态叠加层，用于实时同步和交互
+interface TaskStatusState {
+  is_completed: boolean
+  syncing: boolean
+  is_deleted?: boolean
+  title?: string
+  priority_group?: number
+  deadline_at?: string | null
+}
+const taskStatusMap = reactive<Record<number, TaskStatusState>>({})
+
+/**
+ * 切换任务完成状态
+ * 1. 检查当前是否正在同步，避免重复点击
+ * 2. 乐观更新 UI 或标记 syncing
+ * 3. 调用后端接口反转状态
+ * 4. 失败时回滚并报错
+ */
+async function toggleTaskStatus(taskId: number) {
+  const current = taskStatusMap[taskId]
+  if (current?.syncing || current?.is_deleted) return
+
+  const wasCompleted = current?.is_completed ?? false
+  
+  // 标记同步中
+  if (!taskStatusMap[taskId]) {
+    taskStatusMap[taskId] = { is_completed: wasCompleted, syncing: true }
+  } else {
+    taskStatusMap[taskId].syncing = true
+  }
+
+  try {
+    if (wasCompleted) {
+      await undoCompleteTask(taskId)
+    } else {
+      await completeTask(taskId)
+    }
+    taskStatusMap[taskId].is_completed = !wasCompleted
+  } catch (error: any) {
+    ElMessage.error(error.message || '操作失败')
+  } finally {
+    taskStatusMap[taskId].syncing = false
+  }
+}
+
+async function handleTaskDelete(taskId: number) {
+  try {
+    // 1. 弹出确认框，避免误删。
+    await ElMessageBox.confirm('确定要删除此任务吗？删除后不可恢复。', '确认删除', {
+      confirmButtonText: '确认删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+      roundButton: true
+    })
+
+    // 2. 标记同步中
+    if (!taskStatusMap[taskId]) {
+      taskStatusMap[taskId] = { is_completed: false, syncing: true }
+    } else {
+      taskStatusMap[taskId].syncing = true
+    }
+
+    // 3. 调用后端接口删除
+    await deleteTask(taskId)
+
+    // 4. 标记为已删除并停止同步
+    taskStatusMap[taskId].is_deleted = true
+    taskStatusMap[taskId].syncing = false
+    ElMessage.success('已成功删除任务')
+  } catch (error: any) {
+    if (error === 'cancel') return
+    // 失败时恢复状态
+    if (taskStatusMap[taskId]) {
+      taskStatusMap[taskId].syncing = false
+    }
+    ElMessage.error(error.message || '删除失败')
+  }
+}
+
+/**
+ * 批量刷新当前时间线中所有卡片任务的真实状态
+ * 1. 扫描 businessCardEventsMap 中所有已发现的 task id
+ * 2. 调用 batch-status 接口回填
+ */
+async function hydrateTaskStatuses(conversationId: string) {
+  // 确保在 Vue 状态更新后执行
+  await nextTick()
+  
+  const messages = conversationMessagesMap[conversationId]
+  if (!messages || messages.length === 0) return
+
+  const ids = new Set<number>()
+  messages.forEach(msg => {
+    // 同时也扫描消息本身可能附带的 extra（用于 SSE 在线消息）
+    if (msg.extra?.business_card) {
+      const card = msg.extra.business_card
+      if (card.card_type === 'task_query') {
+        const data = card.data as any
+        data.tasks?.forEach((t: any) => { if (t.id) ids.add(t.id) })
+      } else if (card.card_type === 'task_record') {
+        const data = card.data as any
+        if (data.id) ids.add(data.id)
+      }
+    }
+
+    // 扫描历史恢复的卡片事件
+    const cardList = businessCardEventsMap[msg.id]
+    if (cardList) {
+      cardList.forEach(card => {
+        if (card.card_type === 'task_query') {
+          const data = card.data as any
+          data.tasks?.forEach((t: any) => { if (t.id) ids.add(t.id) })
+        } else if (card.card_type === 'task_record') {
+          const data = card.data as any
+          if (data.id) ids.add(data.id)
+        }
+      })
+    }
+  })
+
+  if (ids.size === 0) {
+    return
+  }
+
+  const idList = Array.from(ids)
+  // 初始化 syncing
+  idList.forEach(id => {
+    if (!taskStatusMap[id]) {
+      taskStatusMap[id] = { is_completed: false, syncing: true }
+    } else {
+      taskStatusMap[id].syncing = true
+    }
+  })
+
+  try {
+    const items = await getTaskBatchStatus(idList)
+    items.forEach(item => {
+      const id = Number(item.id)
+      if (taskStatusMap[id]) {
+        // 合并更新，避免丢失已有属性
+        taskStatusMap[id].is_completed = item.is_completed
+        taskStatusMap[id].syncing = false
+      } else {
+        taskStatusMap[id] = { is_completed: item.is_completed, syncing: false }
+      }
+    })
+  } catch (err) {
+    console.error('[Hydration] Batch status fetch failed:', err)
+  } finally {
+    // 兜底：确保所有 ID 退出 syncing 状态
+    idList.forEach(id => {
+      if (taskStatusMap[id]?.syncing) {
+        taskStatusMap[id].syncing = false
+      }
+    })
+  }
+}
+
+provide('taskStatusMap', taskStatusMap)
+provide('toggleTaskStatus', toggleTaskStatus)
+provide('onEditTask', handleTaskEdit)
+provide('onDeleteTask', handleTaskDelete)
+
 const quickActions = [
   '帮我梳理今天最重要的三件事',
   '把当前任务拆成可执行步骤',
@@ -263,7 +454,7 @@ const shouldAutoFollowMessages = ref(true)
 const messageBottomTolerancePx = 24
 const isProgrammaticMessageScroll = ref(false)
 
-const isStandaloneMode = computed(() => props.viewMode === 'standalone')
+
 const shouldShowDialogConfirmOverlay = computed(() => confirmOverlayState.visible)
 
 const assistantBodyStyle = computed(() => {
@@ -877,6 +1068,7 @@ function isAssistantTimelineKind(kind: string) {
     'schedule_completed',
     'interrupt',
     'status',
+    'business_card',
   ])
   return assistantKinds.has(kind)
 }
@@ -990,6 +1182,9 @@ function migrateConversationState(fromConversationId: string, toConversationId: 
 
   if (selectedConversationId.value === fromConversationId) {
     selectedConversationId.value = toConversationId
+    if (isStandaloneMode.value) {
+      router.replace({ name: 'assistant', params: { id: toConversationId } })
+    }
   }
 }
 
@@ -1537,9 +1732,16 @@ function scheduleScrollMessagesToBottom(smooth = false, force = false) {
 }
 
 async function ensureSelectedConversationAfterListLoad() {
-  // 1. 根据用户最新要求：进入页面时不自动加载最后一次对话。
-  // 2. 默认保持 selectedConversationId 为空，从而触发居中的“新会话”看板及动画过渡逻辑。
-  // 3. 用户若需查看历史，可从左侧列表中手动点击。
+  // 1. 如果 URL 中显式指定了 ID (Standalone 模式)，优先根据 URL 恢复状态
+  if (isStandaloneMode.value && route.params.id) {
+    const urlId = route.params.id as string
+    if (urlId !== selectedConversationId.value) {
+      await selectConversation(urlId)
+      return
+    }
+  }
+
+  // 2. 否则遵循用户最新要求：进入页面时不自动加载最后一次对话，保持新会话状态。
   /*
   if (!selectedConversationId.value && conversationList.value.length > 0) {
     await selectConversation(conversationList.value[0].conversation_id)
@@ -1844,12 +2046,6 @@ function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[
         break
       case 'business_card':
         if (event.payload?.business_card) {
-          appendBusinessCardEvent(mid, event.payload.business_card)
-        }
-        break
-
-      case 'business_card':
-        if (event.payload?.business_card) {
           appendBusinessCardEvent(mid, event.payload.business_card, event.seq)
         }
         break
@@ -1871,6 +2067,7 @@ async function loadConversationMessages(conversationId: string, forceReload = fa
   }
 
   if (!forceReload && conversationMessagesMap[conversationId] && unavailableHistoryMap[conversationId] !== true) {
+    void hydrateTaskStatuses(conversationId)
     return
   }
 
@@ -1878,12 +2075,24 @@ async function loadConversationMessages(conversationId: string, forceReload = fa
     const events = await getConversationTimeline(conversationId)
     conversationMessagesMap[conversationId] = rebuildStateFromTimeline(conversationId, events)
     unavailableHistoryMap[conversationId] = false
+    // 时间线恢复后，立即启动任务状态同步（Hydration）
+    void hydrateTaskStatuses(conversationId)
   } catch (error) {
     console.error('Failed to load timeline:', error)
     unavailableHistoryMap[conversationId] = true
     ensureConversationBucket(conversationId)
   }
 }
+
+// 监听当前会话消息变化，实时触发状态同步
+watch(
+  () => selectedConversationId.value ? conversationMessagesMap[selectedConversationId.value]?.length : 0,
+  (newLen) => {
+    if (newLen > 0 && selectedConversationId.value) {
+      void hydrateTaskStatuses(selectedConversationId.value)
+    }
+  }
+)
 
 async function ensureConversationMeta(
   conversationId: string,
@@ -1981,6 +2190,12 @@ async function selectConversation(conversationId: string) {
   cancelEditUserMessage()
   resetConfirmOverlay()
   selectedConversationId.value = conversationId
+
+  // 仅在 Standalone 模式下将状态同步到 URL，实现可刷新/可分享
+  if (isStandaloneMode.value && route.params.id !== conversationId) {
+    router.push({ name: 'assistant', params: { id: conversationId || undefined } })
+  }
+
   await Promise.allSettled([
     loadConversationMessages(conversationId),
     ensureConversationMeta(conversationId),
@@ -1993,6 +2208,12 @@ function startNewConversation() {
   cancelEditUserMessage()
   resetConfirmOverlay()
   selectedConversationId.value = ''
+
+  // 清除 URL 中的 ID
+  if (isStandaloneMode.value && route.params.id) {
+    router.push({ name: 'assistant', params: { id: undefined } })
+  }
+
   messageInput.value = ''
   activeStreamingMessageId.value = ''
   shouldAutoFollowMessages.value = true
@@ -2111,6 +2332,57 @@ function handleConfirmRejectInputEnter(event: KeyboardEvent) {
   if (event.shiftKey) return
   event.preventDefault()
   void submitConfirmRejectMessage()
+}
+
+// 任务管理逻辑（对齐首页）
+function handleTaskEdit(task: any) {
+  isEditMode.value = true
+  editingTaskId.value = task.id
+  taskForm.title = task.title
+  taskForm.priority_group = task.priority_group || 2
+  taskForm.deadline_at = task.deadline_at || task.deadline ? new Date(task.deadline_at || task.deadline) : null
+  taskForm.urgency_threshold_at = task.urgency_threshold_at ? new Date(task.urgency_threshold_at) : null
+  taskDialogVisible.value = true
+}
+
+async function handleSaveTask() {
+  if (!taskForm.title.trim()) {
+    ElMessage.warning('标题不能为空')
+    return
+  }
+  saveTaskLoading.value = true
+  try {
+    if (isEditMode.value && editingTaskId.value) {
+      const taskId = editingTaskId.value
+      const updateData = {
+        task_id: taskId,
+        title: taskForm.title.trim(),
+        priority_group: taskForm.priority_group,
+        deadline_at: taskForm.deadline_at ? (typeof taskForm.deadline_at === 'string' ? taskForm.deadline_at : taskForm.deadline_at.toISOString()) : null,
+        urgency_threshold_at: taskForm.urgency_threshold_at ? (typeof taskForm.urgency_threshold_at === 'string' ? taskForm.urgency_threshold_at : taskForm.urgency_threshold_at.toISOString()) : null,
+      }
+      await updateTask(updateData)
+
+      // 同步更新本地状态映射，让所有历史卡片实时联动
+      if (taskStatusMap[taskId]) {
+        taskStatusMap[taskId].title = updateData.title
+        taskStatusMap[taskId].priority_group = updateData.priority_group
+        // 格式化截止时间用于展示
+        taskStatusMap[taskId].deadline_at = taskForm.deadline_at 
+          ? (taskForm.deadline_at instanceof Date 
+              ? taskForm.deadline_at.toLocaleDateString('zh-CN').replace(/\//g, '-')
+              : String(taskForm.deadline_at).split('T')[0])
+          : null
+      }
+
+      ElMessage.success('任务详情已更新')
+    }
+    taskDialogVisible.value = false
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '保存失败')
+  } finally {
+    saveTaskLoading.value = false
+  }
 }
 
 function applyConfirmOverlay(confirmPayload?: StreamConfirmPayload) {
@@ -2298,6 +2570,33 @@ function handleStreamExtraEvent(extra: StreamExtraPayload | undefined, assistant
   if (extra.kind === 'business_card' && extra.business_card) {
     appendBusinessCardEvent(assistantMessage.id, extra.business_card)
     scheduleScrollMessagesToBottom(true)
+    
+    // SSE 在线接收到新卡片时，也尝试同步一次其状态（主要针对立即生成的任务）
+    const card = extra.business_card
+    const ids: number[] = []
+    if (card.card_type === 'task_query') {
+      (card.data as TaskQueryCardData).tasks?.forEach(t => { if (t.id) ids.push(t.id) })
+    } else if (card.card_type === 'task_record') {
+      const id = (card.data as TaskRecordCardData).id
+      if (id) ids.push(id)
+    }
+    
+    if (ids.length > 0) {
+      ids.forEach(id => {
+        if (!taskStatusMap[id]) {
+           taskStatusMap[id] = { is_completed: false, syncing: true }
+        }
+      })
+      void getTaskBatchStatus(ids).then(items => {
+        items.forEach(item => {
+          taskStatusMap[item.id] = { is_completed: item.is_completed, syncing: false }
+        })
+      }).finally(() => {
+        ids.forEach(id => {
+          if (taskStatusMap[id]?.syncing) taskStatusMap[id].syncing = false
+        })
+      })
+    }
   }
 }
 
@@ -2619,6 +2918,19 @@ watch(
   },
 )
 
+// 监听路由参数 id 的变化，实现前进/后退同步切换对话
+watch(
+  () => route.params.id,
+  (newId) => {
+    if (isStandaloneMode.value) {
+      const targetId = (newId as string) || ''
+      if (targetId !== selectedConversationId.value) {
+        selectConversation(targetId)
+      }
+    }
+  }
+)
+
 
 onMounted(async () => {
   reasoningTicker = window.setInterval(() => {
@@ -2626,6 +2938,12 @@ onMounted(async () => {
   }, 1000)
   window.addEventListener('resize', syncHistoryPanelWidthForViewport)
   syncHistoryPanelWidthForViewport()
+  
+  // 如果 URL 中有 ID，则立即启动加载，不等会话列表返回，避免闪烁主页态
+  if (isStandaloneMode.value && route.params.id) {
+    void selectConversation(route.params.id as string)
+  }
+
   await loadConversationListData(true)
   syncHistoryPanelWidthForViewport()
 })
@@ -2754,7 +3072,7 @@ onBeforeUnmount(() => {
 
       <section 
         class="assistant-chat dashboard-item-pop" 
-        :class="{ 'assistant-chat--empty': !selectedMessages.length && !chatLoading }"
+        :class="{ 'assistant-chat--empty': (!selectedConversationId || isDraftConversationId(selectedConversationId)) && !selectedMessages.length && !chatLoading }"
         :style="{ '--anim-delay': '0.1s' }"
       >
         <div class="assistant-chat__spacer-top" />
@@ -2764,11 +3082,13 @@ onBeforeUnmount(() => {
           @scroll.passive="handleMessageViewportScroll"
           @wheel.passive="handleMessageViewportWheel"
         >
-          <div v-if="shouldShowHistoryFallback" class="assistant-chat__fallback">
-            当前会话的历史消息暂时不可读，但你仍然可以继续追问；后续刷新后会自动恢复。
-          </div>
+          <transition name="chat-content-fade">
+            <div :key="selectedConversationId" class="assistant-messages__inner">
+              <div v-if="shouldShowHistoryFallback" class="assistant-chat__fallback">
+                当前会话的历史消息暂时不可读，但你仍然可以继续追问；后续刷新后会自动恢复。
+              </div>
 
-          <TransitionGroup v-if="selectedMessages.length" tag="div" name="message-stagger" class="assistant-message-list">
+              <TransitionGroup v-if="selectedMessages.length" tag="div" name="message-stagger" class="assistant-message-list">
               <article
                 v-for="dm in displayMessages"
                 :key="dm.id"
@@ -2932,7 +3252,7 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
 
-                  <div v-else-if="block.type === 'business_card'" class="chat-message__business-card">
+                  <div v-else-if="block.type === 'business_card' && block.businessCard" class="chat-message__business-card">
                     <BusinessCardRenderer :payload="block.businessCard" />
                   </div>
 
@@ -2971,13 +3291,15 @@ onBeforeUnmount(() => {
               <span class="chat-message__time">{{ formatMessageTime(dm.createdAt) }}</span>
             </div>
             </article>
-          </TransitionGroup>
+              </TransitionGroup>
+            </div>
+          </transition>
         </div>
 
         <div class="assistant-chat__interaction-group">
           <!-- Welcome Content (Only in empty state) -->
           <Transition name="fade-switch">
-            <div v-if="!selectedMessages.length && !chatLoading" class="assistant-empty">
+            <div v-if="(!selectedConversationId || isDraftConversationId(selectedConversationId)) && !selectedMessages.length && !chatLoading" class="assistant-empty">
               <div class="assistant-empty__halo" />
               <div class="assistant-empty__content">
                 <strong>SmartMate AI 伙伴</strong>
@@ -3192,6 +3514,66 @@ onBeforeUnmount(() => {
     @close="closeFineTuneModal"
     @saved="handleScheduleSaved"
   />
+
+  <!-- 任务编辑弹窗 (对齐首页) -->
+  <el-dialog
+    v-model="taskDialogVisible"
+    :title="isEditMode ? '修改任务详情' : '创建新任务'"
+    width="440px"
+    append-to-body
+    destroy-on-close
+    class="task-edit-dialog"
+  >
+    <div class="task-form">
+      <div class="form-item">
+        <label>任务标题</label>
+        <el-input 
+          v-model="taskForm.title" 
+          placeholder="你想做点什么？" 
+          maxlength="100"
+          show-word-limit
+        />
+      </div>
+      
+      <div class="form-item">
+        <label>优先级象限</label>
+        <el-radio-group v-model="taskForm.priority_group" class="priority-selector">
+          <el-radio-button :value="1">重要紧急</el-radio-button>
+          <el-radio-button :value="2">重要不紧急</el-radio-button>
+          <el-radio-button :value="3">简单琐碎</el-radio-button>
+          <el-radio-button :value="4">暂缓处理</el-radio-button>
+        </el-radio-group>
+      </div>
+
+      <div class="form-row">
+        <div class="form-item">
+          <label>截止日期</label>
+          <el-date-picker
+            v-model="taskForm.deadline_at"
+            type="datetime"
+            placeholder="选个截止时间"
+            format="YYYY-MM-DD HH:mm"
+            value-format="YYYY-MM-DD HH:mm:ss"
+            :clearable="true"
+          />
+        </div>
+      </div>
+    </div>
+    
+    <template #footer>
+      <div class="dialog-footer">
+        <el-button @click="taskDialogVisible = false" round>取消</el-button>
+        <el-button 
+          type="primary" 
+          @click="handleSaveTask" 
+          :loading="saveTaskLoading"
+          round
+        >
+          保存更改
+        </el-button>
+      </div>
+    </template>
+  </el-dialog>
 </template>
 
 <style scoped>
@@ -3213,32 +3595,29 @@ onBeforeUnmount(() => {
 
 .fade-switch-enter-from {
   opacity: 0;
-  transform: translateY(10px);
 }
 
 .fade-switch-leave-to {
   opacity: 0;
-  transform: translateY(-10px);
 }
 
 .message-stagger-enter-active,
 .message-stagger-leave-active {
-  transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .message-stagger-enter-from {
   opacity: 0;
-  transform: translateY(20px) scale(0.98);
 }
 
 .message-stagger-leave-to {
   opacity: 0;
-  transform: translateX(30px) scale(0.95);
 }
 
 .message-stagger-leave-active {
   position: absolute;
   width: 100%;
+  pointer-events: none;
 }
 
 .inner-fade-enter-active,
@@ -3248,11 +3627,40 @@ onBeforeUnmount(() => {
 
 .inner-fade-enter-from {
   opacity: 0;
-  transform: translateY(5px);
 }
 
 .inner-fade-leave-to {
   opacity: 0;
+}
+
+.chat-content-fade-enter-active,
+.chat-content-fade-leave-active {
+  transition: 
+    opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+    filter 0.4s ease;
+}
+
+.chat-content-fade-leave-active {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.chat-content-fade-enter-active {
+  z-index: 1;
+}
+
+.chat-content-fade-enter-from {
+  opacity: 0;
+  filter: blur(8px);
+}
+
+.chat-content-fade-leave-to {
+  opacity: 0;
+  filter: blur(8px);
 }
 
 .assistant-shell {
@@ -3746,12 +4154,10 @@ onBeforeUnmount(() => {
 
 .assistant-chat__spacer-top {
   flex: 0;
-  transition: flex 0.75s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .assistant-chat__spacer-bottom {
   flex: 0;
-  transition: flex 0.75s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .assistant-chat--empty .assistant-chat__spacer-top {
@@ -3766,8 +4172,16 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden; /* 关键：防止转场时的水平抖动 */
+  position: relative;
   /* 隐藏滚动条，保持纯净感，仅在非空时显示 */
   scrollbar-width: thin;
+}
+
+.assistant-messages__inner {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
 }
 
 .assistant-chat--empty .assistant-messages {
@@ -5049,6 +5463,129 @@ onBeforeUnmount(() => {
   box-shadow: 0 25px 50px -12px rgba(15, 23, 42, 0.25) !important;
   backdrop-filter: blur(16px) !important;
   background: rgba(255, 255, 255, 0.9) !important;
+}
+
+:global(.task-edit-dialog) {
+  border-radius: 32px !important;
+  overflow: hidden !important;
+  border: none !important;
+  box-shadow: 0 40px 100px rgba(15, 23, 42, 0.18) !important;
+  background: #ffffff !important;
+}
+
+:global(.task-edit-dialog .el-dialog__header) {
+  margin: 0 !important;
+  padding: 40px 40px 10px !important;
+  border-bottom: none !important;
+}
+
+:global(.task-edit-dialog .el-dialog__title) {
+  font-size: 26px !important;
+  font-weight: 900 !important;
+  color: #0f172a !important;
+  letter-spacing: -0.04em !important;
+}
+
+:global(.task-edit-dialog .el-dialog__headerbtn) {
+  top: 40px !important;
+  right: 40px !important;
+  width: 40px !important;
+  height: 40px !important;
+  background: #f8fafc !important;
+  border: none !important;
+}
+
+:global(.task-edit-dialog .el-dialog__body) {
+  padding: 10px 40px 40px !important;
+}
+
+:global(.task-edit-dialog .el-dialog__footer) {
+  padding: 0 40px 40px !important;
+}
+
+.task-form {
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+.form-item label {
+  display: block;
+  font-size: 11px;
+  font-weight: 900;
+  color: #cbd5e1;
+  margin-bottom: 14px;
+  margin-left: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+}
+
+.task-form :deep(.el-input__wrapper) {
+  background: #fcfdfe !important;
+  box-shadow: none !important;
+  border: 2px solid #f1f5f9 !important;
+  border-radius: 20px !important;
+  padding: 14px 22px !important;
+}
+
+.task-form :deep(.el-input__wrapper.is-focus) {
+  background: #ffffff !important;
+  border-color: #3b82f6 !important;
+  box-shadow: 0 10px 30px rgba(59, 130, 246, 0.08) !important;
+}
+
+.priority-selector {
+  display: flex;
+  width: 100%;
+  gap: 10px;
+  background: #f8fafc;
+  padding: 8px;
+  border-radius: 24px;
+}
+
+.priority-selector :deep(.el-radio-button__inner) {
+  width: 100% !important;
+  border: none !important;
+  background: transparent !important;
+  font-size: 12px;
+  font-weight: 800;
+  color: #94a3b8;
+  padding: 14px 4px !important;
+  border-radius: 18px !important;
+}
+
+.priority-selector :deep(.el-radio-button.is-active .el-radio-button__inner) {
+  background: #ffffff !important;
+  color: #3b82f6 !important;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06) !important;
+}
+
+.dialog-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+.dialog-footer .el-button {
+  width: 100%;
+  margin: 0 !important;
+  height: 60px;
+  font-size: 16px;
+  font-weight: 900;
+  border-radius: 22px;
+}
+
+.dialog-footer .el-button--primary {
+  background: #0f172a !important; /* Midnight flat style */
+  color: #ffffff !important;
+  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.2);
+}
+
+.dialog-footer .el-button--primary:hover {
+  background: #1e293b !important;
+  transform: translateY(-2px);
+  box-shadow: 0 25px 50px rgba(15, 23, 42, 0.25);
 }
 
 :global(.premium-msg-box .el-message-box__header) {

@@ -113,6 +113,35 @@ type GetUserTaskResp struct {
 	UrgencyThresholdAt string `json:"urgency_threshold_at,omitempty"`
 }
 
+// BatchTaskStatusRequest 是任务批量状态查询请求体。
+//
+// 职责边界：
+// 1. 只承载前端从历史卡片中提取的任务 ID 列表；
+// 2. 不承载 user_id，用户身份必须来自鉴权上下文，避免越权查询；
+// 3. 不表达任务是否必须存在，不存在或无权访问的任务由 Service 静默过滤。
+type BatchTaskStatusRequest struct {
+	IDs []int `json:"ids"`
+}
+
+// BatchTaskStatusItem 是单个任务当前完成状态快照。
+//
+// 说明：
+// 1. 当前 Task 模型未维护 UpdatedAt 字段，因此这里只返回可用的 id/is_completed；
+// 2. 该结构表示"当前状态"，不用于反写 NewAgent timeline 历史 payload。
+type BatchTaskStatusItem struct {
+	ID          int  `json:"id"`
+	IsCompleted bool `json:"is_completed"`
+}
+
+// BatchTaskStatusResponse 是批量任务状态查询响应体。
+//
+// 职责边界：
+// 1. items 只包含当前登录用户有权访问且仍存在的任务；
+// 2. ids 为空、非法 ID 全部被过滤、或无匹配任务时，items 为空切片而不是业务错误。
+type BatchTaskStatusResponse struct {
+	Items []BatchTaskStatusItem `json:"items"`
+}
+
 // UserUpdateTaskRequest 是"更新任务属性"接口的请求体。
 //
 // 职责边界：

@@ -77,6 +77,26 @@ export async function updateTask(payload: TaskUpdatePayload) {
   }
 }
 
+export interface TaskBatchStatusItem {
+  id: number
+  is_completed: boolean
+}
+
+export interface TaskBatchStatusResult {
+  items: TaskBatchStatusItem[]
+}
+
+export async function getTaskBatchStatus(ids: number[]) {
+  if (ids.length === 0) return []
+  try {
+    const response = await http.post<ApiResponse<TaskBatchStatusResult>>('/task/batch-status', { ids })
+    return response.data.data?.items ?? []
+  } catch (error) {
+    console.error('Failed to fetch batch status:', error)
+    return []
+  }
+}
+
 export async function deleteTask(taskId: number) {
   try {
     const response = await http.delete<ApiResponse<{ task_id: number }>>(
@@ -93,3 +113,4 @@ export async function deleteTask(taskId: number) {
     throw new Error(extractErrorMessage(error, '删除任务失败，请稍后重试'))
   }
 }
+

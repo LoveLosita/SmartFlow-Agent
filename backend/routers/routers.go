@@ -58,6 +58,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, userRepo *d
 			taskGroup.PUT("/update", middleware.IdempotencyMiddleware(cache), handlers.TaskHandler.UpdateTask)
 			taskGroup.DELETE("/delete", middleware.IdempotencyMiddleware(cache), handlers.TaskHandler.DeleteTask)
 			taskGroup.GET("/get", handlers.TaskHandler.GetUserTasks)
+			taskGroup.POST("/batch-status", handlers.TaskHandler.BatchTaskStatus)
 		}
 		courseGroup := apiGroup.Group("/course")
 		{

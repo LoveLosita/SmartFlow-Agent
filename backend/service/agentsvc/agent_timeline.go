@@ -295,6 +295,7 @@ func canonicalizeTimelineKind(kind string, role string) string {
 		model.AgentTimelineKindToolCall,
 		model.AgentTimelineKindToolResult,
 		model.AgentTimelineKindConfirmRequest,
+		model.AgentTimelineKindBusinessCard,
 		model.AgentTimelineKindScheduleCompleted:
 		return normalizedKind
 	case "text", "message", "query":
@@ -343,6 +344,8 @@ func mapTimelineKindFromStreamExtra(extra *newagentstream.OpenAIChunkExtra) (str
 		return model.AgentTimelineKindToolResult, true
 	case newagentstream.StreamExtraKindConfirm:
 		return model.AgentTimelineKindConfirmRequest, true
+	case newagentstream.StreamExtraKindBusinessCard:
+		return model.AgentTimelineKindBusinessCard, true
 	case newagentstream.StreamExtraKindScheduleCompleted:
 		return model.AgentTimelineKindScheduleCompleted, true
 	default:
@@ -381,8 +384,27 @@ func buildTimelinePayloadFromStreamExtra(extra *newagentstream.OpenAIChunkExtra)
 			"summary":        strings.TrimSpace(extra.Interrupt.Summary),
 		}
 	}
+	if extra.BusinessCard != nil {
+		payload["business_card"] = cloneStreamBusinessCard(extra.BusinessCard)
+	}
 	if len(extra.Meta) > 0 {
 		payload["meta"] = cloneTimelinePayload(extra.Meta)
 	}
 	return payload
+}
+
+func cloneStreamBusinessCard(card *newagentstream.StreamBusinessCardExtra) map[string]any {
+	if card == nil {
+		return nil
+	}
+	cloned := map[string]any{
+		"card_type": strings.TrimSpace(card.CardType),
+		"title":     strings.TrimSpace(card.Title),
+		"summary":   strings.TrimSpace(card.Summary),
+		"source":    strings.TrimSpace(card.Source),
+	}
+	if len(card.Data) > 0 {
+		cloned["data"] = cloneTimelinePayload(card.Data)
+	}
+	return cloned
 }

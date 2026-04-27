@@ -184,8 +184,27 @@ interface TaskQueryCardTaskItem {
   is_completed?: boolean
 }
 
+type TaskQueryFilterOperator = 'eq' | 'contains' | 'gte' | 'lt'
+
+interface TaskQueryCardFilter {
+  key:
+    | 'quadrant'
+    | 'keyword'
+    | 'deadline_after'
+    | 'deadline_before'
+    | 'include_completed'
+    | 'sort'
+  label: string
+  value: string | number | boolean
+  operator?: TaskQueryFilterOperator
+  display_text: string
+}
+
 interface TaskQueryCardData {
+  // 展示摘要：只适合整段展示，不作为前端切分协议。
   query_summary?: string
+  // 稳定结构化筛选条件：前端若要渲染标签/chip，应优先消费此字段。
+  query_filters?: TaskQueryCardFilter[]
   result_count: number
   shown_count: number
   has_more?: boolean
@@ -212,11 +231,14 @@ interface TaskQueryCardData {
 有条件时建议补充：
 
 - `query_summary`
+- `query_filters`
 - `priority_label`
 - `deadline_at`
 - `is_completed`
 - `shown_count`
 - `has_more`
+
+其中 `query_summary` 是给人看的整段摘要，不保证分隔符可解析；前端若要拆成标签，应使用 `query_filters[].display_text` 或根据 `key/operator/value` 自行格式化，禁止按 `；` 切分 `query_summary`。
 
 ### 5.1.5 降级规则
 
@@ -242,6 +264,29 @@ interface TaskQueryCardData {
       "summary": "按截止时间升序",
       "data": {
         "query_summary": "关键词：离散数学；仅未完成；截止时间升序",
+        "query_filters": [
+          {
+            "key": "keyword",
+            "label": "关键词",
+            "value": "离散数学",
+            "operator": "contains",
+            "display_text": "关键词：离散数学"
+          },
+          {
+            "key": "include_completed",
+            "label": "完成状态",
+            "value": false,
+            "operator": "eq",
+            "display_text": "仅未完成"
+          },
+          {
+            "key": "sort",
+            "label": "排序",
+            "value": "deadline_asc",
+            "operator": "eq",
+            "display_text": "按截止时间升序"
+          }
+        ],
         "result_count": 4,
         "shown_count": 3,
         "has_more": true,

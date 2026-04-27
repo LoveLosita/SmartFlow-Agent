@@ -38,7 +38,7 @@ const router = createRouter({
       },
     },
     {
-      path: '/assistant',
+      path: '/assistant/:id?',
       name: 'assistant',
       component: AssistantView,
       meta: {

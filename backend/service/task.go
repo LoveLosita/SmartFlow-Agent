@@ -18,6 +18,8 @@ import (
 )
 
 const (
+	// taskBatchStatusMaxIDs 限制批量状态查询的单次任务 ID 数量，避免大请求放大缓存/内存扫描成本。
+	taskBatchStatusMaxIDs = 100
 	// taskUrgencyPromoteDedupeTTL 是"同一任务平移请求"的去重锁有效期。
 	//
 	// 设计考虑：
@@ -173,6 +175,65 @@ func (ts *TaskService) GetUserTasks(ctx context.Context, userID int) ([]model.Ge
 		return nil, err
 	}
 	return conv.ModelToGetUserTasksResp(derivedTasks), nil
+}
+
+// BatchTaskStatus 批量查询当前登录用户任务的完成状态。
+//
+// 职责边界：
+// 1. 负责请求 ID 的过滤、去重和数量限制；
+// 2. 只返回当前用户有权访问且仍存在的任务，避免泄露其他用户任务状态；
+// 3. 复用 getRawUserTasks 的 Redis 任务列表缓存链路，不新增绕过缓存的 DAO 查询；
+// 4. 该接口只读，不触发 GORM cache_deleter，也不反向修改 NewAgent timeline 历史快照。
+func (ts *TaskService) BatchTaskStatus(ctx context.Context, req *model.BatchTaskStatusRequest, userID int) (*model.BatchTaskStatusResponse, error) {
+	resp := &model.BatchTaskStatusResponse{
+		Items: []model.BatchTaskStatusItem{},
+	}
+	if userID <= 0 {
+		return nil, respond.WrongUserID
+	}
+	if req == nil {
+		return resp, nil
+	}
+
+	// 1. 先把前端传入的历史卡片 task id 做归一化。
+	// 1.1 非法 ID 直接过滤，避免无意义匹配；
+	// 1.2 保留首次出现顺序，方便前端按请求顺序回填；
+	// 1.3 超过上限时截断，避免单次 hydration 请求放大服务端成本。
+	validIDs := compactPositiveUniqueTaskIDsWithLimit(req.IDs, taskBatchStatusMaxIDs)
+	if len(validIDs) == 0 {
+		return resp, nil
+	}
+
+	// 2. 复用原始任务读取链路。
+	// 2.1 命中 Redis 时直接读取 smartflow:tasks:{userID}；
+	// 2.2 未命中时由 getRawUserTasks 回源 DB 并回填缓存；
+	// 2.3 用户没有任何任务时映射为空 items，符合 hydration 的“无匹配不报错”语义。
+	tasks, err := ts.getRawUserTasks(ctx, userID)
+	if err != nil {
+		if errors.Is(err, respond.UserTasksEmpty) {
+			return resp, nil
+		}
+		return nil, err
+	}
+
+	// 3. 在当前用户任务集合内做内存匹配。
+	// 3.1 不命中的 ID 可能是已删除、属于其他用户、或历史快照里的旧任务，统一静默过滤；
+	// 3.2 返回字段只包含当前模型可用的完成状态，避免伪造不存在的 updated_at。
+	taskByID := make(map[int]model.Task, len(tasks))
+	for _, task := range tasks {
+		taskByID[task.ID] = task
+	}
+	for _, id := range validIDs {
+		task, exists := taskByID[id]
+		if !exists {
+			continue
+		}
+		resp.Items = append(resp.Items, model.BatchTaskStatusItem{
+			ID:          task.ID,
+			IsCompleted: task.IsCompleted,
+		})
+	}
+	return resp, nil
 }
 
 // GetTasksWithUrgencyPromotion 读取用户任务并应用读时紧急性提升 + 异步落库触发。
@@ -353,6 +414,16 @@ func (ts *TaskService) releaseTaskPromoteLocks(lockKeys []string) {
 // 1. 只做参数清洗；
 // 2. 不承载业务规则判断。
 func compactPositiveUniqueTaskIDs(taskIDs []int) []int {
+	return compactPositiveUniqueTaskIDsWithLimit(taskIDs, 0)
+}
+
+// compactPositiveUniqueTaskIDsWithLimit 对任务 ID 做"过滤非正数 + 去重 + 可选限量"。
+//
+// 职责边界：
+// 1. 只做纯参数归一化，不查询任务、不判断权限；
+// 2. limit <= 0 表示不限制数量，供既有调用保持原行为；
+// 3. 达到 limit 后立即停止扫描，避免超长请求继续消耗 CPU。
+func compactPositiveUniqueTaskIDsWithLimit(taskIDs []int, limit int) []int {
 	seen := make(map[int]struct{}, len(taskIDs))
 	result := make([]int, 0, len(taskIDs))
 	for _, taskID := range taskIDs {
@@ -364,6 +435,9 @@ func compactPositiveUniqueTaskIDs(taskIDs []int) []int {
 		}
 		seen[taskID] = struct{}{}
 		result = append(result, taskID)
+		if limit > 0 && len(result) >= limit {
+			break
+		}
 	}
 	return result
 }

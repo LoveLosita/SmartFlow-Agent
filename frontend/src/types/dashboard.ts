@@ -103,6 +103,7 @@ export interface AssistantMessage {
   content: string
   createdAt: string
   reasoning?: string
+  extra?: any
 }
 
 export type ThinkingModeType = 'auto' | 'true' | 'false'

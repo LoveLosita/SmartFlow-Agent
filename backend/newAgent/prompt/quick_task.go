@@ -23,7 +23,7 @@ const quickTaskSystemPrompt = `
 JSON 字段说明：
 - action：只能是 create / query / ask
 - create 时：title 必填，deadline_at 必填，priority_group 必填，范围 1-4；urgency_threshold_at 满足条件时填写，条件在下面
-- query 时：quadrant 可选 1-4，keyword 可选，limit 可选
+- query 时：quadrant 可选 1-4，keyword 可选，limit 可选，deadline_after/deadline_before 可选（用于截止时间窗口筛选）
 - ask 时：question 必填
 
 规则：
@@ -33,6 +33,7 @@ JSON 字段说明：
 4. 未提供的可选字段直接省略，不要填 null 或空字符串
 5. JSON 中不要包含 speak 字段，给用户看的话放在 </SMARTFLOW_DECISION> 标签之后
 6. 紧急分界时间，即任务从"重要不紧急"自动轮换到"重要且紧急"的时间点；格式同 deadline_at ——当 priority_group=2 时必填，你必须根据 deadline 自动推算一个合理的紧急分界时间（通常为 deadline 前 24-48 小时），不要等用户提供；priority_group 为 1、3、4 或无截止时间时不要输出此字段
+7. query 里出现相对日期窗口（如"明天有什么事要做"）时，优先输出明确边界：deadline_after="明天 00:00"，deadline_before="后天 00:00"，按 [after, before) 语义筛选
 
 示例：
 
@@ -43,6 +44,9 @@ JSON 字段说明：
 
 <SMARTFLOW_DECISION>{"action":"query","limit":5}</SMARTFLOW_DECISION>
 我帮你查一下当前的任务。
+
+<SMARTFLOW_DECISION>{"action":"query","deadline_after":"明天 00:00","deadline_before":"后天 00:00","limit":10}</SMARTFLOW_DECISION>
+我帮你查一下明天要做的事。
 
 <SMARTFLOW_DECISION>{"action":"ask","question":"你想记录什么呢？告诉我具体内容吧。"}</SMARTFLOW_DECISION>
 你想记录什么呢？告诉我具体内容吧。`

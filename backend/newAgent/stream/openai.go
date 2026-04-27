@@ -46,6 +46,7 @@ const (
 	StreamExtraKindToolResult        StreamExtraKind = "tool_result"
 	StreamExtraKindConfirm           StreamExtraKind = "confirm_request"
 	StreamExtraKindInterrupt         StreamExtraKind = "interrupt"
+	StreamExtraKindBusinessCard      StreamExtraKind = "business_card"
 	StreamExtraKindFinish            StreamExtraKind = "finish"
 	StreamExtraKindScheduleCompleted StreamExtraKind = "schedule_completed"
 )
@@ -63,18 +64,19 @@ const (
 //
 // 职责边界：
 // 1. Kind / Stage / BlockID 提供前端排版和分组所需的最小元信息；
-// 2. Status / Tool / Confirm / Interrupt 只存展示层真正需要的摘要，不直接耦合后端完整状态对象；
+// 2. Status / Tool / Confirm / Interrupt / BusinessCard 只存展示层真正需要的摘要，不直接耦合后端完整状态对象；
 // 3. Meta 留给后续做灰度扩展，避免每加一种小字段都要立刻改 DTO 结构。
 type OpenAIChunkExtra struct {
-	Kind        StreamExtraKind       `json:"kind,omitempty"`
-	BlockID     string                `json:"block_id,omitempty"`
-	Stage       string                `json:"stage,omitempty"`
-	DisplayMode StreamDisplayMode     `json:"display_mode,omitempty"`
-	Status      *StreamStatusExtra    `json:"status,omitempty"`
-	Tool        *StreamToolExtra      `json:"tool,omitempty"`
-	Confirm     *StreamConfirmExtra   `json:"confirm,omitempty"`
-	Interrupt   *StreamInterruptExtra `json:"interrupt,omitempty"`
-	Meta        map[string]any        `json:"meta,omitempty"`
+	Kind         StreamExtraKind          `json:"kind,omitempty"`
+	BlockID      string                   `json:"block_id,omitempty"`
+	Stage        string                   `json:"stage,omitempty"`
+	DisplayMode  StreamDisplayMode        `json:"display_mode,omitempty"`
+	Status       *StreamStatusExtra       `json:"status,omitempty"`
+	Tool         *StreamToolExtra         `json:"tool,omitempty"`
+	Confirm      *StreamConfirmExtra      `json:"confirm,omitempty"`
+	Interrupt    *StreamInterruptExtra    `json:"interrupt,omitempty"`
+	BusinessCard *StreamBusinessCardExtra `json:"business_card,omitempty"`
+	Meta         map[string]any           `json:"meta,omitempty"`
 }
 
 // StreamStatusExtra 表示普通阶段状态或提示性事件。
@@ -103,6 +105,20 @@ type StreamInterruptExtra struct {
 	InteractionID string `json:"interaction_id,omitempty"`
 	Type          string `json:"type,omitempty"`
 	Summary       string `json:"summary,omitempty"`
+}
+
+// StreamBusinessCardExtra 表示一张业务结果卡片。
+//
+// 职责边界：
+// 1. CardType 只允许前端已约定的卡片类型（task_query/task_record）；
+// 2. Source 仅在 task_record 时有语义，其他卡片类型可为空；
+// 3. Data 承载“可直接渲染的最小快照”，避免前端再二次补拉才能看到结果。
+type StreamBusinessCardExtra struct {
+	CardType string         `json:"card_type,omitempty"`
+	Title    string         `json:"title,omitempty"`
+	Summary  string         `json:"summary,omitempty"`
+	Source   string         `json:"source,omitempty"`
+	Data     map[string]any `json:"data,omitempty"`
 }
 
 // ToOpenAIStream 把 Eino message 转成 OpenAI 兼容 chunk。
@@ -263,6 +279,17 @@ func NewInterruptExtra(blockID, stage, interactionID, interactionType, summary s
 	}
 }
 
+// NewBusinessCardExtra 创建“业务结果卡片”事件的 extra。
+func NewBusinessCardExtra(blockID, stage string, businessCard *StreamBusinessCardExtra) *OpenAIChunkExtra {
+	return &OpenAIChunkExtra{
+		Kind:         StreamExtraKindBusinessCard,
+		BlockID:      blockID,
+		Stage:        stage,
+		DisplayMode:  StreamDisplayModeCard,
+		BusinessCard: businessCard,
+	}
+}
+
 // NewScheduleCompletedExtra 创建”排程完毕”卡片事件的 extra。
 //
 // 职责边界：
@@ -331,5 +358,6 @@ func hasStreamExtra(extra *OpenAIChunkExtra) bool {
 		extra.Tool != nil ||
 		extra.Confirm != nil ||
 		extra.Interrupt != nil ||
+		extra.BusinessCard != nil ||
 		len(extra.Meta) > 0
 }
