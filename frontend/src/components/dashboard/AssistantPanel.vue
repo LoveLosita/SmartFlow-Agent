@@ -32,6 +32,8 @@ import ScheduleResultCard from '@/components/assistant/ScheduleResultCard.vue'
 import ScheduleFineTuneModal from '@/components/assistant/ScheduleFineTuneModal.vue'
 import { formatConversationTime, formatMessageTime } from '@/utils/date'
 import { renderMarkdown } from '@/utils/markdown'
+import BusinessCardRenderer from '@/components/assistant/cards/BusinessCardRenderer.vue'
+import type { TimelineBusinessCardPayload } from '@/api/schedule_agent'
 
 interface StreamDeltaPayload {
   content?: string
@@ -147,12 +149,13 @@ interface DisplayMessage {
 
 interface DisplayAssistantBlock {
   id: string
-  type: 'tool' | 'status' | 'reasoning' | 'content' | 'content_indicator' | 'schedule_card'
+  type: 'tool' | 'status' | 'reasoning' | 'content' | 'content_indicator' | 'schedule_card' | 'business_card'
   seq: number
   text?: string
   event?: ToolTraceEvent
   statusEvent?: StatusTraceEvent
   schedulePreview?: SchedulePreviewData
+  businessCard?: TimelineBusinessCardPayload
   /** 所属的源消息 ID，用于状态查询 */
   sourceId?: string
   /** 所属的源消息引用，用于渲染辅助信息 */
@@ -228,12 +231,13 @@ const toolTraceExpandedMap = reactive<Record<string, boolean>>({})
 const assistantReasoningSeqMap = reactive<Record<string, number>>({})
 const assistantContentBlocksMap = reactive<Record<string, AssistantContentBlock[]>>({})
 const assistantReasoningBlocksMap = reactive<Record<string, AssistantContentBlock[]>>({})
-const assistantTimelineLastKindMap = reactive<Record<string, 'content' | 'tool' | 'status' | 'reasoning' | 'other'>>({})
+const assistantTimelineLastKindMap = reactive<Record<string, 'content' | 'tool' | 'status' | 'reasoning' | 'business_card' | 'other'>>({})
 const conversationContextStatsMap = reactive<Record<string, ConversationContextStats | null>>({})
 const conversationContextStatsLoadingMap = reactive<Record<string, boolean>>({})
 const conversationContextStatsReadyMap = reactive<Record<string, boolean>>({})
 const conversationListItemRevealMap = reactive<Record<string, boolean>>({})
 const scheduleResultMap = reactive<Record<string, SchedulePreviewData>>({})
+const businessCardEventsMap = reactive<Record<string, TimelineBusinessCardPayload[]>>({})
 const isFineTuneModalVisible = ref(false)
 const fineTuneLoading = ref(false)
 const activeFineTuneData = ref<SchedulePreviewData | null>(null)
@@ -484,6 +488,7 @@ function clearToolTraceState(messageId: string) {
   delete assistantContentBlocksMap[messageId]
   delete assistantTimelineLastKindMap[messageId]
   delete scheduleResultMap[messageId]
+  delete businessCardEventsMap[messageId]
   for (const key of Object.keys(toolTraceExpandedMap)) {
     if (key.startsWith(`${messageId}:tool:`)) {
       delete toolTraceExpandedMap[key]
@@ -709,6 +714,29 @@ function appendAssistantReasoningChunk(messageId: string, chunk: string) {
   reasoningCollapsedMap[blockId] = false
   
   assistantTimelineLastKindMap[messageId] = 'reasoning'
+}
+
+/**
+ * 追加业务卡片事件
+ */
+function appendBusinessCardEvent(messageId: string, payload: TimelineBusinessCardPayload, seq?: number) {
+  if (!businessCardEventsMap[messageId]) {
+    businessCardEventsMap[messageId] = []
+  }
+  
+  // 如果上一个阶段是推理，则结束并折叠它
+  if (assistantTimelineLastKindMap[messageId] === 'reasoning') {
+    finishCurrentReasoningBlock(messageId)
+  }
+
+  const eventSeq = seq || nextAssistantTimelineSeq()
+  businessCardEventsMap[messageId].push({
+    ...payload,
+    // 借用 payload 存储 seq，便于 getDisplayAssistantBlocks 排序
+    _seq: eventSeq
+  } as any)
+  
+  assistantTimelineLastKindMap[messageId] = 'business_card'
 }
 
 function mapToolEventState(rawStatus?: string): ToolTraceState {
@@ -1284,7 +1312,6 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
         source,
       })
     }
-
     const statusEvents = (statusTraceEventsMap[source.id] || []).slice().sort((left, right) => left.seq - right.seq)
     for (const statusEvent of statusEvents) {
       blocks.push({
@@ -1316,6 +1343,18 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
         id: `${source.id}:reasoning:streaming`,
         type: 'reasoning',
         seq: assistantReasoningSeqMap[source.id] || 10,
+        sourceId: source.id,
+        source,
+      })
+    }
+
+    const businessCards = businessCardEventsMap[source.id] || []
+    for (const card of businessCards) {
+      blocks.push({
+        id: `${source.id}:card:${(card as any)._seq}`,
+        type: 'business_card',
+        seq: (card as any)._seq,
+        businessCard: card,
         sourceId: source.id,
         source,
       })
@@ -1803,18 +1842,16 @@ function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[
           // 在刷新恢复场景下，我们只需设置状态即可。
         }
         break
+      case 'business_card':
+        if (event.payload?.business_card) {
+          appendBusinessCardEvent(mid, event.payload.business_card)
+        }
+        break
 
-      case 'schedule_completed':
-        // 1. 标记该消息需要排程卡片。
-        // 2. 改造点：不在此处立即进行 getSchedulePreview 的异步拉取，
-        //    避免后端还未完成落库、或者并发过高导致的 'schedule plan preview not found' 404 捕获。
-        // 3. 这里先存入占位标志，真正的拉取推迟到用户“点击卡片”时。
-        scheduleResultMap[mid] = {
-          summary: '智能编排方案已就绪',
-          conversation_id: conversationId,
-          hybrid_entries: [],
-          is_placeholder: true, // 内部临时标记
-        } as any
+      case 'business_card':
+        if (event.payload?.business_card) {
+          appendBusinessCardEvent(mid, event.payload.business_card, event.seq)
+        }
         break
     }
   }
@@ -2255,20 +2292,11 @@ function handleStreamExtraEvent(extra: StreamExtraPayload | undefined, assistant
         `${extra.stage || ''}`,
       )
     }
+    scheduleScrollMessagesToBottom(true)
   }
 
-  if (extra.kind === 'schedule_completed') {
-    // 1. 每当“排程卡片”这种重量级里程碑出现时，刷新统计信息，让用户感知到上下文变动。
-    void loadConversationContextStats(selectedConversationId.value, true)
-
-    // 2. 收到编排完成事件，仅在前端打上占位标记，展示展示卡片。
-    // 不再并发执行异步 fetch，防止后端落库延迟导致的 NotFound。
-    scheduleResultMap[assistantMessage.id] = {
-      summary: '智能编排方案已就绪',
-      conversation_id: selectedConversationId.value,
-      hybrid_entries: [],
-      is_placeholder: true,
-    } as any
+  if (extra.kind === 'business_card' && extra.business_card) {
+    appendBusinessCardEvent(assistantMessage.id, extra.business_card)
     scheduleScrollMessagesToBottom(true)
   }
 }
@@ -2798,16 +2826,7 @@ onBeforeUnmount(() => {
             <div v-else class="chat-message__assistant-flow">
               <TransitionGroup name="inner-fade">
                 <div v-for="block in getDisplayAssistantBlocks(dm)" :key="block.id">
-                <div v-if="block.type === 'tool'" class="chat-message__tool-list">
-                  <article
-                    class="chat-message__tool-item"
-                    :class="{
-                      'chat-message__tool-item--called': block.event?.state === 'called',
-                      'chat-message__tool-item--completed': block.event?.state === 'completed',
-                      'chat-message__tool-item--create': block.event?.state === 'create',
-                      'chat-message__tool-item--blocked': block.event?.state === 'blocked',
-                    }"
-                  >
+                  <article v-if="block.type === 'tool'" class="chat-message__tool">
                     <button
                       type="button"
                       class="chat-message__tool-head"
@@ -2831,105 +2850,108 @@ onBeforeUnmount(() => {
                       {{ block.event.detail }}
                     </p>
                   </article>
-                </div>
 
-                <div v-else-if="block.type === 'status'" class="chat-message__status-line">
-                  <span class="chat-message__status-icon" aria-hidden="true">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M12 2v4" />
-                      <path d="M12 18v4" />
-                      <path d="M4.93 4.93l2.83 2.83" />
-                      <path d="M16.24 16.24l2.83 2.83" />
-                      <path d="M2 12h4" />
-                      <path d="M18 12h4" />
-                      <path d="M4.93 19.07l2.83-2.83" />
-                      <path d="M16.24 7.76l2.83-2.83" />
-                    </svg>
-                  </span>
-                  <span class="chat-message__status-text">{{ block.statusEvent?.summary }}</span>
-                </div>
-
-                <div v-else-if="block.type === 'reasoning'" class="chat-message__reasoning">
-                  <div class="chat-message__reasoning-head">
-                    <div class="chat-message__reasoning-title">
-                      <span class="chat-message__reasoning-icon">
-                        <svg
-                          class="chat-message__reasoning-icon-svg"
-                          viewBox="0 0 16 16"
-                          fill="none"
-                          xmlns="http://www.w3.org/2000/svg"
-                          aria-hidden="true"
-                        >
-                          <path
-                            d="M8.00195 6.64454C8.75029 6.64454 9.35735 7.25169 9.35742 8.00001C9.35742 8.74838 8.75033 9.35548 8.00195 9.35548C7.2537 9.35533 6.64746 8.74829 6.64746 8.00001C6.64753 7.25178 7.25374 6.64468 8.00195 6.64454Z"
-                            fill="currentColor"
-                          />
-                          <path
-                            fill-rule="evenodd"
-                            clip-rule="evenodd"
-                            d="M9.97168 1.29981C11.5854 0.718916 13.271 0.642197 14.3145 1.68555C15.3578 2.72902 15.2811 4.41466 14.7002 6.02833C14.4708 6.66561 14.1505 7.32937 13.75 8.00001C14.1505 8.67062 14.4708 9.33444 14.7002 9.97169C15.2811 11.5854 15.3579 13.271 14.3145 14.3145C13.271 15.3579 11.5854 15.2811 9.97168 14.7002C9.33443 14.4708 8.67062 14.1505 8 13.75C7.32936 14.1505 6.66561 14.4708 6.02832 14.7002C4.41464 15.2811 2.72902 15.3578 1.68555 14.3145C0.642186 13.271 0.718901 11.5854 1.29981 9.97169C1.52918 9.33454 1.84868 8.67049 2.24902 8.00001C1.84869 7.32953 1.52918 6.66544 1.29981 6.02833C0.718882 4.41459 0.6421 2.729 1.68555 1.68555C2.729 0.642112 4.41459 0.718887 6.02832 1.29981C6.66544 1.52918 7.32953 1.8487 8 2.24903C8.67048 1.84869 9.33454 1.52919 9.97168 1.29981ZM12.9404 9.2129C12.4391 9.893 11.8616 10.5681 11.2148 11.2149C10.5681 11.8616 9.89299 12.4391 9.21289 12.9404C9.62535 13.1579 10.0271 13.338 10.4121 13.4766C11.9146 14.0174 12.9173 13.8738 13.3955 13.3955C13.8737 12.9173 14.0174 11.9146 13.4766 10.4121C13.338 10.0271 13.1579 9.62535 12.9404 9.2129ZM3.05859 9.2129C2.84124 9.62523 2.662 10.0272 2.52344 10.4121C1.98255 11.9146 2.1263 12.9172 2.60449 13.3955C3.08281 13.8737 4.08548 14.0174 5.58789 13.4766C5.97267 13.338 6.37392 13.1577 6.78613 12.9404C6.10627 12.4393 5.43171 11.8614 4.78516 11.2149C4.13826 10.5679 3.55995 9.89313 3.05859 9.2129ZM7.99902 3.792C7.23182 4.31419 6.45309 4.95512 5.7041 5.70411C4.95512 6.45309 4.31418 7.23184 3.79199 7.99903C4.31434 8.76666 4.95474 9.54653 5.7041 10.2959C6.45312 11.0449 7.23274 11.6848 8 12.207C8.76728 11.6848 9.54686 11.0449 10.2959 10.2959C11.0449 9.54686 11.6848 8.76729 12.207 8.00001C11.6848 7.23275 11.0449 6.45312 10.2959 5.70411C9.54653 4.95475 8.76665 4.31434 7.99902 3.792ZM5.58789 2.52344C4.08536 1.98255 3.08275 2.12625 2.60449 2.6045C2.12624 3.08275 1.98255 4.08536 2.52344 5.5879C2.66192 5.97253 2.84143 6.37409 3.05859 6.78614C3.55986 6.10611 4.13843 5.43189 4.78516 4.78516C5.4319 4.13843 6.10609 3.55987 6.78613 3.0586C6.37408 2.84144 5.97252 2.66192 5.58789 2.52344ZM13.3955 2.6045C12.9172 2.12631 11.9146 1.98257 10.4121 2.52344C10.0272 2.66201 9.62522 2.84125 9.21289 3.0586C9.89313 3.55996 10.5679 4.13827 11.2148 4.78516C11.8614 5.43172 12.4392 6.10627 12.9404 6.78614C13.1577 6.37393 13.338 5.97267 13.4766 5.5879C14.0174 4.08549 13.8736 3.08281 13.3955 2.6045Z"
-                            fill="currentColor"
-                          />
-                        </svg>
-                      </span>
-                      <span class="chat-message__reasoning-status">{{ getReasoningStatusLabel(block) }}</span>
-                    </div>
-                    <button
-                      type="button"
-                      class="chat-message__reasoning-toggle"
-                      :aria-label="isReasoningCollapsed(block.id) ? '展开深度思考' : '折叠深度思考'"
-                      @click="toggleReasoningCollapse(block.id)"
-                    >
-                      <span class="chat-message__reasoning-chevron">
-                        <svg
-                          class="chat-message__reasoning-chevron-icon"
-                          :class="{ 'chat-message__reasoning-chevron-icon--expanded': !isReasoningCollapsed(block.id) }"
-                          width="14"
-                          height="14"
-                          viewBox="0 0 14 14"
-                          fill="none"
-                          xmlns="http://www.w3.org/2000/svg"
-                          aria-hidden="true"
-                        >
-                          <path
-                            d="M5.5 2.15137L5.92383 2.57617L8.65137 5.30273C8.90706 5.55843 9.13382 5.78438 9.29785 5.98828C9.46883 6.20088 9.61756 6.44405 9.66602 6.75C9.69222 6.91565 9.69222 7.08435 9.66602 7.25C9.61756 7.55595 9.46883 7.79912 9.29785 8.01172C9.13382 8.21561 8.90706 8.44157 8.65137 8.69727L5.92383 11.4238L5.5 11.8486L4.65137 11L5.07617 10.5762L7.80273 7.84863C8.07732 7.57405 8.24849 7.40124 8.3623 7.25977C8.46904 7.12709 8.47813 7.07728 8.48047 7.0625C8.48703 7.02105 8.48703 6.97895 8.48047 6.9375C8.47813 6.92272 8.46904 6.87291 8.3623 6.74023C8.24848 6.59876 8.07732 6.42595 7.80273 6.15137L5.07617 3.42383L4.65137 3L5.5 2.15137Z"
-                            fill="currentColor"
-                          />
-                        </svg>
-                      </span>
-                    </button>
+                  <div v-else-if="block.type === 'status'" class="chat-message__status-line">
+                    <span class="chat-message__status-icon" aria-hidden="true">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 2v4" />
+                        <path d="M12 18v4" />
+                        <path d="M4.93 4.93l2.83 2.83" />
+                        <path d="M16.24 16.24l2.83 2.83" />
+                        <path d="M2 12h4" />
+                        <path d="M18 12h4" />
+                        <path d="M4.93 19.07l2.83-2.83" />
+                        <path d="M16.24 7.76l2.83-2.83" />
+                      </svg>
+                    </span>
+                    <span class="chat-message__status-text">{{ block.statusEvent?.summary }}</span>
                   </div>
 
-                  <div v-if="isReasoningCollapsed(block.id) === false" class="chat-message__reasoning-body">
-                    <div
-                      v-if="block.text"
-                      class="chat-message__markdown chat-message__markdown--reasoning"
-                      v-html="renderMessageMarkdown(block.text || '')"
-                    />
-                    <div v-else class="chat-message__streaming chat-message__streaming--reasoning">
-                      <div class="thinking-indicator">
-                        <span class="thinking-indicator__text">正在思考</span>
+                  <div v-else-if="block.type === 'reasoning'" class="chat-message__reasoning">
+                    <div class="chat-message__reasoning-head">
+                      <div class="chat-message__reasoning-title">
+                        <span class="chat-message__reasoning-icon">
+                          <svg
+                            class="chat-message__reasoning-icon-svg"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                            aria-hidden="true"
+                          >
+                            <path
+                              d="M8.00195 6.64454C8.75029 6.64454 9.35735 7.25169 9.35742 8.00001C9.35742 8.74838 8.75033 9.35548 8.00195 9.35548C7.2537 9.35533 6.64746 8.74829 6.64746 8.00001C6.64753 7.25178 7.25374 6.64468 8.00195 6.64454Z"
+                              fill="currentColor"
+                            />
+                            <path
+                              fill-rule="evenodd"
+                              clip-rule="evenodd"
+                              d="M9.97168 1.29981C11.5854 0.718916 13.271 0.642197 14.3145 1.68555C15.3578 2.72902 15.2811 4.41466 14.7002 6.02833C14.4708 6.66561 14.1505 7.32937 13.75 8.00001C14.1505 8.67062 14.4708 9.33444 14.7002 9.97169C15.2811 11.5854 15.3579 13.271 14.3145 14.3145C13.271 15.3579 11.5854 15.2811 9.97168 14.7002C9.33443 14.4708 8.67062 14.1505 8 13.75C7.32936 14.1505 6.66561 14.4708 6.02832 14.7002C4.41464 15.2811 2.72902 15.3578 1.68555 14.3145C0.642186 13.271 0.718901 11.5854 1.29981 9.97169C1.52918 9.33454 1.84868 8.67049 2.24902 8.00001C1.84869 7.32953 1.52918 6.66544 1.29981 6.02833C0.718882 4.41459 0.6421 2.729 1.68555 1.68555C2.729 0.642112 4.41459 0.718887 6.02832 1.29981C6.66544 1.52918 7.32953 1.8487 8 2.24903C8.67048 1.84869 9.33454 1.52919 9.97168 1.29981ZM12.9404 9.2129C12.4391 9.893 11.8616 10.5681 11.2148 11.2149C10.5681 11.8616 9.89299 12.4391 9.21289 12.9404C9.62535 13.1579 10.0271 13.338 10.4121 13.4766C11.9146 14.0174 12.9173 13.8738 13.3955 13.3955C13.8737 12.9173 14.0174 11.9146 13.4766 10.4121C13.338 10.0271 13.1579 9.62535 12.9404 9.2129ZM3.05859 9.2129C2.84124 9.62523 2.662 10.0272 2.52344 10.4121C1.98255 11.9146 2.1263 12.9172 2.60449 13.3955C3.08281 13.8737 4.08548 14.0174 5.58789 13.4766C5.97267 13.338 6.37392 13.1577 6.78613 12.9404C6.10627 12.4393 5.43171 11.8614 4.78516 11.2149C4.13826 10.5679 3.55995 9.89313 3.05859 9.2129ZM7.99902 3.792C7.23182 4.31419 6.45309 4.95512 5.7041 5.70411C4.95512 6.45309 4.31418 7.23184 3.79199 7.99903C4.31434 8.76666 4.95474 9.54653 5.7041 10.2959C6.45312 11.0449 7.23274 11.6848 8 12.207C8.76728 11.6848 9.54686 11.0449 10.2959 10.2959C11.0449 9.54686 11.6848 8.76729 12.207 8.00001C11.6848 7.23275 11.0449 6.45312 10.2959 5.70411C9.54653 4.95475 8.76665 4.31434 7.99902 3.792ZM5.58789 2.52344C4.08536 1.98255 3.08275 2.12625 2.60449 2.6045C2.12624 3.08275 1.98255 4.08536 2.52344 5.5879C2.66192 5.97253 2.84143 6.37409 3.05859 6.78614C3.55986 6.10611 4.13843 5.43189 4.78516 4.78516C5.4319 4.13843 6.10609 3.55987 6.78613 3.0586C6.37408 2.84144 5.97252 2.66192 5.58789 2.52344ZM13.3955 2.6045C12.9172 2.12631 11.9146 1.98257 10.4121 2.52344C10.0272 2.66201 9.62522 2.84125 9.21289 3.0586C9.89313 3.55996 10.5679 4.13827 11.2148 4.78516C11.8614 5.43172 12.4392 6.10627 12.9404 6.78614C13.1577 6.37393 13.338 5.97267 13.4766 5.5879C14.0174 4.08549 13.8736 3.08281 13.3955 2.6045Z"
+                              fill="currentColor"
+                            />
+                          </svg>
+                        </span>
+                        <span class="chat-message__reasoning-status">{{ getReasoningStatusLabel(block) }}</span>
+                      </div>
+                      <button
+                        type="button"
+                        class="chat-message__reasoning-toggle"
+                        :aria-label="isReasoningCollapsed(block.id) ? '展开深度思考' : '折叠深度思考'"
+                        @click="toggleReasoningCollapse(block.id)"
+                      >
+                        <span class="chat-message__reasoning-chevron">
+                          <svg
+                            class="chat-message__reasoning-chevron-icon"
+                            :class="{ 'chat-message__reasoning-chevron-icon--expanded': !isReasoningCollapsed(block.id) }"
+                            width="14"
+                            height="14"
+                            viewBox="0 0 14 14"
+                            fill="none"
+                            xmlns="http://www.w3.org/2000/svg"
+                            aria-hidden="true"
+                          >
+                            <path
+                              d="M5.5 2.15137L5.92383 2.57617L8.65137 5.30273C8.90706 5.55843 9.13382 5.78438 9.29785 5.98828C9.46883 6.20088 9.61756 6.44405 9.66602 6.75C9.69222 6.91565 9.69222 7.08435 9.66602 7.25C9.61756 7.55595 9.46883 7.79912 9.29785 8.01172C9.13382 8.21561 8.90706 8.44157 8.65137 8.69727L5.92383 11.4238L5.5 11.8486L4.65137 11L5.07617 10.5762L7.80273 7.84863C8.07732 7.57405 8.24849 7.40124 8.3623 7.25977C8.46904 7.12709 8.47813 7.07728 8.48047 7.0625C8.48703 7.02105 8.48703 6.97895 8.48047 6.9375C8.47813 6.92272 8.46904 6.87291 8.3623 6.74023C8.24848 6.59876 8.07732 6.42595 7.80273 6.15137L5.07617 3.42383L4.65137 3L5.5 2.15137Z"
+                              fill="currentColor"
+                            />
+                          </svg>
+                        </span>
+                      </button>
+                    </div>
+
+                    <div v-if="isReasoningCollapsed(block.id) === false" class="chat-message__reasoning-body">
+                      <div
+                        v-if="block.text"
+                        class="chat-message__markdown chat-message__markdown--reasoning"
+                        v-html="renderMessageMarkdown(block.text || '')"
+                      />
+                      <div v-else class="chat-message__streaming chat-message__streaming--reasoning">
+                        <div class="thinking-indicator">
+                          <span class="thinking-indicator__text">正在思考</span>
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
 
-                <div v-else-if="block.type === 'content'" class="chat-message__assistant-content">
-                  <div class="chat-message__markdown chat-message__markdown--assistant" v-html="renderMessageMarkdown(block.text || '')" />
-                </div>
-
-                <template v-else-if="block.type === 'schedule_card' && block.schedulePreview">
-                  <ScheduleResultCard
-                    :summary="block.schedulePreview.summary"
-                    @click="openFineTuneModal(block.schedulePreview)"
-                  />
-                </template>
-
-                <div v-else-if="block.type === 'content_indicator'" class="assistant-timeline__answering-indicator">
-                  <div class="thinking-indicator">
-                    <span class="thinking-indicator__text">正在思考</span>
+                  <div v-else-if="block.type === 'business_card'" class="chat-message__business-card">
+                    <BusinessCardRenderer :payload="block.businessCard" />
                   </div>
-                </div>
+
+                  <div v-else-if="block.type === 'content'" class="chat-message__assistant-content">
+                    <div class="chat-message__markdown chat-message__markdown--assistant" v-html="renderMessageMarkdown(block.text || '')" />
+                  </div>
+
+                  <template v-else-if="block.type === 'schedule_card' && block.schedulePreview">
+                    <ScheduleResultCard
+                      :summary="block.schedulePreview.summary"
+                      @click="openFineTuneModal(block.schedulePreview)"
+                    />
+                  </template>
+
+                  <div v-else-if="block.type === 'content_indicator'" class="assistant-timeline__answering-indicator">
+                    <div class="thinking-indicator">
+                      <span class="thinking-indicator__text">正在思考</span>
+                    </div>
+                  </div>
                 </div>
               </TransitionGroup>
 

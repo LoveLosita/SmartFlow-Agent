@@ -7,6 +7,7 @@ import DashboardView from '@/views/DashboardView.vue'
 import ScheduleView from '@/views/ScheduleView.vue'
 import ToolTracePrototypeView from '@/views/ToolTracePrototypeView.vue'
 import TaskInteractiveDemo from '@/views/TaskInteractiveDemo.vue'
+import DesignDemo from '@/views/DesignDemo.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -56,6 +57,11 @@ const router = createRouter({
       path: '/prototype/tool-trace',
       name: 'tool-trace-prototype',
       component: ToolTracePrototypeView,
+    },
+    {
+      path: '/design-demo',
+      name: 'design-demo',
+      component: DesignDemo,
     },
   ],
 })

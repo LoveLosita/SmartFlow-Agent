@@ -16,6 +16,45 @@ export interface TimelineConfirmPayload {
   summary: string
 }
 
+export interface TaskQueryCardTaskItem {
+  id: number
+  title: string
+  priority_group?: number
+  priority_label?: string
+  deadline_at?: string
+  is_completed?: boolean
+}
+
+export interface TaskQueryCardData {
+  query_summary?: string
+  result_count: number
+  shown_count: number
+  has_more?: boolean
+  tasks: TaskQueryCardTaskItem[]
+}
+
+export interface TaskRecordCardData {
+  id?: number
+  title: string
+  priority_group?: number
+  priority_label?: string
+  deadline_at?: string
+  urgency_threshold_at?: string
+  status?: string
+  created_at?: string
+}
+
+export type BusinessCardType = 'task_query' | 'task_record'
+export type TaskRecordSource = 'quick_note' | 'create_task'
+
+export interface TimelineBusinessCardPayload {
+  card_type: BusinessCardType
+  title?: string
+  summary?: string
+  source?: TaskRecordSource
+  data: TaskQueryCardData | TaskRecordCardData
+}
+
 export interface TimelineEvent {
   id: number
   seq: number
@@ -28,6 +67,7 @@ export interface TimelineEvent {
     | 'schedule_completed'
     | 'interrupt'
     | 'status'
+    | 'business_card'
   role?: 'user' | 'assistant'
   content?: string
   payload?: {
@@ -37,6 +77,7 @@ export interface TimelineEvent {
     display_mode?: 'card'
     tool?: TimelineToolPayload
     confirm?: TimelineConfirmPayload
+    business_card?: TimelineBusinessCardPayload
   }
   tokens_consumed?: number
   created_at: string
