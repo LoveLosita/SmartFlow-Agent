@@ -16,13 +16,14 @@ func buildPlanConversationMessage(ctx *newagentmodel.ConversationContext) string
 // buildPlanWorkspace 渲染 plan 节点自己的工作区。
 //
 // 设计说明：
-// 1. 这里只保留“规划真正需要知道的东西”：已有计划、当前步骤、task_class_ids、任务类约束；
-// 2. 不再复用通用胖状态摘要，避免把 execute / deliver 无关状态一起塞给 plan；
-// 3. 若当前没有正式计划，则明确告诉模型“从零开始规划”，避免继续误沿用旧上下文。
+// 1. 这里既保留“当前已有计划/任务类约束”，也显式补充“规划视角的工具摘要”；
+// 2. planner 需要先理解工具边界，才能把步骤收敛到最小闭环，而不是按抽象语义乱拆；
+// 3. 工具摘要不展开全量 schema，只提供规划真正需要的：负责什么、不负责什么、常见闭环、完成证据、域切换条件。
 func buildPlanWorkspace(state *newagentmodel.CommonState) string {
 	lines := []string{"规划工作区："}
 	if state == nil {
 		lines = append(lines, "- 当前缺少流程状态，请主要依据最近对话与本轮输入继续规划。")
+		lines = append(lines, buildPlanToolPlanningSummary())
 		return strings.Join(lines, "\n")
 	}
 
@@ -43,6 +44,7 @@ func buildPlanWorkspace(state *newagentmodel.CommonState) string {
 		lines = append(lines, taskClassMeta)
 	}
 
+	lines = append(lines, buildPlanToolPlanningSummary())
 	return strings.Join(lines, "\n")
 }
 
@@ -138,6 +140,76 @@ func renderPlanTaskClassMeta(state *newagentmodel.CommonState) string {
 			)
 		}
 		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// buildPlanToolPlanningSummary 生成“规划视角的工具摘要”。
+//
+// 步骤化说明：
+// 1. 先讲 domain：让 planner 先判断目标应该停留在哪个业务域；
+// 2. 再讲 schedule packs：让 planner 知道若进入 schedule，该选最小哪组能力；
+// 3. 最后讲 hook 推导规则：因为 context_hook 只有一份，必须和“首个可执行闭环”对齐。
+func buildPlanToolPlanningSummary() string {
+	sections := []string{
+		"规划视角的工具摘要：",
+		buildPlanToolDomainTaskClassSummary(),
+		buildPlanToolDomainScheduleSummary(),
+		buildPlanToolPackSummary(),
+		buildPlanContextHookSummary(),
+	}
+	return strings.Join(sections, "\n")
+}
+
+func buildPlanToolDomainTaskClassSummary() string {
+	lines := []string{
+		"1. taskclass 域：",
+		"- 负责什么：创建 / 更新任务类，沉淀学习目标、总节数、难度、节次偏好、禁排时段、排除星期、内容拆分授权、任务项结构。",
+		"- 不负责什么：不给出具体日期/节次落位，不负责把任务真正排进日程。",
+		"- 常见一步闭环：任务类设计或修正通常可由 taskclass 域单步闭环，核心写入动作为 upsert_task_class。",
+		"- 何时停留在本域：用户仍在描述目标、偏好、约束、拆分方式，而不是要求现在排进日程。",
+		"- 何时切到下一个域：只有用户明确要求“排进日程 / 给出具体时间安排 / 现在就排一版”，或当前目标本身已变成排程执行。",
+		"- done_when 证据偏好：优先锚定 upsert_task_class 成功回执、validation.ok=true、validation.issues 已清空。",
+	}
+	return strings.Join(lines, "\n")
+}
+
+func buildPlanToolDomainScheduleSummary() string {
+	lines := []string{
+		"2. schedule 域：",
+		"- 负责什么：查询日程现状、粗排、具体落位、局部移动/交换、批量同规则调整、排程健康分析。",
+		"- 不负责什么：不凭空补考试时间、DDL、个人空闲、外部时间事实；这类信息拿不到时应 ask_user。",
+		"- 常见一步闭环：单次查询通常一个读工具即可闭环；单次移动/交换/放置通常一个写工具即可闭环；局部分析通常一个 analyze 工具即可闭环。",
+		"- 何时停留在本域：用户明确要求查询、安排、调整、优化当前日程。",
+		"- 何时先回 taskclass：如果用户还在定义“学什么、学多少、怎么拆、哪些时段不要学”，而不是要求立刻排程，应先停留在 taskclass。",
+		"- done_when 证据偏好：优先锚定查询 observation、写工具成功回执、rough_build_done 标记、analyze observation 已能直接支撑下一步。",
+	}
+	return strings.Join(lines, "\n")
+}
+
+func buildPlanToolPackSummary() string {
+	lines := []string{
+		"3. schedule packs 选择参考：",
+		"- detail_read：查看总览、查询区间、看任务详情；适合“先读事实再决定”的首步。",
+		"- mutation：place / move / swap / batch_move / unplace；适合真正落日程或调日程。",
+		"- analyze：analyze_health / analyze_rhythm；适合先判断是否还有优化空间、该往哪里动。",
+		"- queue：适合“按同一规则逐个处理一批任务”的计划，不必把整批任务细节都堆进 steps。",
+		"- web：仅补通用学习资料或通识信息；不用于补个人时间事实。",
+		"- deep_analyze：适合确实需要更深一层 schedule 分析时再加，默认不要为了“看起来完整”就提前注入。",
+		"- 选 pack 原则：只选首个可执行 step 真的需要的最小 packs，不要为了保险一次全带上。",
+	}
+	return strings.Join(lines, "\n")
+}
+
+func buildPlanContextHookSummary() string {
+	lines := []string{
+		"4. context_hook 推导规则：",
+		"- 先确定 steps，再看第一个可执行 step 需要哪个 domain / 哪组最小 packs，最后才写 hook。",
+		"- 若第一个可执行 step 本质上是任务类写入或修正，hook 通常应为 taskclass，且一般不需要 packs。",
+		"- 若第一个可执行 step 是 schedule 查询，hook 应为 schedule，并优先只带 detail_read。",
+		"- 若第一个可执行 step 是 schedule 分析，hook 应为 schedule，并优先带 analyze；若分析后立刻要落写，再补 mutation。",
+		"- 若第一个可执行 step 是批量同规则处理，hook 应在 schedule 基础上按需加 queue。",
+		"- hook 只有一份，不要求提前覆盖整份计划的所有后续能力；execute 可以在后续按计划再切域或补 packs。",
 	}
 	return strings.Join(lines, "\n")
 }

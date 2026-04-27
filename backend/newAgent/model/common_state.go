@@ -189,7 +189,7 @@ type CommonState struct {
 	// HasScheduleWriteOps 标记本轮 execute 循环是否执行过日程写工具。
 	// 调用目的：为 prompt/收口层提供“本轮是否真的动过日程写工具”的运行态信号。
 	HasScheduleWriteOps bool `json:"has_schedule_write_ops,omitempty"`
-	// UsedQuickNote 标记本轮是否调用过 quick_note_create 工具。
+	// UsedQuickNote 标记本轮是否走过“快捷随口记任务”路径。
 	// 调用目的：graph 完成后据此决定是否跳过记忆抽取，避免随口记内容被错误归类。
 	UsedQuickNote bool `json:"used_quick_note,omitempty"`
 	// HasScheduleChanges 标记本轮流程是否产生过日程变更（粗排或写工具）。

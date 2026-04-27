@@ -54,16 +54,13 @@ var toolProfileByName = map[string]toolProfile{
 	"queue_apply_head_move": {Domain: ToolDomainSchedule, Pack: ToolPackQueue},
 	"queue_skip_head":       {Domain: ToolDomainSchedule, Pack: ToolPackQueue},
 
-	"place":              {Domain: ToolDomainSchedule, Pack: ToolPackMutation},
-	"move":               {Domain: ToolDomainSchedule, Pack: ToolPackMutation},
-	"swap":               {Domain: ToolDomainSchedule, Pack: ToolPackMutation},
-	"batch_move":         {Domain: ToolDomainSchedule, Pack: ToolPackMutation},
-	"spread_even":        {Domain: ToolDomainSchedule, Pack: ToolPackMutation},
-	"min_context_switch": {Domain: ToolDomainSchedule, Pack: ToolPackMutation},
-	"unplace":            {Domain: ToolDomainSchedule, Pack: ToolPackMutation},
+	"place":      {Domain: ToolDomainSchedule, Pack: ToolPackMutation},
+	"move":       {Domain: ToolDomainSchedule, Pack: ToolPackMutation},
+	"swap":       {Domain: ToolDomainSchedule, Pack: ToolPackMutation},
+	"batch_move": {Domain: ToolDomainSchedule, Pack: ToolPackMutation},
+	"unplace":    {Domain: ToolDomainSchedule, Pack: ToolPackMutation},
 
-	"analyze_rhythm":    {Domain: ToolDomainSchedule, Pack: ToolPackDeepAnalyze},
-	"analyze_tolerance": {Domain: ToolDomainSchedule, Pack: ToolPackDeepAnalyze},
+	"analyze_rhythm": {Domain: ToolDomainSchedule, Pack: ToolPackDeepAnalyze},
 
 	"web_search": {Domain: ToolDomainSchedule, Pack: ToolPackWeb},
 	"web_fetch":  {Domain: ToolDomainSchedule, Pack: ToolPackWeb},

@@ -19,7 +19,15 @@ export interface TimelineConfirmPayload {
 export interface TimelineEvent {
   id: number
   seq: number
-  kind: 'user_text' | 'assistant_text' | 'tool_call' | 'tool_result' | 'confirm_request' | 'schedule_completed'
+  kind:
+    | 'user_text'
+    | 'assistant_text'
+    | 'tool_call'
+    | 'tool_result'
+    | 'confirm_request'
+    | 'schedule_completed'
+    | 'interrupt'
+    | 'status'
   role?: 'user' | 'assistant'
   content?: string
   payload?: {

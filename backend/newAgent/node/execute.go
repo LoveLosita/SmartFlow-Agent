@@ -27,7 +27,6 @@ const (
 	executeStatusBlockID           = "execute.status"
 	executeSpeakBlockID            = "execute.speak"
 	executePinnedKey               = "execution_context"
-	toolMinContextSwitch           = "min_context_switch"
 	toolAnalyzeHealth              = "analyze_health"
 	executeHistoryKindKey          = "newagent_history_kind"
 	executeHistoryKindStepAdvanced = "execute_step_advanced"
@@ -419,7 +418,7 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 	decision.Speak = normalizeSpeak(decision.Speak) // 末尾已含 \n
 
 	// 非写工具的 confirm 动作自动降级为 continue。
-	// 调用目的：quick_note_create 等非写工具不应走确认卡片流程；
+	// 调用目的：快捷随口记这类非日程写工具不应走确认卡片流程；
 	// 即使 LLM 误输出 action=confirm，也在此处强制修正，
 	// 确保 speak 正常推流和持久化，不会因 confirm 卡片跳过 persistVisibleAssistantMessage。
 	if decision.Action == newagentmodel.ExecuteActionConfirm &&
@@ -452,6 +451,25 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		}
 		speakStreamed = true
 		firstChunk = false
+	}
+
+	// 1. execute 正文若已经在流式阶段推给前端，normalizeSpeak 新补出来的尾部（最常见是末尾 \n）
+	//    不会自动回流到前端，只会留在 history / persist 中。
+	// 2. 这会导致下一跳 deliver 首条正文直接接在 execute 最后一段后面，前端表现成两段文本黏连。
+	// 3. 这里只补发“归一化后新增的尾巴”，不重发整段正文，也不改写中间内容，避免误伤已有流式体验。
+	if speakStreamed {
+		streamedText := fullText.String()
+		if tail := buildExecuteNormalizedSpeakTail(streamedText, decision.Speak); tail != "" {
+			if emitErr := emitter.EmitAssistantText(
+				executeSpeakBlockID,
+				executeStageName,
+				tail,
+				firstChunk,
+			); emitErr != nil {
+				return fmt.Errorf("执行文案尾部补发失败: %w", emitErr)
+			}
+			firstChunk = false
+		}
 	}
 
 	// 自省校验（仅 Plan 模式）：next_plan / done 必须附带 goal_check，否则不推进，追加修正让 LLM 重试。
@@ -514,7 +532,7 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 		// 继续当前步骤的 ReAct 循环。
 		// 若有工具调用意图，则执行工具并记录证据。
 		if decision.ToolCall != nil {
-			// 1. 写工具必须走 confirm；continue 只允许读工具。
+			// 1. 所有写工具都必须走 confirm；continue 只允许读工具。
 			// 2. 若模型误输出 continue+写工具，这里先做纠偏，不直接执行写操作。
 			if input.ToolRegistry != nil && input.ToolRegistry.IsWriteTool(decision.ToolCall.Name) {
 				flowState.ConsecutiveCorrections++
@@ -533,7 +551,7 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 					executeStatusBlockID,
 					executeStageName,
 					"executing",
-					fmt.Sprintf("执行校验：写工具 %q 未执行。原因：模型输出了 action=continue；日程修改工具必须使用 action=confirm。", strings.TrimSpace(decision.ToolCall.Name)),
+					fmt.Sprintf("执行校验：写工具 %q 未执行。原因：模型输出了 action=continue；所有写工具都必须使用 action=confirm。", strings.TrimSpace(decision.ToolCall.Name)),
 					false,
 				)
 				llmOutput := decision.Speak
@@ -544,7 +562,7 @@ func RunExecuteNode(ctx context.Context, input ExecuteNodeInput) error {
 					conversationContext,
 					llmOutput,
 					fmt.Sprintf("你输出了 action=continue，但工具 %q 属于写操作。", decision.ToolCall.Name),
-					"写操作必须输出 action=confirm，并附带同一个 tool_call；continue 仅用于读工具。这次写操作没有执行，请直接重发 confirm。",
+					"所有写操作都必须输出 action=confirm，并附带同一个 tool_call；continue 仅用于读工具。这次写操作没有执行，请直接重发 confirm。",
 				)
 				return nil
 			}
@@ -1699,28 +1717,6 @@ func executeToolCall(
 	}
 
 	// 2. 执行工具。
-	// 顺序护栏：未授权打乱顺序时，拒绝执行 min_context_switch，并写回工具观察结果。
-	if shouldBlockMinContextSwitch(flowState, toolName) {
-		blockedResult := "已拒绝执行 min_context_switch：当前未授权打乱顺序。如需使用该工具，请先由用户明确说明“允许打乱顺序”。"
-		log.Printf(
-			"[WARN] execute tool blocked chat=%s round=%d tool=%s allow_reorder=%v",
-			flowState.ConversationID,
-			flowState.RoundUsed,
-			toolName,
-			flowState.AllowReorder,
-		)
-		_ = emitter.EmitToolCallResult(
-			executeStatusBlockID,
-			executeStageName,
-			toolName,
-			"blocked",
-			blockedResult,
-			buildToolArgumentsPreviewCN(toolCall.Arguments),
-			false,
-		)
-		appendToolCallResultHistory(conversationContext, toolName, toolCall.Arguments, blockedResult)
-		return nil
-	}
 	if shouldForceFeasibilityNegotiation(flowState, registry, toolName) {
 		blockedResult := buildInfeasibleBlockedResult(flowState)
 		_ = emitter.EmitToolCallResult(
@@ -1845,19 +1841,6 @@ func buildTemporarilyDisabledToolResult(toolName string) string {
 	return fmt.Sprintf("工具 %q 当前暂时禁用。请改用 move/swap/batch_move/unplace 等基础微调工具。", strings.TrimSpace(toolName))
 }
 
-// shouldBlockMinContextSwitch 判断是否要拦截 min_context_switch 工具。
-//
-// 说明：
-// 1. 仅当工具名为 min_context_switch 且未授权打乱顺序时返回 true；
-// 2. 其余场景统一放行；
-// 3. nil flowState 视为未命中拦截条件，避免因状态缺失导致误阻断。
-func shouldBlockMinContextSwitch(flowState *newagentmodel.CommonState, toolName string) bool {
-	if flowState == nil {
-		return false
-	}
-	return !flowState.AllowReorder && strings.EqualFold(strings.TrimSpace(toolName), toolMinContextSwitch)
-}
-
 // executePendingTool 执行用户已确认的写工具。
 //
 // 职责边界：
@@ -1920,22 +1903,6 @@ func executePendingTool(
 		return nil
 	}
 
-	// 3.1 顺序护栏在确认执行路径同样生效，避免绕过前置约束。
-	if shouldBlockMinContextSwitch(flowState, pending.ToolName) {
-		blockedResult := "已拒绝执行 min_context_switch：当前未授权打乱顺序。如需使用该工具，请先由用户明确说明“允许打乱顺序”。"
-		_ = emitter.EmitToolCallResult(
-			executeStatusBlockID,
-			executeStageName,
-			pending.ToolName,
-			"blocked",
-			blockedResult,
-			buildToolArgumentsPreviewCN(args),
-			false,
-		)
-		appendToolCallResultHistory(conversationContext, pending.ToolName, args, blockedResult)
-		runtimeState.PendingConfirmTool = nil
-		return nil
-	}
 	if shouldForceFeasibilityNegotiation(flowState, registry, pending.ToolName) {
 		blockedResult := buildInfeasibleBlockedResult(flowState)
 		_ = emitter.EmitToolCallResult(
@@ -2058,6 +2025,24 @@ func normalizeSpeak(speak string) string {
 		speak = listItemRe.ReplaceAllString(speak, "$1\n$2")
 	}
 	return speak + "\n"
+}
+
+// buildExecuteNormalizedSpeakTail 计算“归一化后新增、但前端尚未收到”的 execute 文案尾巴。
+//
+// 职责边界：
+// 1. 只处理“streamed 原文是 normalized 的前缀”这一保守场景，典型就是只缺末尾换行；
+// 2. 不尝试回放中间格式差异，避免把整段已流式输出的正文再推一遍；
+// 3. 若无法安全判断差额，则返回空串，交给现有行为继续执行。
+func buildExecuteNormalizedSpeakTail(streamed, normalized string) string {
+	streamed = strings.ReplaceAll(streamed, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r\n", "\n")
+	if streamed == "" || normalized == "" {
+		return ""
+	}
+	if !strings.HasPrefix(normalized, streamed) {
+		return ""
+	}
+	return normalized[len(streamed):]
 }
 
 // truncateText 截断文本到指定长度。
@@ -2397,15 +2382,12 @@ func resolveToolDisplayNameCN(toolName string) string {
 		"get_task_info":         "查看任务详情",
 		"analyze_health":        "综合体检",
 		"analyze_rhythm":        "分析学习节奏",
-		"analyze_tolerance":     "分析容错空间",
 		"web_search":            "网页搜索",
 		"web_fetch":             "网页抓取",
 		"move":                  "移动任务",
 		"place":                 "放置任务",
 		"swap":                  "交换任务",
 		"batch_move":            "批量移动任务",
-		"spread_even":           "均匀分散任务",
-		"min_context_switch":    "减少上下文切换",
 		"unplace":               "移除任务安排",
 		"upsert_task_class":     "写入任务类",
 		"context_tools_add":     "激活工具域",

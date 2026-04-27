@@ -253,7 +253,7 @@ func (s *AgentService) runNewAgentGraph(
 
 	// 11.6. graph 完成后条件触发记忆抽取。
 	// 说明：
-	// 1. 只有本轮未使用 quick_note_create 时才触发记忆抽取；
+	// 1. 只有本轮未走快捷随口记任务路径时才触发记忆抽取；
 	// 2. 避免随口记创建的 Task 与记忆系统产生语义冲突。
 	if finalState != nil {
 		cs := finalState.EnsureRuntimeState().EnsureCommonState()

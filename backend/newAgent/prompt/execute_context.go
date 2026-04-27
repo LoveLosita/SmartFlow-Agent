@@ -231,9 +231,9 @@ func buildExecuteMessage3(state *newagentmodel.CommonState, ctx *newagentmodel.C
 
 	if state != nil {
 		if state.AllowReorder {
-			lines = append(lines, "- 顺序策略：用户已明确允许打乱顺序，可在必要时使用 min_context_switch。")
+			lines = append(lines, "- 顺序策略：用户已明确允许打乱顺序，但当前主链不再提供顺序重排工具，请优先使用 move/swap 做局部调整。")
 		} else {
-			lines = append(lines, "- 顺序策略：默认保持 suggested 相对顺序，禁止调用 min_context_switch。")
+			lines = append(lines, "- 顺序策略：默认保持 suggested 相对顺序，仅做局部 move/swap 调整。")
 		}
 	}
 
@@ -269,7 +269,7 @@ func buildExecuteMessage3(state *newagentmodel.CommonState, ctx *newagentmodel.C
 //
 // 1. 这里只给模型最低必要的参数和返回值感知，不重复塞完整 schema JSON。
 // 2. 对复杂工具额外给一条调用示例，降低“参数字段写错”的概率。
-// 3. P1 阶段隐藏 min_context_switch，避免模型误用已禁能力。
+// 3. 这里只展示当前真实可用工具，避免历史残留能力继续污染工具面。
 func renderExecuteToolCatalogCompact(ctx *newagentmodel.ConversationContext, state *newagentmodel.CommonState) string {
 	if ctx == nil {
 		return ""
@@ -286,10 +286,6 @@ func renderExecuteToolCatalogCompact(ctx *newagentmodel.ConversationContext, sta
 		if name == "" {
 			continue
 		}
-		if shouldHideMinContextSwitchForP1(state, name) {
-			continue
-		}
-
 		index++
 		desc := strings.TrimSpace(schemaItem.Desc)
 		if desc == "" {
@@ -329,7 +325,6 @@ func shouldRenderExecuteToolReturnSample(toolName string) bool {
 		"web_fetch",
 		"analyze_health",
 		"analyze_rhythm",
-		"analyze_tolerance",
 		"upsert_task_class":
 		return true
 	default:
@@ -340,7 +335,7 @@ func shouldRenderExecuteToolReturnSample(toolName string) bool {
 func renderExecuteToolCallHint(toolName string) string {
 	switch strings.ToLower(strings.TrimSpace(toolName)) {
 	case "upsert_task_class":
-		return `{"name":"upsert_task_class","arguments":{"task_class":{"name":"线性代数复习","mode":"auto","start_date":"2026-06-01","end_date":"2026-06-20","subject_type":"quantitative","difficulty_level":"high","cognitive_intensity":"high","config":{"total_slots":8,"strategy":"steady","allow_filler_course":false,"excluded_slots":[1,11],"excluded_days_of_week":[6,7]},"items":[{"order":1,"content":"行列式定义与基础计算"},{"order":2,"content":"矩阵及其运算规则"},{"order":3,"content":"逆矩阵与矩阵的秩"}]}}}`
+		return `仅当用户或上下文已明确给出日期范围时，才允许写入 start_date/end_date；写前先检查 difficulty_level 已归一为 low/medium/high，items 已非空且内容顺序已生成完成：{"name":"upsert_task_class","arguments":{"task_class":{"name":"线性代数复习","mode":"auto","start_date":"2026-06-01","end_date":"2026-06-20","subject_type":"quantitative","difficulty_level":"high","cognitive_intensity":"high","config":{"total_slots":8,"strategy":"steady","allow_filler_course":false,"excluded_slots":[1,6],"excluded_days_of_week":[6,7]},"items":[{"order":1,"content":"行列式定义与基础计算"},{"order":2,"content":"矩阵及其运算规则"},{"order":3,"content":"逆矩阵与矩阵的秩"}]}}}`
 	default:
 		return ""
 	}
@@ -375,10 +370,6 @@ func renderExecuteToolReturnHint(toolName string) (returnType string, sample str
 		return returnType, "交换完成：[35]... ↔ [36]..."
 	case "batch_move":
 		return returnType, "批量移动完成，2 个任务全部成功。"
-	case "spread_even":
-		return returnType, "均匀化调整完成：共处理 6 个任务，候选坑位 24 个。"
-	case "min_context_switch":
-		return returnType, "最少上下文切换重排完成：共处理 6 个任务，上下文切换次数 5 -> 2。"
 	case "unplace":
 		return returnType, "已将 [35]... 移除，恢复为待安排状态。"
 	case "web_search":
@@ -389,8 +380,6 @@ func renderExecuteToolReturnHint(toolName string) (returnType string, sample str
 		return "string（JSON字符串）", `{"tool":"analyze_health","success":true,"metrics":{"rhythm":{"avg_switches_per_day":1.1,"max_switch_count":4,"heavy_adjacent_days":2,"same_type_transition_ratio":0.58,"block_balance":0,"fragmented_count":0,"compressed_run_count":0},"tightness":{"locally_movable_task_count":3,"avg_local_alternative_slots":1.7,"cross_class_swap_options":1,"forced_heavy_adjacent_days":0,"tightness_level":"tight"},"can_close":false},"decision":{"should_continue_optimize":true,"recommended_operation":"swap","primary_problem":"第4天存在高认知背靠背","candidates":[{"candidate_id":"swap_35_44","tool":"swap","arguments":{"task_a":35,"task_b":44}}]}}`
 	case "analyze_rhythm":
 		return "string（JSON字符串）", `{"tool":"analyze_rhythm","success":true,"metrics":{"overview":{"avg_switches_per_day":3.4,"max_switch_day":4,"max_switch_count":5,"heavy_adjacent_days":2,"long_high_intensity_days":1,"same_type_transition_ratio":0.42}}}`
-	case "analyze_tolerance":
-		return "string（JSON字符串）", `{"tool":"analyze_tolerance","success":true,"metrics":{"overall":{"fragmentation_rate":0.52,"days_without_buffer":1}}}`
 	case "upsert_task_class":
 		return "string（JSON字符串）", `{"tool":"upsert_task_class","success":true,"task_class_id":123,"created":true,"validation":{"ok":true,"issues":[]},"error":"","error_code":""}`
 	default:
@@ -564,9 +553,8 @@ func hasExecuteRoughBuildDone(ctx *newagentmodel.ConversationContext) bool {
 
 func renderExecuteLatestAnalyzeSummary(ctx *newagentmodel.ConversationContext) string {
 	record, ok := findExecuteLatestToolRecord(ctx, map[string]struct{}{
-		"analyze_health":    {},
-		"analyze_rhythm":    {},
-		"analyze_tolerance": {},
+		"analyze_health": {},
+		"analyze_rhythm": {},
 	})
 	if !ok {
 		return ""
@@ -582,8 +570,6 @@ func renderExecuteLatestMutationSummary(ctx *newagentmodel.ConversationContext) 
 		"batch_move":            {},
 		"unplace":               {},
 		"queue_apply_head_move": {},
-		"spread_even":           {},
-		"min_context_switch":    {},
 	})
 	if !ok {
 		return ""
@@ -790,14 +776,13 @@ func renderTaskClassUpsertRuntime(state *newagentmodel.CommonState) string {
 		}
 	}
 	if !state.TaskClassUpsertLastSuccess {
+		lines = append(lines, "- 写前最少检查项：mode=auto 的 start_date/end_date、subject_type/difficulty_level/cognitive_intensity、difficulty_level 合法枚举、items 非空且内容已生成、config 约束字段合法。")
+		lines = append(lines, "- 先判断当前 issues 属于哪一类：若是 schema 字段名、字段位置、半天块索引、枚举值、日期格式、工具语义映射等内部表示问题，直接静默改参重试。")
+		lines = append(lines, "- 若 issue 指向 start_date/end_date 等字段，先检查当前对话、历史、记忆、最近工具结果里是否已出现可用值；只有确实没有时再 ask_user。")
+		lines = append(lines, "- 若缺的是 start_date/end_date/日期范围/开始日期承诺/完成期限，而这些值并未在上下文中出现，就必须 ask_user；不能把当前日期或默认周期当成用户已同意的时间边界。")
+		lines = append(lines, "- 若 issue 像 difficulty_level 非法、items 为空、约束字段格式不合法，就先在本轮静默归一/补齐/生成，再 confirm 重试；不要把 validation 当试错器。")
+		lines = append(lines, "- 若再次调用 upsert_task_class，动作必须是 confirm，不能输出 continue + tool_call。")
 		lines = append(lines, "- 在 issues 处理完之前，不要用 done 收口。")
 	}
 	return strings.Join(lines, "\n")
-}
-
-func shouldHideMinContextSwitchForP1(state *newagentmodel.CommonState, toolName string) bool {
-	if strings.TrimSpace(toolName) != "min_context_switch" {
-		return false
-	}
-	return true
 }

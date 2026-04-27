@@ -173,7 +173,7 @@ func SmartPlanningMainLogic(schedules []model.Schedule, taskClass *model.TaskCla
 	if err != nil {
 		return nil, err
 	}
-	//3.把这些时间通过DTO函数回填到涉��周的 UserWeekSchedule 结构中，供前端展示
+	// 3. 把这些时间通过 DTO 函数回填到涉及周的 UserWeekSchedule 结构中，供前端展示。
 	return conv.PlanningResultToUserWeekSchedules(schedules, allocatedItems), nil
 }
 

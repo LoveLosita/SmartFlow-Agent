@@ -52,14 +52,7 @@ type ToolRegistry struct {
 // 1. 这些工具仍保留定义，避免 prompt / 旧链路 / 历史日志里出现悬空名字；
 // 2. execute 会在调用前统一阻断，并向模型返回纠错提示；
 // 3. ToolNames / Schemas 也会默认隐藏它们，避免继续污染 msg0。
-var temporaryDisabledTools = map[string]bool{
-	"min_context_switch": true,
-	"spread_even":        true,
-	"analyze_load":       true,
-	"analyze_subjects":   true,
-	"analyze_context":    true,
-	"analyze_tolerance":  true,
-}
+var temporaryDisabledTools = map[string]bool{}
 
 // IsTemporarilyDisabledTool 判断工具是否在当前阶段被临时禁用。
 func IsTemporarilyDisabledTool(name string) bool {
@@ -232,8 +225,6 @@ var writeTools = map[string]bool{
 	"swap":                  true,
 	"batch_move":            true,
 	"queue_apply_head_move": true,
-	"spread_even":           true,
-	"min_context_switch":    true,
 	"unplace":               true,
 	"upsert_task_class":     true,
 }
@@ -244,8 +235,6 @@ var scheduleMutationTools = map[string]bool{
 	"swap":                  true,
 	"batch_move":            true,
 	"queue_apply_head_move": true,
-	"spread_even":           true,
-	"min_context_switch":    true,
 	"unplace":               true,
 }
 
@@ -369,43 +358,11 @@ func registerScheduleReadTools(r *ToolRegistry) {
 
 func registerScheduleAnalyzeTools(r *ToolRegistry) {
 	r.Register(
-		"analyze_load",
-		"分析整体负载分布（当前阶段已临时禁用，仅保留定义）。",
-		`{"name":"analyze_load","parameters":{"scope":{"type":"string","enum":["full","week","day_range"]},"week_from":{"type":"int"},"week_to":{"type":"int"},"day_from":{"type":"int"},"day_to":{"type":"int"},"granularity":{"type":"string","enum":["day","week","time_of_day"]},"detail":{"type":"string","enum":["summary","full"]}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
-			return schedule.AnalyzeLoad(state, args)
-		},
-	)
-	r.Register(
-		"analyze_subjects",
-		"分析学科分布与连贯性（当前阶段已临时禁用，仅保留定义）。",
-		`{"name":"analyze_subjects","parameters":{"category":{"type":"string"},"include_pending":{"type":"bool"},"detail":{"type":"string","enum":["summary","full"]}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
-			return schedule.AnalyzeSubjects(state, args)
-		},
-	)
-	r.Register(
-		"analyze_context",
-		"分析上下文切换与相邻关系（当前阶段已临时禁用，仅保留定义）。",
-		`{"name":"analyze_context","parameters":{"day_from":{"type":"int"},"day_to":{"type":"int"},"detail":{"type":"string","enum":["summary","day_detail"]},"hard_categories":{"type":"array","items":{"type":"string"}}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
-			return schedule.AnalyzeContext(state, args)
-		},
-	)
-	r.Register(
 		"analyze_rhythm",
 		"分析学习节奏与切换情况。",
 		`{"name":"analyze_rhythm","parameters":{"category":{"type":"string"},"include_pending":{"type":"bool"},"detail":{"type":"string","enum":["summary","full"]},"hard_categories":{"type":"array","items":{"type":"string"}}}}`,
 		func(state *schedule.ScheduleState, args map[string]any) string {
 			return schedule.AnalyzeRhythm(state, args)
-		},
-	)
-	r.Register(
-		"analyze_tolerance",
-		"分析局部容错与调整空间。",
-		`{"name":"analyze_tolerance","parameters":{"scope":{"type":"string","enum":["full","week","day_range"]},"week_from":{"type":"int"},"week_to":{"type":"int"},"day_from":{"type":"int"},"day_to":{"type":"int"},"min_usable_size":{"type":"int"},"min_daily_buffer":{"type":"int"},"detail":{"type":"string","enum":["summary","full"]}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
-			return schedule.AnalyzeTolerance(state, args)
 		},
 	)
 	r.Register(
@@ -501,30 +458,6 @@ func registerScheduleMutationTools(r *ToolRegistry) {
 		`{"name":"queue_skip_head","parameters":{"reason":{"type":"string"}}}`,
 		func(state *schedule.ScheduleState, args map[string]any) string {
 			return schedule.QueueSkipHead(state, args)
-		},
-	)
-	r.Register(
-		"min_context_switch",
-		"在指定任务集合内减少上下文切换（当前阶段已临时禁用，仅保留定义）。",
-		`{"name":"min_context_switch","parameters":{"task_ids":{"type":"array","required":true,"items":{"type":"int"}},"task_id":{"type":"int"}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
-			taskIDs, err := schedule.ParseMinContextSwitchTaskIDs(args)
-			if err != nil {
-				return fmt.Sprintf("减少上下文切换失败：%s。", err.Error())
-			}
-			return schedule.MinContextSwitch(state, taskIDs)
-		},
-	)
-	r.Register(
-		"spread_even",
-		"在给定任务集合内做均匀化铺开（当前阶段已临时禁用，仅保留定义）。",
-		`{"name":"spread_even","parameters":{"task_ids":{"type":"array","required":true,"items":{"type":"int"}},"task_id":{"type":"int"},"limit":{"type":"int"},"allow_embed":{"type":"bool"},"day":{"type":"int"},"day_start":{"type":"int"},"day_end":{"type":"int"},"day_scope":{"type":"string","enum":["all","workday","weekend"]},"day_of_week":{"type":"array","items":{"type":"int"}},"week":{"type":"int"},"week_filter":{"type":"array","items":{"type":"int"}},"week_from":{"type":"int"},"week_to":{"type":"int"},"slot_type":{"type":"string"},"slot_types":{"type":"array","items":{"type":"string"}},"exclude_sections":{"type":"array","items":{"type":"int"}},"after_section":{"type":"int"},"before_section":{"type":"int"}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
-			taskIDs, err := schedule.ParseSpreadEvenTaskIDs(args)
-			if err != nil {
-				return fmt.Sprintf("均匀化调整失败：%s。", err.Error())
-			}
-			return schedule.SpreadEven(state, taskIDs, args)
 		},
 	)
 	r.Register(

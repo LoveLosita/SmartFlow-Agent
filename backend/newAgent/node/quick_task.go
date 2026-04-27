@@ -14,7 +14,6 @@ import (
 	newagentrouter "github.com/LoveLosita/smartflow/backend/newAgent/router"
 	newagentshared "github.com/LoveLosita/smartflow/backend/newAgent/shared"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
-	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -272,7 +271,7 @@ func handleQuickTaskQuery(
 	decision *quickTaskDecision,
 	flowState *newagentmodel.CommonState,
 ) string {
-	params := newagenttools.TaskQueryParams{
+	params := newagentmodel.TaskQueryParams{
 		SortBy:           "deadline",
 		Order:            "asc",
 		Limit:            5,
@@ -316,7 +315,7 @@ func handleQuickTaskQuery(
 	return sb.String()
 }
 
-// quickNoteFallbackPriority 根据截止时间推断默认优先级，与 tools/quicknote.go 保持一致。
+// quickNoteFallbackPriority 根据截止时间推断默认优先级。
 func quickNoteFallbackPriority(deadline *time.Time) int {
 	if deadline != nil {
 		if time.Until(*deadline) <= 48*time.Hour {

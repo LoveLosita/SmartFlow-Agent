@@ -20,7 +20,7 @@ func validateLocalOrderForSinglePlacement(state *ScheduleState, taskID int, targ
 // validateLocalOrderBatchPlacement 在“多任务同时变更”的假设下做顺序约束校验。
 //
 // 职责边界：
-// 1. 先把所有候选落位一次性写入克隆态，再统一校验，避免 swap/batch/spread_even 出现伪冲突；
+// 1. 先把所有候选落位一次性写入克隆态，再统一校验，避免批量局部调整时出现伪冲突；
 // 2. 只校验 proposals 中涉及的任务，因为只要这些任务仍处于各自前驱/后继之间，就不会破坏同类整体顺序；
 // 3. 返回首个命中的中文错误，供写工具直接透传给 LLM。
 func validateLocalOrderBatchPlacement(state *ScheduleState, proposals map[int][]TaskSlot) error {

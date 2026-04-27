@@ -78,7 +78,7 @@ func renderExecuteNextStepHintV2(
 		if roughBuildDone {
 			return `先激活 schedule 业务域；当前是粗排后的微调场景，通常至少需要 mutation+analyze。若要按统一条件逐个处理一批任务，再加 packs=["queue"]。`
 		}
-		return `先判断当前任务属于哪个业务域，再用 context_tools_add 激活对应工具。`
+		return `先判断当前任务属于哪个业务域，再用 context_tools_add 激活对应工具。若用户只是在描述学习目标、总节数、难度、节次偏好、禁排时段、排除星期、内容拆分授权，默认先走 taskclass；只有用户明确要求“排进日程 / 给出具体时间安排 / 现在就排一版”时，才切 schedule。`
 	}
 
 	if activeDomain == "schedule" &&
@@ -97,7 +97,7 @@ func renderExecuteNextStepHintV2(
 	if activeDomain == "taskclass" &&
 		state.TaskClassUpsertLastTried &&
 		!state.TaskClassUpsertLastSuccess {
-		return `先根据 validation.issues 补齐缺失字段，再重试 upsert_task_class，不要直接收口。`
+		return `先判断 validation.issues 是“用户缺信息”还是“内部表示修正”；能从上下文补的先静默补齐，再用 confirm 重试 upsert_task_class，不要继续解释底层约束，更不要直接收口。`
 	}
 
 	return ""

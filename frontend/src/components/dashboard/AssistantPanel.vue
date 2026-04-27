@@ -504,6 +504,22 @@ function appendToolTraceEvent(
   }
 
   ensureToolTraceBucket(messageId)
+  const normalizedDetail = detail.trim()
+  const normalizedToolName = toolName.trim()
+  const matchedPendingEvent = findMergeableToolTraceEvent(
+    messageId,
+    state,
+    normalizedSummary,
+    normalizedDetail,
+    normalizedToolName,
+  )
+  if (matchedPendingEvent) {
+    matchedPendingEvent.state = state
+    matchedPendingEvent.summary = normalizedSummary
+    matchedPendingEvent.detail = normalizedDetail || matchedPendingEvent.detail
+    matchedPendingEvent.toolName = normalizedToolName || matchedPendingEvent.toolName
+    return
+  }
   const eventSeq = nextAssistantTimelineSeq()
   const eventId = `${messageId}:tool:${eventSeq}`
 
@@ -517,10 +533,82 @@ function appendToolTraceEvent(
     seq: eventSeq,
     state,
     summary: normalizedSummary,
-    detail: detail.trim() || undefined,
-    toolName: toolName.trim() || undefined,
+    detail: normalizedDetail || undefined,
+    toolName: normalizedToolName || undefined,
   })
   assistantTimelineLastKindMap[messageId] = 'tool'
+}
+
+function isPendingToolTraceState(state: ToolTraceState) {
+  return state === 'called'
+}
+
+function findMergeableToolTraceEvent(
+  messageId: string,
+  nextState: ToolTraceState,
+  summary: string,
+  detail: string,
+  toolName: string,
+): ToolTraceEvent | null {
+  if (nextState === 'called') {
+    return null
+  }
+
+  const pendingEvents = (toolTraceEventsMap[messageId] || [])
+    .slice()
+    .reverse()
+    .filter((event) => isPendingToolTraceState(event.state))
+
+  if (pendingEvents.length <= 0) {
+    return null
+  }
+
+  const normalizedToolName = toolName.trim().toLowerCase()
+  const normalizedDetail = detail.trim()
+  const normalizedSummary = summary.trim()
+
+  if (normalizedToolName && normalizedDetail) {
+    const exactMatch = pendingEvents.find((event) => {
+      return (
+        `${event.toolName || ''}`.trim().toLowerCase() === normalizedToolName &&
+        `${event.detail || ''}`.trim() === normalizedDetail
+      )
+    })
+    if (exactMatch) {
+      return exactMatch
+    }
+  }
+
+  if (normalizedToolName) {
+    const toolNameMatch = pendingEvents.find((event) => {
+      return `${event.toolName || ''}`.trim().toLowerCase() === normalizedToolName
+    })
+    if (toolNameMatch) {
+      return toolNameMatch
+    }
+  }
+
+  if (normalizedDetail) {
+    const detailMatch = pendingEvents.find((event) => {
+      return `${event.detail || ''}`.trim() === normalizedDetail
+    })
+    if (detailMatch) {
+      return detailMatch
+    }
+  }
+
+  if (normalizedSummary) {
+    const summaryMatch = pendingEvents.find((event) => event.summary === normalizedSummary)
+    if (summaryMatch) {
+      return summaryMatch
+    }
+  }
+
+  if (pendingEvents.length === 1) {
+    return pendingEvents[0]
+  }
+
+  return null
 }
 
 function appendStatusTraceEvent(
@@ -725,7 +813,44 @@ function shouldSkipStatusEvent(code: string, stage = '') {
   if (stage === 'confirm' && (code === 'plan_confirm' || code === 'tool_confirm' || code === 'confirm')) {
     return true
   }
+
+  const hiddenStatusCodes = new Set([
+    'accepted',
+    'ask_user',
+    'planning',
+    'resumed',
+    'confirmed',
+    'rejected',
+    'executing',
+    'summarizing',
+    'done',
+    'rough_building',
+    'order_guard_initialized',
+    'order_guard_passed',
+    'order_guard_restored',
+    'order_guard_restore_skipped',
+    'context_compact_start',
+    'context_compact_done',
+    'plan_auto_confirmed',
+  ])
+
+  if (hiddenStatusCodes.has(code)) {
+    return true
+  }
   return false
+}
+
+function isAssistantTimelineKind(kind: string) {
+  const assistantKinds = new Set([
+    'assistant_text',
+    'tool_call',
+    'tool_result',
+    'confirm_request',
+    'schedule_completed',
+    'interrupt',
+    'status',
+  ])
+  return assistantKinds.has(kind)
 }
 
 function isToolTraceExpanded(eventId: string) {
@@ -1582,12 +1707,12 @@ function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[
     const kind = String(event.kind || '').toLowerCase()
     const rawRole = String(event.role || '').toLowerCase()
     
-    // 如果 role 已明确为 user，或者 kind 包含 user 关键字
+    // 1. timeline 重建时先识别显式 user 事件，避免把真正的用户输入吞进 assistant 回合。
+    // 2. interrupt / status 这类 assistant 侧协议事件不能再掉进 user 兜底，否则会把 ask_user 正文切断。
+    // 3. 这里仍保留 kind.includes('user') 的保守判断，只是把 assistant 白名单补齐到本轮真实协议。
     let isUser = rawRole === 'user' || kind.includes('user')
-    // 终极兜底：只要不是明确的五大助手专属事件，就将其视为用户的消息回合边界
     if (!isUser) {
-      const knownAssistantKinds = ['assistant_text', 'tool_call', 'tool_result', 'confirm_request', 'schedule_completed']
-      if (!knownAssistantKinds.includes(kind)) {
+      if (!isAssistantTimelineKind(kind)) {
         isUser = true
       }
     }
@@ -1620,6 +1745,7 @@ function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[
 
     switch (event.kind) {
       case 'assistant_text':
+      case 'interrupt':
         if (event.content) {
           const newContent = event.content
           const oldContent = currentAssistantMessage.content || ''
@@ -1657,14 +1783,14 @@ function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[
       case 'tool_call':
         if (event.payload?.tool) {
           const t = event.payload.tool
-          appendToolTraceEvent(mid, mapToolEventState(t.status), t.summary, t.arguments_preview, t.name)
+          appendToolTraceEvent(mid, mapToolEventState(t.status), normalizeToolSummary(t), buildToolDetail(t), t.name)
         }
         break
       
       case 'tool_result':
         if (event.payload?.tool) {
           const t = event.payload.tool
-          appendToolTraceEvent(mid, mapToolEventState(t.status), t.summary, t.arguments_preview, t.name)
+          appendToolTraceEvent(mid, mapToolEventState(t.status), normalizeToolSummary(t), buildToolDetail(t), t.name)
         }
         break
 

@@ -288,7 +288,7 @@ func Start() {
 			}
 			return created.ID, nil
 		},
-		QueryTasks: func(ctx context.Context, userID int, params newagenttools.TaskQueryParams) ([]newagenttools.TaskQueryResult, error) {
+		QueryTasks: func(ctx context.Context, userID int, params newagentmodel.TaskQueryParams) ([]newagentmodel.TaskQueryResult, error) {
 			req := newagentmodel.TaskQueryRequest{
 				UserID:           userID,
 				Quadrant:         params.Quadrant,
@@ -304,13 +304,13 @@ func Start() {
 			if err != nil {
 				return nil, err
 			}
-			results := make([]newagenttools.TaskQueryResult, 0, len(records))
+			results := make([]newagentmodel.TaskQueryResult, 0, len(records))
 			for _, r := range records {
 				deadlineStr := ""
 				if r.DeadlineAt != nil {
 					deadlineStr = r.DeadlineAt.In(time.Local).Format("2006-01-02 15:04")
 				}
-				results = append(results, newagenttools.TaskQueryResult{
+				results = append(results, newagentmodel.TaskQueryResult{
 					ID:            r.ID,
 					Title:         r.Title,
 					PriorityGroup: r.PriorityGroup,
