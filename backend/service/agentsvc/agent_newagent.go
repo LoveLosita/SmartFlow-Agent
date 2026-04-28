@@ -182,10 +182,12 @@ func (s *AgentService) runNewAgentGraph(
 	planClient := infrallm.WrapArkClient(s.AIHub.Max)
 	executeClient := infrallm.WrapArkClient(s.AIHub.Max)
 	deliverClient := infrallm.WrapArkClient(s.AIHub.Pro)
+	summaryClient := infrallm.WrapArkClient(s.AIHub.Lite)
 
 	// 8. 适配 SSE emitter。
 	sseEmitter := newagentstream.NewSSEPayloadEmitter(outChan)
 	chunkEmitter := newagentstream.NewChunkEmitter(sseEmitter, traceID, resolvedModelName, requestStart.Unix())
+	chunkEmitter.SetReasoningSummaryFunc(s.makeReasoningSummaryFunc(summaryClient))
 	// 关键卡片事件走统一时间线持久化，保证刷新后可重建。
 	chunkEmitter.SetExtraEventHook(func(extra *newagentstream.OpenAIChunkExtra) {
 		s.persistNewAgentTimelineExtraEvent(context.Background(), userID, chatID, extra)
@@ -449,9 +451,11 @@ func (s *AgentService) persistNewAgentConversationMessage(
 	}
 
 	persistMsg := &schema.Message{
-		Role:             msg.Role,
-		Content:          content,
-		ReasoningContent: strings.TrimSpace(msg.ReasoningContent),
+		Role:    msg.Role,
+		Content: content,
+		// 可见消息持久化只保存正文；模型 raw reasoning 改由 thinking_summary 生成用户可见摘要，
+		// 避免历史接口或时间线刷新时重新暴露内部思考文本。
+		ReasoningContent: "",
 	}
 	if len(msg.Extra) > 0 {
 		persistMsg.Extra = make(map[string]any, len(msg.Extra))
@@ -498,9 +502,6 @@ func (s *AgentService) persistNewAgentConversationMessage(
 		timelineKind = model.AgentTimelineKindAssistantText
 	}
 	timelinePayload := map[string]any{}
-	if persistPayload.ReasoningContent != "" {
-		timelinePayload["reasoning_content"] = persistPayload.ReasoningContent
-	}
 	if reasoningDurationSeconds > 0 {
 		timelinePayload["reasoning_duration_seconds"] = reasoningDurationSeconds
 	}

@@ -71,6 +71,16 @@ export interface TaskRecordCardData {
 export type BusinessCardType = 'task_query' | 'task_record'
 export type TaskRecordSource = 'quick_note' | 'create_task'
 
+export interface TimelineThinkingSummaryPayload {
+  stage?: string
+  block_id?: string
+  display_mode?: 'append'
+  summary_seq?: number
+  detail_summary?: string
+  duration_seconds?: number
+  final?: boolean
+}
+
 export interface TimelineBusinessCardPayload {
   card_type: BusinessCardType
   title?: string
@@ -92,16 +102,21 @@ export interface TimelineEvent {
   | 'interrupt'
   | 'status'
   | 'business_card'
+  | 'thinking_summary'
   role?: 'user' | 'assistant'
   content?: string
   payload?: {
     reasoning_content?: string
     stage?: string
     block_id?: string
-    display_mode?: 'card'
+    display_mode?: 'card' | 'append'
     tool?: TimelineToolPayload
     confirm?: TimelineConfirmPayload
     business_card?: TimelineBusinessCardPayload
+    summary_seq?: number
+    detail_summary?: string
+    duration_seconds?: number
+    final?: boolean
   }
   tokens_consumed?: number
   created_at: string

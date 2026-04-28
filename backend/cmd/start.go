@@ -135,6 +135,9 @@ func Start() {
 		if err = eventsvc.RegisterAgentStateSnapshotHandler(eventBus, outboxRepo, manager); err != nil {
 			log.Fatalf("Failed to register agent state snapshot event handler: %v", err)
 		}
+		if err = eventsvc.RegisterAgentTimelinePersistHandler(eventBus, outboxRepo, agentRepo, cacheRepo); err != nil {
+			log.Fatalf("Failed to register agent timeline persist event handler: %v", err)
+		}
 		if err = eventsvc.RegisterMemoryExtractRequestedHandler(eventBus, outboxRepo, memoryModule); err != nil {
 			log.Fatalf("Failed to register memory extract event handler: %v", err)
 		}

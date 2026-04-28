@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
 	"github.com/cloudwego/eino-ext/components/model/ark"
@@ -25,6 +26,8 @@ func (s *AgentService) streamChatFallback(
 	chatHistory []*schema.Message,
 	outChan chan<- string,
 	reasoningStartAt *time.Time,
+	userID int,
+	chatID string,
 ) (string, string, int, *schema.TokenUsage, error) {
 	messages := make([]*schema.Message, 0, len(chatHistory)+2)
 	messages = append(messages, schema.SystemMessage(newagentprompt.SystemPrompt))
@@ -46,6 +49,24 @@ func (s *AgentService) streamChatFallback(
 	requestID := "chatcmpl-" + uuid.NewString()
 	created := time.Now().Unix()
 	firstChunk := true
+	chunkEmitter := newagentstream.NewChunkEmitter(newagentstream.NewSSEPayloadEmitter(outChan), requestID, modelName, created)
+	chunkEmitter.SetReasoningSummaryFunc(s.makeReasoningSummaryFunc(infrallm.WrapArkClient(s.AIHub.Lite)))
+	chunkEmitter.SetExtraEventHook(func(extra *newagentstream.OpenAIChunkExtra) {
+		s.persistNewAgentTimelineExtraEvent(context.Background(), userID, chatID, extra)
+	})
+	reasoningDigestor, digestorErr := chunkEmitter.NewReasoningDigestor(ctx, "fallback.speak", "fallback")
+	if digestorErr != nil {
+		return "", "", 0, nil, digestorErr
+	}
+	digestorClosed := false
+	closeDigestor := func() {
+		if reasoningDigestor == nil || digestorClosed {
+			return
+		}
+		digestorClosed = true
+		_ = reasoningDigestor.Close(ctx)
+	}
+	defer closeDigestor()
 
 	var localReasoningStartAt *time.Time
 	if reasoningStartAt != nil && !reasoningStartAt.IsZero() {
@@ -61,7 +82,6 @@ func (s *AgentService) streamChatFallback(
 	defer reader.Close()
 
 	var fullText strings.Builder
-	var reasoningText strings.Builder
 	var tokenUsage *schema.TokenUsage
 	for {
 		chunk, recvErr := reader.Recv()
@@ -85,26 +105,31 @@ func (s *AgentService) streamChatFallback(
 				now := time.Now()
 				reasoningEndAt = &now
 			}
-			fullText.WriteString(chunk.Content)
-			reasoningText.WriteString(chunk.ReasoningContent)
-		}
-
-		payload, payloadErr := newagentstream.ToOpenAIStream(chunk, requestID, modelName, created, firstChunk)
-		if payloadErr != nil {
-			return "", "", 0, nil, payloadErr
-		}
-		if payload != "" {
-			outChan <- payload
-			firstChunk = false
+			// 1. fallback 链路同样不能透传 raw reasoning_content；
+			// 2. 只把 reasoning 喂给摘要器，正文出现时立即关门丢弃后续摘要。
+			if strings.TrimSpace(chunk.ReasoningContent) != "" && reasoningDigestor != nil {
+				reasoningDigestor.Append(chunk.ReasoningContent)
+			}
+			if chunk.Content != "" {
+				if reasoningDigestor != nil {
+					reasoningDigestor.MarkContentStarted()
+				}
+				if emitErr := chunkEmitter.EmitAssistantText("fallback.speak", "fallback", chunk.Content, firstChunk); emitErr != nil {
+					return "", "", 0, nil, emitErr
+				}
+				fullText.WriteString(chunk.Content)
+				firstChunk = false
+			}
 		}
 	}
+	closeDigestor()
 
-	finishChunk, finishErr := newagentstream.ToOpenAIFinishStream(requestID, modelName, created)
-	if finishErr != nil {
+	if finishErr := chunkEmitter.EmitFinish("fallback.speak", "fallback"); finishErr != nil {
 		return "", "", 0, nil, finishErr
 	}
-	outChan <- finishChunk
-	outChan <- "[DONE]"
+	if doneErr := chunkEmitter.EmitDone(); doneErr != nil {
+		return "", "", 0, nil, doneErr
+	}
 
 	reasoningDurationSeconds := 0
 	if localReasoningStartAt != nil {
@@ -117,5 +142,5 @@ func (s *AgentService) streamChatFallback(
 		}
 	}
 
-	return fullText.String(), reasoningText.String(), reasoningDurationSeconds, tokenUsage, nil
+	return fullText.String(), "", reasoningDurationSeconds, tokenUsage, nil
 }

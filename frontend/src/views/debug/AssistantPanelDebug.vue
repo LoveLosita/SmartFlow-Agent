@@ -414,7 +414,7 @@ async function hydrateTaskStatuses(conversationId: string) {
 
   try {
     const items = await getTaskBatchStatus(idList)
-    const returnedIdSet = new Set(items.map(item => Number(item.id)))
+    const returnedIdSet = new Set(items.map((item: any) => Number(item.id)))
 
     items.forEach(item => {
       const id = Number(item.id)
@@ -486,7 +486,7 @@ const assistantBodyStyle = computed(() => {
 })
 
 const selectedConversation = computed(() =>
-  conversationList.value.find((item) => item.conversation_id === selectedConversationId.value),
+  conversationList.value.find((item: any) => item.conversation_id === selectedConversationId.value),
 )
 
 const rawSelectedMessages = computed(() => {
@@ -933,7 +933,7 @@ function appendAssistantReasoningChunk(messageId: string, chunk: string) {
   // 记录块级别的起始时间和初始折叠状态
   reasoningStartedAtMap[blockId] = Date.now()
   reasoningCollapsedMap[blockId] = true
-
+  
   assistantTimelineLastKindMap[messageId] = 'reasoning'
 }
 
@@ -1246,7 +1246,7 @@ function mergeConversationList(items: ConversationListItem[]) {
 }
 
 function prependConversationPreview(conversationId: string, previewText: string, createdAt: string) {
-  const current = conversationList.value.find((item) => item.conversation_id === conversationId)
+  const current = conversationList.value.find((item: any) => item.conversation_id === conversationId)
   const nextItem: ConversationListItem = {
     conversation_id: conversationId,
     title: current?.title || previewText.slice(0, 24),
@@ -1259,7 +1259,7 @@ function prependConversationPreview(conversationId: string, previewText: string,
 
   conversationList.value = [
     nextItem,
-    ...conversationList.value.filter((item) => item.conversation_id !== conversationId),
+    ...conversationList.value.filter((item: any) => item.conversation_id !== conversationId),
   ]
 }
 
@@ -1295,7 +1295,7 @@ function syncConversationListItemFromMeta(
   meta: ConversationMeta,
   options: ConversationListItemRevealOptions = {},
 ) {
-  const targetIndex = conversationList.value.findIndex((item) => item.conversation_id === meta.conversation_id)
+  const targetIndex = conversationList.value.findIndex((item: any) => item.conversation_id === meta.conversation_id)
   if (targetIndex < 0) {
     return
   }
@@ -1469,6 +1469,13 @@ function getReasoningDurationSeconds(blockId: string) {
 
   return Math.max(1, Math.round((reasoningDisplayNow.value - startedAt) / 1000))
 }
+
+const thinkingPairs = [
+  { short: '正在拆解任务需求', long: 'SmartFlow 正在深度解析您的指令，识别其中的关键意图与潜在约束，确保后续执行路径的准确性。' },
+  { short: '搜寻最佳执行路径', long: '我们正在从数千个可能的工具组合中进行筛选，为您匹配最高效、最稳定的自动化执行方案。' },
+  { short: '构建深度回复逻辑', long: '基于 Eino 的 ReAct 框架，系统正在实时构建逻辑闭环，通过多轮推演优化回答的深度与广度。' },
+  { short: '优化结果呈现方式', long: '最后，我们将采用 Bento UI 风格对结果进行格式化处理，确保信息呈现既美观又易于快速浏览。' }
+]
 
 function getReasoningStatusLabel(block: DisplayAssistantBlock) {
   const isThinking = block.sourceId === activeStreamingMessageId.value && thinkingMessageMap[block.sourceId]
@@ -1818,6 +1825,7 @@ async function ensureSelectedConversationAfterListLoad() {
 // 2. reset=false 时只在还有更多数据且当前不在加载时继续拉下一页，避免重复请求。
 // 3. 接口失败时保留现有列表，不清空本地草稿会话，防止用户当前上下文丢失。
 async function loadConversationListData(reset = false) {
+  return
   let loadSucceeded = false
 
   if (reset) {
@@ -1844,7 +1852,7 @@ async function loadConversationListData(reset = false) {
     ])
 
     if (reset) {
-      conversationList.value = conversationList.value.filter((item) => isDraftConversationId(item.conversation_id))
+      conversationList.value = conversationList.value.filter((item: any) => isDraftConversationId(item.conversation_id))
     }
     mergeConversationList(result?.list ?? [])
 
@@ -1853,8 +1861,8 @@ async function loadConversationListData(reset = false) {
     conversationListReady.value = true
     await ensureSelectedConversationAfterListLoad()
     loadSucceeded = true
-  } catch (error) {
-    ElMessage.warning(error instanceof Error ? error.message : '会话列表加载失败，请稍后重试')
+  } catch (error: any) {
+    ElMessage.warning(error?.message || '会话列表加载失败，请稍后重试')
   } finally {
     conversationLoading.value = false
     conversationLoadingMore.value = false
@@ -2271,14 +2279,16 @@ async function selectConversation(conversationId: string) {
 
   // 仅在 Standalone 模式下将状态同步到 URL，实现可刷新/可分享
   if (isStandaloneMode.value && route.params.id !== conversationId) {
-    router.push({ name: 'assistant', params: { id: conversationId || undefined } })
+    router.push({ name: 'debug-assistant', params: { id: conversationId || undefined } })
   }
 
+  /*
   await Promise.allSettled([
     loadConversationMessages(conversationId),
     ensureConversationMeta(conversationId),
     loadConversationContextStats(conversationId),
   ])
+  */
   scheduleScrollMessagesToBottom(false, true)
 }
 
@@ -3032,6 +3042,112 @@ watch(
 )
 
 
+// 模拟流式输出
+async function startStreamingSimulation() {
+  console.log('DEBUG: startStreamingSimulation started')
+  const mockId = 'debug-mock-conv'
+  selectedConversationId.value = mockId
+  
+  // 1. 设置基础信息
+  conversationList.value = [
+    {
+      conversation_id: mockId,
+      title: '流式输出样式调试',
+      has_title: true,
+      message_count: 2,
+      status: 'active',
+      created_at: new Date().toISOString(),
+      last_message_at: new Date().toISOString(),
+    }
+  ]
+  conversationListReady.value = true
+  conversationLoading.value = false
+
+  // 2. 添加用户消息
+  const msgUser: AssistantMessage = {
+    id: 'm-user-1',
+    role: 'user',
+    content: '请帮我分析一下 SmartFlow 的架构优势，并给出一段示例代码。',
+    createdAt: new Date().toISOString(),
+  }
+  conversationMessagesMap[mockId] = [msgUser]
+
+  // 等待一下，模拟网络延迟
+  await new Promise(r => setTimeout(r, 800))
+
+  // 3. 创建 Assistant 消息占位
+  const msgAssistantId = 'm-assistant-1'
+  const msgAssistant: AssistantMessage = {
+    id: msgAssistantId,
+    role: 'assistant',
+    content: '',
+    reasoning: '',
+    createdAt: new Date().toISOString(),
+  }
+  conversationMessagesMap[mockId].push(msgAssistant)
+  
+  // 4. 进入思考状态
+  activeStreamingMessageId.value = msgAssistantId
+  thinkingMessageMap[msgAssistantId] = true
+  const reasoningBlockId = `${msgAssistantId}:reasoning:1`
+  reasoningStartedAtMap[reasoningBlockId] = Date.now()
+  
+  assistantReasoningBlocksMap[msgAssistantId] = [
+    {
+      id: reasoningBlockId,
+      seq: 1,
+      text: '',
+    }
+  ]
+  reasoningCollapsedMap[reasoningBlockId] = true // 默认折叠
+
+  // 5. 模拟推理流：4段短摘要配合4段长摘要，按序吐出
+  let combinedLongText = ''
+  for (let i = 0; i < thinkingPairs.length; i++) {
+    const pair = thinkingPairs[i]
+    reasoningCurrentShortSummaryMap[reasoningBlockId] = pair.short
+    
+    // 模拟长摘要流式追加 (Append)
+    const currentLongText = pair.long
+    for (let j = 0; j <= currentLongText.length; j++) {
+      const displayText = combinedLongText + currentLongText.slice(0, j)
+      assistantReasoningBlocksMap[msgAssistantId][0].text = displayText
+      msgAssistant.reasoning = displayText
+      await new Promise(r => setTimeout(r, 20))
+    }
+    
+    combinedLongText += currentLongText + '\n\n'
+    // 每一段结束后的短暂停顿
+    await new Promise(r => setTimeout(r, 400))
+  }
+
+  // 6. 推理结束
+  await new Promise(r => setTimeout(r, 500))
+  markReasoningFinished(reasoningBlockId, msgAssistantId)
+  thinkingMessageMap[msgAssistantId] = false
+
+  // 7. 模拟正文流
+  const fullContent = 'SmartFlow 的架构优势主要体现在其**极简、响应式且模块化**的设计。\n\n1. **基于 Eino 的 ReAct 循环**：能够处理复杂的任务拆解与执行。\n2. **SSE 流式渲染**：极致的响应速度。\n3. **Bento 风格组件库**：视觉统一且易于扩展。\n\n下面是一段简单的使用示例：\n\n```typescript\nconst flow = new SmartFlow({\n  mode: "react",\n  tools: [searchTool, calendarTool]\n});\nawait flow.chat("帮我排下明天的会");\n```'
+  
+  assistantContentBlocksMap[msgAssistantId] = [
+    {
+      id: `${msgAssistantId}:content:1`,
+      seq: 2,
+      text: '',
+    }
+  ]
+
+  for (let i = 0; i <= fullContent.length; i++) {
+    assistantContentBlocksMap[msgAssistantId][0].text = fullContent.slice(0, i)
+    msgAssistant.content = fullContent.slice(0, i)
+    scheduleScrollMessagesToBottom(true)
+    await new Promise(r => setTimeout(r, 20))
+  }
+
+  // 8. 结束流
+  activeStreamingMessageId.value = ''
+}
+
 onMounted(async () => {
   reasoningTicker = window.setInterval(() => {
     reasoningDisplayNow.value = Date.now()
@@ -3039,12 +3155,10 @@ onMounted(async () => {
   window.addEventListener('resize', syncHistoryPanelWidthForViewport)
   syncHistoryPanelWidthForViewport()
   
-  // 如果 URL 中有 ID，则立即启动加载，不等会话列表返回，避免闪烁主页态
-  if (isStandaloneMode.value && route.params.id) {
-    void selectConversation(route.params.id as string)
-  }
-
-  await loadConversationListData(true)
+  // 启动动态模拟
+  console.log('DEBUG: onMounted triggered')
+  startStreamingSimulation()
+  
   syncHistoryPanelWidthForViewport()
 })
 
@@ -3240,7 +3354,7 @@ onBeforeUnmount(() => {
                   </svg>
                 </button>
               </div>
-
+              
             </div>
 
             <div v-else class="chat-message__assistant-flow">
@@ -3386,7 +3500,7 @@ onBeforeUnmount(() => {
                   </svg>
                 </button>
               </div>
-
+              
             </div>
             </article>
               </TransitionGroup>
@@ -3768,7 +3882,6 @@ onBeforeUnmount(() => {
   opacity: 0;
   filter: blur(8px);
 }
-
 
 .assistant-shell {
   height: 100%;
@@ -4324,6 +4437,8 @@ onBeforeUnmount(() => {
   background: #ffffff !important;
   overflow: hidden !important;
 }
+
+
 
 :global(.assistant-thinking-select-panel .el-select-dropdown__list) {
   padding: 4px !important; /* 让内部列表直接决定间距 */
@@ -4929,12 +5044,56 @@ onBeforeUnmount(() => {
   margin-bottom: 8px;
 }
 
+/* 推理框展开收起弹性动效 */
+.reasoning-bounce-enter-active {
+  transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform-origin: top center;
+}
+
+.reasoning-bounce-leave-active {
+  transition: all 0.2s ease;
+  transform-origin: top center;
+}
+
+.reasoning-bounce-enter-from,
+.reasoning-bounce-leave-to {
+  opacity: 0;
+  transform: translateY(-15px);
+}
+
 .chat-message__reasoning-title {
   display: flex;
   align-items: center;
   gap: 8px;
   color: #5a6577;
   position: relative;
+}
+
+.chat-message__reasoning-title--shimmering {
+  overflow: hidden;
+}
+
+.chat-message__reasoning-title--shimmering::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.9),
+    transparent
+  );
+  transform: skewX(-20deg);
+  animation: shimmer-sweep 1.2s infinite linear;
+  pointer-events: none;
+}
+
+@keyframes shimmer-sweep {
+  from { left: -150%; }
+  to { left: 150%; }
 }
 
 /* --- Tooling & Selector Beautification --- */
@@ -5064,7 +5223,7 @@ onBeforeUnmount(() => {
 .chat-message__reasoning-body {
   margin: 10px 0 10px 7px;
   padding-left: 16px;
-  border-left: 2px dashed rgba(148, 163, 184, 0.4); /* 灰色虚线（同 debug 页） */
+  border-left: 2px dashed rgba(148, 163, 184, 0.4); /* 改为灰色虚线 */
   font-style: italic;
   color: #64748b;
 }
@@ -5590,51 +5749,6 @@ onBeforeUnmount(() => {
   .assistant-shell--standalone .assistant-history__content {
     max-height: 260px;
   }
-}
-
-/* 扫光动效：位于标题上的白色光线从左到右划过 */
-.chat-message__reasoning-title--shimmering {
-  overflow: hidden;
-}
-
-.chat-message__reasoning-title--shimmering::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: -100%;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(255, 255, 255, 0.9),
-    transparent
-  );
-  transform: skewX(-20deg);
-  animation: shimmer-sweep 1.2s infinite linear;
-  pointer-events: none;
-}
-
-@keyframes shimmer-sweep {
-  from { left: -150%; }
-  to { left: 150%; }
-}
-
-/* 推理框展开收起弹性动效 */
-.reasoning-bounce-enter-active {
-  transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
-  transform-origin: top center;
-}
-
-.reasoning-bounce-leave-active {
-  transition: all 0.2s ease;
-  transform-origin: top center;
-}
-
-.reasoning-bounce-enter-from,
-.reasoning-bounce-leave-to {
-  opacity: 0;
-  transform: translateY(-15px);
 }
 </style>
 <style>

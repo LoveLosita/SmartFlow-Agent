@@ -5,6 +5,7 @@ import AuthView from '@/views/AuthView.vue'
 import AssistantView from '@/views/AssistantView.vue'
 import DashboardView from '@/views/DashboardView.vue'
 import ScheduleView from '@/views/ScheduleView.vue'
+import AssistantReasoningDebug from '@/views/debug/AssistantReasoningDebug.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -54,6 +55,11 @@ const router = createRouter({
       path: '/debug/tool-cards',
       name: 'debug-tool-cards',
       component: () => import('@/views/debug/ToolCardMockPage.vue'),
+    },
+    {
+      path: '/debug/assistant/:id?',
+      name: 'debug-assistant',
+      component: AssistantReasoningDebug,
     },
   ],
 })

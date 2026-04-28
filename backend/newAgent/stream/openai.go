@@ -40,6 +40,7 @@ type StreamExtraKind string
 
 const (
 	StreamExtraKindReasoningText     StreamExtraKind = "reasoning_text"
+	StreamExtraKindThinkingSummary   StreamExtraKind = "thinking_summary"
 	StreamExtraKindAssistantText     StreamExtraKind = "assistant_text"
 	StreamExtraKindStatus            StreamExtraKind = "status"
 	StreamExtraKindToolCall          StreamExtraKind = "tool_call"
@@ -67,16 +68,31 @@ const (
 // 2. Status / Tool / Confirm / Interrupt / BusinessCard 只存展示层真正需要的摘要，不直接耦合后端完整状态对象；
 // 3. Meta 留给后续做灰度扩展，避免每加一种小字段都要立刻改 DTO 结构。
 type OpenAIChunkExtra struct {
-	Kind         StreamExtraKind          `json:"kind,omitempty"`
-	BlockID      string                   `json:"block_id,omitempty"`
-	Stage        string                   `json:"stage,omitempty"`
-	DisplayMode  StreamDisplayMode        `json:"display_mode,omitempty"`
-	Status       *StreamStatusExtra       `json:"status,omitempty"`
-	Tool         *StreamToolExtra         `json:"tool,omitempty"`
-	Confirm      *StreamConfirmExtra      `json:"confirm,omitempty"`
-	Interrupt    *StreamInterruptExtra    `json:"interrupt,omitempty"`
-	BusinessCard *StreamBusinessCardExtra `json:"business_card,omitempty"`
-	Meta         map[string]any           `json:"meta,omitempty"`
+	Kind            StreamExtraKind             `json:"kind,omitempty"`
+	BlockID         string                      `json:"block_id,omitempty"`
+	Stage           string                      `json:"stage,omitempty"`
+	DisplayMode     StreamDisplayMode           `json:"display_mode,omitempty"`
+	ThinkingSummary *StreamThinkingSummaryExtra `json:"thinking_summary,omitempty"`
+	Status          *StreamStatusExtra          `json:"status,omitempty"`
+	Tool            *StreamToolExtra            `json:"tool,omitempty"`
+	Confirm         *StreamConfirmExtra         `json:"confirm,omitempty"`
+	Interrupt       *StreamInterruptExtra       `json:"interrupt,omitempty"`
+	BusinessCard    *StreamBusinessCardExtra    `json:"business_card,omitempty"`
+	Meta            map[string]any              `json:"meta,omitempty"`
+}
+
+// StreamThinkingSummaryExtra 表示“流式思考摘要”事件。
+//
+// 职责边界：
+// 1. short_summary 仅用于 SSE 端快速展示短句，不要求与持久化内容完全一致；
+// 2. detail_summary 作为更完整的摘要正文，后续持久化层可直接复用；
+// 3. summary_seq / final / duration_seconds 由摘要调度层补充运行态信息，前端可据此去重和排序。
+type StreamThinkingSummaryExtra struct {
+	SummarySeq      int     `json:"summary_seq,omitempty"`
+	ShortSummary    string  `json:"short_summary,omitempty"`
+	DetailSummary   string  `json:"detail_summary,omitempty"`
+	Final           bool    `json:"final,omitempty"`
+	DurationSeconds float64 `json:"duration_seconds,omitempty"`
 }
 
 // StreamStatusExtra 表示普通阶段状态或提示性事件。
@@ -192,6 +208,17 @@ func NewReasoningTextExtra(blockID, stage string) *OpenAIChunkExtra {
 		BlockID:     blockID,
 		Stage:       stage,
 		DisplayMode: StreamDisplayModeAppend,
+	}
+}
+
+// NewThinkingSummaryExtra 创建“流式思考摘要”事件的 extra。
+func NewThinkingSummaryExtra(blockID, stage string, summary StreamThinkingSummaryExtra) *OpenAIChunkExtra {
+	return &OpenAIChunkExtra{
+		Kind:            StreamExtraKindThinkingSummary,
+		BlockID:         blockID,
+		Stage:           stage,
+		DisplayMode:     StreamDisplayModeAppend,
+		ThinkingSummary: &summary,
 	}
 }
 
@@ -367,6 +394,7 @@ func hasStreamExtra(extra *OpenAIChunkExtra) bool {
 		extra.BlockID != "" ||
 		extra.Stage != "" ||
 		extra.DisplayMode != "" ||
+		extra.ThinkingSummary != nil ||
 		extra.Status != nil ||
 		extra.Tool != nil ||
 		extra.Confirm != nil ||

@@ -106,6 +106,15 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 	parser := newagentrouter.NewStreamDecisionParser()
 	firstChunk := true
 	speakStreamed := false
+	reasoningDigestor, digestorErr := emitter.NewReasoningDigestor(ctx, planSpeakBlockID, planStageName)
+	if digestorErr != nil {
+		return fmt.Errorf("规划 thinking 摘要器初始化失败: %w", digestorErr)
+	}
+	defer func() {
+		if reasoningDigestor != nil {
+			_ = reasoningDigestor.Close(ctx)
+		}
+	}()
 
 	// 3.1 阶段一：解析决策标签。
 	for {
@@ -118,12 +127,11 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 			break
 		}
 
-		// thinking 内容独立推流。
+		// thinking 内容只进入摘要器，不再把 raw reasoning_content 透传给前端。
 		if chunk != nil && strings.TrimSpace(chunk.ReasoningContent) != "" {
-			if emitErr := emitter.EmitReasoningText(planSpeakBlockID, planStageName, chunk.ReasoningContent, firstChunk); emitErr != nil {
-				return fmt.Errorf("规划 thinking 推送失败: %w", emitErr)
+			if reasoningDigestor != nil {
+				reasoningDigestor.Append(chunk.ReasoningContent)
 			}
-			firstChunk = false
 		}
 
 		content := ""
@@ -152,6 +160,9 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 		// 3.2 阶段二：流式推送 speak（同一 reader 继续读取）。
 		var fullText strings.Builder
 		if visible != "" {
+			if reasoningDigestor != nil {
+				reasoningDigestor.MarkContentStarted()
+			}
 			if emitErr := emitter.EmitAssistantText(planSpeakBlockID, planStageName, visible, firstChunk); emitErr != nil {
 				return fmt.Errorf("规划文案推送失败: %w", emitErr)
 			}
@@ -172,9 +183,14 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 				continue
 			}
 			if strings.TrimSpace(chunk2.ReasoningContent) != "" {
-				_ = emitter.EmitReasoningText(planSpeakBlockID, planStageName, chunk2.ReasoningContent, false)
+				if reasoningDigestor != nil {
+					reasoningDigestor.Append(chunk2.ReasoningContent)
+				}
 			}
 			if chunk2.Content != "" {
+				if reasoningDigestor != nil {
+					reasoningDigestor.MarkContentStarted()
+				}
 				if emitErr := emitter.EmitAssistantText(planSpeakBlockID, planStageName, chunk2.Content, firstChunk); emitErr != nil {
 					return fmt.Errorf("规划文案推送失败: %w", emitErr)
 				}

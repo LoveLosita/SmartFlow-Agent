@@ -353,12 +353,11 @@ func (s *AgentService) runNormalChatFlow(
 
 	// 6. 执行真正的流式聊天。
 	//    fullText 用于后续写 Redis/持久化，outChan 用于把流片段实时推给前端。
-	fullText, reasoningText, reasoningDurationSeconds, streamUsage, streamErr := s.streamChatFallback(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, chatHistory, outChan, assistantReasoningStartedAt)
+	fullText, _, reasoningDurationSeconds, streamUsage, streamErr := s.streamChatFallback(ctx, selectedModel, resolvedModelName, userMessage, ifThinking, chatHistory, outChan, assistantReasoningStartedAt, userID, chatID)
 	if streamErr != nil {
 		pushErrNonBlocking(errChan, streamErr)
 		return
 	}
-	assistantReasoning := mergeAgentReasoningText(assistantReasoningPrefix, reasoningText)
 
 	// 6.1 流式 usage 并入请求级 token 统计器：
 	// 6.1.1 route/quicknote/taskquery 等 Generate 调用由 callback 自动累加；
@@ -413,7 +412,7 @@ func (s *AgentService) runNormalChatFlow(
 	// 8. 后置持久化（助手消息）：
 	//    8.1 先写 Redis，保证下一轮上下文可见；
 	//    8.2 再异步可靠落库，失败通过 errChan 回传给上层。
-	assistantMsg := &schema.Message{Role: schema.Assistant, Content: fullText, ReasoningContent: assistantReasoning}
+	assistantMsg := &schema.Message{Role: schema.Assistant, Content: fullText}
 	if reasoningDurationSeconds > 0 {
 		assistantMsg.Extra = map[string]any{"reasoning_duration_seconds": reasoningDurationSeconds}
 	}
@@ -426,7 +425,7 @@ func (s *AgentService) runNormalChatFlow(
 		ConversationID:           chatID,
 		Role:                     "assistant",
 		Message:                  fullText,
-		ReasoningContent:         assistantReasoning,
+		ReasoningContent:         "",
 		ReasoningDurationSeconds: reasoningDurationSeconds,
 		// 口径B：助手消息记录“本轮请求总 token”。
 		TokensConsumed: requestTotalTokens,
@@ -434,9 +433,6 @@ func (s *AgentService) runNormalChatFlow(
 		pushErrNonBlocking(errChan, saveErr)
 	} else {
 		assistantTimelinePayload := map[string]any{}
-		if strings.TrimSpace(assistantReasoning) != "" {
-			assistantTimelinePayload["reasoning_content"] = strings.TrimSpace(assistantReasoning)
-		}
 		if reasoningDurationSeconds > 0 {
 			assistantTimelinePayload["reasoning_duration_seconds"] = reasoningDurationSeconds
 		}

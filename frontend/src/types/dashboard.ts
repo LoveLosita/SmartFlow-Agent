@@ -97,6 +97,31 @@ export interface ConversationMeta {
   status: string
 }
 
+export interface ThinkingSummaryPayload {
+  summary_seq?: number
+  short_summary?: string
+  detail_summary?: string
+  final?: boolean
+  duration_seconds?: number
+}
+
+export interface ThinkingSummaryBlock {
+  key: string
+  stage?: string
+  blockId?: string
+  latestSeq: number
+  globalSeq: number
+  latestShort: string
+  details: Array<{
+    seq: number
+    text: string
+    durationSeconds?: number
+    final?: boolean
+  }>
+  active: boolean
+  collapsed: boolean
+}
+
 export interface AssistantMessage {
   id: string
   role: 'user' | 'assistant' | 'system'
@@ -104,6 +129,7 @@ export interface AssistantMessage {
   createdAt: string
   reasoning?: string
   extra?: any
+  thinkingSummaryBlocks?: ThinkingSummaryBlock[]
 }
 
 export type ThinkingModeType = 'auto' | 'true' | 'false'
@@ -130,6 +156,7 @@ export interface ChatStreamRequest {
   model?: string
   thinking?: ThinkingModeType
   extra?: ChatRequestExtra
+  thinking_summary?: ThinkingSummaryPayload
 }
 
 export interface HybridScheduleEntry {

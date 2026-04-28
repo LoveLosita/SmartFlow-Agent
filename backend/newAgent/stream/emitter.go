@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
@@ -62,6 +63,18 @@ type ChunkEmitter struct {
 	RequestID string
 	ModelName string
 	Created   int64
+
+	// thinkingGateMu 是“正文门卫”的轻量保护。
+	// 1. 它只保护 thinking_summary 是否还能发，不串行化全部 SSE；
+	// 2. 正文一旦开始，对应 block 的门会被关闭，后续同 block 摘要直接丢弃；
+	// 3. 这样既避免摘要 goroutine 在正文之后补发旧思考，又不误杀后续节点的新一轮思考。
+	thinkingGateMu       sync.Mutex
+	thinkingClosedBlocks map[string]bool
+	// reasoningSummaryFunc 用于把原始 reasoning 压成用户可见摘要。
+	// 1. 该函数由 service 层注入，stream 包只负责调度，不负责选择模型；
+	// 2. 未注入时模型 reasoning 只会被静默丢弃，不再回退成 raw reasoning_content；
+	// 3. 正文一旦开始，ReasoningDigestor 和 ChunkEmitter 会同时关门，迟到结果不会再发给前端。
+	reasoningSummaryFunc ReasoningSummaryFunc
 	// extraEventHook 用于把关键结构化事件同步给上层做持久化。
 	// 1. hook 失败不能影响 SSE 主链路；
 	// 2. hook 只接收 extra 结构，避免 emitter 反向依赖业务层；
@@ -122,6 +135,40 @@ func (e *ChunkEmitter) SetExtraEventHook(hook func(extra *OpenAIChunkExtra)) {
 	e.extraEventHook = hook
 }
 
+// SetReasoningSummaryFunc 设置 reasoning 摘要模型调用函数。
+//
+// 职责边界：
+// 1. 这里只保存函数引用，不立即调用模型；
+// 2. 摘要触发频率、单飞、正文闸门由 ReasoningDigestor 负责；
+// 3. 传 nil 表示关闭摘要能力，后续 reasoning chunk 会被静默丢弃。
+func (e *ChunkEmitter) SetReasoningSummaryFunc(fn ReasoningSummaryFunc) {
+	if e == nil {
+		return
+	}
+	e.reasoningSummaryFunc = fn
+}
+
+// NewReasoningDigestor 为当前 block 创建一个 reasoning 摘要器。
+//
+// 步骤说明：
+// 1. 若未注入摘要函数，返回 nil，调用方只需跳过 raw reasoning 推送；
+// 2. 摘要结果先经过 ChunkEmitter 的正文门卫，再走统一 extra/hook 链路；
+// 3. Digestor 自身仍负责单飞、水位线和正文开始后的 in-flight 结果丢弃。
+func (e *ChunkEmitter) NewReasoningDigestor(ctx context.Context, blockID, stage string) (*ReasoningDigestor, error) {
+	if e == nil || e.reasoningSummaryFunc == nil {
+		return nil, nil
+	}
+	e.openThinkingSummaryGate(blockID, stage)
+	return NewReasoningDigestor(ReasoningDigestorOptions{
+		SummaryFunc: e.reasoningSummaryFunc,
+		SummarySink: func(summary StreamThinkingSummaryExtra) {
+			_ = e.EmitThinkingSummary(blockID, stage, summary)
+		},
+		BaseContext:    ctx,
+		SummaryTimeout: 8 * time.Second,
+	})
+}
+
 // EmitReasoningText 输出一段 reasoning 文字，并附带 reasoning_text extra。
 func (e *ChunkEmitter) EmitReasoningText(blockID, stage, text string, includeRole bool) error {
 	if e == nil || e.emit == nil {
@@ -160,6 +207,7 @@ func (e *ChunkEmitter) EmitAssistantText(blockID, stage, text string, includeRol
 	if text == "" {
 		return nil
 	}
+	e.closeThinkingSummaryGate(blockID, stage)
 
 	payload, err := ToOpenAIAssistantChunkWithExtra(
 		e.RequestID,
@@ -176,6 +224,66 @@ func (e *ChunkEmitter) EmitAssistantText(blockID, stage, text string, includeRol
 		return nil
 	}
 	return e.emit(payload)
+}
+
+// EmitThinkingSummary 输出一次“流式思考摘要”事件。
+//
+// 协议约束：
+// 1. 该事件只走 extra.thinking_summary，不回写 delta.content / delta.reasoning_content；
+// 2. 仍复用现有 extra hook，让上层在不依赖 emitter 细节的前提下同步持久化；
+// 3. includeRole 不再需要，因为 thinking_summary 本身就是纯结构化事件。
+func (e *ChunkEmitter) EmitThinkingSummary(blockID, stage string, summary StreamThinkingSummaryExtra) error {
+	if e == nil || e.emit == nil {
+		return nil
+	}
+	if e.isThinkingSummaryGateClosed(blockID, stage) {
+		return nil
+	}
+	return e.emitExtraOnly(NewThinkingSummaryExtra(blockID, stage, summary))
+}
+
+func (e *ChunkEmitter) openThinkingSummaryGate(blockID, stage string) {
+	if e == nil {
+		return
+	}
+	e.thinkingGateMu.Lock()
+	if e.thinkingClosedBlocks != nil {
+		delete(e.thinkingClosedBlocks, thinkingSummaryGateKey(blockID, stage))
+	}
+	e.thinkingGateMu.Unlock()
+}
+
+func (e *ChunkEmitter) closeThinkingSummaryGate(blockID, stage string) {
+	if e == nil {
+		return
+	}
+	e.thinkingGateMu.Lock()
+	if e.thinkingClosedBlocks == nil {
+		e.thinkingClosedBlocks = make(map[string]bool)
+	}
+	e.thinkingClosedBlocks[thinkingSummaryGateKey(blockID, stage)] = true
+	e.thinkingGateMu.Unlock()
+}
+
+func (e *ChunkEmitter) isThinkingSummaryGateClosed(blockID, stage string) bool {
+	if e == nil {
+		return true
+	}
+	e.thinkingGateMu.Lock()
+	defer e.thinkingGateMu.Unlock()
+	return e.thinkingClosedBlocks[thinkingSummaryGateKey(blockID, stage)]
+}
+
+func thinkingSummaryGateKey(blockID, stage string) string {
+	blockID = strings.TrimSpace(blockID)
+	stage = strings.TrimSpace(stage)
+	if blockID != "" {
+		return blockID
+	}
+	if stage != "" {
+		return stage
+	}
+	return "__default__"
 }
 
 // EmitPseudoReasoningText 把整段 reasoning 文本按伪流式方式逐块推出。
@@ -304,6 +412,9 @@ func (e *ChunkEmitter) EmitConfirmRequest(ctx context.Context, blockID, stage, i
 	text := buildConfirmAssistantText(title, summary)
 	extra := NewConfirmRequestExtra(blockID, stage, interactionID, title, summary)
 	e.emitExtraEventHook(extra)
+	if strings.TrimSpace(text) != "" {
+		e.closeThinkingSummaryGate(blockID, stage)
+	}
 	return e.emitPseudoText(
 		ctx,
 		text,
@@ -341,6 +452,9 @@ func (e *ChunkEmitter) EmitInterruptMessage(ctx context.Context, blockID, stage,
 
 	text := buildInterruptAssistantText(interactionType, summary)
 	extra := NewInterruptExtra(blockID, stage, interactionID, interactionType, summary)
+	if strings.TrimSpace(text) != "" {
+		e.closeThinkingSummaryGate(blockID, stage)
+	}
 	return e.emitPseudoText(
 		ctx,
 		text,
@@ -435,6 +549,15 @@ func (e *ChunkEmitter) EmitStreamAssistantText(
 
 	var fullText strings.Builder
 	firstChunk := true
+	digestor, digestorErr := e.NewReasoningDigestor(ctx, blockID, stage)
+	if digestorErr != nil {
+		return "", digestorErr
+	}
+	defer func() {
+		if digestor != nil {
+			_ = digestor.Close(ctx)
+		}
+	}()
 
 	for {
 		chunk, err := reader.Recv()
@@ -445,16 +568,19 @@ func (e *ChunkEmitter) EmitStreamAssistantText(
 			return fullText.String(), err
 		}
 
-		// 推送 reasoning content。
+		// 1. reasoning content 只喂给摘要器，不再透传给前端。
+		// 2. 未注入摘要能力时直接丢弃，避免 raw reasoning_content 泄漏到 SSE。
 		if chunk != nil && strings.TrimSpace(chunk.ReasoningContent) != "" {
-			if emitErr := e.EmitReasoningText(blockID, stage, chunk.ReasoningContent, firstChunk); emitErr != nil {
-				return fullText.String(), emitErr
+			if digestor != nil {
+				digestor.Append(chunk.ReasoningContent)
 			}
-			firstChunk = false
 		}
 
 		// 推送 assistant 正文。
 		if chunk != nil && chunk.Content != "" {
+			if digestor != nil {
+				digestor.MarkContentStarted()
+			}
 			if emitErr := e.EmitAssistantText(blockID, stage, chunk.Content, firstChunk); emitErr != nil {
 				return fullText.String(), emitErr
 			}
@@ -466,9 +592,9 @@ func (e *ChunkEmitter) EmitStreamAssistantText(
 	return fullText.String(), nil
 }
 
-// EmitStreamReasoningText 从 StreamReader 逐 chunk 读取并实时推送 reasoning 文字。
+// EmitStreamReasoningText 从 StreamReader 逐 chunk 读取 reasoning，并转成低频 thinking_summary。
 //
-// 与 EmitStreamAssistantText 结构相同，但只推送 ReasoningContent，不推送 Content。
+// 与 EmitStreamAssistantText 结构相同，但不再输出 raw ReasoningContent。
 // 用于只需展示思考过程而无需展示正文的场景。
 func (e *ChunkEmitter) EmitStreamReasoningText(
 	ctx context.Context,
@@ -480,7 +606,15 @@ func (e *ChunkEmitter) EmitStreamReasoningText(
 	}
 
 	var fullText strings.Builder
-	firstChunk := true
+	digestor, digestorErr := e.NewReasoningDigestor(ctx, blockID, stage)
+	if digestorErr != nil {
+		return "", digestorErr
+	}
+	defer func() {
+		if digestor != nil {
+			_ = digestor.Close(ctx)
+		}
+	}()
 
 	for {
 		chunk, err := reader.Recv()
@@ -492,11 +626,10 @@ func (e *ChunkEmitter) EmitStreamReasoningText(
 		}
 
 		if chunk != nil && strings.TrimSpace(chunk.ReasoningContent) != "" {
-			if emitErr := e.EmitReasoningText(blockID, stage, chunk.ReasoningContent, firstChunk); emitErr != nil {
-				return fullText.String(), emitErr
+			if digestor != nil {
+				digestor.Append(chunk.ReasoningContent)
 			}
 			fullText.WriteString(chunk.ReasoningContent)
-			firstChunk = false
 		}
 	}
 

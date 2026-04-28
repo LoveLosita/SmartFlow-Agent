@@ -56,6 +56,15 @@ func collectExecuteDecisionFromLLM(
 	parser := newagentrouter.NewStreamDecisionParser()
 	output := &executeDecisionStreamOutput{firstChunk: true}
 	var fullText strings.Builder
+	reasoningDigestor, digestorErr := emitter.NewReasoningDigestor(ctx, executeSpeakBlockID, executeStageName)
+	if digestorErr != nil {
+		return nil, fmt.Errorf("执行 thinking 摘要器初始化失败: %w", digestorErr)
+	}
+	defer func() {
+		if reasoningDigestor != nil {
+			_ = reasoningDigestor.Close(ctx)
+		}
+	}()
 
 	for {
 		chunk, recvErr := reader.Recv()
@@ -68,15 +77,9 @@ func collectExecuteDecisionFromLLM(
 		}
 
 		if chunk != nil && strings.TrimSpace(chunk.ReasoningContent) != "" {
-			if emitErr := emitter.EmitReasoningText(
-				executeSpeakBlockID,
-				executeStageName,
-				chunk.ReasoningContent,
-				output.firstChunk,
-			); emitErr != nil {
-				return nil, fmt.Errorf("执行 thinking 推送失败: %w", emitErr)
+			if reasoningDigestor != nil {
+				reasoningDigestor.Append(chunk.ReasoningContent)
 			}
-			output.firstChunk = false
 		}
 
 		content := ""
@@ -148,6 +151,9 @@ func collectExecuteDecisionFromLLM(
 		output.decision = decision
 
 		if visible != "" {
+			if reasoningDigestor != nil {
+				reasoningDigestor.MarkContentStarted()
+			}
 			if emitErr := emitter.EmitAssistantText(
 				executeSpeakBlockID,
 				executeStageName,
@@ -174,9 +180,14 @@ func collectExecuteDecisionFromLLM(
 				continue
 			}
 			if strings.TrimSpace(chunk2.ReasoningContent) != "" {
-				_ = emitter.EmitReasoningText(executeSpeakBlockID, executeStageName, chunk2.ReasoningContent, false)
+				if reasoningDigestor != nil {
+					reasoningDigestor.Append(chunk2.ReasoningContent)
+				}
 			}
 			if chunk2.Content != "" {
+				if reasoningDigestor != nil {
+					reasoningDigestor.MarkContentStarted()
+				}
 				if emitErr := emitter.EmitAssistantText(
 					executeSpeakBlockID,
 					executeStageName,

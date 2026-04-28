@@ -10,6 +10,7 @@ import (
 
 	"github.com/LoveLosita/smartflow/backend/model"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
+	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 	"gorm.io/gorm"
 )
 
@@ -63,13 +64,13 @@ func (s *AgentService) GetConversationTimeline(ctx context.Context, userID int, 
 	return normalizeConversationTimelineItems(items), nil
 }
 
-// appendConversationTimelineEvent 统一追加单条时间线事件到 Redis + MySQL。
+// appendConversationTimelineEvent 统一追加单条时间线事件到 Redis + outbox。
 //
 // 步骤化说明：
-// 1. 先从 Redis INCR 分配 seq，若 Redis 异常则回退 DB MAX(seq)+1；
-// 2. 再写 MySQL，保证刷新时至少有权威持久化；
-// 3. 最后追加 Redis 时间线列表，失败只记日志，不影响主链路返回；
-// 4. 返回分配到的 seq，便于后续扩展在 SSE meta 回传顺序号。
+// 1. 先分配同会话内单调递增的 seq，优先走 Redis，Redis 不可用时回退 DB；
+// 2. 再把事件同步追加到 Redis timeline cache，保证刷新前的用户体验连续；
+// 3. 最后发布 outbox 事件异步落 MySQL，与 chat history 的可靠落库方式对齐；
+// 4. 未注入 eventPublisher 时走同步 MySQL fallback，方便本地极简环境启动。
 func (s *AgentService) appendConversationTimelineEvent(
 	ctx context.Context,
 	userID int,
@@ -95,86 +96,260 @@ func (s *AgentService) appendConversationTimelineEvent(
 		return 0, errors.New("invalid timeline event identity")
 	}
 
+	normalizedContent, normalizedPayload, shouldPersist := normalizeConversationTimelinePersistMaterial(normalizedKind, normalizedContent, payload)
+	if !shouldPersist {
+		return 0, nil
+	}
+
 	seq, err := s.nextConversationTimelineSeq(ctx, userID, normalizedChatID)
 	if err != nil {
 		return 0, err
 	}
 
-	payloadJSON := marshalTimelinePayloadJSON(payload)
-	persistPayload := model.ChatTimelinePersistPayload{
+	persistPayload := (model.ChatTimelinePersistPayload{
 		UserID:         userID,
 		ConversationID: normalizedChatID,
 		Seq:            seq,
 		Kind:           normalizedKind,
 		Role:           normalizedRole,
 		Content:        normalizedContent,
-		PayloadJSON:    payloadJSON,
+		PayloadJSON:    marshalTimelinePayloadJSON(normalizedPayload),
 		TokensConsumed: tokensConsumed,
+	}).Normalize()
+	if s.eventPublisher != nil {
+		now := time.Now()
+
+		// 1. 先写 Redis timeline cache，让刷新前的本地态和下一轮上下文都能立即看到这条事件。
+		// 2. 再发布 outbox 事件，与 chat history 保持相同的“入队成功即返回”语义。
+		// 3. 若 outbox 发布失败，这里返回 error 交给上层处理，不在本方法里偷偷回退成同步写库。
+		s.appendConversationTimelineCacheNonBlocking(
+			ctx,
+			userID,
+			normalizedChatID,
+			buildConversationTimelineCacheItem(0, seq, normalizedKind, normalizedRole, normalizedContent, normalizedPayload, tokensConsumed, &now),
+		)
+		if err := eventsvc.PublishAgentTimelinePersistRequested(ctx, s.eventPublisher, persistPayload); err != nil {
+			return 0, err
+		}
+		return seq, nil
 	}
+	return s.appendConversationTimelineEventSync(ctx, userID, normalizedChatID, persistPayload, normalizedPayload)
+}
+
+// appendConversationTimelineEventSync 在未启用 outbox 时同步写 MySQL。
+//
+// 步骤化说明：
+// 1. 本方法只作为 eventPublisher 为空时的降级路径，保证本地环境不依赖总线；
+// 2. 若 seq 唯一键冲突，读取 DB 最大 seq 后补一个新序号，语义与 outbox 消费者保持一致；
+// 3. MySQL 写入成功后再追加 Redis cache，让缓存拿到数据库生成的 id/created_at。
+func (s *AgentService) appendConversationTimelineEventSync(
+	ctx context.Context,
+	userID int,
+	chatID string,
+	persistPayload model.ChatTimelinePersistPayload,
+	payload map[string]any,
+) (int64, error) {
 	eventID, eventCreatedAt, err := s.repo.SaveConversationTimelineEvent(ctx, persistPayload)
 	if err != nil {
-		// 1. 并发极端场景下（例如 Redis seq 分配失败后 DB 兜底）可能产生重复 seq；
-		// 2. 这里做一次“读取最新 MAX(seq)+1”的重试，避免主链路直接失败；
-		// 3. 重试仍失败则返回错误，让调用方感知真实落库失败。
-		if !isTimelineSeqConflictError(err) {
+		// 1. 这里的冲突通常来自 Redis seq key 过期或落后于 DB。
+		// 2. 由于当前是同步写库链路，可以直接读取 DB 当前最大 seq 并补一个新序号。
+		// 3. 若重试后仍失败，则把数据库错误原样抛给上层，避免悄悄吞掉真实问题。
+		if !model.IsTimelineSeqConflictError(err) {
 			return 0, err
 		}
-		maxSeq, seqErr := s.repo.GetConversationTimelineMaxSeq(ctx, userID, normalizedChatID)
+		maxSeq, seqErr := s.repo.GetConversationTimelineMaxSeq(ctx, userID, chatID)
 		if seqErr != nil {
-			return 0, err
+			return 0, seqErr
 		}
 		persistPayload.Seq = maxSeq + 1
-		var retryErr error
-		eventID, eventCreatedAt, retryErr = s.repo.SaveConversationTimelineEvent(ctx, persistPayload)
-		if retryErr != nil {
-			return 0, retryErr
+		eventID, eventCreatedAt, err = s.repo.SaveConversationTimelineEvent(ctx, persistPayload)
+		if err != nil {
+			return 0, err
 		}
-		seq = persistPayload.Seq
 		if s.cacheDAO != nil {
-			if setErr := s.cacheDAO.SetConversationTimelineSeq(ctx, userID, normalizedChatID, seq); setErr != nil {
-				log.Printf("时间线 seq 冲突重试后回写 Redis 失败 user=%d chat=%s seq=%d err=%v", userID, normalizedChatID, seq, setErr)
+			if setErr := s.cacheDAO.SetConversationTimelineSeq(ctx, userID, chatID, persistPayload.Seq); setErr != nil {
+				log.Printf("回填时间线 seq 到 Redis 失败 user=%d chat=%s seq=%d err=%v", userID, chatID, persistPayload.Seq, setErr)
 			}
 		}
 	}
 
+	s.appendConversationTimelineCacheNonBlocking(
+		ctx,
+		userID,
+		chatID,
+		buildConversationTimelineCacheItem(
+			eventID,
+			persistPayload.Seq,
+			persistPayload.Kind,
+			persistPayload.Role,
+			persistPayload.Content,
+			payload,
+			persistPayload.TokensConsumed,
+			eventCreatedAt,
+		),
+	)
+	return persistPayload.Seq, nil
+}
+
+// appendConversationTimelineCacheNonBlocking 尽力把单条 timeline 事件追加到 Redis。
+//
+// 步骤化说明：
+// 1. 缓存失败不能反向影响主链路，因为 MySQL/outbox 才是最终可靠写入；
+// 2. 这里统一记录错误日志，方便排查 Redis 不可用或 payload 序列化问题；
+// 3. item 由调用方提前标准化，本方法不再二次裁剪业务字段。
+func (s *AgentService) appendConversationTimelineCacheNonBlocking(
+	ctx context.Context,
+	userID int,
+	chatID string,
+	item model.GetConversationTimelineItem,
+) {
+	if s.cacheDAO == nil {
+		return
+	}
+	if err := s.cacheDAO.AppendConversationTimelineEventToCache(ctx, userID, chatID, item); err != nil {
+		log.Printf("追加时间线缓存失败 user=%d chat=%s seq=%d kind=%s err=%v", userID, chatID, item.Seq, item.Kind, err)
+	}
+}
+
+// nextConversationTimelineSeq 负责分配一条新的 timeline seq。
+//
+// 步骤化说明：
+// 1. 优先走 Redis INCR，避免所有事件都串行依赖 MySQL；
+// 2. 再用 DB MAX(seq) 做一次自检，尽量把“Redis key 过期/落后”在写入前提前修正；
+// 3. 若 Redis 不可用，则直接回退到 DB MAX(seq)+1，并把结果尽力回填回 Redis。
+func (s *AgentService) nextConversationTimelineSeq(ctx context.Context, userID int, chatID string) (int64, error) {
+	if s == nil || s.repo == nil {
+		return 0, errors.New("agent service is not initialized")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	normalizedChatID := strings.TrimSpace(chatID)
+	if userID <= 0 || normalizedChatID == "" {
+		return 0, errors.New("invalid timeline seq identity")
+	}
+
+	if s.cacheDAO == nil {
+		return s.nextConversationTimelineSeqFromDB(ctx, userID, normalizedChatID)
+	}
+
+	candidateSeq, err := s.cacheDAO.IncrConversationTimelineSeq(ctx, userID, normalizedChatID)
+	if err != nil {
+		log.Printf("分配时间线 seq 时 Redis INCR 失败，回退 DB user=%d chat=%s err=%v", userID, normalizedChatID, err)
+		return s.nextConversationTimelineSeqFromDB(ctx, userID, normalizedChatID)
+	}
+
+	// 1. Redis key 缺失时，INCR 常会从 1 重新开始，容易和已有 DB 记录撞 seq。
+	// 2. 这里额外对照一次 DB 最大 seq，把明显落后的顺序号提前修正，降低 outbox 消费时的补 seq 概率。
+	// 3. 该自检不会看到“尚未消费到 MySQL 的新 outbox 事件”，因此真正的极端并发兜底仍由消费者承担。
+	maxSeq, err := s.repo.GetConversationTimelineMaxSeq(ctx, userID, normalizedChatID)
+	if err != nil {
+		return 0, err
+	}
+	if candidateSeq > maxSeq {
+		return candidateSeq, nil
+	}
+
+	repairedSeq := maxSeq + 1
+	if err = s.cacheDAO.SetConversationTimelineSeq(ctx, userID, normalizedChatID, repairedSeq); err != nil {
+		log.Printf("修正时间线 seq 到 Redis 失败 user=%d chat=%s seq=%d err=%v", userID, normalizedChatID, repairedSeq, err)
+	}
+	return repairedSeq, nil
+}
+
+func (s *AgentService) nextConversationTimelineSeqFromDB(ctx context.Context, userID int, chatID string) (int64, error) {
+	maxSeq, err := s.repo.GetConversationTimelineMaxSeq(ctx, userID, chatID)
+	if err != nil {
+		return 0, err
+	}
+	nextSeq := maxSeq + 1
 	if s.cacheDAO != nil {
-		now := time.Now()
-		item := model.GetConversationTimelineItem{
-			ID:             eventID,
-			Seq:            seq,
-			Kind:           normalizedKind,
-			Role:           normalizedRole,
-			Content:        normalizedContent,
-			Payload:        cloneTimelinePayload(payload),
-			TokensConsumed: tokensConsumed,
-		}
-		if eventCreatedAt != nil {
-			item.CreatedAt = eventCreatedAt
-		} else {
-			item.CreatedAt = &now
-		}
-		if err := s.cacheDAO.AppendConversationTimelineEventToCache(ctx, userID, normalizedChatID, item); err != nil {
-			log.Printf("追加会话时间线缓存失败 user=%d chat=%s seq=%d kind=%s err=%v", userID, normalizedChatID, seq, normalizedKind, err)
+		if setErr := s.cacheDAO.SetConversationTimelineSeq(ctx, userID, chatID, nextSeq); setErr != nil {
+			log.Printf("回填时间线 seq 到 Redis 失败 user=%d chat=%s seq=%d err=%v", userID, chatID, nextSeq, setErr)
 		}
 	}
-	return seq, nil
+	return nextSeq, nil
 }
 
-func isTimelineSeqConflictError(err error) bool {
-	if err == nil {
-		return false
+// normalizeConversationTimelinePersistMaterial 负责把 timeline 原始输入收敛成“可缓存 + 可持久化”的口径。
+//
+// 职责边界：
+// 1. 对普通事件只做浅拷贝，避免调用方后续继续改 map 影响已入队 payload；
+// 2. 对 thinking_summary 只保留 detail_summary 与必要 metadata，明确剔除 short_summary；
+// 3. 若 thinking_summary 最终没有 detail_summary，则返回 shouldPersist=false，仅保留实时 SSE 展示，不进入 timeline。
+func normalizeConversationTimelinePersistMaterial(kind string, content string, payload map[string]any) (string, map[string]any, bool) {
+	normalizedKind := strings.ToLower(strings.TrimSpace(kind))
+	normalizedContent := strings.TrimSpace(content)
+	if normalizedKind != model.AgentTimelineKindThinkingSummary {
+		return normalizedContent, cloneTimelinePayload(payload), true
 	}
-	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "duplicate") && strings.Contains(text, "uk_timeline_user_chat_seq")
+	return sanitizeThinkingSummaryPersistMaterial(normalizedContent, payload)
 }
 
-// persistNewAgentTimelineExtraEvent 把 SSE extra 卡片事件写入时间线。
+func sanitizeThinkingSummaryPersistMaterial(content string, payload map[string]any) (string, map[string]any, bool) {
+	detailSummary := readTimelinePayloadString(payload, "detail_summary")
+	if detailSummary == "" {
+		detailSummary = strings.TrimSpace(content)
+	}
+	if detailSummary == "" {
+		return "", nil, false
+	}
+
+	sanitized := make(map[string]any)
+	copyTrimmedTimelinePayloadField(payload, sanitized, "stage")
+	copyTrimmedTimelinePayloadField(payload, sanitized, "block_id")
+	copyTrimmedTimelinePayloadField(payload, sanitized, "display_mode")
+	copyTimelinePayloadFieldIfPresent(payload, sanitized, "summary_seq")
+	copyTimelinePayloadFieldIfPresent(payload, sanitized, "final")
+	copyTimelinePayloadFieldIfPresent(payload, sanitized, "duration_seconds")
+	sanitized["detail_summary"] = detailSummary
+
+	return detailSummary, sanitized, true
+}
+
+func copyTrimmedTimelinePayloadField(src map[string]any, dst map[string]any, key string) {
+	if len(src) == 0 || dst == nil {
+		return
+	}
+	value, ok := src[key]
+	if !ok {
+		return
+	}
+	text, ok := value.(string)
+	if !ok {
+		return
+	}
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return
+	}
+	dst[key] = trimmed
+}
+
+func copyTimelinePayloadFieldIfPresent(src map[string]any, dst map[string]any, key string) {
+	if len(src) == 0 || dst == nil {
+		return
+	}
+	value, ok := src[key]
+	if !ok || value == nil {
+		return
+	}
+	dst[key] = value
+}
+
+// persistNewAgentTimelineExtraEvent 把 SSE extra 里的结构化事件写入时间线。
 //
 // 说明：
-// 1. 只持久化真正需要刷新后重建的卡片事件；
-// 2. status/reasoning/finish 等临时过程信号不落时间线；
-// 3. 失败只记日志，不中断当前 SSE 输出。
-func (s *AgentService) persistNewAgentTimelineExtraEvent(ctx context.Context, userID int, chatID string, extra *newagentstream.OpenAIChunkExtra) {
+// 1. 只持久化刷新后仍需重建的业务事件；
+// 2. short_summary 这类临时展示信息会在 appendConversationTimelineEvent 内被过滤掉；
+// 3. 失败只记日志，不反向打断当前 SSE 输出。
+func (s *AgentService) persistNewAgentTimelineExtraEvent(
+	ctx context.Context,
+	userID int,
+	chatID string,
+	extra *newagentstream.OpenAIChunkExtra,
+) {
 	kind, ok := mapTimelineKindFromStreamExtra(extra)
 	if !ok {
 		return
@@ -193,30 +368,33 @@ func (s *AgentService) persistNewAgentTimelineExtraEvent(ctx context.Context, us
 		buildTimelinePayloadFromStreamExtra(extra),
 		0,
 	); err != nil {
-		log.Printf("写入 newAgent 卡片时间线失败 user=%d chat=%s kind=%s err=%v", userID, chatID, kind, err)
+		log.Printf("写入 newAgent 时间线事件失败 user=%d chat=%s kind=%s err=%v", userID, chatID, kind, err)
 	}
 }
 
-func (s *AgentService) nextConversationTimelineSeq(ctx context.Context, userID int, chatID string) (int64, error) {
-	if s.cacheDAO != nil {
-		seq, err := s.cacheDAO.IncrConversationTimelineSeq(ctx, userID, chatID)
-		if err == nil {
-			return seq, nil
-		}
-		log.Printf("会话时间线 seq Redis 分配失败，回退 DB user=%d chat=%s err=%v", userID, chatID, err)
+func buildConversationTimelineCacheItem(
+	eventID int64,
+	seq int64,
+	kind string,
+	role string,
+	content string,
+	payload map[string]any,
+	tokensConsumed int,
+	createdAt *time.Time,
+) model.GetConversationTimelineItem {
+	item := model.GetConversationTimelineItem{
+		ID:             eventID,
+		Seq:            seq,
+		Kind:           kind,
+		Role:           role,
+		Content:        content,
+		Payload:        cloneTimelinePayload(payload),
+		TokensConsumed: tokensConsumed,
 	}
-
-	maxSeq, err := s.repo.GetConversationTimelineMaxSeq(ctx, userID, chatID)
-	if err != nil {
-		return 0, err
+	if createdAt != nil {
+		item.CreatedAt = createdAt
 	}
-	seq := maxSeq + 1
-	if s.cacheDAO != nil {
-		if err := s.cacheDAO.SetConversationTimelineSeq(ctx, userID, chatID, seq); err != nil {
-			log.Printf("会话时间线 seq 回填 Redis 失败 user=%d chat=%s seq=%d err=%v", userID, chatID, seq, err)
-		}
-	}
-	return seq, nil
+	return item
 }
 
 func buildConversationTimelineItemsFromDB(events []model.AgentTimelineEvent) []model.GetConversationTimelineItem {
@@ -296,7 +474,8 @@ func canonicalizeTimelineKind(kind string, role string) string {
 		model.AgentTimelineKindToolResult,
 		model.AgentTimelineKindConfirmRequest,
 		model.AgentTimelineKindBusinessCard,
-		model.AgentTimelineKindScheduleCompleted:
+		model.AgentTimelineKindScheduleCompleted,
+		model.AgentTimelineKindThinkingSummary:
 		return normalizedKind
 	case "text", "message", "query":
 		if normalizedRole == "user" {
@@ -337,6 +516,9 @@ func mapTimelineKindFromStreamExtra(extra *newagentstream.OpenAIChunkExtra) (str
 	if extra == nil {
 		return "", false
 	}
+	if isThinkingSummaryStreamExtra(extra) {
+		return model.AgentTimelineKindThinkingSummary, true
+	}
 	switch extra.Kind {
 	case newagentstream.StreamExtraKindToolCall:
 		return model.AgentTimelineKindToolCall, true
@@ -356,6 +538,9 @@ func mapTimelineKindFromStreamExtra(extra *newagentstream.OpenAIChunkExtra) (str
 func buildTimelinePayloadFromStreamExtra(extra *newagentstream.OpenAIChunkExtra) map[string]any {
 	if extra == nil {
 		return nil
+	}
+	if isThinkingSummaryStreamExtra(extra) {
+		return buildThinkingSummaryTimelinePayload(extra)
 	}
 	payload := map[string]any{
 		"stage":        strings.TrimSpace(extra.Stage),
@@ -398,6 +583,67 @@ func buildTimelinePayloadFromStreamExtra(extra *newagentstream.OpenAIChunkExtra)
 		payload["meta"] = cloneTimelinePayload(extra.Meta)
 	}
 	return payload
+}
+
+func isThinkingSummaryStreamExtra(extra *newagentstream.OpenAIChunkExtra) bool {
+	if extra == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(string(extra.Kind)), model.AgentTimelineKindThinkingSummary)
+}
+
+func buildThinkingSummaryTimelinePayload(extra *newagentstream.OpenAIChunkExtra) map[string]any {
+	payload := map[string]any{
+		"stage":        strings.TrimSpace(extra.Stage),
+		"block_id":     strings.TrimSpace(extra.BlockID),
+		"display_mode": string(extra.DisplayMode),
+	}
+
+	if extra.ThinkingSummary != nil {
+		summary := extra.ThinkingSummary
+		payload["summary_seq"] = summary.SummarySeq
+		payload["final"] = summary.Final
+		payload["duration_seconds"] = summary.DurationSeconds
+		if detailSummary := strings.TrimSpace(summary.DetailSummary); detailSummary != "" {
+			payload["detail_summary"] = detailSummary
+		}
+		return payload
+	}
+
+	if detailSummary := readTimelineExtraMetaString(extra.Meta, "detail_summary"); detailSummary != "" {
+		payload["detail_summary"] = detailSummary
+	}
+	return payload
+}
+
+func readTimelineExtraMetaString(meta map[string]any, key string) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, ok := meta[key]
+	if !ok {
+		return ""
+	}
+	text, ok := raw.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(text)
+}
+
+func readTimelinePayloadString(payload map[string]any, key string) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	raw, ok := payload[key]
+	if !ok {
+		return ""
+	}
+	text, ok := raw.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(text)
 }
 
 func cloneStreamBusinessCard(card *newagentstream.StreamBusinessCardExtra) map[string]any {
