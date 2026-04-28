@@ -22,7 +22,8 @@ import {
   getConversationTimeline,
   type TimelineEvent,
   type TimelineToolPayload,
-  type TimelineConfirmPayload
+  type TimelineConfirmPayload,
+  type ToolView
 } from '@/api/schedule_agent'
 import { refreshToken } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
@@ -41,6 +42,7 @@ import ScheduleFineTuneModal from '@/components/assistant/ScheduleFineTuneModal.
 import { formatConversationTime, formatMessageTime } from '@/utils/date'
 import { renderMarkdown } from '@/utils/markdown'
 import BusinessCardRenderer from '@/components/assistant/cards/BusinessCardRenderer.vue'
+import ToolCardRenderer from '@/components/dashboard/ToolCardRenderer.vue'
 import type { 
   TimelineBusinessCardPayload, 
   TaskQueryCardData, 
@@ -77,6 +79,8 @@ interface StreamToolExtraPayload {
   status?: string
   summary?: string
   arguments_preview?: string
+  argument_view?: ToolView
+  result_view?: ToolView
 }
 
 interface StreamExtraPayload {
@@ -108,6 +112,8 @@ interface ToolTraceEvent {
   summary: string
   detail?: string
   toolName?: string
+  argumentView?: ToolView
+  resultView?: ToolView
 }
 
 interface StatusTraceEvent {
@@ -265,6 +271,7 @@ const conversationContextStatsLoadingMap = reactive<Record<string, boolean>>({})
 const conversationContextStatsReadyMap = reactive<Record<string, boolean>>({})
 const conversationListItemRevealMap = reactive<Record<string, boolean>>({})
 const scheduleResultMap = reactive<Record<string, SchedulePreviewData>>({})
+const scheduleResultSeqMap = reactive<Record<string, number>>({})
 const businessCardEventsMap = reactive<Record<string, TimelineBusinessCardPayload[]>>({})
 const isFineTuneModalVisible = ref(false)
 const fineTuneLoading = ref(false)
@@ -693,6 +700,7 @@ function clearToolTraceState(messageId: string) {
   delete assistantContentBlocksMap[messageId]
   delete assistantTimelineLastKindMap[messageId]
   delete scheduleResultMap[messageId]
+  delete scheduleResultSeqMap[messageId]
   delete businessCardEventsMap[messageId]
   for (const key of Object.keys(toolTraceExpandedMap)) {
     if (key.startsWith(`${messageId}:tool:`)) {
@@ -707,6 +715,8 @@ function appendToolTraceEvent(
   summary: string,
   detail = '',
   toolName = '',
+  argumentView?: ToolView,
+  resultView?: ToolView,
 ) {
   const normalizedSummary = summary.trim()
   if (!normalizedSummary) {
@@ -745,6 +755,8 @@ function appendToolTraceEvent(
     summary: normalizedSummary,
     detail: normalizedDetail || undefined,
     toolName: normalizedToolName || undefined,
+    argumentView,
+    resultView,
   })
   assistantTimelineLastKindMap[messageId] = 'tool'
 }
@@ -1569,6 +1581,17 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
       })
     }
 
+    if (scheduleResultMap[source.id]) {
+      blocks.push({
+        id: `${source.id}:schedule-card`,
+        type: 'schedule_card',
+        seq: scheduleResultSeqMap[source.id] || 1000000,
+        schedulePreview: scheduleResultMap[source.id],
+        sourceId: source.id,
+        source,
+      })
+    }
+
     const contentBlocks = assistantContentBlocksMap[source.id] || []
     if (contentBlocks.length > 0) {
       hasContentBlock = true
@@ -1597,16 +1620,6 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
         source,
       })
     }
-  }
-
-  const schedulePreview = scheduleResultMap[dm.id]
-  if (schedulePreview) {
-    blocks.push({
-      id: `${dm.id}:schedule-card`,
-      type: 'schedule_card',
-      seq: nextAssistantTimelineSeq(),
-      schedulePreview,
-    })
   }
 
   if (!hasContentBlock && dm.content) {
@@ -2038,15 +2051,30 @@ function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[
       case 'tool_call':
         if (event.payload?.tool) {
           const t = event.payload.tool
-          appendToolTraceEvent(mid, mapToolEventState(t.status), normalizeToolSummary(t), buildToolDetail(t), t.name)
+          appendToolTraceEvent(mid, mapToolEventState(t.status), normalizeToolSummary(t), buildToolDetail(t), t.name, t.argument_view, t.result_view)
         }
         break
       
       case 'tool_result':
         if (event.payload?.tool) {
           const t = event.payload.tool
-          appendToolTraceEvent(mid, mapToolEventState(t.status), normalizeToolSummary(t), buildToolDetail(t), t.name)
+          appendToolTraceEvent(mid, mapToolEventState(t.status), normalizeToolSummary(t), buildToolDetail(t), t.name, t.argument_view, t.result_view)
         }
+        break
+
+      case 'schedule_completed':
+        // 为该 assistant message 添加一个 schedule_card 占位卡
+        scheduleResultMap[mid] = {
+          conversation_id: conversationId,
+          trace_id: '',
+          summary: '日程表编排已就绪',
+          candidate_plans: [],
+          hybrid_entries: [],
+          task_class_ids: [],
+          generated_at: event.created_at || new Date().toISOString(),
+          is_placeholder: true
+        } as any
+        scheduleResultSeqMap[mid] = event.seq || nextAssistantTimelineSeq()
         break
 
       case 'confirm_request':
@@ -2532,6 +2560,24 @@ function handleStreamExtraEvent(extra: StreamExtraPayload | undefined, assistant
     return
   }
 
+  if (extra.kind === 'schedule_completed') {
+    // 为当前助理消息添加一个排程卡片占位符
+    const mid = assistantMessage.id
+    scheduleResultMap[mid] = {
+      conversation_id: selectedConversationId.value,
+      trace_id: '',
+      summary: '日程表编排已就绪',
+      candidate_plans: [],
+      hybrid_entries: [],
+      task_class_ids: [],
+      generated_at: new Date().toISOString(),
+      is_placeholder: true
+    } as any
+    scheduleResultSeqMap[mid] = nextAssistantTimelineSeq()
+    scheduleScrollMessagesToBottom(true)
+    return
+  }
+
   if (extra.kind === 'tool_call' && extra.tool) {
     appendToolTraceEvent(
       assistantMessage.id,
@@ -2539,6 +2585,8 @@ function handleStreamExtraEvent(extra: StreamExtraPayload | undefined, assistant
       normalizeToolSummary(extra.tool),
       buildToolDetail(extra.tool),
       `${extra.tool.name || ''}`,
+      extra.tool.argument_view,
+      extra.tool.result_view,
     )
     return
   }
@@ -2550,6 +2598,8 @@ function handleStreamExtraEvent(extra: StreamExtraPayload | undefined, assistant
       normalizeToolSummary(extra.tool),
       buildToolDetail(extra.tool),
       `${extra.tool.name || ''}`,
+      extra.tool.argument_view,
+      extra.tool.result_view,
     )
     if (extra.tool.status === 'done') {
       void loadConversationContextStats(selectedConversationId.value, true)
@@ -3160,30 +3210,19 @@ onBeforeUnmount(() => {
             <div v-else class="chat-message__assistant-flow">
               <TransitionGroup name="inner-fade">
                 <div v-for="block in getDisplayAssistantBlocks(dm)" :key="block.id">
-                  <article v-if="block.type === 'tool'" class="chat-message__tool">
-                    <button
-                      type="button"
-                      class="chat-message__tool-head"
-                      @click="block.event && toggleToolTraceExpanded(block.event.id)"
-                    >
-                      <span class="chat-message__tool-icon" aria-hidden="true">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-                        </svg>
-                      </span>
-                      <span class="chat-message__tool-summary">{{ block.event?.summary }}</span>
-                      <em class="chat-message__tool-badge">{{ getToolTraceStateLabel(block.event?.state || 'completed') }}</em>
-                      <span class="chat-message__tool-chevron" :class="{ 'chat-message__tool-chevron--expanded': block.event ? isToolTraceExpanded(block.event.id) : false }" aria-hidden="true">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                          <polyline points="9 18 15 12 9 6"></polyline>
-                        </svg>
-                      </span>
-                    </button>
-
-                    <p v-if="block.event && isToolTraceExpanded(block.event.id) && block.event.detail" class="chat-message__tool-detail">
-                      {{ block.event.detail }}
-                    </p>
-                  </article>
+                  <ToolCardRenderer
+                    v-if="block.type === 'tool' && block.event"
+                    :payload="{
+                      name: block.event.toolName || '',
+                      status: block.event.state === 'called' ? 'start' : (block.event.state === 'completed' ? 'done' : block.event.state),
+                      summary: block.event.summary,
+                      arguments_preview: block.event.detail,
+                      argument_view: block.event.argumentView,
+                      result_view: block.event.resultView
+                    }"
+                    :expanded="isToolTraceExpanded(block.id)"
+                    @toggle="toggleToolTraceExpanded(block.id)"
+                  />
 
                   <div v-else-if="block.type === 'status'" class="chat-message__status-line">
                     <span class="chat-message__status-icon" aria-hidden="true">

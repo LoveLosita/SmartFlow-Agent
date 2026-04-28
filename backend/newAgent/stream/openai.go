@@ -87,10 +87,12 @@ type StreamStatusExtra struct {
 
 // StreamToolExtra 表示一次工具调用相关事件。
 type StreamToolExtra struct {
-	Name             string `json:"name,omitempty"`
-	Status           string `json:"status,omitempty"`
-	Summary          string `json:"summary,omitempty"`
-	ArgumentsPreview string `json:"arguments_preview,omitempty"`
+	Name             string         `json:"name,omitempty"`
+	Status           string         `json:"status,omitempty"`
+	Summary          string         `json:"summary,omitempty"`
+	ArgumentsPreview string         `json:"arguments_preview,omitempty"`
+	ArgumentView     map[string]any `json:"argument_view,omitempty"`
+	ResultView       map[string]any `json:"result_view,omitempty"`
 }
 
 // StreamConfirmExtra 表示一次待确认事件的展示摘要。
@@ -234,7 +236,16 @@ func NewToolCallExtra(blockID, stage, toolName, status, summary, argumentsPrevie
 }
 
 // NewToolResultExtra 创建“工具结果”事件的 extra。
-func NewToolResultExtra(blockID, stage, toolName, status, summary, argumentsPreview string) *OpenAIChunkExtra {
+func NewToolResultExtra(
+	blockID string,
+	stage string,
+	toolName string,
+	status string,
+	summary string,
+	argumentsPreview string,
+	argumentView map[string]any,
+	resultView map[string]any,
+) *OpenAIChunkExtra {
 	return &OpenAIChunkExtra{
 		Kind:        StreamExtraKindToolResult,
 		BlockID:     blockID,
@@ -245,6 +256,8 @@ func NewToolResultExtra(blockID, stage, toolName, status, summary, argumentsPrev
 			Status:           status,
 			Summary:          summary,
 			ArgumentsPreview: argumentsPreview,
+			ArgumentView:     argumentView,
+			ResultView:       resultView,
 		},
 	}
 }

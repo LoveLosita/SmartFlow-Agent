@@ -363,12 +363,19 @@ func buildTimelinePayloadFromStreamExtra(extra *newagentstream.OpenAIChunkExtra)
 		"display_mode": string(extra.DisplayMode),
 	}
 	if extra.Tool != nil {
-		payload["tool"] = map[string]any{
+		toolPayload := map[string]any{
 			"name":              strings.TrimSpace(extra.Tool.Name),
 			"status":            strings.TrimSpace(extra.Tool.Status),
 			"summary":           strings.TrimSpace(extra.Tool.Summary),
 			"arguments_preview": strings.TrimSpace(extra.Tool.ArgumentsPreview),
 		}
+		if len(extra.Tool.ArgumentView) > 0 {
+			toolPayload["argument_view"] = cloneTimelinePayload(extra.Tool.ArgumentView)
+		}
+		if len(extra.Tool.ResultView) > 0 {
+			toolPayload["result_view"] = cloneTimelinePayload(extra.Tool.ResultView)
+		}
+		payload["tool"] = toolPayload
 	}
 	if extra.Confirm != nil {
 		payload["confirm"] = map[string]any{

@@ -233,12 +233,31 @@ func (e *ChunkEmitter) EmitToolCallStart(blockID, stage, toolName, summary, argu
 // 协议约束：
 // 1. status 由调用方明确传入（如 done/blocked/failed）；
 // 2. 结果事件只走 extra.tool，不回写 reasoning_content。
-func (e *ChunkEmitter) EmitToolCallResult(blockID, stage, toolName, status, summary, argumentsPreview string, includeRole bool) error {
+func (e *ChunkEmitter) EmitToolCallResult(
+	blockID string,
+	stage string,
+	toolName string,
+	status string,
+	summary string,
+	argumentsPreview string,
+	argumentView map[string]any,
+	resultView map[string]any,
+	includeRole bool,
+) error {
 	if e == nil || e.emit == nil {
 		return nil
 	}
 	_ = includeRole
-	return e.emitExtraOnly(NewToolResultExtra(blockID, stage, toolName, status, summary, argumentsPreview))
+	return e.emitExtraOnly(NewToolResultExtra(
+		blockID,
+		stage,
+		toolName,
+		status,
+		summary,
+		argumentsPreview,
+		argumentView,
+		resultView,
+	))
 }
 
 // emitExtraOnly 仅输出结构化 extra 事件，不附带 content/reasoning。

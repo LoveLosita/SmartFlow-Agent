@@ -56,76 +56,76 @@ type taskClassUpsertToolResult struct {
 //
 // 职责边界：
 // 1. 只做参数解析、合法性校验、调用依赖、返回统一 JSON；
-// 2. 不负责草案生成，草案由 prompt+LLM 完成；
+// 2. 不负责草稿生成，草稿由 prompt+LLM 完成；
 // 3. 不依赖 ScheduleState，可在纯聊天场景调用（execute 会注入 _user_id）。
 func NewTaskClassUpsertToolHandler(deps TaskClassWriteDeps) ToolHandler {
-	return func(state *schedule.ScheduleState, args map[string]any) string {
+	return func(state *schedule.ScheduleState, args map[string]any) ToolExecutionResult {
 		_ = state
 
 		if deps.UpsertTaskClass == nil {
-			return marshalTaskClassUpsertResult(taskClassUpsertToolResult{
+			return LegacyResult("upsert_task_class", args, marshalTaskClassUpsertResult(taskClassUpsertToolResult{
 				Tool:       "upsert_task_class",
 				Success:    false,
 				Validation: taskClassValidationResult{OK: false, Issues: []string{"任务类写库依赖未注入"}},
 				Error:      "任务类写库依赖未注入",
 				ErrorCode:  "dependency_missing",
-			})
+			}))
 		}
 
 		userID, ok := readUpsertUserID(args["_user_id"])
 		if !ok || userID <= 0 {
-			return marshalTaskClassUpsertResult(taskClassUpsertToolResult{
+			return LegacyResult("upsert_task_class", args, marshalTaskClassUpsertResult(taskClassUpsertToolResult{
 				Tool:       "upsert_task_class",
 				Success:    false,
 				Validation: taskClassValidationResult{OK: false, Issues: []string{"无法识别用户身份"}},
 				Error:      "工具调用失败：无法识别用户身份",
 				ErrorCode:  "missing_user_id",
-			})
+			}))
 		}
 
 		input, parseErr := parseTaskClassUpsertInput(args)
 		if parseErr != nil {
-			return marshalTaskClassUpsertResult(taskClassUpsertToolResult{
+			return LegacyResult("upsert_task_class", args, marshalTaskClassUpsertResult(taskClassUpsertToolResult{
 				Tool:       "upsert_task_class",
 				Success:    false,
 				Validation: taskClassValidationResult{OK: false, Issues: []string{parseErr.Error()}},
 				Error:      parseErr.Error(),
 				ErrorCode:  "invalid_args",
-			})
+			}))
 		}
 
 		issues := validateTaskClassUpsertRequest(input.Request, input.ID)
 		if len(issues) > 0 {
-			return marshalTaskClassUpsertResult(taskClassUpsertToolResult{
+			return LegacyResult("upsert_task_class", args, marshalTaskClassUpsertResult(taskClassUpsertToolResult{
 				Tool:       "upsert_task_class",
 				Success:    false,
 				Validation: taskClassValidationResult{OK: false, Issues: issues},
 				Error:      strings.Join(issues, "；"),
 				ErrorCode:  "validation_failed",
-			})
+			}))
 		}
 
 		result, err := deps.UpsertTaskClass(userID, input)
 		if err != nil {
-			return marshalTaskClassUpsertResult(taskClassUpsertToolResult{
+			return LegacyResult("upsert_task_class", args, marshalTaskClassUpsertResult(taskClassUpsertToolResult{
 				Tool:       "upsert_task_class",
 				Success:    false,
 				Validation: taskClassValidationResult{OK: false, Issues: []string{"持久化写入失败"}},
 				Error:      err.Error(),
 				ErrorCode:  "persist_failed",
-			})
+			}))
 		}
 		if result.TaskClassID <= 0 {
-			return marshalTaskClassUpsertResult(taskClassUpsertToolResult{
+			return LegacyResult("upsert_task_class", args, marshalTaskClassUpsertResult(taskClassUpsertToolResult{
 				Tool:       "upsert_task_class",
 				Success:    false,
 				Validation: taskClassValidationResult{OK: false, Issues: []string{"未返回有效 task_class_id"}},
 				Error:      "写入后未返回有效 task_class_id",
 				ErrorCode:  "invalid_persist_result",
-			})
+			}))
 		}
 
-		return marshalTaskClassUpsertResult(taskClassUpsertToolResult{
+		return LegacyResult("upsert_task_class", args, marshalTaskClassUpsertResult(taskClassUpsertToolResult{
 			Tool:        "upsert_task_class",
 			Success:     true,
 			TaskClassID: result.TaskClassID,
@@ -133,7 +133,7 @@ func NewTaskClassUpsertToolHandler(deps TaskClassWriteDeps) ToolHandler {
 			Validation:  taskClassValidationResult{OK: true, Issues: []string{}},
 			Error:       "",
 			ErrorCode:   "",
-		})
+		}))
 	}
 }
 

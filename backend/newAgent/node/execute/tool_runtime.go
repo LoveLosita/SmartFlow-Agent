@@ -21,7 +21,7 @@ func appendToolCallResultHistory(
 	conversationContext *newagentmodel.ConversationContext,
 	toolName string,
 	args map[string]any,
-	result string,
+	result newagenttools.ToolExecutionResult,
 ) {
 	if conversationContext == nil {
 		return
@@ -50,7 +50,7 @@ func appendToolCallResultHistory(
 	})
 	conversationContext.AppendHistory(&schema.Message{
 		Role:       schema.Tool,
-		Content:    result,
+		Content:    result.ObservationText,
 		ToolCallID: toolCallID,
 		ToolName:   toolName,
 	})
@@ -98,16 +98,9 @@ func executeToolCall(
 			return fmt.Errorf("连续 %d 次调用临时禁用工具，终止执行: %s",
 				flowState.ConsecutiveCorrections, toolName)
 		}
-		blockedResult := buildTemporarilyDisabledToolResult(toolName)
-		_ = emitter.EmitToolCallResult(
-			executeStatusBlockID,
-			executeStageName,
-			toolName,
-			"blocked",
-			blockedResult,
-			buildToolArgumentsPreviewCN(toolCall.Arguments),
-			false,
-		)
+		blockedText := buildTemporarilyDisabledToolResult(toolName)
+		blockedResult := newagenttools.BlockedResult(toolName, toolCall.Arguments, blockedText, "tool_temporarily_disabled", blockedText)
+		emitToolCallResultEvent(emitter, executeStatusBlockID, executeStageName, blockedResult, toolCall.Arguments)
 		appendToolCallResultHistory(conversationContext, toolName, toolCall.Arguments, blockedResult)
 		newagentshared.AppendLLMCorrectionWithHint(
 			conversationContext,
@@ -165,16 +158,9 @@ func executeToolCall(
 	}
 
 	if shouldForceFeasibilityNegotiation(flowState, registry, toolName) {
-		blockedResult := buildInfeasibleBlockedResult(flowState)
-		_ = emitter.EmitToolCallResult(
-			executeStatusBlockID,
-			executeStageName,
-			toolName,
-			"blocked",
-			blockedResult,
-			buildToolArgumentsPreviewCN(toolCall.Arguments),
-			false,
-		)
+		blockedText := buildInfeasibleBlockedResult(flowState)
+		blockedResult := newagenttools.BlockedResult(toolName, toolCall.Arguments, blockedText, "health_negotiation_required", blockedText)
+		emitToolCallResultEvent(emitter, executeStatusBlockID, executeStageName, blockedResult, toolCall.Arguments)
 		appendToolCallResultHistory(conversationContext, toolName, toolCall.Arguments, blockedResult)
 		return nil
 	}
@@ -187,9 +173,10 @@ func executeToolCall(
 		toolCall.Arguments["_user_id"] = flowState.UserID
 	}
 	result := registry.Execute(scheduleState, toolName, toolCall.Arguments)
-	updateHealthSnapshotV2(flowState, toolName, result)
-	updateTaskClassUpsertSnapshot(flowState, toolName, result)
-	updateActiveToolDomainSnapshot(flowState, toolName, result)
+	result = newagenttools.EnsureToolResultDefaults(result, toolCall.Arguments)
+	updateHealthSnapshotV2(flowState, toolName, result.ObservationText)
+	updateTaskClassUpsertSnapshot(flowState, toolName, result.ObservationText)
+	updateActiveToolDomainSnapshot(flowState, toolName, result.ObservationText)
 	afterDigest := summarizeScheduleStateForDebug(scheduleState)
 	log.Printf(
 		"[DEBUG] execute tool chat=%s round=%d tool=%s args=%s before=%s after=%s result_preview=%.200s",
@@ -199,17 +186,9 @@ func executeToolCall(
 		marshalArgsForDebug(toolCall.Arguments),
 		beforeDigest,
 		afterDigest,
-		flattenForLog(result),
+		flattenForLog(result.ObservationText),
 	)
-	_ = emitter.EmitToolCallResult(
-		executeStatusBlockID,
-		executeStageName,
-		toolName,
-		resolveToolEventResultStatus(result),
-		buildToolEventResultSummary(result),
-		buildToolArgumentsPreviewCN(toolCall.Arguments),
-		false,
-	)
+	emitToolCallResultEvent(emitter, executeStatusBlockID, executeStageName, result, toolCall.Arguments)
 
 	appendToolCallResultHistory(conversationContext, toolName, toolCall.Arguments, result)
 
@@ -301,32 +280,18 @@ func executePendingTool(
 	}
 	flowState := runtimeState.EnsureCommonState()
 	if registry.IsToolTemporarilyDisabled(pending.ToolName) {
-		blockedResult := buildTemporarilyDisabledToolResult(pending.ToolName)
-		_ = emitter.EmitToolCallResult(
-			executeStatusBlockID,
-			executeStageName,
-			pending.ToolName,
-			"blocked",
-			blockedResult,
-			buildToolArgumentsPreviewCN(args),
-			false,
-		)
+		blockedText := buildTemporarilyDisabledToolResult(pending.ToolName)
+		blockedResult := newagenttools.BlockedResult(pending.ToolName, args, blockedText, "tool_temporarily_disabled", blockedText)
+		emitToolCallResultEvent(emitter, executeStatusBlockID, executeStageName, blockedResult, args)
 		appendToolCallResultHistory(conversationContext, pending.ToolName, args, blockedResult)
 		runtimeState.PendingConfirmTool = nil
 		return nil
 	}
 
 	if shouldForceFeasibilityNegotiation(flowState, registry, pending.ToolName) {
-		blockedResult := buildInfeasibleBlockedResult(flowState)
-		_ = emitter.EmitToolCallResult(
-			executeStatusBlockID,
-			executeStageName,
-			pending.ToolName,
-			"blocked",
-			blockedResult,
-			buildToolArgumentsPreviewCN(args),
-			false,
-		)
+		blockedText := buildInfeasibleBlockedResult(flowState)
+		blockedResult := newagenttools.BlockedResult(pending.ToolName, args, blockedText, "health_negotiation_required", blockedText)
+		emitToolCallResultEvent(emitter, executeStatusBlockID, executeStageName, blockedResult, args)
 		appendToolCallResultHistory(conversationContext, pending.ToolName, args, blockedResult)
 		runtimeState.PendingConfirmTool = nil
 		return nil
@@ -340,9 +305,10 @@ func executePendingTool(
 		args["_user_id"] = flowState.UserID
 	}
 	result := registry.Execute(scheduleState, pending.ToolName, args)
-	updateHealthSnapshotV2(flowState, pending.ToolName, result)
-	updateTaskClassUpsertSnapshot(flowState, pending.ToolName, result)
-	updateActiveToolDomainSnapshot(flowState, pending.ToolName, result)
+	result = newagenttools.EnsureToolResultDefaults(result, args)
+	updateHealthSnapshotV2(flowState, pending.ToolName, result.ObservationText)
+	updateTaskClassUpsertSnapshot(flowState, pending.ToolName, result.ObservationText)
+	updateActiveToolDomainSnapshot(flowState, pending.ToolName, result.ObservationText)
 	afterDigest := summarizeScheduleStateForDebug(scheduleState)
 	log.Printf(
 		"[DEBUG] execute pending tool chat=%s round=%d tool=%s args=%s before=%s after=%s result_preview=%.200s",
@@ -352,17 +318,9 @@ func executePendingTool(
 		marshalArgsForDebug(args),
 		beforeDigest,
 		afterDigest,
-		flattenForLog(result),
+		flattenForLog(result.ObservationText),
 	)
-	_ = emitter.EmitToolCallResult(
-		executeStatusBlockID,
-		executeStageName,
-		pending.ToolName,
-		resolveToolEventResultStatus(result),
-		buildToolEventResultSummary(result),
-		buildToolArgumentsPreviewCN(args),
-		false,
-	)
+	emitToolCallResultEvent(emitter, executeStatusBlockID, executeStageName, result, args)
 
 	appendToolCallResultHistory(conversationContext, pending.ToolName, args, result)
 
@@ -433,4 +391,28 @@ func buildExecuteNormalizedSpeakTail(streamed, normalized string) string {
 		return ""
 	}
 	return normalized[len(streamed):]
+}
+
+func emitToolCallResultEvent(
+	emitter *newagentstream.ChunkEmitter,
+	blockID string,
+	stage string,
+	result newagenttools.ToolExecutionResult,
+	args map[string]any,
+) {
+	if emitter == nil {
+		return
+	}
+	result = newagenttools.EnsureToolResultDefaults(result, args)
+	_ = emitter.EmitToolCallResult(
+		blockID,
+		stage,
+		result.Tool,
+		result.Status,
+		result.Summary,
+		result.ArgumentsPreview,
+		newagenttools.ToolArgumentViewToMap(result.ArgumentView),
+		newagenttools.ToolDisplayViewToMap(result.ResultView),
+		false,
+	)
 }

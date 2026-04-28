@@ -3,11 +3,20 @@ import type { ApiResponse } from '@/types/api'
 import type { PlacedItem, SchedulePreviewData } from '@/types/dashboard'
 import { extractErrorMessage } from '@/utils/http'
 
+export type ToolView = {
+  view_type?: string
+  version?: number
+  collapsed?: Record<string, any>
+  expanded?: Record<string, any>
+}
+
 export interface TimelineToolPayload {
   name: string
-  status: 'start' | 'done' | 'blocked' | 'failed'
+  status: 'start' | 'done' | 'blocked' | 'failed' | string
   summary: string
   arguments_preview?: string
+  argument_view?: ToolView
+  result_view?: ToolView
 }
 
 export interface TimelineConfirmPayload {
@@ -27,12 +36,12 @@ export interface TaskQueryCardTaskItem {
 
 export interface TaskQueryCardFilter {
   key:
-    | 'quadrant'
-    | 'keyword'
-    | 'deadline_after'
-    | 'deadline_before'
-    | 'include_completed'
-    | 'sort'
+  | 'quadrant'
+  | 'keyword'
+  | 'deadline_after'
+  | 'deadline_before'
+  | 'include_completed'
+  | 'sort'
   label: string
   value: string | number | boolean
   operator?: 'eq' | 'contains' | 'gte' | 'lt'
@@ -74,15 +83,15 @@ export interface TimelineEvent {
   id: number
   seq: number
   kind:
-    | 'user_text'
-    | 'assistant_text'
-    | 'tool_call'
-    | 'tool_result'
-    | 'confirm_request'
-    | 'schedule_completed'
-    | 'interrupt'
-    | 'status'
-    | 'business_card'
+  | 'user_text'
+  | 'assistant_text'
+  | 'tool_call'
+  | 'tool_result'
+  | 'confirm_request'
+  | 'schedule_completed'
+  | 'interrupt'
+  | 'status'
+  | 'business_card'
   role?: 'user' | 'assistant'
   content?: string
   payload?: {

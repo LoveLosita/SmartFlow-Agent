@@ -11,11 +11,12 @@ import (
 )
 
 // ToolHandler 约定所有工具的统一执行签名。
+//
 // 职责边界：
 // 1. 负责消费当前 ScheduleState 与模型传入参数；
-// 2. 返回统一 string 结果，供 execute 节点写回 observation；
+// 2. 返回 ToolExecutionResult，供 execute 节点写回 observation 与结构化事件；
 // 3. 不负责 confirm、上下文注入、轮次控制，这些由上层节点处理。
-type ToolHandler func(state *schedule.ScheduleState, args map[string]any) string
+type ToolHandler func(state *schedule.ScheduleState, args map[string]any) ToolExecutionResult
 
 // ToolSchemaEntry 描述注入给模型的工具快照。
 type ToolSchemaEntry struct {
@@ -25,6 +26,7 @@ type ToolSchemaEntry struct {
 }
 
 // DefaultRegistryDeps 描述默认注册表需要的外部依赖。
+//
 // 职责边界：
 // 1. 这里只承载工具层需要的依赖注入，不承载业务状态；
 // 2. 某些依赖即便暂未使用也允许保留，避免业务层重新到处 new；
@@ -48,6 +50,7 @@ type ToolRegistry struct {
 }
 
 // temporaryDisabledTools 描述“已注册但当前阶段临时禁用”的工具。
+//
 // 设计说明：
 // 1. 这些工具仍保留定义，避免 prompt / 旧链路 / 历史日志里出现悬空名字；
 // 2. execute 会在调用前统一阻断，并向模型返回纠错提示；
@@ -84,19 +87,27 @@ func (r *ToolRegistry) Register(name, desc, schemaText string, handler ToolHandl
 }
 
 // Execute 执行指定工具。
+//
 // 职责边界：
 // 1. 这里只负责找到 handler 并调用；
-// 2. 若工具临时禁用，直接返回只读失败文案，不进入 handler；
-// 3. 不负责参数 schema 级纠错，具体参数错误交由 handler 返回。
-func (r *ToolRegistry) Execute(state *schedule.ScheduleState, toolName string, args map[string]any) string {
+// 2. 工具临时禁用时直接返回 blocked 结构化结果，不进入 handler；
+// 3. 参数 schema 级纠错仍由 handler 内处理。
+func (r *ToolRegistry) Execute(state *schedule.ScheduleState, toolName string, args map[string]any) ToolExecutionResult {
 	if r.IsToolTemporarilyDisabled(toolName) {
-		return fmt.Sprintf("工具 %q 当前阶段已临时禁用，请优先使用 analyze_health、move、swap 等当前主链工具。", strings.TrimSpace(toolName))
+		observation := fmt.Sprintf("工具 %q 当前阶段已临时禁用，请优先使用 analyze_health、move、swap 等当前主链工具。", strings.TrimSpace(toolName))
+		return BlockedResult(toolName, args, observation, "tool_temporarily_disabled", observation)
 	}
 	handler, ok := r.handlers[toolName]
 	if !ok {
-		return fmt.Sprintf("工具调用失败：未知工具 %q。可用工具：%s", toolName, strings.Join(r.ToolNames(), "、"))
+		observation := fmt.Sprintf("工具调用失败：未知工具 %q。可用工具：%s", toolName, strings.Join(r.ToolNames(), "、"))
+		result := LegacyResult(toolName, args, observation)
+		result.Status = ToolStatusFailed
+		result.Success = false
+		result.ErrorCode = "unknown_tool"
+		result.ErrorMessage = observation
+		return EnsureToolResultDefaults(result, args)
 	}
-	return handler(state, args)
+	return EnsureToolResultDefaults(handler(state, args), args)
 }
 
 // HasTool 判断工具是否已注册且当前可见。
@@ -138,6 +149,7 @@ func (r *ToolRegistry) Schemas() []ToolSchemaEntry {
 }
 
 // SchemasForActiveDomain 返回某业务域当前真正可见的工具 schema。
+//
 // 职责边界：
 // 1. context_tools_add/remove 始终保留，用于动态区协议；
 // 2. 仅当工具域已激活时，才暴露该域下可见工具；
@@ -209,7 +221,7 @@ func (r *ToolRegistry) IsWriteTool(name string) bool {
 }
 
 // IsScheduleMutationTool 判断工具是否会真实修改 ScheduleState 中的日程布局。
-// 说明：upsert_task_class 会写库，但不修改当前日程预览，因此不计入此集合。
+// upsert_task_class 会写库，但不修改当前日程预览，因此不计入此集合。
 func (r *ToolRegistry) IsScheduleMutationTool(name string) bool {
 	return scheduleMutationTools[strings.TrimSpace(name)]
 }
@@ -253,6 +265,7 @@ func NewDefaultRegistry() *ToolRegistry {
 }
 
 // NewDefaultRegistryWithDeps 创建带依赖的默认注册表。
+//
 // 步骤化说明：
 // 1. 先注册上下文管理工具，保证动态区协议随时可用；
 // 2. 再注册 schedule 域的读、诊断、写工具；
@@ -293,66 +306,66 @@ func registerScheduleReadTools(r *ToolRegistry) {
 		"get_overview",
 		"获取当前窗口总览：保留课程占位统计，展开任务清单。",
 		`{"name":"get_overview","parameters":{}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
+		wrapLegacyToolHandler("get_overview", func(state *schedule.ScheduleState, args map[string]any) string {
 			_ = args
 			return schedule.GetOverview(state)
-		},
+		}),
 	)
 	r.Register(
 		"query_range",
 		"查看某天或某时段的占用详情。day 必填，slot_start/slot_end 选填。",
 		`{"name":"query_range","parameters":{"day":{"type":"int","required":true},"slot_start":{"type":"int"},"slot_end":{"type":"int"}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
+		wrapLegacyToolHandler("query_range", func(state *schedule.ScheduleState, args map[string]any) string {
 			day, ok := schedule.ArgsInt(args, "day")
 			if !ok {
 				return "查询失败：缺少必填参数 day。"
 			}
 			return schedule.QueryRange(state, day, schedule.ArgsIntPtr(args, "slot_start"), schedule.ArgsIntPtr(args, "slot_end"))
-		},
+		}),
 	)
 	r.Register(
 		"query_available_slots",
 		"查询候选空位池，适合 move 前筛落点。",
 		`{"name":"query_available_slots","parameters":{"span":{"type":"int"},"duration":{"type":"int"},"limit":{"type":"int"},"allow_embed":{"type":"bool"},"day":{"type":"int"},"day_start":{"type":"int"},"day_end":{"type":"int"},"day_scope":{"type":"string","enum":["all","workday","weekend"]},"day_of_week":{"type":"array","items":{"type":"int"}},"week":{"type":"int"},"week_filter":{"type":"array","items":{"type":"int"}},"week_from":{"type":"int"},"week_to":{"type":"int"},"slot_type":{"type":"string"},"slot_types":{"type":"array","items":{"type":"string"}},"exclude_sections":{"type":"array","items":{"type":"int"}},"after_section":{"type":"int"},"before_section":{"type":"int"},"section_from":{"type":"int"},"section_to":{"type":"int"}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
+		wrapLegacyToolHandler("query_available_slots", func(state *schedule.ScheduleState, args map[string]any) string {
 			return schedule.QueryAvailableSlots(state, args)
-		},
+		}),
 	)
 	r.Register(
 		"query_target_tasks",
 		"查询候选任务集合，可按 status/week/day/task_id/category 筛选；支持 enqueue。",
 		`{"name":"query_target_tasks","parameters":{"status":{"type":"string","enum":["all","existing","suggested","pending"]},"category":{"type":"string"},"limit":{"type":"int"},"day_scope":{"type":"string","enum":["all","workday","weekend"]},"day":{"type":"int"},"day_start":{"type":"int"},"day_end":{"type":"int"},"day_of_week":{"type":"array","items":{"type":"int"}},"week":{"type":"int"},"week_filter":{"type":"array","items":{"type":"int"}},"week_from":{"type":"int"},"week_to":{"type":"int"},"task_ids":{"type":"array","items":{"type":"int"}},"task_id":{"type":"int"},"task_item_ids":{"type":"array","items":{"type":"int"}},"task_item_id":{"type":"int"},"enqueue":{"type":"bool"},"reset_queue":{"type":"bool"}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
+		wrapLegacyToolHandler("query_target_tasks", func(state *schedule.ScheduleState, args map[string]any) string {
 			return schedule.QueryTargetTasks(state, args)
-		},
+		}),
 	)
 	r.Register(
 		"queue_pop_head",
 		"弹出并返回当前队首任务；若已有 current 则复用。",
 		`{"name":"queue_pop_head","parameters":{}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
+		wrapLegacyToolHandler("queue_pop_head", func(state *schedule.ScheduleState, args map[string]any) string {
 			return schedule.QueuePopHead(state, args)
-		},
+		}),
 	)
 	r.Register(
 		"queue_status",
 		"查看当前队列状态（pending/current/completed/skipped）。",
 		`{"name":"queue_status","parameters":{}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
+		wrapLegacyToolHandler("queue_status", func(state *schedule.ScheduleState, args map[string]any) string {
 			return schedule.QueueStatus(state, args)
-		},
+		}),
 	)
 	r.Register(
 		"get_task_info",
 		"查看单个任务详情，包括类别、状态与落位。",
 		`{"name":"get_task_info","parameters":{"task_id":{"type":"int","required":true}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
+		wrapLegacyToolHandler("get_task_info", func(state *schedule.ScheduleState, args map[string]any) string {
 			taskID, ok := schedule.ArgsInt(args, "task_id")
 			if !ok {
 				return "查询失败：缺少必填参数 task_id。"
 			}
 			return schedule.GetTaskInfo(state, taskID)
-		},
+		}),
 	)
 }
 
@@ -361,17 +374,17 @@ func registerScheduleAnalyzeTools(r *ToolRegistry) {
 		"analyze_rhythm",
 		"分析学习节奏与切换情况。",
 		`{"name":"analyze_rhythm","parameters":{"category":{"type":"string"},"include_pending":{"type":"bool"},"detail":{"type":"string","enum":["summary","full"]},"hard_categories":{"type":"array","items":{"type":"string"}}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
+		wrapLegacyToolHandler("analyze_rhythm", func(state *schedule.ScheduleState, args map[string]any) string {
 			return schedule.AnalyzeRhythm(state, args)
-		},
+		}),
 	)
 	r.Register(
 		"analyze_health",
 		"主动优化裁判入口：聚焦 rhythm/semantic_profile/tightness，判断当前是否还值得继续优化，并给出候选。",
 		`{"name":"analyze_health","parameters":{"detail":{"type":"string","enum":["summary","full"]},"dimensions":{"type":"array","items":{"type":"string"}},"threshold":{"type":"string","enum":["strict","normal","relaxed"]}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
+		wrapLegacyToolHandler("analyze_health", func(state *schedule.ScheduleState, args map[string]any) string {
 			return schedule.AnalyzeHealth(state, args)
-		},
+		}),
 	)
 }
 
@@ -380,97 +393,45 @@ func registerScheduleMutationTools(r *ToolRegistry) {
 		"place",
 		"将一个待安排任务预排到指定位置。task_id/day/slot_start 必填。",
 		`{"name":"place","parameters":{"task_id":{"type":"int","required":true},"day":{"type":"int","required":true},"slot_start":{"type":"int","required":true}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
-			taskID, ok := schedule.ArgsInt(args, "task_id")
-			if !ok {
-				return "放置失败：缺少必填参数 task_id。"
-			}
-			day, ok := schedule.ArgsInt(args, "day")
-			if !ok {
-				return "放置失败：缺少必填参数 day。"
-			}
-			slotStart, ok := schedule.ArgsInt(args, "slot_start")
-			if !ok {
-				return "放置失败：缺少必填参数 slot_start。"
-			}
-			return schedule.Place(state, taskID, day, slotStart)
-		},
+		NewPlaceToolHandler(),
 	)
 	r.Register(
 		"move",
 		"将一个已预排任务（仅 suggested）移动到新位置。task_id/new_day/new_slot_start 必填。",
 		`{"name":"move","parameters":{"task_id":{"type":"int","required":true},"new_day":{"type":"int","required":true},"new_slot_start":{"type":"int","required":true}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
-			taskID, ok := schedule.ArgsInt(args, "task_id")
-			if !ok {
-				return "移动失败：缺少必填参数 task_id。"
-			}
-			newDay, ok := schedule.ArgsInt(args, "new_day")
-			if !ok {
-				return "移动失败：缺少必填参数 new_day。"
-			}
-			newSlotStart, ok := schedule.ArgsInt(args, "new_slot_start")
-			if !ok {
-				return "移动失败：缺少必填参数 new_slot_start。"
-			}
-			return schedule.Move(state, taskID, newDay, newSlotStart)
-		},
+		NewMoveToolHandler(),
 	)
 	r.Register(
 		"swap",
 		"交换两个已落位任务的位置。task_a/task_b 必填，且两任务时长必须一致。",
 		`{"name":"swap","parameters":{"task_a":{"type":"int","required":true},"task_b":{"type":"int","required":true}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
-			taskA, ok := schedule.ArgsInt(args, "task_a")
-			if !ok {
-				return "交换失败：缺少必填参数 task_a。"
-			}
-			taskB, ok := schedule.ArgsInt(args, "task_b")
-			if !ok {
-				return "交换失败：缺少必填参数 task_b。"
-			}
-			return schedule.Swap(state, taskA, taskB)
-		},
+		NewSwapToolHandler(),
 	)
 	r.Register(
 		"batch_move",
 		"原子性批量移动多个任务。moves 必填。",
 		`{"name":"batch_move","parameters":{"moves":{"type":"array","required":true,"items":{"task_id":"int","new_day":"int","new_slot_start":"int"}}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
-			moves, err := schedule.ArgsMoveList(args)
-			if err != nil {
-				return fmt.Sprintf("批量移动失败：%s", err.Error())
-			}
-			return schedule.BatchMove(state, moves)
-		},
+		NewBatchMoveToolHandler(),
 	)
 	r.Register(
 		"queue_apply_head_move",
 		"将当前队首任务移动到指定位置并自动出队。new_day/new_slot_start 必填。",
 		`{"name":"queue_apply_head_move","parameters":{"new_day":{"type":"int","required":true},"new_slot_start":{"type":"int","required":true}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
-			return schedule.QueueApplyHeadMove(state, args)
-		},
+		NewQueueApplyHeadMoveToolHandler(),
 	)
 	r.Register(
 		"queue_skip_head",
 		"跳过当前队首任务，将其标记为 skipped。",
 		`{"name":"queue_skip_head","parameters":{"reason":{"type":"string"}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
+		wrapLegacyToolHandler("queue_skip_head", func(state *schedule.ScheduleState, args map[string]any) string {
 			return schedule.QueueSkipHead(state, args)
-		},
+		}),
 	)
 	r.Register(
 		"unplace",
 		"将一个已落位任务移除，恢复为待安排状态。task_id 必填。",
 		`{"name":"unplace","parameters":{"task_id":{"type":"int","required":true}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
-			taskID, ok := schedule.ArgsInt(args, "task_id")
-			if !ok {
-				return "移除失败：缺少必填参数 task_id。"
-			}
-			return schedule.Unplace(state, taskID)
-		},
+		NewUnplaceToolHandler(),
 	)
 }
 
@@ -491,18 +452,24 @@ func registerWebTools(r *ToolRegistry, deps DefaultRegistryDeps) {
 		"web_search",
 		"Web 搜索：根据 query 返回结构化检索结果。query 必填。",
 		`{"name":"web_search","parameters":{"query":{"type":"string","required":true},"top_k":{"type":"int"},"domain_allow":{"type":"array","items":{"type":"string"}},"recency_days":{"type":"int"}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
+		wrapLegacyToolHandler("web_search", func(state *schedule.ScheduleState, args map[string]any) string {
 			_ = state
 			return webSearchHandler.Handle(args)
-		},
+		}),
 	)
 	r.Register(
 		"web_fetch",
 		"抓取指定 URL 的正文内容并做最小清洗。url 必填。",
 		`{"name":"web_fetch","parameters":{"url":{"type":"string","required":true},"max_chars":{"type":"int"}}}`,
-		func(state *schedule.ScheduleState, args map[string]any) string {
+		wrapLegacyToolHandler("web_fetch", func(state *schedule.ScheduleState, args map[string]any) string {
 			_ = state
 			return webFetchHandler.Handle(args)
-		},
+		}),
 	)
+}
+
+func wrapLegacyToolHandler(toolName string, handler func(state *schedule.ScheduleState, args map[string]any) string) ToolHandler {
+	return func(state *schedule.ScheduleState, args map[string]any) ToolExecutionResult {
+		return LegacyResultWithState(toolName, args, state, handler(state, args))
+	}
 }
