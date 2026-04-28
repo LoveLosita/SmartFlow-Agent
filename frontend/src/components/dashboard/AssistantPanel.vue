@@ -406,6 +406,8 @@ async function hydrateTaskStatuses(conversationId: string) {
 
   try {
     const items = await getTaskBatchStatus(idList)
+    const returnedIdSet = new Set(items.map(item => Number(item.id)))
+
     items.forEach(item => {
       const id = Number(item.id)
       if (taskStatusMap[id]) {
@@ -414,6 +416,18 @@ async function hydrateTaskStatuses(conversationId: string) {
         taskStatusMap[id].syncing = false
       } else {
         taskStatusMap[id] = { is_completed: item.is_completed, syncing: false }
+      }
+    })
+
+    // 处理不在回传列表中的 ID，说明该任务已被物理删除
+    idList.forEach(id => {
+      if (!returnedIdSet.has(id)) {
+        if (taskStatusMap[id]) {
+          taskStatusMap[id].is_deleted = true
+          taskStatusMap[id].syncing = false
+        } else {
+          taskStatusMap[id] = { is_completed: false, syncing: false, is_deleted: true }
+        }
       }
     })
   } catch (err) {
@@ -3515,62 +3529,70 @@ onBeforeUnmount(() => {
     @saved="handleScheduleSaved"
   />
 
-  <!-- 任务编辑弹窗 (对齐首页) -->
+  <!-- 任务编辑弹窗 (对齐首页 premium 风格) -->
   <el-dialog
     v-model="taskDialogVisible"
-    :title="isEditMode ? '修改任务详情' : '创建新任务'"
+    :title="isEditMode ? '编辑任务详情' : '添加新任务'"
     width="440px"
+    align-center
     append-to-body
     destroy-on-close
-    class="task-edit-dialog"
+    class="dashboard-dialog premium-dialog"
   >
-    <div class="task-form">
-      <div class="form-item">
-        <label>任务标题</label>
+    <el-form label-position="top">
+      <el-form-item label="任务标题">
         <el-input 
           v-model="taskForm.title" 
-          placeholder="你想做点什么？" 
-          maxlength="100"
-          show-word-limit
+          maxlength="255" 
+          placeholder="例如：完成数据库复习" 
         />
-      </div>
-      
-      <div class="form-item">
-        <label>优先级象限</label>
-        <el-radio-group v-model="taskForm.priority_group" class="priority-selector">
-          <el-radio-button :value="1">重要紧急</el-radio-button>
-          <el-radio-button :value="2">重要不紧急</el-radio-button>
-          <el-radio-button :value="3">简单琐碎</el-radio-button>
-          <el-radio-button :value="4">暂缓处理</el-radio-button>
-        </el-radio-group>
-      </div>
-
-      <div class="form-row">
-        <div class="form-item">
-          <label>截止日期</label>
+      </el-form-item>
+      <el-form-item label="优先级象限">
+        <el-select 
+          v-model="taskForm.priority_group" 
+          class="dashboard-dialog__select" 
+          popper-class="premium-select-popper" 
+          placement="bottom-start"
+        >
+          <el-option :value="1" label="1 - 重要且紧急" />
+          <el-option :value="2" label="2 - 重要不紧急" />
+          <el-option :value="3" label="3 - 简单不重要" />
+          <el-option :value="4" label="4 - 不简单不重要" />
+        </el-select>
+      </el-form-item>
+      <div class="dialog-double-row">
+        <el-form-item label="截止时间" class="half">
           <el-date-picker
             v-model="taskForm.deadline_at"
             type="datetime"
-            placeholder="选个截止时间"
+            placeholder="截止时间"
+            class="dashboard-dialog__select"
+            popper-class="premium-select-popper"
             format="YYYY-MM-DD HH:mm"
-            value-format="YYYY-MM-DD HH:mm:ss"
-            :clearable="true"
           />
-        </div>
+        </el-form-item>
+        <el-form-item label="紧急阈值" class="half">
+          <el-date-picker
+            v-model="taskForm.urgency_threshold_at"
+            type="datetime"
+            placeholder="进入紧急的时间点"
+            class="dashboard-dialog__select"
+            popper-class="premium-select-popper"
+            format="YYYY-MM-DD HH:mm"
+          />
+        </el-form-item>
       </div>
-    </div>
-    
+    </el-form>
     <template #footer>
-      <div class="dialog-footer">
-        <el-button @click="taskDialogVisible = false" round>取消</el-button>
-        <el-button 
-          type="primary" 
-          @click="handleSaveTask" 
-          :loading="saveTaskLoading"
-          round
+      <div class="premium-dialog__footer">
+        <button class="premium-btn premium-btn--ghost" @click="taskDialogVisible = false">取消</button>
+        <button 
+          class="premium-btn premium-btn--primary" 
+          :disabled="saveTaskLoading" 
+          @click="handleSaveTask"
         >
-          保存更改
-        </el-button>
+          {{ saveTaskLoading ? '保存中...' : (isEditMode ? '保存修改' : '确认添加') }}
+        </button>
       </div>
     </template>
   </el-dialog>
@@ -5465,127 +5487,185 @@ onBeforeUnmount(() => {
   background: rgba(255, 255, 255, 0.9) !important;
 }
 
-:global(.task-edit-dialog) {
-  border-radius: 32px !important;
-  overflow: hidden !important;
-  border: none !important;
-  box-shadow: 0 40px 100px rgba(15, 23, 42, 0.18) !important;
-  background: #ffffff !important;
-}
-
-:global(.task-edit-dialog .el-dialog__header) {
-  margin: 0 !important;
-  padding: 40px 40px 10px !important;
-  border-bottom: none !important;
-}
-
-:global(.task-edit-dialog .el-dialog__title) {
-  font-size: 26px !important;
-  font-weight: 900 !important;
-  color: #0f172a !important;
-  letter-spacing: -0.04em !important;
-}
-
-:global(.task-edit-dialog .el-dialog__headerbtn) {
-  top: 40px !important;
-  right: 40px !important;
-  width: 40px !important;
-  height: 40px !important;
-  background: #f8fafc !important;
-  border: none !important;
-}
-
-:global(.task-edit-dialog .el-dialog__body) {
-  padding: 10px 40px 40px !important;
-}
-
-:global(.task-edit-dialog .el-dialog__footer) {
-  padding: 0 40px 40px !important;
-}
-
-.task-form {
-  display: flex;
-  flex-direction: column;
-  gap: 32px;
-}
-
-.form-item label {
-  display: block;
-  font-size: 11px;
-  font-weight: 900;
-  color: #cbd5e1;
-  margin-bottom: 14px;
-  margin-left: 2px;
-  text-transform: uppercase;
-  letter-spacing: 0.15em;
-}
-
-.task-form :deep(.el-input__wrapper) {
-  background: #fcfdfe !important;
-  box-shadow: none !important;
-  border: 2px solid #f1f5f9 !important;
+/* --- Premium Dialog Styles --- */
+:global(.premium-dialog) {
   border-radius: 20px !important;
-  padding: 14px 22px !important;
-}
-
-.task-form :deep(.el-input__wrapper.is-focus) {
   background: #ffffff !important;
-  border-color: #3b82f6 !important;
-  box-shadow: 0 10px 30px rgba(59, 130, 246, 0.08) !important;
+  border: 1px solid rgba(15, 23, 42, 0.08) !important;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25) !important;
+  overflow: hidden;
 }
 
-.priority-selector {
-  display: flex;
-  width: 100%;
-  gap: 10px;
+:global(.premium-dialog .el-dialog__header) {
+  padding: 24px 28px 12px !important;
+  margin-right: 0 !important;
+  text-align: left;
+}
+
+:global(.premium-dialog .el-dialog__title) {
+  font-size: 18px !important;
+  font-weight: 800 !important;
+  color: #0f172a !important;
+  letter-spacing: -0.02em;
+}
+
+:global(.premium-dialog .el-dialog__body) {
+  padding: 12px 28px 20px !important;
+}
+
+:global(.premium-dialog .el-dialog__footer) {
+  padding: 0 !important;
+}
+
+.premium-dialog__footer {
+  padding: 16px 28px 24px;
   background: #f8fafc;
-  padding: 8px;
-  border-radius: 24px;
-}
-
-.priority-selector :deep(.el-radio-button__inner) {
-  width: 100% !important;
-  border: none !important;
-  background: transparent !important;
-  font-size: 12px;
-  font-weight: 800;
-  color: #94a3b8;
-  padding: 14px 4px !important;
-  border-radius: 18px !important;
-}
-
-.priority-selector :deep(.el-radio-button.is-active .el-radio-button__inner) {
-  background: #ffffff !important;
-  color: #3b82f6 !important;
-  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06) !important;
-}
-
-.dialog-footer {
   display: flex;
-  flex-direction: column;
+  justify-content: flex-end;
+  gap: 12px;
+  border-top: 1px solid #f1f5f9;
+}
+
+.dialog-double-row {
+  display: flex;
   gap: 12px;
   width: 100%;
+  overflow: hidden;
+}
+.dialog-double-row .half {
+  flex: 1;
+  min-width: 0;
 }
 
-.dialog-footer .el-button {
-  width: 100%;
-  margin: 0 !important;
-  height: 60px;
-  font-size: 16px;
-  font-weight: 900;
-  border-radius: 22px;
+.premium-btn {
+  height: 40px;
+  padding: 0 20px;
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.dialog-footer .el-button--primary {
-  background: #0f172a !important; /* Midnight flat style */
-  color: #ffffff !important;
-  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.2);
+.premium-btn--primary {
+  background: #3b82f6;
+  color: #ffffff;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2);
 }
 
-.dialog-footer .el-button--primary:hover {
-  background: #1e293b !important;
-  transform: translateY(-2px);
-  box-shadow: 0 25px 50px rgba(15, 23, 42, 0.25);
+.premium-btn--primary:hover:not(:disabled) {
+  background: #2563eb;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(59, 130, 246, 0.3);
+}
+
+.premium-btn--ghost {
+  background: #ffffff;
+  color: #64748b;
+  border: 1px solid #e2e8f0;
+}
+
+.premium-btn--ghost:hover {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+/* 表单美化 */
+:global(.premium-dialog .el-form-item__label) {
+  font-weight: 700 !important;
+  color: #475569 !important;
+  font-size: 13px !important;
+  margin-bottom: 6px !important;
+}
+
+:global(.premium-dialog .el-input__wrapper),
+:global(.premium-dialog .el-select__wrapper),
+:global(.premium-dialog .el-date-editor.el-input__wrapper) {
+  background-color: #f8fafc !important;
+  box-shadow: 0 0 0 1px #e2e8f0 inset !important;
+  border-radius: 10px !important;
+  padding: 4px 12px !important;
+  width: 100% !important;
+}
+
+:global(.premium-dialog .el-input__wrapper.is-focus),
+:global(.premium-dialog .el-select__wrapper.is-focused) {
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2) inset !important;
+  background-color: #ffffff !important;
+}
+
+:global(.premium-dialog .el-dialog__headerbtn) {
+  top: 20px !important;
+  right: 20px !important;
+  width: 32px !important;
+  height: 32px !important;
+  border-radius: 50% !important;
+  background: #f1f5f9 !important;
+  transition: all 0.2s !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+:global(.premium-dialog .el-dialog__headerbtn:hover) {
+  background: #e2e8f0 !important;
+  transform: rotate(90deg);
+}
+
+:global(.premium-dialog .el-dialog__headerbtn .el-dialog__close) {
+  color: #64748b !important;
+  font-size: 16px !important;
+  font-weight: 800 !important;
+}
+
+/* 统一输入框高度与背景 */
+:global(.premium-dialog .el-input__inner),
+:global(.premium-dialog .el-select .el-input__inner) {
+  height: 38px !important;
+  color: #0f172a !important;
+  font-weight: 600 !important;
+}
+
+/* --- 下拉菜单扁平化 --- */
+:global(.premium-select-popper) {
+  border-radius: 16px !important;
+  border: 1px solid rgba(15, 23, 42, 0.08) !important;
+  box-shadow: 0 12px 30px -5px rgba(0, 0, 0, 0.12) !important;
+  background: #ffffff !important;
+  overflow: hidden !important;
+  margin-top: 8px !important;
+}
+
+:global(.premium-select-popper .el-select-dropdown__list) {
+  padding: 6px !important;
+}
+
+:global(.premium-select-popper .el-select-dropdown__item) {
+  border-radius: 10px !important;
+  height: 38px !important;
+  line-height: 38px !important;
+  margin-bottom: 2px !important;
+  font-weight: 600 !important;
+  color: #475569 !important;
+  padding: 0 12px !important;
+}
+
+:global(.premium-select-popper .el-select-dropdown__item.is-selected) {
+  background: #eff6ff !important;
+  color: #3b82f6 !important;
+}
+
+:global(.premium-select-popper .el-select-dropdown__item:hover) {
+  background: #f1f5f9 !important;
+  color: #0f172a !important;
+}
+
+:global(.premium-select-popper .el-popper__arrow) {
+  display: none !important;
 }
 
 :global(.premium-msg-box .el-message-box__header) {
