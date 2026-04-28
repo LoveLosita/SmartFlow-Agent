@@ -471,18 +471,28 @@ func buildArgumentFields(toolName string, args map[string]any, state *schedule.S
 
 func argumentDisplayRank(key string) int {
 	switch strings.TrimSpace(key) {
-	case "task_id", "task_a", "task_b":
+	case "task_id", "task_ids", "task_item_id", "task_item_ids", "task_a", "task_b":
 		return 10
-	case "day", "new_day":
+	case "status", "category":
 		return 20
-	case "slot_start", "new_slot_start":
+	case "day", "new_day", "day_start", "day_end", "day_scope", "day_of_week":
 		return 30
-	case "moves":
+	case "week", "week_filter", "week_from", "week_to":
 		return 40
-	case "reason":
+	case "slot_start", "new_slot_start", "slot_type", "slot_types", "exclude_sections", "after_section", "before_section", "section_from", "section_to":
 		return 50
-	default:
+	case "span", "duration":
+		return 60
+	case "allow_embed", "enqueue", "reset_queue", "detail", "dimensions", "threshold", "include_pending", "hard_categories", "limit":
+		return 70
+	case "moves":
+		return 80
+	case "reason":
+		return 90
+	case "query", "url":
 		return 100
+	default:
+		return 120
 	}
 }
 
@@ -517,6 +527,12 @@ func resolveArgumentLabelCN(key string) string {
 	switch strings.TrimSpace(key) {
 	case "task_id":
 		return "任务"
+	case "task_ids":
+		return "任务列表"
+	case "task_item_id":
+		return "任务项"
+	case "task_item_ids":
+		return "任务项列表"
 	case "task_a":
 		return "任务A"
 	case "task_b":
@@ -525,24 +541,79 @@ func resolveArgumentLabelCN(key string) string {
 		return "目标日期"
 	case "new_day":
 		return "目标日期"
+	case "day_start":
+		return "起始日期"
+	case "day_end":
+		return "结束日期"
+	case "day_scope":
+		return "日期范围"
+	case "day_of_week":
+		return "星期过滤"
+	case "week":
+		return "周次"
+	case "week_filter":
+		return "周次过滤"
+	case "week_from":
+		return "起始周"
+	case "week_to":
+		return "结束周"
 	case "slot_start":
 		return "目标时段"
 	case "new_slot_start":
 		return "目标时段"
+	case "span":
+		return "连续时长"
+	case "duration":
+		return "时长"
+	case "allow_embed":
+		return "允许嵌入补位"
+	case "slot_type":
+		return "时段类型"
+	case "slot_types":
+		return "时段类型过滤"
+	case "exclude_sections":
+		return "排除节次"
+	case "after_section":
+		return "晚于节次"
+	case "before_section":
+		return "早于节次"
+	case "section_from":
+		return "起始节次"
+	case "section_to":
+		return "结束节次"
 	case "moves":
 		return "移动列表"
 	case "reason":
 		return "原因"
 	case "status":
 		return "状态"
+	case "category":
+		return "类别"
 	case "limit":
-		return "数量"
+		return "数量上限"
+	case "enqueue":
+		return "加入队列"
+	case "reset_queue":
+		return "重置队列"
+	case "detail":
+		return "详情级别"
+	case "dimensions":
+		return "分析维度"
+	case "threshold":
+		return "阈值"
+	case "include_pending":
+		return "包含待安排"
+	case "hard_categories":
+		return "强约束类别"
 	case "query":
 		return "查询内容"
 	case "url":
 		return "链接"
 	default:
-		return "参数"
+		if strings.TrimSpace(key) == "" {
+			return "参数"
+		}
+		return strings.TrimSpace(key)
 	}
 }
 
@@ -553,14 +624,33 @@ func formatArgumentDisplay(
 	args map[string]any,
 	state *schedule.ScheduleState,
 ) string {
+	_ = toolName
 	switch key {
-	case "task_id", "task_a", "task_b":
+	case "task_id", "task_item_id", "task_a", "task_b":
 		if taskID, ok := toInt(value); ok {
 			return resolveTaskLabelByID(state, taskID, true)
 		}
-	case "day", "new_day":
+	case "task_ids", "task_item_ids":
+		return formatTaskIDListArgumentCN(value, state)
+	case "day", "new_day", "day_start", "day_end":
 		if day, ok := toInt(value); ok {
-			return formatDayLabelCN(day)
+			return formatScheduleDayCN(state, day)
+		}
+	case "day_scope":
+		if text, ok := value.(string); ok {
+			return formatDayScopeLabelCN(text)
+		}
+	case "day_of_week":
+		return formatWeekdaySliceArgumentCN(value)
+	case "week":
+		if week, ok := toInt(value); ok {
+			return fmt.Sprintf("第%d周", week)
+		}
+	case "week_filter":
+		return formatWeekSliceArgumentCN(value)
+	case "week_from", "week_to":
+		if week, ok := toInt(value); ok {
+			return fmt.Sprintf("第%d周", week)
 		}
 	case "slot_start", "new_slot_start":
 		if slotStart, ok := toInt(value); ok {
@@ -569,15 +659,58 @@ func formatArgumentDisplay(
 				if task := stateTaskByID(state, taskID); task != nil && task.Duration > 1 {
 					slotEnd = slotStart + task.Duration - 1
 				}
+			} else if duration, ok := toInt(args["duration"]); ok && duration > 1 {
+				slotEnd = slotStart + duration - 1
+			} else if span, ok := toInt(args["span"]); ok && span > 1 {
+				slotEnd = slotStart + span - 1
 			}
 			if day, ok := toInt(args["day"]); ok {
-				return fmt.Sprintf("%s%s", formatDayLabelCN(day), formatSlotRangeCN(slotStart, slotEnd))
+				return fmt.Sprintf("%s %s", formatScheduleDayCN(state, day), formatSlotRangeCN(slotStart, slotEnd))
 			}
 			if day, ok := toInt(args["new_day"]); ok {
-				return fmt.Sprintf("%s%s", formatDayLabelCN(day), formatSlotRangeCN(slotStart, slotEnd))
+				return fmt.Sprintf("%s %s", formatScheduleDayCN(state, day), formatSlotRangeCN(slotStart, slotEnd))
 			}
 			return formatSlotRangeCN(slotStart, slotEnd)
 		}
+	case "slot_type":
+		if text, ok := value.(string); ok {
+			return formatSlotTypeLabelCN(text)
+		}
+	case "slot_types":
+		return formatSlotTypeListArgumentCN(value)
+	case "exclude_sections":
+		return formatSectionSliceArgumentCN(value)
+	case "after_section", "before_section", "section_from", "section_to":
+		if section, ok := toInt(value); ok {
+			return fmt.Sprintf("第%d节", section)
+		}
+	case "span", "duration":
+		if count, ok := toInt(value); ok {
+			return fmt.Sprintf("%d 节", count)
+		}
+	case "allow_embed", "enqueue", "reset_queue", "include_pending":
+		if enabled, ok := toBool(value); ok {
+			return formatBoolLabelCN(enabled)
+		}
+	case "status":
+		if text, ok := value.(string); ok {
+			return formatTargetPoolStatusCN(text)
+		}
+	case "category":
+		return fallbackText(formatAnyValueCN(value), "未分类")
+	case "detail":
+		if text, ok := value.(string); ok {
+			switch strings.ToLower(strings.TrimSpace(text)) {
+			case "summary":
+				return "摘要"
+			case "full":
+				return "完整"
+			default:
+				return fallbackText(text, "未标注")
+			}
+		}
+	case "dimensions", "hard_categories":
+		return formatStringSliceArgumentCN(value)
 	case "moves":
 		return formatMovesArgumentCN(value, state)
 	}
@@ -646,8 +779,39 @@ func formatAnyValueCN(value any) string {
 			return "是"
 		}
 		return "否"
+	case []string:
+		return formatStringSliceArgumentCN(typed)
+	case []int:
+		if len(typed) == 0 {
+			return "空"
+		}
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			parts = append(parts, fmt.Sprintf("%d", item))
+		}
+		return strings.Join(parts, "、")
+	case []float64:
+		if len(typed) == 0 {
+			return "空"
+		}
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			parts = append(parts, fmt.Sprintf("%g", item))
+		}
+		return strings.Join(parts, "、")
 	case []any:
-		return fmt.Sprintf("%d 项", len(typed))
+		if len(typed) == 0 {
+			return "空"
+		}
+		parts := make([]string, 0, len(typed))
+		for index, item := range typed {
+			if index >= 4 {
+				parts = append(parts, fmt.Sprintf("等 %d 项", len(typed)))
+				break
+			}
+			parts = append(parts, formatAnyValueCN(item))
+		}
+		return strings.Join(parts, "、")
 	default:
 		if value == nil {
 			return "空"
@@ -657,6 +821,143 @@ func formatAnyValueCN(value any) string {
 			return fmt.Sprintf("%v", value)
 		}
 		return strings.TrimSpace(string(raw))
+	}
+}
+
+func formatTaskIDListArgumentCN(value any, state *schedule.ScheduleState) string {
+	ids := toIntSliceAny(value)
+	if len(ids) == 0 {
+		return formatAnyValueCN(value)
+	}
+	parts := make([]string, 0, len(ids))
+	for index, id := range ids {
+		if index >= 4 {
+			parts = append(parts, fmt.Sprintf("等 %d 项", len(ids)))
+			break
+		}
+		parts = append(parts, resolveTaskLabelByID(state, id, true))
+	}
+	return strings.Join(parts, "、")
+}
+
+func formatWeekdaySliceArgumentCN(value any) string {
+	days := toIntSliceAny(value)
+	if len(days) == 0 {
+		return formatAnyValueCN(value)
+	}
+	return formatWeekdayListCN(days)
+}
+
+func formatWeekSliceArgumentCN(value any) string {
+	weeks := toIntSliceAny(value)
+	if len(weeks) == 0 {
+		return formatAnyValueCN(value)
+	}
+	return formatScheduleWeekListCN(weeks)
+}
+
+func formatSectionSliceArgumentCN(value any) string {
+	sections := toIntSliceAny(value)
+	if len(sections) == 0 {
+		return formatAnyValueCN(value)
+	}
+	return formatScheduleSectionListCN(sections)
+}
+
+func formatSlotTypeListArgumentCN(value any) string {
+	items := toStringSliceAny(value)
+	if len(items) == 0 {
+		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+			return formatSlotTypeLabelCN(text)
+		}
+		return "空"
+	}
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		parts = append(parts, formatSlotTypeLabelCN(item))
+	}
+	return strings.Join(parts, "、")
+}
+
+func formatStringSliceArgumentCN(value any) string {
+	items := toStringSliceAny(value)
+	if len(items) == 0 {
+		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+		return "空"
+	}
+	return strings.Join(items, "、")
+}
+
+func toIntSliceAny(value any) []int {
+	switch typed := value.(type) {
+	case []int:
+		out := make([]int, len(typed))
+		copy(out, typed)
+		return out
+	case []float64:
+		out := make([]int, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, int(item))
+		}
+		return out
+	case []any:
+		out := make([]int, 0, len(typed))
+		for _, item := range typed {
+			number, ok := toInt(item)
+			if !ok {
+				continue
+			}
+			out = append(out, number)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func toStringSliceAny(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if strings.TrimSpace(item) == "" {
+				continue
+			}
+			out = append(out, strings.TrimSpace(item))
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text := strings.TrimSpace(fmt.Sprintf("%v", item))
+			if text == "" || text == "<nil>" {
+				continue
+			}
+			out = append(out, text)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func toBool(value any) (bool, bool) {
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "true", "1", "yes":
+			return true, true
+		case "false", "0", "no":
+			return false, true
+		default:
+			return false, false
+		}
+	default:
+		return false, false
 	}
 }
 

@@ -306,38 +306,25 @@ func registerScheduleReadTools(r *ToolRegistry) {
 		"get_overview",
 		"获取当前窗口总览：保留课程占位统计，展开任务清单。",
 		`{"name":"get_overview","parameters":{}}`,
-		wrapLegacyToolHandler("get_overview", func(state *schedule.ScheduleState, args map[string]any) string {
-			_ = args
-			return schedule.GetOverview(state)
-		}),
+		NewGetOverviewToolHandler(),
 	)
 	r.Register(
 		"query_range",
 		"查看某天或某时段的占用详情。day 必填，slot_start/slot_end 选填。",
 		`{"name":"query_range","parameters":{"day":{"type":"int","required":true},"slot_start":{"type":"int"},"slot_end":{"type":"int"}}}`,
-		wrapLegacyToolHandler("query_range", func(state *schedule.ScheduleState, args map[string]any) string {
-			day, ok := schedule.ArgsInt(args, "day")
-			if !ok {
-				return "查询失败：缺少必填参数 day。"
-			}
-			return schedule.QueryRange(state, day, schedule.ArgsIntPtr(args, "slot_start"), schedule.ArgsIntPtr(args, "slot_end"))
-		}),
+		NewQueryRangeToolHandler(),
 	)
 	r.Register(
 		"query_available_slots",
 		"查询候选空位池，适合 move 前筛落点。",
 		`{"name":"query_available_slots","parameters":{"span":{"type":"int"},"duration":{"type":"int"},"limit":{"type":"int"},"allow_embed":{"type":"bool"},"day":{"type":"int"},"day_start":{"type":"int"},"day_end":{"type":"int"},"day_scope":{"type":"string","enum":["all","workday","weekend"]},"day_of_week":{"type":"array","items":{"type":"int"}},"week":{"type":"int"},"week_filter":{"type":"array","items":{"type":"int"}},"week_from":{"type":"int"},"week_to":{"type":"int"},"slot_type":{"type":"string"},"slot_types":{"type":"array","items":{"type":"string"}},"exclude_sections":{"type":"array","items":{"type":"int"}},"after_section":{"type":"int"},"before_section":{"type":"int"},"section_from":{"type":"int"},"section_to":{"type":"int"}}}`,
-		wrapLegacyToolHandler("query_available_slots", func(state *schedule.ScheduleState, args map[string]any) string {
-			return schedule.QueryAvailableSlots(state, args)
-		}),
+		NewQueryAvailableSlotsToolHandler(),
 	)
 	r.Register(
 		"query_target_tasks",
 		"查询候选任务集合，可按 status/week/day/task_id/category 筛选；支持 enqueue。",
 		`{"name":"query_target_tasks","parameters":{"status":{"type":"string","enum":["all","existing","suggested","pending"]},"category":{"type":"string"},"limit":{"type":"int"},"day_scope":{"type":"string","enum":["all","workday","weekend"]},"day":{"type":"int"},"day_start":{"type":"int"},"day_end":{"type":"int"},"day_of_week":{"type":"array","items":{"type":"int"}},"week":{"type":"int"},"week_filter":{"type":"array","items":{"type":"int"}},"week_from":{"type":"int"},"week_to":{"type":"int"},"task_ids":{"type":"array","items":{"type":"int"}},"task_id":{"type":"int"},"task_item_ids":{"type":"array","items":{"type":"int"}},"task_item_id":{"type":"int"},"enqueue":{"type":"bool"},"reset_queue":{"type":"bool"}}}`,
-		wrapLegacyToolHandler("query_target_tasks", func(state *schedule.ScheduleState, args map[string]any) string {
-			return schedule.QueryTargetTasks(state, args)
-		}),
+		NewQueryTargetTasksToolHandler(),
 	)
 	r.Register(
 		"queue_pop_head",
@@ -351,21 +338,13 @@ func registerScheduleReadTools(r *ToolRegistry) {
 		"queue_status",
 		"查看当前队列状态（pending/current/completed/skipped）。",
 		`{"name":"queue_status","parameters":{}}`,
-		wrapLegacyToolHandler("queue_status", func(state *schedule.ScheduleState, args map[string]any) string {
-			return schedule.QueueStatus(state, args)
-		}),
+		NewQueueStatusToolHandler(),
 	)
 	r.Register(
 		"get_task_info",
 		"查看单个任务详情，包括类别、状态与落位。",
 		`{"name":"get_task_info","parameters":{"task_id":{"type":"int","required":true}}}`,
-		wrapLegacyToolHandler("get_task_info", func(state *schedule.ScheduleState, args map[string]any) string {
-			taskID, ok := schedule.ArgsInt(args, "task_id")
-			if !ok {
-				return "查询失败：缺少必填参数 task_id。"
-			}
-			return schedule.GetTaskInfo(state, taskID)
-		}),
+		NewGetTaskInfoToolHandler(),
 	)
 }
 
