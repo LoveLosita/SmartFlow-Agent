@@ -45,6 +45,16 @@ const router = createRouter({
         requiresAuth: true,
       },
     },
+    {
+      path: '/debug/tool-card',
+      name: 'debug-tool-card',
+      component: () => import('@/views/debug/ToolCardFixture.vue'),
+    },
+    {
+      path: '/debug/tool-cards',
+      name: 'debug-tool-cards',
+      component: () => import('@/views/debug/ToolCardMockPage.vue'),
+    },
   ],
 })
 

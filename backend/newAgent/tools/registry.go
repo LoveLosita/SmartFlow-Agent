@@ -330,9 +330,7 @@ func registerScheduleReadTools(r *ToolRegistry) {
 		"queue_pop_head",
 		"弹出并返回当前队首任务；若已有 current 则复用。",
 		`{"name":"queue_pop_head","parameters":{}}`,
-		wrapLegacyToolHandler("queue_pop_head", func(state *schedule.ScheduleState, args map[string]any) string {
-			return schedule.QueuePopHead(state, args)
-		}),
+		NewQueuePopHeadToolHandler(),
 	)
 	r.Register(
 		"queue_status",
@@ -353,17 +351,13 @@ func registerScheduleAnalyzeTools(r *ToolRegistry) {
 		"analyze_rhythm",
 		"分析学习节奏与切换情况。",
 		`{"name":"analyze_rhythm","parameters":{"category":{"type":"string"},"include_pending":{"type":"bool"},"detail":{"type":"string","enum":["summary","full"]},"hard_categories":{"type":"array","items":{"type":"string"}}}}`,
-		wrapLegacyToolHandler("analyze_rhythm", func(state *schedule.ScheduleState, args map[string]any) string {
-			return schedule.AnalyzeRhythm(state, args)
-		}),
+		NewAnalyzeRhythmToolHandler(),
 	)
 	r.Register(
 		"analyze_health",
 		"主动优化裁判入口：聚焦 rhythm/semantic_profile/tightness，判断当前是否还值得继续优化，并给出候选。",
 		`{"name":"analyze_health","parameters":{"detail":{"type":"string","enum":["summary","full"]},"dimensions":{"type":"array","items":{"type":"string"}},"threshold":{"type":"string","enum":["strict","normal","relaxed"]}}}`,
-		wrapLegacyToolHandler("analyze_health", func(state *schedule.ScheduleState, args map[string]any) string {
-			return schedule.AnalyzeHealth(state, args)
-		}),
+		NewAnalyzeHealthToolHandler(),
 	)
 }
 
@@ -402,9 +396,7 @@ func registerScheduleMutationTools(r *ToolRegistry) {
 		"queue_skip_head",
 		"跳过当前队首任务，将其标记为 skipped。",
 		`{"name":"queue_skip_head","parameters":{"reason":{"type":"string"}}}`,
-		wrapLegacyToolHandler("queue_skip_head", func(state *schedule.ScheduleState, args map[string]any) string {
-			return schedule.QueueSkipHead(state, args)
-		}),
+		NewQueueSkipHeadToolHandler(),
 	)
 	r.Register(
 		"unplace",
@@ -424,31 +416,16 @@ func registerTaskClassTools(r *ToolRegistry, deps DefaultRegistryDeps) {
 }
 
 func registerWebTools(r *ToolRegistry, deps DefaultRegistryDeps) {
-	webSearchHandler := web.NewSearchToolHandler(deps.WebSearchProvider)
-	webFetchHandler := web.NewFetchToolHandler(web.NewFetcher())
-
 	r.Register(
 		"web_search",
 		"Web 搜索：根据 query 返回结构化检索结果。query 必填。",
 		`{"name":"web_search","parameters":{"query":{"type":"string","required":true},"top_k":{"type":"int"},"domain_allow":{"type":"array","items":{"type":"string"}},"recency_days":{"type":"int"}}}`,
-		wrapLegacyToolHandler("web_search", func(state *schedule.ScheduleState, args map[string]any) string {
-			_ = state
-			return webSearchHandler.Handle(args)
-		}),
+		NewWebSearchToolHandler(deps.WebSearchProvider),
 	)
 	r.Register(
 		"web_fetch",
 		"抓取指定 URL 的正文内容并做最小清洗。url 必填。",
 		`{"name":"web_fetch","parameters":{"url":{"type":"string","required":true},"max_chars":{"type":"int"}}}`,
-		wrapLegacyToolHandler("web_fetch", func(state *schedule.ScheduleState, args map[string]any) string {
-			_ = state
-			return webFetchHandler.Handle(args)
-		}),
+		NewWebFetchToolHandler(web.NewFetcher()),
 	)
-}
-
-func wrapLegacyToolHandler(toolName string, handler func(state *schedule.ScheduleState, args map[string]any) string) ToolHandler {
-	return func(state *schedule.ScheduleState, args map[string]any) ToolExecutionResult {
-		return LegacyResultWithState(toolName, args, state, handler(state, args))
-	}
 }

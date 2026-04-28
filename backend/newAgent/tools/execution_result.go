@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
+	toolcontextresult "github.com/LoveLosita/smartflow/backend/newAgent/tools/tool_context_result"
 )
 
 const (
@@ -473,6 +474,8 @@ func argumentDisplayRank(key string) int {
 	switch strings.TrimSpace(key) {
 	case "task_id", "task_ids", "task_item_id", "task_item_ids", "task_a", "task_b":
 		return 10
+	case "domain", "packs", "mode", "all":
+		return 15
 	case "status", "category":
 		return 20
 	case "day", "new_day", "day_start", "day_end", "day_scope", "day_of_week":
@@ -585,6 +588,14 @@ func resolveArgumentLabelCN(key string) string {
 		return "移动列表"
 	case "reason":
 		return "原因"
+	case "domain":
+		return "工具域"
+	case "packs":
+		return "工具包"
+	case "mode":
+		return "注入模式"
+	case "all":
+		return "清空全部"
 	case "status":
 		return "状态"
 	case "category":
@@ -691,6 +702,35 @@ func formatArgumentDisplay(
 	case "allow_embed", "enqueue", "reset_queue", "include_pending":
 		if enabled, ok := toBool(value); ok {
 			return formatBoolLabelCN(enabled)
+		}
+	case "domain":
+		if text, ok := value.(string); ok {
+			return fallbackText(toolcontextresult.ResolveDomainLabelCN(text), text)
+		}
+	case "packs":
+		switch typed := value.(type) {
+		case []string:
+			return toolcontextresult.FormatPacksCN(typed)
+		case []any:
+			items := make([]string, 0, len(typed))
+			for _, item := range typed {
+				text := strings.TrimSpace(fmt.Sprintf("%v", item))
+				if text == "" || text == "<nil>" {
+					continue
+				}
+				items = append(items, text)
+			}
+			if len(items) > 0 {
+				return toolcontextresult.FormatPacksCN(items)
+			}
+		case string:
+			if strings.TrimSpace(typed) != "" {
+				return toolcontextresult.FormatPacksCN(strings.Split(strings.TrimSpace(typed), ","))
+			}
+		}
+	case "mode":
+		if text, ok := value.(string); ok {
+			return fallbackText(toolcontextresult.ResolveModeLabelCN(text), text)
 		}
 	case "status":
 		if text, ok := value.(string); ok {

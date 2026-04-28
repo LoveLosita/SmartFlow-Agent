@@ -67,10 +67,18 @@ func RunDeliverNode(ctx context.Context, input DeliverNodeInput) error {
 		return fmt.Errorf("交付阶段状态推送失败: %w", err)
 	}
 
-	// 2. 调 LLM 生成交付总结。
+	// 2. 在线流式消息会把 execute / deliver 的正文追加到同一条 assistant 气泡。
+	// 2.1 deliver 的 LLM 真流式路径不会经过 normalizeSpeak，因此第一段总结可能贴住上一段 execute 正文。
+	// 2.2 这里先发一个仅用于 SSE 展示的段落分隔；不写入 history，避免历史回放和持久化消息额外多空行。
+	// 2.3 若本轮 deliver 前没有任何正文，前端 Markdown 渲染会 trim 掉开头空行，不影响首段展示。
+	if err := emitter.EmitAssistantText(deliverSpeakBlockID, deliverStageName, "\n\n", false); err != nil {
+		return fmt.Errorf("交付总结段落分隔推送失败: %w", err)
+	}
+
+	// 3. 调 LLM 生成交付总结。
 	summary, streamed := generateDeliverSummary(ctx, input.Client, flowState, conversationContext, input.ThinkingEnabled, input.CompactionStore, emitter)
 
-	// 2.1 排程完毕卡片信号：
+	// 3.1 排程完毕卡片信号：
 	// 1. 仅在流程正常完成且确实产生过日程变更（粗排或写工具）时推送；
 	// 2. 前端收到 kind=schedule_completed 后，自行用对话 ID 调用现有接口拉取排程数据渲染卡片；
 	// 3. 不携带 Redis key 或排程数据，保持信号职责单一。
@@ -78,7 +86,7 @@ func RunDeliverNode(ctx context.Context, input DeliverNodeInput) error {
 		_ = emitter.EmitScheduleCompleted(deliverStatusBlockID, deliverStageName)
 	}
 
-	// 3. 推送总结。LLM 路径已在 generateDeliverSummary 内部真流式推送，
+	// 4. 推送总结。LLM 路径已在 generateDeliverSummary 内部真流式推送，
 	//    仅机械/降级路径需要在此伪流式补推。
 	if strings.TrimSpace(summary) != "" {
 		if !streamed {
@@ -101,7 +109,7 @@ func RunDeliverNode(ctx context.Context, input DeliverNodeInput) error {
 		}
 	}
 
-	// 4. 推送最终完成状态。
+	// 5. 推送最终完成状态。
 	_ = emitter.EmitStatus(
 		deliverStatusBlockID,
 		deliverStageName,

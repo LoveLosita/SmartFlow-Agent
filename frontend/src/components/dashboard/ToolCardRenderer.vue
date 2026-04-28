@@ -70,8 +70,8 @@ function getOperationFallbackLabel(op: string) {
         </p>
       </div>
 
-      <!-- 简短指标区 -->
-      <div v-if="!expanded && payload.result_view?.collapsed?.metrics" class="tool-card__metrics">
+      <!-- 简短指标区 (优先读取 result_view.collapsed.metrics) -->
+      <div v-if="payload.result_view?.collapsed?.metrics" class="tool-card__metrics">
         <div v-for="(m, mi) in payload.result_view.collapsed.metrics" :key="mi" class="metric-item">
           <span class="metric-value">{{ m.value }}</span>
           <span class="metric-label">{{ m.label }}</span>
@@ -95,23 +95,32 @@ function getOperationFallbackLabel(op: string) {
       <section v-if="expanded" class="tool-card__content">
         <div class="tool-card__divider"></div>
 
-        <!-- 2.1 参数展示 (优先读取 argument_view) -->
-        <div v-if="payload.argument_view" class="section-block section-arguments">
-           <h4 class="detail-section-title">参数详情</h4>
-           <p v-if="payload.argument_view.collapsed?.summary" class="arg-summary">
-              {{ payload.argument_view.collapsed.summary }}
-           </p>
-           <div v-if="payload.argument_view.expanded?.fields" class="arg-fields">
-              <div v-for="(f, fi) in payload.argument_view.expanded.fields" :key="fi" class="arg-field-item">
-                 <span class="arg-label">{{ f.label }}</span>
-                 <span class="arg-value">{{ f.display }}</span>
+        <!-- 2.1 参数展示 (如果有 argument_view) -->
+        <div v-if="payload.argument_view" class="section-block view-arguments">
+          <details class="arguments-details">
+            <summary class="arguments-summary">
+              <span class="summary-label">输入参数</span>
+              <span class="summary-preview">{{ payload.argument_view.collapsed?.summary }}</span>
+            </summary>
+            <div class="kv-grid kv-grid--arguments">
+              <div v-for="field in payload.argument_view.expanded?.fields" :key="field.key" class="kv-item">
+                <span class="kv-label">{{ field.label }}</span>
+                <span class="kv-value">{{ field.display || field.value }}</span>
               </div>
-           </div>
+            </div>
+          </details>
         </div>
 
         <!-- 2.2 结果渲染: schedule.operation_result -->
         <div v-if="payload.result_view?.view_type === 'schedule.operation_result'" class="section-block view-operation">
-          <h4 class="detail-section-title">操作结果</h4>
+          <h4 class="detail-section-title">操作变更明细</h4>
+          
+          <!-- 影响日期汇总 -->
+          <div v-if="payload.result_view.expanded?.affected_days_label" class="affected-days-box">
+             <span class="affected-label">影响日期：</span>
+             <span class="affected-value">{{ payload.result_view.expanded.affected_days_label }}</span>
+          </div>
+
           <div v-if="payload.result_view.expanded?.changes?.length" class="changes-list">
             <div v-for="(change, idx) in payload.result_view.expanded.changes" :key="idx" class="change-item">
               <div class="change-item__header">
@@ -119,14 +128,14 @@ function getOperationFallbackLabel(op: string) {
                 <span class="change-item__task-name">{{ change.task_label }}</span>
                 <span v-if="change.status_label" class="change-item__status-tag">{{ change.status_label }}</span>
               </div>
-
+ 
               <div class="change-item__path">
                 <div class="slot-box slot-box--before">
                   <span class="slot-tag">之前</span>
                   <div class="slot-text">{{ change.before_label || '未排程' }}</div>
                 </div>
                 <div class="path-arrow">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                     <line x1="5" y1="12" x2="19" y2="12"></line>
                     <polyline points="12 5 19 12 12 19"></polyline>
                   </svg>
@@ -138,7 +147,7 @@ function getOperationFallbackLabel(op: string) {
               </div>
             </div>
           </div>
-
+ 
           <!-- 队列快照 (带标签) -->
           <div v-if="payload.result_view.expanded?.queue_snapshot" class="queue-snapshot">
             <h5 class="sub-section-title">{{ payload.result_view.expanded.queue_snapshot.summary_label || '队列变更' }}</h5>
@@ -152,7 +161,7 @@ function getOperationFallbackLabel(op: string) {
               </div>
             </div>
           </div>
-
+ 
           <!-- 失败信息 -->
           <div v-if="payload.result_view.expanded?.failure_reason" class="failure-box">
             <span class="failure-icon">!</span>
@@ -160,7 +169,94 @@ function getOperationFallbackLabel(op: string) {
           </div>
         </div>
 
-        <!-- 2.3 结果渲染: legacy_text -->
+        <!-- 2.3 结果渲染: 结构化渲染 (read_result, analysis_result, search_result, fetch_result, write_result, context_result) -->
+        <div v-else-if="[
+          'schedule.read_result', 
+          'schedule.analysis_result', 
+          'web.search_result', 
+          'web.fetch_result', 
+          'taskclass.write_result', 
+          'tool.context_result'
+        ].includes(payload.result_view?.view_type || '')" class="section-block view-read">
+          <!-- 优先展示 sections -->
+          <template v-if="payload.result_view?.expanded?.sections?.length">
+            <div v-for="(section, sidx) in payload.result_view.expanded.sections" :key="sidx" class="read-section">
+              <!-- 1. items 类型: 渲染列表 -->
+              <div v-if="section.type === 'items'" class="read-section__items">
+                 <h4 v-if="section.title" class="detail-section-title">{{ section.title }}</h4>
+                 <p v-if="section.summary" class="section-summary">{{ section.summary }}</p>
+                 <div class="items-list">
+                    <div v-for="(item, iidx) in section.items" :key="iidx" class="list-item-card">
+                       <div class="item-main">
+                          <div class="item-title">{{ item.title }}</div>
+                          <div class="item-subtitle" v-if="item.subtitle">{{ item.subtitle }}</div>
+                       </div>
+                       <div class="item-tags" v-if="item.tags?.length">
+                          <span v-for="tag in item.tags" :key="tag" class="item-tag">{{ tag }}</span>
+                       </div>
+                       <div class="item-details" v-if="item.detail_lines?.length">
+                          <p v-for="line in item.detail_lines" :key="line" class="detail-line">{{ line }}</p>
+                       </div>
+                    </div>
+                 </div>
+              </div>
+
+              <!-- 2. kv 类型: 渲染字段列表 -->
+              <div v-else-if="section.type === 'kv'" class="read-section__kv">
+                 <h4 v-if="section.title" class="detail-section-title">{{ section.title }}</h4>
+                 <div class="kv-grid">
+                    <div v-for="(field, fidx) in section.fields" :key="fidx" class="kv-item">
+                       <span class="kv-label">{{ field.label }}</span>
+                       <span class="kv-value">{{ field.value }}</span>
+                    </div>
+                 </div>
+              </div>
+
+              <!-- 3. callout 类型: 渲染提示块 -->
+              <div v-else-if="section.type === 'callout'" class="read-section__callout" :class="`tone--${section.tone || 'info'}`">
+                 <div class="callout-header">
+                    <span class="callout-title">{{ section.title }}</span>
+                 </div>
+                 <p v-if="section.summary || section.subtitle" class="callout-summary">{{ section.summary || section.subtitle }}</p>
+                 <div v-if="section.detail_lines?.length" class="callout-details">
+                    <p v-for="line in section.detail_lines" :key="line" class="detail-line">{{ line }}</p>
+                 </div>
+              </div>
+
+              <!-- 4. 降级展示: 未知类型 -->
+              <div v-else class="read-section__fallback">
+                 <h4 v-if="section.title" class="detail-section-title">{{ section.title }}</h4>
+                 <p v-if="section.summary" class="section-summary">{{ section.summary }}</p>
+                 <div v-if="section.detail_lines?.length" class="fallback-details">
+                    <p v-for="line in section.detail_lines" :key="line" class="detail-line">{{ line }}</p>
+                 </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- 如果没有 sections，尝试展示 items -->
+          <template v-else-if="payload.result_view?.expanded?.items?.length">
+             <div class="read-section__items">
+                <h4 class="detail-section-title">结果列表</h4>
+                <div class="items-list">
+                   <div v-for="(item, iidx) in payload.result_view.expanded.items" :key="iidx" class="list-item-card">
+                      <div class="item-main">
+                         <div class="item-title">{{ item.title }}</div>
+                         <div class="item-subtitle" v-if="item.subtitle">{{ item.subtitle }}</div>
+                      </div>
+                      <div class="item-tags" v-if="item.tags?.length">
+                         <span v-for="tag in item.tags" :key="tag" class="item-tag">{{ tag }}</span>
+                      </div>
+                      <div v-if="item.detail_lines?.length" class="item-details">
+                         <p v-for="line in item.detail_lines" :key="line" class="detail-line">{{ line }}</p>
+                      </div>
+                   </div>
+                </div>
+             </div>
+          </template>
+        </div>
+
+        <!-- 2.4 结果渲染: legacy_text -->
         <div v-else-if="payload.result_view?.view_type === 'legacy_text'" class="section-block view-legacy">
           <h4 class="detail-section-title">{{ payload.result_view.expanded?.raw_text_label || '输出内容' }}</h4>
           <div class="raw-text-container">
@@ -168,7 +264,21 @@ function getOperationFallbackLabel(op: string) {
           </div>
         </div>
 
-        <!-- 2.4 旧协议兜底 -->
+        <!-- 2.5 未知协议展示: 只要有 collapsed 就显示基础信息 -->
+        <div v-else-if="payload.result_view?.collapsed" class="section-block view-unknown">
+           <h4 class="detail-section-title">结果详情 (未知协议)</h4>
+           <div class="unknown-content">
+              <p class="unknown-subtitle">{{ payload.result_view.collapsed.subtitle }}</p>
+              <div v-if="payload.result_view.collapsed.metrics" class="unknown-metrics">
+                 <div v-for="(m, mi) in payload.result_view.collapsed.metrics" :key="mi" class="metric-chip">
+                    <span class="chip-label">{{ m.label }}:</span>
+                    <span class="chip-value">{{ m.value }}</span>
+                 </div>
+              </div>
+           </div>
+        </div>
+
+        <!-- 2.6 旧协议兜底 -->
         <div v-else-if="!payload.result_view" class="section-block view-old-fallback">
            <h4 class="detail-section-title">工具输出 (兼容模式)</h4>
            <div class="fallback-summary-box">
@@ -197,9 +307,14 @@ function getOperationFallbackLabel(op: string) {
   border: 1px solid #eef2f6;
   border-radius: 16px;
   overflow: hidden;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow-x: hidden;
+  transition: border-color 0.3s, box-shadow 0.3s, transform 0.3s, background-color 0.3s;
   box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.02);
   margin: 8px 0;
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+  overflow-wrap: break-word;
 }
 
 .tool-card:hover {
@@ -227,6 +342,9 @@ function getOperationFallbackLabel(op: string) {
   gap: 12px;
   cursor: pointer;
   user-select: none;
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
 }
 
 .tool-card__icon-box {
@@ -344,6 +462,10 @@ function getOperationFallbackLabel(op: string) {
 /* Content */
 .tool-card__content {
   padding: 0 16px 20px;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .tool-card__divider {
@@ -365,41 +487,56 @@ function getOperationFallbackLabel(op: string) {
   letter-spacing: 0.05em;
 }
 
-/* Arguments */
-.arg-summary {
-  font-size: 13px;
-  color: #475569;
-  font-weight: 500;
-  line-height: 1.5;
-  margin-bottom: 10px;
+/* Arguments Section */
+.view-arguments {
+  margin-bottom: 16px;
+  padding: 0 4px;
 }
 
-.arg-fields {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-  background: #f8fafc;
-  padding: 12px;
-  border-radius: 12px;
+.arguments-details {
   border: 1px solid #f1f5f9;
+  border-radius: 10px;
+  background: #f8fafc;
+  overflow: hidden;
 }
 
-.arg-field-item {
+.arguments-summary {
+  padding: 10px 12px;
+  cursor: pointer;
   display: flex;
-  flex-direction: column;
-  gap: 1px;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+  user-select: none;
 }
 
-.arg-label {
-  font-size: 10px;
-  color: #94a3b8;
-  font-weight: 500;
+.arguments-summary::-webkit-details-marker {
+  display: none;
 }
 
-.arg-value {
+.arguments-summary .summary-label {
   font-size: 12px;
-  color: #1e293b;
   font-weight: 600;
+  color: #64748b;
+  background: #fff;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid #e2e8f0;
+}
+
+.arguments-summary .summary-preview {
+  flex: 1;
+  font-size: 12px;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kv-grid--arguments {
+  padding: 8px 12px 12px;
+  border-top: 1px solid #f1f5f9;
+  background: #fff;
 }
 
 /* Operation Changes */
@@ -434,6 +571,7 @@ function getOperationFallbackLabel(op: string) {
   font-size: 13px;
   font-weight: 700;
   color: #0f172a;
+  word-break: break-all;
 }
 
 .change-item__status-tag {
@@ -455,6 +593,8 @@ function getOperationFallbackLabel(op: string) {
   flex: 1;
   padding: 8px 10px;
   border-radius: 10px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .slot-box--before {
@@ -480,6 +620,7 @@ function getOperationFallbackLabel(op: string) {
 .slot-text {
   font-size: 12px;
   font-weight: 600;
+  word-break: break-all;
 }
 
 /* Queue Snapshot */
@@ -518,10 +659,59 @@ function getOperationFallbackLabel(op: string) {
   color: #10b981;
 }
 
+/* Operation View Styles */
+.affected-days-box {
+  margin: -4px 0 16px;
+  padding: 10px 14px;
+  background: #f8fafc;
+  border-radius: 12px;
+  border: 1px solid #f1f5f9;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.affected-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #94a3b8;
+}
+
+.affected-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.path-arrow {
+  color: #cbd5e1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+}
+
+.tool-card--expanded .path-arrow {
+  color: #3b82f6;
+  filter: drop-shadow(0 0 4px rgba(59, 130, 246, 0.2));
+}
+
 .queue-arrow {
   flex: 2;
   height: 2px;
   background: #e2e8f0;
+  position: relative;
+}
+
+.queue-arrow::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  border-left: 6px solid #e2e8f0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
 }
 
 /* Legacy Text */
@@ -615,6 +805,221 @@ function getOperationFallbackLabel(op: string) {
   color: #94a3b8;
   max-height: 120px;
   overflow-y: auto;
+}
+
+/* Read Result Styles */
+.read-section + .read-section {
+  margin-top: 24px;
+}
+
+.section-summary {
+  font-size: 13px;
+  color: #475569;
+  line-height: 1.6;
+  margin: -4px 0 12px;
+}
+
+.items-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.list-item-card {
+  background: #f8fafc;
+  border: 1px solid #f1f5f9;
+  border-radius: 12px;
+  padding: 12px 14px;
+  transition: all 0.2s ease;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.list-item-card:hover {
+  background: #f1f5f9;
+  border-color: #e2e8f0;
+}
+
+.item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.item-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1e293b;
+  word-break: break-all;
+}
+
+.item-subtitle {
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+.item-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.item-tag {
+  font-size: 10px;
+  font-weight: 600;
+  color: #3b82f6;
+  background: #eff6ff;
+  padding: 1px 8px;
+  border-radius: 6px;
+  border: 1px solid #dbeafe;
+}
+
+.item-details {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detail-line {
+  font-size: 12px;
+  color: #475569;
+  margin: 0;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+/* KV Grid */
+.kv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 140px), 1fr));
+  gap: 12px;
+  background: #f8fafc;
+  padding: 16px;
+  border-radius: 14px;
+  border: 1px solid #f1f5f9;
+}
+
+.kv-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.kv-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.kv-value {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: #1e293b;
+  font-weight: 500;
+  text-align: left;
+  word-break: break-word;
+  line-height: 1.4;
+}
+
+/* Callout */
+.read-section__callout {
+  padding: 14px 16px;
+  border-radius: 14px;
+  border-left: 4px solid #cbd5e1;
+  background: #f8fafc;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.read-section__callout.tone--info {
+  background: #f0f9ff;
+  border-color: #3b82f6;
+}
+
+.read-section__callout.tone--info .callout-title { color: #0369a1; }
+.read-section__callout.tone--info .callout-summary { color: #0c4a6e; }
+
+.read-section__callout.tone--warning {
+  background: #fffbeb;
+  border-color: #f59e0b;
+}
+
+.read-section__callout.tone--warning .callout-title { color: #b45309; }
+.read-section__callout.tone--warning .callout-summary { color: #78350f; }
+
+.read-section__callout.tone--danger {
+  background: #fef2f2;
+  border-color: #ef4444;
+}
+
+.read-section__callout.tone--danger .callout-title { color: #b91c1c; }
+.read-section__callout.tone--danger .callout-summary { color: #7f1d1d; }
+
+.callout-header {
+  margin-bottom: 4px;
+}
+
+.callout-title {
+  font-size: 13px;
+  font-weight: 800;
+  word-break: break-word;
+}
+
+.callout-summary {
+  font-size: 12px;
+  margin: 0;
+  line-height: 1.5;
+  font-weight: 500;
+  word-break: break-word;
+}
+
+.callout-details {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(0,0,0,0.05);
+}
+
+/* Unknown View Styles */
+.unknown-subtitle {
+  font-size: 13px;
+  color: #475569;
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+
+.unknown-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.metric-chip {
+  background: #f1f5f9;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 11px;
+  display: flex;
+  gap: 4px;
+}
+
+.chip-label {
+  color: #64748b;
+  font-weight: 600;
+}
+
+.chip-value {
+  color: #0f172a;
+  font-weight: 700;
 }
 
 /* Animations */

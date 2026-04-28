@@ -738,6 +738,9 @@ function appendToolTraceEvent(
     matchedPendingEvent.summary = normalizedSummary
     matchedPendingEvent.detail = normalizedDetail || matchedPendingEvent.detail
     matchedPendingEvent.toolName = normalizedToolName || matchedPendingEvent.toolName
+    // 同步更新视图模型，确保 tool_result 的 result_view 能回填到已存在的卡片中
+    if (argumentView) matchedPendingEvent.argumentView = argumentView
+    if (resultView) matchedPendingEvent.resultView = resultView
     return
   }
   const eventSeq = nextAssistantTimelineSeq()
@@ -3209,7 +3212,7 @@ onBeforeUnmount(() => {
 
             <div v-else class="chat-message__assistant-flow">
               <TransitionGroup name="inner-fade">
-                <div v-for="block in getDisplayAssistantBlocks(dm)" :key="block.id">
+                <div v-for="block in getDisplayAssistantBlocks(dm)" :key="block.id" class="chat-message__block-wrapper">
                   <ToolCardRenderer
                     v-if="block.type === 'tool' && block.event"
                     :payload="{
@@ -3842,7 +3845,7 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: var(--assistant-history-width) auto minmax(0, 1fr);
+  grid-template-columns: var(--assistant-history-width) 8px minmax(0, 1fr);
   gap: 12px;
   position: relative;
   transition: grid-template-columns 0.35s cubic-bezier(0.4, 0, 0.2, 1);
@@ -3853,7 +3856,7 @@ onBeforeUnmount(() => {
 }
 
 .assistant-body--standalone {
-  grid-template-columns: var(--assistant-history-width) auto minmax(0, 1fr);
+  grid-template-columns: var(--assistant-history-width) 8px minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -4176,7 +4179,7 @@ onBeforeUnmount(() => {
   justify-content: center;
   cursor: col-resize;
   width: 8px;
-  margin: 0 -4px;
+  margin: 0;
   z-index: 20;
 }
 
@@ -4201,6 +4204,8 @@ onBeforeUnmount(() => {
 }
 
 .assistant-chat {
+  flex: 1;
+  width: 100%;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -4243,6 +4248,13 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   min-height: 100%;
+  min-width: 0;
+  width: 100%;
+}
+
+.assistant-message-list {
+  min-width: 0;
+  width: 100%;
 }
 
 .assistant-chat--empty .assistant-messages {
@@ -4494,13 +4506,16 @@ onBeforeUnmount(() => {
 }
 
 .assistant-messages {
+  min-width: 0;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 24px 28px 18px;
   overscroll-behavior: contain;
   display: grid;
   gap: 20px;
   align-content: start;
+  scrollbar-gutter: stable;
   background:
     linear-gradient(180deg, rgba(249, 251, 253, 0.42), rgba(255, 255, 255, 0.9) 28%, rgba(255, 255, 255, 1)),
     radial-gradient(circle at top center, rgba(129, 171, 255, 0.1), transparent 34%);
@@ -4519,6 +4534,14 @@ onBeforeUnmount(() => {
   border-radius: 12px;
   color: #92400e;
   font-size: 13px;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.chat-message {
+  min-width: 0;
+  width: 100%;
 }
 
 .chat-message__reasoning {
@@ -4593,10 +4616,17 @@ onBeforeUnmount(() => {
 }
 
 .chat-message__assistant-flow {
+  width: 100%;
+  min-width: 0;
   max-width: min(92%, 860px);
   margin: 0 auto;
   display: grid;
   gap: 12px;
+}
+
+.chat-message__block-wrapper {
+  min-width: 0;
+  width: 100%;
 }
 
 .chat-message__assistant-content {
