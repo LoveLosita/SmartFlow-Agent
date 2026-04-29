@@ -206,6 +206,38 @@ func buildAnalyzeHealthFinalDecisionBrief(
 	return decision
 }
 
+// buildAnalyzeHealthCandidateAfterBrief 生成候选执行后的轻量复诊摘要。
+//
+// 职责边界：
+// 1. 只负责为 candidate.after / candidate.summary 提供“执行后看起来如何”的展示结论；
+// 2. 不负责再次枚举 move/swap 候选，也不决定顶层 analyze_health 是否继续优化；
+// 3. 输入是已经模拟执行后的 state/snapshot，输出沿用 analyzeHealthDecisionBase 的字段语义。
+func buildAnalyzeHealthCandidateAfterBrief(
+	state *ScheduleState,
+	snapshot analyzeHealthSnapshot,
+) analyzeHealthDecisionBase {
+	base := buildAnalyzeHealthDecisionBase(state, snapshot)
+	decision := analyzeHealthDecisionBase{
+		ShouldContinueOptimize: base.ShouldContinueOptimize,
+		PrimaryProblem:         base.PrimaryProblem,
+		ProblemScope:           base.ProblemScope,
+		IsForcedImperfection:   base.IsForcedImperfection,
+		RecommendedOperation:   base.RecommendedOperation,
+	}
+
+	if !shouldEnterHealthCandidateLoop(base) {
+		decision.ShouldContinueOptimize = false
+		return decision
+	}
+
+	// 1. candidate.after 位于候选模拟内层，不能再跑全局候选枚举。
+	// 2. 顶层 buildAnalyzeHealthDecisionV2 已经负责严谨筛选“是否值得继续优化”；
+	//    这里保留基础诊断即可，避免每个候选递归触发 score-only 全局扫描。
+	// 3. 若仍存在基础诊断认为可优化的问题，则如实展示给前端和 LLM；下一轮会再次调用
+	//    analyze_health 做正式复诊，作为真正的收口依据。
+	return decision
+}
+
 // pickPrimaryHealthProblem 选择当前最值得处理的局部问题。
 func pickPrimaryHealthProblem(state *ScheduleState, snapshot analyzeHealthSnapshot) (analyzeHealthProblem, bool) {
 	best := analyzeHealthProblem{}
@@ -868,7 +900,7 @@ func evaluateHealthCandidateOutcome(
 	operation string,
 	moveCost int,
 ) (string, int, analyzeHealthDecisionBase, bool) {
-	afterDecision := buildAnalyzeHealthFinalDecisionBrief(afterState, after)
+	afterDecision := buildAnalyzeHealthCandidateAfterBrief(afterState, after)
 	effect, score, ok := evaluateHealthCandidateScoreOnly(
 		baseline,
 		after,

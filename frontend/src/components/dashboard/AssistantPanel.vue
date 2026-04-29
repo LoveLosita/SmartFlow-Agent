@@ -187,6 +187,13 @@ interface AssistantContentBlock {
   text: string
 }
 
+interface ThinkingSummaryBlockState {
+  blockId: string
+  lastSummarySeq: number
+  lastSignature: string
+  finished: boolean
+}
+
 const props = withDefaults(
   defineProps<{
     initialHistoryWidth?: number
@@ -258,6 +265,7 @@ const reasoningCollapsedMap = reactive<Record<string, boolean>>({})
 const reasoningStartedAtMap = reactive<Record<string, number>>({})
 const reasoningCurrentShortSummaryMap = reactive<Record<string, string>>({})
 const reasoningDurationMap = reactive<Record<string, number>>({})
+const activeReasoningBlockIdMap = reactive<Record<string, string>>({})
 const confirmOnlyStreamMap = reactive<Record<string, boolean>>({})
 const confirmVisiblePrefixMap = reactive<Record<string, boolean>>({})
 const toolTraceEventsMap = reactive<Record<string, ToolTraceEvent[]>>({})
@@ -275,10 +283,8 @@ const scheduleResultMap = reactive<Record<string, SchedulePreviewData>>({})
 const scheduleResultSeqMap = reactive<Record<string, number>>({})
 const businessCardEventsMap = reactive<Record<string, TimelineBusinessCardPayload[]>>({})
 
-// thinking_summary 协议：每条 message 唯一一个 reasoning blockId
-const messageThinkingBlockIdMap = reactive<Record<string, string>>({})
-// summary_seq 按 messageId + backendKey(block_id|stage|'thinking') 维度去重
-const thinkingSummarySeqMap = reactive<Record<string, Record<string, number>>>({})
+// thinking_summary 协议：同一条 message 可能发生多轮思考，每轮都需要独立 reasoning block。
+const thinkingSummaryBlockStateMap = reactive<Record<string, Record<string, ThinkingSummaryBlockState>>>({})
 
 // 长摘要逐字流式状态：用普通 Map 存储，避免每字符触发 reactive 收集
 interface ThinkingStreamState { queue: string; timerId: number | null }
@@ -742,12 +748,13 @@ function clearToolTraceState(messageId: string) {
   delete statusTraceEventsMap[messageId]
   delete assistantReasoningSeqMap[messageId]
   delete assistantContentBlocksMap[messageId]
+  delete assistantReasoningBlocksMap[messageId]
+  delete activeReasoningBlockIdMap[messageId]
   delete assistantTimelineLastKindMap[messageId]
   delete scheduleResultMap[messageId]
   delete scheduleResultSeqMap[messageId]
   delete businessCardEventsMap[messageId]
-  delete messageThinkingBlockIdMap[messageId]
-  delete thinkingSummarySeqMap[messageId]
+  delete thinkingSummaryBlockStateMap[messageId]
   for (const key of Object.keys(toolTraceExpandedMap)) {
     if (key.startsWith(`${messageId}:tool:`)) {
       delete toolTraceExpandedMap[key]
@@ -764,6 +771,18 @@ function clearToolTraceState(messageId: string) {
       thinkingSummaryStreamMap.delete(blockId)
     }
   }
+  for (const key of Object.keys(reasoningCollapsedMap)) {
+    if (key.startsWith(prefix)) delete reasoningCollapsedMap[key]
+  }
+  for (const key of Object.keys(reasoningStartedAtMap)) {
+    if (key.startsWith(prefix)) delete reasoningStartedAtMap[key]
+  }
+  for (const key of Object.keys(reasoningCurrentShortSummaryMap)) {
+    if (key.startsWith(prefix)) delete reasoningCurrentShortSummaryMap[key]
+  }
+  for (const key of Object.keys(reasoningDurationMap)) {
+    if (key.startsWith(prefix)) delete reasoningDurationMap[key]
+  }
 }
 
 function appendToolTraceEvent(
@@ -774,6 +793,7 @@ function appendToolTraceEvent(
   toolName = '',
   argumentView?: ToolView,
   resultView?: ToolView,
+  seq?: number,
 ) {
   const normalizedSummary = summary.trim()
   if (!normalizedSummary) {
@@ -800,7 +820,7 @@ function appendToolTraceEvent(
     if (resultView) matchedPendingEvent.resultView = resultView
     return
   }
-  const eventSeq = nextAssistantTimelineSeq()
+  const eventSeq = typeof seq === 'number' && seq > 0 ? seq : nextAssistantTimelineSeq()
   const eventId = `${messageId}:tool:${eventSeq}`
 
   // 如果上一个阶段是推理，则结束并折叠它
@@ -898,6 +918,7 @@ function appendStatusTraceEvent(
   code: string,
   summary: string,
   stage = '',
+  seq?: number,
 ) {
   const normalizedSummary = summary.trim()
   if (!normalizedSummary) {
@@ -915,7 +936,7 @@ function appendStatusTraceEvent(
     return
   }
 
-  const eventSeq = nextAssistantTimelineSeq()
+  const eventSeq = typeof seq === 'number' && seq > 0 ? seq : nextAssistantTimelineSeq()
   // 如果上一个阶段是推理，则结束并折叠它
   if (assistantTimelineLastKindMap[messageId] === 'reasoning') {
     finishCurrentReasoningBlock(messageId)
@@ -931,7 +952,7 @@ function appendStatusTraceEvent(
   assistantTimelineLastKindMap[messageId] = 'status'
 }
 
-function appendAssistantContentChunk(messageId: string, chunk: string) {
+function appendAssistantContentChunk(messageId: string, chunk: string, seq?: number) {
   if (!chunk) {
     return
   }
@@ -949,10 +970,10 @@ function appendAssistantContentChunk(messageId: string, chunk: string) {
     return
   }
 
-  const seq = nextAssistantTimelineSeq()
+  const blockSeq = typeof seq === 'number' && seq > 0 ? seq : nextAssistantTimelineSeq()
   blocks.push({
-    id: `${messageId}:content:${seq}`,
-    seq,
+    id: `${messageId}:content:${blockSeq}`,
+    seq: blockSeq,
     text: chunk,
   })
   assistantTimelineLastKindMap[messageId] = 'content'
@@ -1063,64 +1084,140 @@ interface ApplyThinkingSummaryOptions {
   backendBlockId?: string
   stage?: string
   summary: ThinkingSummaryPayload
+  /** 历史回放时使用 timeline 事件自身顺序；实时流未传时按真实到达顺序分配 */
+  eventSeq?: number
   /** true 表示来自 timeline 历史恢复：不写短摘要、不更新思考态、长摘要一次性写入 */
   fromHistory?: boolean
 }
 
-/**
- * 把后端 thinking_summary 事件（实时或历史）落到现有 reasoning UI 上：
- * - 多 block_id 合并到该消息的同一个 reasoning block（友商风格）
- * - 短摘要覆盖式更新（仅实时流；历史不恢复）
- * - 长摘要 append（实时走逐字流式，历史一次性写入）
- * - summary_seq 按 backendKey 维度去重，乱序/重复事件丢弃
- */
-function applyThinkingSummary(messageId: string, opts: ApplyThinkingSummaryOptions) {
+function getThinkingBackendKey(opts: Pick<ApplyThinkingSummaryOptions, 'backendBlockId' | 'stage'>) {
   const backendKeyRaw = (opts.backendBlockId || opts.stage || 'thinking').trim()
-  const backendKey = backendKeyRaw || 'thinking'
+  return backendKeyRaw || 'thinking'
+}
 
-  // 1. 找/建该消息唯一的 reasoning block
-  let frontendBlockId = messageThinkingBlockIdMap[messageId]
-  if (!frontendBlockId) {
-    if (!assistantReasoningBlocksMap[messageId]) {
-      assistantReasoningBlocksMap[messageId] = []
-    }
-    const seq = assistantReasoningSeqMap[messageId] || nextAssistantTimelineSeq()
-    frontendBlockId = opts.fromHistory ? `${messageId}:reasoning:${seq}` : getPendingAssistantIndicatorId(messageId)
-    assistantReasoningBlocksMap[messageId].push({ id: frontendBlockId, seq, text: '' })
-    reasoningStartedAtMap[frontendBlockId] = Date.now()
-    reasoningCollapsedMap[frontendBlockId] = true
-    messageThinkingBlockIdMap[messageId] = frontendBlockId
-    // 写入 seq 索引：保持 pending 小圆点与真实 reasoning 使用同一顺序，替换时不触发布局重排。
-    if (!assistantReasoningSeqMap[messageId]) {
-      assistantReasoningSeqMap[messageId] = seq
-    }
-    assistantTimelineLastKindMap[messageId] = 'reasoning'
+function buildThinkingSummarySignature(summary: ThinkingSummaryPayload) {
+  return [
+    typeof summary.summary_seq === 'number' ? summary.summary_seq : '',
+    (summary.short_summary || '').trim(),
+    (summary.detail_summary || '').trim(),
+    typeof summary.duration_seconds === 'number' ? summary.duration_seconds : '',
+    summary.final === true ? '1' : '0',
+  ].join('\u001f')
+}
+
+function ensureThinkingSummaryBlockBucket(messageId: string) {
+  if (!thinkingSummaryBlockStateMap[messageId]) {
+    thinkingSummaryBlockStateMap[messageId] = {}
+  }
+  return thinkingSummaryBlockStateMap[messageId]
+}
+
+function createThinkingReasoningBlock(messageId: string, seq: number) {
+  if (!assistantReasoningBlocksMap[messageId]) {
+    assistantReasoningBlocksMap[messageId] = []
   }
 
-  // 2. summary_seq 按 backendKey 去重
-  if (!thinkingSummarySeqMap[messageId]) thinkingSummarySeqMap[messageId] = {}
-  const lastSeq = thinkingSummarySeqMap[messageId][backendKey] || 0
-  const seqRaw = opts.summary.summary_seq
-  const incomingSeq = typeof seqRaw === 'number' ? seqRaw : lastSeq + 1
-  if (incomingSeq <= lastSeq) return
-  thinkingSummarySeqMap[messageId][backendKey] = incomingSeq
+  const frontendBlockId = `${messageId}:reasoning:${seq}`
+  assistantReasoningBlocksMap[messageId].push({ id: frontendBlockId, seq, text: '' })
+  reasoningStartedAtMap[frontendBlockId] = Date.now()
+  reasoningCollapsedMap[frontendBlockId] = true
+  activeReasoningBlockIdMap[messageId] = frontendBlockId
 
-  // 3. 思考态（仅实时流）
+  // 1. 仅记录该消息最早的 reasoning seq，用于旧的占位/合并判断兜底。
+  // 2. 真正展示顺序由每个 block 自己的 seq 决定，避免多轮思考互相挤到一起。
+  const currentSeq = assistantReasoningSeqMap[messageId]
+  if (typeof currentSeq !== 'number' || currentSeq <= 0 || seq < currentSeq) {
+    assistantReasoningSeqMap[messageId] = seq
+  }
+
+  assistantTimelineLastKindMap[messageId] = 'reasoning'
+  return frontendBlockId
+}
+
+function markThinkingSummaryBlockFinished(messageId: string, blockId: string) {
+  const bucket = thinkingSummaryBlockStateMap[messageId]
+  if (!bucket) return
+  Object.values(bucket).forEach((state) => {
+    if (state.blockId === blockId) {
+      state.finished = true
+    }
+  })
+}
+
+/**
+ * 把后端 thinking_summary 事件（实时或历史）落到现有 reasoning UI 上：
+ * - 同一 backendKey 连续摘要进入同一块；backendKey 变化、final 后续写入或 summary_seq 重启都会新建块
+ * - 短摘要覆盖式更新（仅实时流；历史不恢复）
+ * - 长摘要 append（实时走逐字流式，历史一次性写入）
+ * - summary_seq 只在当前思考阶段内去重，避免下一轮思考被上一轮的序号状态吞掉
+ */
+function applyThinkingSummary(messageId: string, opts: ApplyThinkingSummaryOptions) {
+  const backendKey = getThinkingBackendKey(opts)
+  const stateBucket = ensureThinkingSummaryBlockBucket(messageId)
+  const existingState = stateBucket[backendKey]
+  const seqRaw = opts.summary.summary_seq
+  const incomingSeq = typeof seqRaw === 'number' ? seqRaw : (existingState?.lastSummarySeq || 0) + 1
+  const signature = buildThinkingSummarySignature(opts.summary)
+
+  // 1. 同一阶段的完全重复事件直接丢弃；若序号回退但内容不同，视为后端开启了新一轮思考。
+  if (
+    existingState &&
+    incomingSeq <= existingState.lastSummarySeq &&
+    incomingSeq === existingState.lastSummarySeq &&
+    signature === existingState.lastSignature
+  ) {
+    return
+  }
+
+  const existingBlock = existingState
+    ? assistantReasoningBlocksMap[messageId]?.find((block) => block.id === existingState.blockId)
+    : null
+  const shouldStartNewBlock = !existingState ||
+    !existingBlock ||
+    existingState.finished ||
+    incomingSeq <= existingState.lastSummarySeq
+
+  let frontendBlockId = existingState?.blockId || ''
+  let currentState = existingState
+
+  if (shouldStartNewBlock) {
+    if (assistantTimelineLastKindMap[messageId] === 'reasoning') {
+      finishCurrentReasoningBlock(messageId)
+    }
+
+    const blockSeq = typeof opts.eventSeq === 'number' && opts.eventSeq > 0
+      ? opts.eventSeq
+      : nextAssistantTimelineSeq()
+    frontendBlockId = createThinkingReasoningBlock(messageId, blockSeq)
+    currentState = {
+      blockId: frontendBlockId,
+      lastSummarySeq: 0,
+      lastSignature: '',
+      finished: false,
+    }
+    stateBucket[backendKey] = currentState
+  }
+
+  if (!currentState) return
+  currentState.lastSummarySeq = incomingSeq
+  currentState.lastSignature = signature
+
+  // 2. 思考态（仅实时流）
   if (!opts.fromHistory) {
     thinkingMessageMap[messageId] = opts.summary.final !== true
   }
 
-  // 4. 短摘要覆盖（仅实时流）
+  // 3. 短摘要覆盖（仅实时流）
   if (!opts.fromHistory) {
     const shortText = (opts.summary.short_summary || '').trim()
     if (shortText) reasoningCurrentShortSummaryMap[frontendBlockId] = shortText
   }
 
-  // 5. 长摘要：实时走逐字流式队列；历史一次性写入
+  // 4. 长摘要：实时走逐字流式队列；历史一次性写入。
   const detailText = (opts.summary.detail_summary || '').trim()
   if (detailText) {
     if (opts.fromHistory) {
-      const block = assistantReasoningBlocksMap[messageId].find(b => b.id === frontendBlockId)
+      const block = assistantReasoningBlocksMap[messageId].find((b) => b.id === frontendBlockId)
       if (block) {
         block.text = block.text ? `${block.text}\n\n${detailText}` : detailText
       }
@@ -1129,13 +1226,13 @@ function applyThinkingSummary(messageId: string, opts: ApplyThinkingSummaryOptio
     }
   }
 
-  // 6. 累计耗时
+  // 5. 累计耗时
   if (typeof opts.summary.duration_seconds === 'number') {
     reasoningDurationMap[frontendBlockId] = Math.max(1, Math.round(opts.summary.duration_seconds))
   }
 
-  // 7. final 收口（仅实时流；先 flush 残留再 mark）
-  if (!opts.fromHistory && opts.summary.final === true) {
+  // 6. final 收口：先 flush 残留再 mark，后续同 backendKey 摘要会开启新的思考块。
+  if (opts.summary.final === true) {
     flushThinkingStream(messageId, frontendBlockId)
     markReasoningFinished(frontendBlockId, messageId)
   }
@@ -1656,7 +1753,11 @@ function markReasoningFinished(blockId: string, messageId: string) {
   if (startedAt && !reasoningDurationMap[blockId]) {
     reasoningDurationMap[blockId] = Math.max(1, Math.round((Date.now() - startedAt) / 1000))
   }
-  thinkingMessageMap[messageId] = false
+  if (activeReasoningBlockIdMap[messageId] === blockId) {
+    delete activeReasoningBlockIdMap[messageId]
+    thinkingMessageMap[messageId] = false
+  }
+  markThinkingSummaryBlockFinished(messageId, blockId)
 
   // 若被展开，则思考完毕后自动闭合
   if (reasoningCollapsedMap[blockId] === false) {
@@ -1679,7 +1780,7 @@ function getReasoningDurationSeconds(blockId: string) {
 }
 
 function getReasoningStatusLabel(block: DisplayAssistantBlock) {
-  const isThinking = block.sourceId === activeStreamingMessageId.value && thinkingMessageMap[block.sourceId]
+  const isThinking = isReasoningBlockActive(block)
 
   if (isThinking) {
     // 状态栏显示当前阶段的短摘要
@@ -1688,6 +1789,22 @@ function getReasoningStatusLabel(block: DisplayAssistantBlock) {
 
   // 思考结束后，状态栏显示固定文案
   return '已完成深度思考'
+}
+
+function isReasoningBlockActive(block: DisplayAssistantBlock) {
+  const sourceId = block.sourceId || ''
+  if (!sourceId) {
+    return false
+  }
+
+  // 1. message 级 thinking 只表示“这条回复仍在思考”，不能直接套到所有 reasoning block。
+  // 2. 只有当前活跃 block 才允许闪光、显示游标和继续逐字更新，避免新一轮思考把旧块复活。
+  return (
+    block.type === 'reasoning' &&
+    sourceId === activeStreamingMessageId.value &&
+    thinkingMessageMap[sourceId] === true &&
+    activeReasoningBlockIdMap[sourceId] === block.id
+  )
 }
 
 /**
@@ -1699,7 +1816,8 @@ function finishCurrentReasoningBlock(messageId: string) {
   const blocks = assistantReasoningBlocksMap[messageId] || []
   if (blocks.length === 0) return
   const lastBlock = blocks[blocks.length - 1]
-  
+
+  flushThinkingStream(messageId, lastBlock.id)
   markReasoningFinished(lastBlock.id, messageId)
   reasoningCollapsedMap[lastBlock.id] = true
 }
@@ -1870,11 +1988,16 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
 
   const sortedBlocks = blocks.sort((left, right) => left.seq - right.seq)
 
-  // 核心修复：确保全消息流中只有一个点。
-  // 只有当整个 DisplayMessage 处于流式状态，且当前块是最后一块时，才标记为 isStreaming。
+  // 1. reasoning 的流式状态下沉到具体 block，避免新一轮思考把旧 reasoning block 一起点亮。
+  // 2. 没有活跃 reasoning 时，仍沿用“最后一个块流式输出”的正文展示逻辑。
   if (isDisplayStreaming(dm) && sortedBlocks.length > 0) {
-    const lastBlock = sortedBlocks[sortedBlocks.length - 1] as any
-    lastBlock.isStreaming = true
+    const activeReasoningBlock = sortedBlocks.find((block) => isReasoningBlockActive(block)) as any
+    if (activeReasoningBlock) {
+      activeReasoningBlock.isStreaming = true
+    } else {
+      const lastBlock = sortedBlocks[sortedBlocks.length - 1] as any
+      lastBlock.isStreaming = true
+    }
   }
 
   return sortedBlocks
@@ -2389,7 +2512,7 @@ function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[
           if (chunk) {
             currentAssistantMessage.content += chunk
             // 同时存入 blocks 以支持和工具交错显示
-            appendAssistantContentChunk(mid, chunk)
+            appendAssistantContentChunk(mid, chunk, event.seq)
           }
         }
         break
@@ -2397,14 +2520,14 @@ function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[
       case 'tool_call':
         if (event.payload?.tool) {
           const t = event.payload.tool
-          appendToolTraceEvent(mid, mapToolEventState(t.status), normalizeToolSummary(t), buildToolDetail(t), t.name, t.argument_view, t.result_view)
+          appendToolTraceEvent(mid, mapToolEventState(t.status), normalizeToolSummary(t), buildToolDetail(t), t.name, t.argument_view, t.result_view, event.seq)
         }
         break
       
       case 'tool_result':
         if (event.payload?.tool) {
           const t = event.payload.tool
-          appendToolTraceEvent(mid, mapToolEventState(t.status), normalizeToolSummary(t), buildToolDetail(t), t.name, t.argument_view, t.result_view)
+          appendToolTraceEvent(mid, mapToolEventState(t.status), normalizeToolSummary(t), buildToolDetail(t), t.name, t.argument_view, t.result_view, event.seq)
         }
         break
 
@@ -2451,6 +2574,7 @@ function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[
             duration_seconds: payload.duration_seconds,
             final: payload.final,
           },
+          eventSeq: event.seq,
           fromHistory: true,
         })
         break
@@ -2918,10 +3042,10 @@ function prepareAssistantMessageForStreaming(message: AssistantMessage, createdA
   delete reasoningStartedAtMap[message.id]
   delete reasoningDurationMap[message.id]
   clearToolTraceState(message.id)
-  assistantReasoningSeqMap[message.id] = nextAssistantTimelineSeq()
   toolTraceEventsMap[message.id] = []
   statusTraceEventsMap[message.id] = []
   assistantContentBlocksMap[message.id] = []
+  assistantReasoningBlocksMap[message.id] = []
   assistantTimelineLastKindMap[message.id] = 'other'
 }
 
@@ -3296,8 +3420,7 @@ async function sendMessageInternal(options: SendMessageOptions = {}) {
   })
 
   // thinking 态由 applyThinkingSummary 在第一段 thinking_summary 到达时接管，
-  // 发送瞬间不预设，避免空占位 block 闪现后被真实 block 替换。
-  assistantReasoningSeqMap[assistantMessage.id] = nextAssistantTimelineSeq()
+  // 发送瞬间不预设 seq，避免后到的思考块排到先到的日志/工具事件前面。
   reasoningCollapsedMap[assistantMessage.id] = true
   activeStreamingMessageId.value = assistantMessage.id
   shouldAutoFollowMessages.value = true
@@ -3658,7 +3781,7 @@ onBeforeUnmount(() => {
                     <div class="chat-message__reasoning-head">
                       <div
                         class="chat-message__reasoning-title"
-                        :class="{ 'chat-message__reasoning-title--shimmering': activeStreamingMessageId === block.sourceId && thinkingMessageMap[block.sourceId] }"
+                        :class="{ 'chat-message__reasoning-title--shimmering': isReasoningBlockActive(block) }"
                       >
                         <span class="chat-message__reasoning-icon">
                           <svg
@@ -3716,7 +3839,7 @@ onBeforeUnmount(() => {
                           :class="{ 'chat-message__markdown--streaming': (block as any).isStreaming }"
                           v-html="renderMessageMarkdown(block.text || '', (block as any).isStreaming)"
                         />
-                        <div v-else class="chat-message__streaming chat-message__streaming--reasoning">
+                        <div v-else-if="isReasoningBlockActive(block)" class="chat-message__streaming chat-message__streaming--reasoning">
                           <div class="thinking-dot"></div>
                         </div>
                       </div>
