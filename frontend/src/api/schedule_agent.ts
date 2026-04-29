@@ -106,6 +106,7 @@ export interface TimelineEvent {
   role?: 'user' | 'assistant'
   content?: string
   payload?: {
+    /** @deprecated 仅供 Debug 页 mock 路径与 legacy 后端兼容；生产页已切换至 thinking_summary 协议。 */
     reasoning_content?: string
     stage?: string
     block_id?: string

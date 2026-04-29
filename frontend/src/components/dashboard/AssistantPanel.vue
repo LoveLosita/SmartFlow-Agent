@@ -36,6 +36,7 @@ import type {
   ConversationMeta,
   ThinkingModeType,
   SchedulePreviewData,
+  ThinkingSummaryPayload,
 } from '@/types/dashboard'
 import ScheduleResultCard from '@/components/assistant/ScheduleResultCard.vue'
 import ScheduleFineTuneModal from '@/components/assistant/ScheduleFineTuneModal.vue'
@@ -51,7 +52,6 @@ import type {
 
 interface StreamDeltaPayload {
   content?: string
-  reasoning_content?: string
 }
 
 interface StreamChoicePayload {
@@ -91,13 +91,13 @@ interface StreamExtraPayload {
   tool?: StreamToolExtraPayload
   confirm?: StreamConfirmPayload
   business_card?: TimelineBusinessCardPayload
+  thinking_summary?: ThinkingSummaryPayload
 }
 
 interface StreamEventPayload {
   choices?: StreamChoicePayload[]
   delta?: StreamDeltaPayload
   content?: string
-  reasoning_content?: string
   finish_reason?: string | null
   error?: StreamErrorPayload
   extra?: StreamExtraPayload
@@ -274,6 +274,18 @@ const conversationListItemRevealMap = reactive<Record<string, boolean>>({})
 const scheduleResultMap = reactive<Record<string, SchedulePreviewData>>({})
 const scheduleResultSeqMap = reactive<Record<string, number>>({})
 const businessCardEventsMap = reactive<Record<string, TimelineBusinessCardPayload[]>>({})
+
+// thinking_summary 协议：每条 message 唯一一个 reasoning blockId
+const messageThinkingBlockIdMap = reactive<Record<string, string>>({})
+// summary_seq 按 messageId + backendKey(block_id|stage|'thinking') 维度去重
+const thinkingSummarySeqMap = reactive<Record<string, Record<string, number>>>({})
+
+// 长摘要逐字流式状态：用普通 Map 存储，避免每字符触发 reactive 收集
+interface ThinkingStreamState { queue: string; timerId: number | null }
+const thinkingSummaryStreamMap = new Map<string, ThinkingStreamState>()
+const THINKING_STREAM_INTERVAL_MS = 20
+const THINKING_STREAM_FLUSH_THRESHOLD = 100
+
 const isFineTuneModalVisible = ref(false)
 const fineTuneLoading = ref(false)
 const activeFineTuneData = ref<SchedulePreviewData | null>(null)
@@ -455,14 +467,6 @@ provide('toggleTaskStatus', toggleTaskStatus)
 provide('onEditTask', handleTaskEdit)
 provide('onDeleteTask', handleTaskDelete)
 
-const quickActions = [
-  '帮我梳理今天最重要的三件事',
-  '把当前任务拆成可执行步骤',
-  '总结这段对话的关键结论',
-  '给我一个更稳妥的推进方案',
-]
-
-
 const DEFAULT_PLANNING_PROMPT = '请基于这些任务类帮我做一版智能编排。'
 
 let messageScrollRaf = 0
@@ -475,6 +479,9 @@ const reasoningDisplayNow = ref(Date.now())
 const shouldAutoFollowMessages = ref(true)
 const messageBottomTolerancePx = 24
 const isProgrammaticMessageScroll = ref(false)
+const suppressNextMessageLengthAutoScroll = ref(false)
+const initialFollowAlignmentPending = ref(false)
+const suppressEmptyStateTransition = ref(false)
 
 
 const shouldShowDialogConfirmOverlay = computed(() => confirmOverlayState.visible)
@@ -484,6 +491,13 @@ const assistantBodyStyle = computed(() => {
     '--assistant-history-width': `${historyExpanded.value ? historyPanelWidth.value : 68}px`,
   }
 })
+
+// 消息容器过渡 key 只表达“用户切换了哪一个会话视图”，不跟随消息数量变化。
+// 1. 发送首条消息时 selectedConversationId 会从空变 draft，随后又迁移成真实 ID；
+//    这些都是同一轮会话的内部状态变化，不能触发 chat-content-fade 重挂，否则用户消息会视觉下坠。
+// 2. 只有 selectConversation / startNewConversation 这种用户主动切视图的动作才更新 key。
+// 3. 新会话发送期间保持 empty key，等用户下次主动进入其它会话时再切换。
+const conversationTransitionKey = ref('empty')
 
 const selectedConversation = computed(() =>
   conversationList.value.find((item) => item.conversation_id === selectedConversationId.value),
@@ -498,6 +512,31 @@ const rawSelectedMessages = computed(() => {
 
 // retry 机制已整体下线：selectedMessages 直接回退到原始消息流，不再做分组/翻页。
 const selectedMessages = computed(() => rawSelectedMessages.value)
+
+function getPendingAssistantIndicatorId(messageId: string) {
+  return `${messageId}:reasoning:pending`
+}
+
+function hasVisibleAssistantOutput(message: AssistantMessage) {
+  if (message.role !== 'assistant') {
+    return true
+  }
+
+  // 1. activeStreamingMessageId 对应的空 assistant 要进入展示层，用稳定小圆点给“已发出”反馈。
+  // 2. 非活跃空 assistant 仍过滤，避免历史/异常占位消息污染时间线。
+  // 3. thinking_summary、正文、工具/状态/卡片任意一种到达后继续按真实块展示。
+  return Boolean(
+    isStreamingMessage(message) ||
+    message.content.trim() ||
+    message.reasoning?.trim() ||
+    (assistantReasoningBlocksMap[message.id]?.length ?? 0) > 0 ||
+    (assistantContentBlocksMap[message.id]?.length ?? 0) > 0 ||
+    (toolTraceEventsMap[message.id]?.length ?? 0) > 0 ||
+    (statusTraceEventsMap[message.id]?.length ?? 0) > 0 ||
+    (businessCardEventsMap[message.id]?.length ?? 0) > 0 ||
+    scheduleResultMap[message.id],
+  )
+}
 
 // 1. 将连续 assistant 消息合并为一条展示消息。
 // 2. ReAct 循环中 plan/execute/deliver 各节点都会产生 assistant speak，
@@ -527,14 +566,18 @@ const displayMessages = computed<DisplayMessage[]>(() => {
       group.push(src[i])
       i++
     }
+    const visibleGroup = group.filter(hasVisibleAssistantOutput)
+    if (visibleGroup.length <= 0) {
+      continue
+    }
     result.push({
-      id: group[0].id,
+      id: visibleGroup[0].id,
       role: 'assistant',
-      content: group.map(m => m.content).filter(Boolean).join('\n\n'),
-      createdAt: group[group.length - 1].createdAt,
-      reasoning: group.map(m => m.reasoning).filter(Boolean).join('\n\n') || undefined,
-      sources: group,
-      merged: group.length > 1,
+      content: visibleGroup.map(m => m.content).filter(Boolean).join('\n\n'),
+      createdAt: visibleGroup[visibleGroup.length - 1].createdAt,
+      reasoning: visibleGroup.map(m => m.reasoning).filter(Boolean).join('\n\n') || undefined,
+      sources: visibleGroup,
+      merged: visibleGroup.length > 1,
     })
   }
   return result
@@ -703,9 +746,22 @@ function clearToolTraceState(messageId: string) {
   delete scheduleResultMap[messageId]
   delete scheduleResultSeqMap[messageId]
   delete businessCardEventsMap[messageId]
+  delete messageThinkingBlockIdMap[messageId]
+  delete thinkingSummarySeqMap[messageId]
   for (const key of Object.keys(toolTraceExpandedMap)) {
     if (key.startsWith(`${messageId}:tool:`)) {
       delete toolTraceExpandedMap[key]
+    }
+  }
+  // 清理该 message 名下所有 thinking 流式 ticker
+  const prefix = `${messageId}:reasoning:`
+  for (const blockId of Array.from(thinkingSummaryStreamMap.keys())) {
+    if (blockId.startsWith(prefix)) {
+      const state = thinkingSummaryStreamMap.get(blockId)
+      if (state?.timerId !== null && state?.timerId !== undefined) {
+        window.clearInterval(state.timerId)
+      }
+      thinkingSummaryStreamMap.delete(blockId)
     }
   }
 }
@@ -937,6 +993,154 @@ function appendAssistantReasoningChunk(messageId: string, chunk: string) {
   assistantTimelineLastKindMap[messageId] = 'reasoning'
 }
 
+// ============ thinking_summary 协议接入 ============
+
+function getOrInitThinkingStream(blockId: string): ThinkingStreamState {
+  let state = thinkingSummaryStreamMap.get(blockId)
+  if (!state) {
+    state = { queue: '', timerId: null }
+    thinkingSummaryStreamMap.set(blockId, state)
+  }
+  return state
+}
+
+function startThinkingStreamTicker(messageId: string, blockId: string) {
+  const state = getOrInitThinkingStream(blockId)
+  if (state.timerId !== null) return
+  state.timerId = window.setInterval(() => {
+    const cur = thinkingSummaryStreamMap.get(blockId)
+    if (!cur) return
+    if (!cur.queue) {
+      if (cur.timerId !== null) {
+        window.clearInterval(cur.timerId)
+        cur.timerId = null
+      }
+      return
+    }
+    const ch = cur.queue.charAt(0)
+    cur.queue = cur.queue.slice(1)
+    const block = assistantReasoningBlocksMap[messageId]?.find(b => b.id === blockId)
+    if (block) {
+      block.text += ch
+      // 逐字输出不是 SSE block 驱动，必须在 ticker 内主动跟随，否则长摘要会慢半拍贴近输入框。
+      scheduleScrollMessagesToBottom(false)
+    }
+  }, THINKING_STREAM_INTERVAL_MS)
+}
+
+function flushThinkingStream(messageId: string, blockId: string) {
+  const state = thinkingSummaryStreamMap.get(blockId)
+  if (!state) return
+  if (state.queue) {
+    const block = assistantReasoningBlocksMap[messageId]?.find(b => b.id === blockId)
+    if (block) block.text += state.queue
+    state.queue = ''
+  }
+  if (state.timerId !== null) {
+    window.clearInterval(state.timerId)
+    state.timerId = null
+  }
+}
+
+function flushAllThinkingStreamsForMessage(messageId: string) {
+  const blocks = assistantReasoningBlocksMap[messageId] || []
+  blocks.forEach(b => flushThinkingStream(messageId, b.id))
+}
+
+function enqueueThinkingDetail(messageId: string, blockId: string, detail: string) {
+  const state = getOrInitThinkingStream(blockId)
+  // 高频时段：队列堆积超阈值，直接打包瞬出，避免画面落后真实进度
+  if (state.queue.length > THINKING_STREAM_FLUSH_THRESHOLD) {
+    flushThinkingStream(messageId, blockId)
+  }
+  const block = assistantReasoningBlocksMap[messageId]?.find(b => b.id === blockId)
+  const hasPrior = !!(block?.text) || !!state.queue
+  state.queue += (hasPrior ? '\n\n' : '') + detail
+  startThinkingStreamTicker(messageId, blockId)
+}
+
+interface ApplyThinkingSummaryOptions {
+  backendBlockId?: string
+  stage?: string
+  summary: ThinkingSummaryPayload
+  /** true 表示来自 timeline 历史恢复：不写短摘要、不更新思考态、长摘要一次性写入 */
+  fromHistory?: boolean
+}
+
+/**
+ * 把后端 thinking_summary 事件（实时或历史）落到现有 reasoning UI 上：
+ * - 多 block_id 合并到该消息的同一个 reasoning block（友商风格）
+ * - 短摘要覆盖式更新（仅实时流；历史不恢复）
+ * - 长摘要 append（实时走逐字流式，历史一次性写入）
+ * - summary_seq 按 backendKey 维度去重，乱序/重复事件丢弃
+ */
+function applyThinkingSummary(messageId: string, opts: ApplyThinkingSummaryOptions) {
+  const backendKeyRaw = (opts.backendBlockId || opts.stage || 'thinking').trim()
+  const backendKey = backendKeyRaw || 'thinking'
+
+  // 1. 找/建该消息唯一的 reasoning block
+  let frontendBlockId = messageThinkingBlockIdMap[messageId]
+  if (!frontendBlockId) {
+    if (!assistantReasoningBlocksMap[messageId]) {
+      assistantReasoningBlocksMap[messageId] = []
+    }
+    const seq = assistantReasoningSeqMap[messageId] || nextAssistantTimelineSeq()
+    frontendBlockId = opts.fromHistory ? `${messageId}:reasoning:${seq}` : getPendingAssistantIndicatorId(messageId)
+    assistantReasoningBlocksMap[messageId].push({ id: frontendBlockId, seq, text: '' })
+    reasoningStartedAtMap[frontendBlockId] = Date.now()
+    reasoningCollapsedMap[frontendBlockId] = true
+    messageThinkingBlockIdMap[messageId] = frontendBlockId
+    // 写入 seq 索引：保持 pending 小圆点与真实 reasoning 使用同一顺序，替换时不触发布局重排。
+    if (!assistantReasoningSeqMap[messageId]) {
+      assistantReasoningSeqMap[messageId] = seq
+    }
+    assistantTimelineLastKindMap[messageId] = 'reasoning'
+  }
+
+  // 2. summary_seq 按 backendKey 去重
+  if (!thinkingSummarySeqMap[messageId]) thinkingSummarySeqMap[messageId] = {}
+  const lastSeq = thinkingSummarySeqMap[messageId][backendKey] || 0
+  const seqRaw = opts.summary.summary_seq
+  const incomingSeq = typeof seqRaw === 'number' ? seqRaw : lastSeq + 1
+  if (incomingSeq <= lastSeq) return
+  thinkingSummarySeqMap[messageId][backendKey] = incomingSeq
+
+  // 3. 思考态（仅实时流）
+  if (!opts.fromHistory) {
+    thinkingMessageMap[messageId] = opts.summary.final !== true
+  }
+
+  // 4. 短摘要覆盖（仅实时流）
+  if (!opts.fromHistory) {
+    const shortText = (opts.summary.short_summary || '').trim()
+    if (shortText) reasoningCurrentShortSummaryMap[frontendBlockId] = shortText
+  }
+
+  // 5. 长摘要：实时走逐字流式队列；历史一次性写入
+  const detailText = (opts.summary.detail_summary || '').trim()
+  if (detailText) {
+    if (opts.fromHistory) {
+      const block = assistantReasoningBlocksMap[messageId].find(b => b.id === frontendBlockId)
+      if (block) {
+        block.text = block.text ? `${block.text}\n\n${detailText}` : detailText
+      }
+    } else {
+      enqueueThinkingDetail(messageId, frontendBlockId, detailText)
+    }
+  }
+
+  // 6. 累计耗时
+  if (typeof opts.summary.duration_seconds === 'number') {
+    reasoningDurationMap[frontendBlockId] = Math.max(1, Math.round(opts.summary.duration_seconds))
+  }
+
+  // 7. final 收口（仅实时流；先 flush 残留再 mark）
+  if (!opts.fromHistory && opts.summary.final === true) {
+    flushThinkingStream(messageId, frontendBlockId)
+    markReasoningFinished(frontendBlockId, messageId)
+  }
+}
+
 /**
  * 追加业务卡片事件
  */
@@ -1099,6 +1303,7 @@ function isAssistantTimelineKind(kind: string) {
     'interrupt',
     'status',
     'business_card',
+    'thinking_summary',
   ])
   return assistantKinds.has(kind)
 }
@@ -1109,6 +1314,9 @@ function isToolTraceExpanded(eventId: string) {
 
 function toggleToolTraceExpanded(eventId: string) {
   toolTraceExpandedMap[eventId] = !toolTraceExpandedMap[eventId]
+  // 1. 工具卡片展开/收起会改变消息流高度，但它不是用户滚轮上翻。
+  // 2. 若当前仍处于自动跟随态，则等 DOM 更新后补一次跟随线对齐；若用户已手动阅读，schedule 内部会自动跳过。
+  void nextTick(() => scheduleScrollMessagesToBottom(false))
 }
 
 function removeConversationMessage(conversationId: string, messageId: string) {
@@ -1502,6 +1710,9 @@ function isReasoningCollapsed(messageId: string) {
 
 function toggleReasoningCollapse(messageId: string) {
   reasoningCollapsedMap[messageId] = !reasoningCollapsedMap[messageId]
+  // 1. 深度思考长摘要展开时高度会瞬间增加，容易把底部推出跟随线。
+  // 2. 这里只在自动跟随仍开启时补偿；用户已经上翻时不会强行拉回。
+  void nextTick(() => scheduleScrollMessagesToBottom(false))
 }
 
 function shouldShowReasoningBox(message: AssistantMessage) {
@@ -1509,10 +1720,6 @@ function shouldShowReasoningBox(message: AssistantMessage) {
     Boolean(message.reasoning?.trim()) ||
     (isStreamingMessage(message) && isThinkingMessage(message))
   )
-}
-
-function shouldShowAnsweringIndicator(message: AssistantMessage) {
-  return isStreamingMessage(message) && !isThinkingMessage(message) && !message.content.trim()
 }
 
 // ---------- DisplayMessage 适配函数 ----------
@@ -1550,6 +1757,7 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
   let hasContentBlock = false
 
   for (const source of dm.sources) {
+    const sourceBlockStart = blocks.length
     const sourceEvents = (toolTraceEventsMap[source.id] || []).slice().sort((left, right) => left.seq - right.seq)
     for (const event of sourceEvents) {
       blocks.push({
@@ -1573,25 +1781,15 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
       })
     }
 
-    // 从推理块映射中提取所有独立的推理片段
+    // 推理块完全由 applyThinkingSummary 创建；不再注入空占位块。
+    // 没有 thinking_summary 事件到达时，先保持时间线空白，避免临时小圆点与真实思考块互相替换造成跳动。
     const reasoningBlocks = assistantReasoningBlocksMap[source.id] || []
-    if (reasoningBlocks.length > 0) {
-      for (const rb of reasoningBlocks) {
-        blocks.push({
-          id: rb.id,
-          type: 'reasoning',
-          seq: rb.seq,
-          text: rb.text,
-          sourceId: source.id,
-          source,
-        })
-      }
-    } else if (source.id === activeStreamingMessageId.value && thinkingMessageMap[source.id]) {
-      // 流式过程中尚未有实质文本产出时的“思考中”占位块
+    for (const rb of reasoningBlocks) {
       blocks.push({
-        id: `${source.id}:reasoning:streaming`,
+        id: rb.id,
         type: 'reasoning',
-        seq: assistantReasoningSeqMap[source.id] || 10,
+        seq: rb.seq,
+        text: rb.text,
         sourceId: source.id,
         source,
       })
@@ -1648,6 +1846,16 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
         source,
       })
     }
+
+    if (source.id === activeStreamingMessageId.value && blocks.length === sourceBlockStart) {
+      blocks.push({
+        id: getPendingAssistantIndicatorId(source.id),
+        type: 'content_indicator',
+        seq: assistantReasoningSeqMap[source.id] || 10,
+        sourceId: source.id,
+        source,
+      })
+    }
   }
 
   if (!hasContentBlock && dm.content) {
@@ -1659,15 +1867,6 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
       text: dm.content,
     })
   }
-
-    if (shouldShowDisplayAnsweringIndicator(dm) && blocks.length === 0) {
-      const maxSeq = blocks.length > 0 ? Math.max(...blocks.map((item) => item.seq)) : 0
-      blocks.push({
-        id: `${dm.id}:content-indicator`,
-        type: 'content_indicator',
-        seq: maxSeq + 1,
-      } as any)
-    }
 
   const sortedBlocks = blocks.sort((left, right) => left.seq - right.seq)
 
@@ -1694,18 +1893,36 @@ function getToolTraceStateLabel(state: ToolTraceState): string {
   return '已完成'
 }
 
-function shouldShowDisplayAnsweringIndicator(dm: DisplayMessage): boolean {
-  // 基础判断：处于流式，且还没有任何实质性内容（包括推理和正文）
-  return isDisplayStreaming(dm) && !dm.content.trim()
-}
-
 function getDisplayReasoningStatusLabel(dm: DisplayMessage): string {
   // 此函数已废弃，推理状态现已下沉到各 source 块处理。
   // 仅保留空实现以防意外调用。
   return '已思考'
 }
 
+function getMessageFollowLineOverflow(viewport: HTMLElement) {
+  const messageList = viewport.querySelector<HTMLElement>('.assistant-message-list')
+  const followSpacer = viewport.querySelector<HTMLElement>('.assistant-messages__follow-spacer')
+  if (!messageList || !followSpacer) {
+    return null
+  }
+
+  const viewportRect = viewport.getBoundingClientRect()
+  const listRect = messageList.getBoundingClientRect()
+  const spacerHeight = followSpacer.getBoundingClientRect().height
+  const followLineY = viewportRect.bottom - spacerHeight
+  return listRect.bottom - followLineY
+}
+
 function isMessageViewportAtBottom(viewport: HTMLElement) {
+  const followLineOverflow = getMessageFollowLineOverflow(viewport)
+  if (followLineOverflow !== null) {
+    // 1. 当前页面的“自动跟随底部”不是 scrollHeight 真底部，而是输入框上方的跟随线。
+    // 2. follow-spacer 会故意留在消息后面；如果继续按 scrollHeight 判断，程序刚对齐跟随线就会被误判为“离底部很远”。
+    // 3. overflow <= 容差 表示短消息自然在跟随线上方，或长消息已经贴住跟随线，都应保持自动跟随。
+    return followLineOverflow <= messageBottomTolerancePx
+  }
+
+  // 兜底：极早期 DOM 尚未挂载 follow-spacer 时，退回原始滚动底部判定。
   return viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= messageBottomTolerancePx
 }
 
@@ -1743,7 +1960,7 @@ function handleMessageViewportScroll(event: Event) {
   shouldAutoFollowMessages.value = isMessageViewportAtBottom(viewport)
 }
 
-function scheduleScrollMessagesToBottom(smooth = false, force = false) {
+function scheduleScrollMessagesToBottom(_smooth = false, force = false) {
   if (!force && !shouldAutoFollowMessages.value) {
     return
   }
@@ -1771,25 +1988,136 @@ function scheduleScrollMessagesToBottom(smooth = false, force = false) {
       return
     }
 
-    // 1. 先标记为程序触发滚动，避免 scroll 事件把自动跟随错误关闭。
-    // 2. 采用双 requestAnimationFrame，等待本轮文本增量和布局波动稳定后再落到底部。
-    // 3. 下一帧统一释放程序滚动标记，恢复用户主动滚动的判断能力。
-    isProgrammaticMessageScroll.value = true
-    viewport.scrollTo({
-      top: viewport.scrollHeight,
-      behavior: smooth ? 'smooth' : 'auto',
-    })
+    // 自动跟随只补偿“超出跟随线”的距离，短消息保持自然排布。
+    alignMessagesToFollowLineCore(viewport)
     messageScrollRaf = window.requestAnimationFrame(() => {
-      viewport.scrollTo({
-        top: viewport.scrollHeight,
-        behavior: 'auto',
-      })
+      alignMessagesToFollowLineCore(viewport)
       messageScrollRaf = 0
       messageScrollReleaseRaf = window.requestAnimationFrame(() => {
         isProgrammaticMessageScroll.value = false
         shouldAutoFollowMessages.value = isMessageViewportAtBottom(viewport)
         messageScrollReleaseRaf = 0
       })
+    })
+  })
+}
+
+function scrollMessagesToBottomImmediately(force = false) {
+  if (!force && !shouldAutoFollowMessages.value) {
+    return
+  }
+
+  if (force) {
+    shouldAutoFollowMessages.value = true
+  }
+
+  if (messageScrollRaf) {
+    cancelAnimationFrame(messageScrollRaf)
+    messageScrollRaf = 0
+  }
+  if (messageScrollReleaseRaf) {
+    cancelAnimationFrame(messageScrollReleaseRaf)
+    messageScrollReleaseRaf = 0
+  }
+
+  const viewport = messageViewportRef.value
+  if (!viewport) {
+    return
+  }
+
+  // 发送首帧只按跟随线补偿，不再直达 scrollHeight，避免短消息被强制吸到底部。
+  alignMessagesToFollowLineCore(viewport)
+  messageScrollReleaseRaf = window.requestAnimationFrame(() => {
+    isProgrammaticMessageScroll.value = false
+    shouldAutoFollowMessages.value = isMessageViewportAtBottom(viewport)
+    messageScrollReleaseRaf = 0
+  })
+}
+
+function alignMessagesToFollowLineCore(viewport: HTMLElement) {
+  const overflow = getMessageFollowLineOverflow(viewport)
+  if (overflow === null) {
+    return false
+  }
+
+  // 1. 短消息：列表底部还没碰到跟随线，不做滚动，保持自然贴顶部/上一条消息。
+  // 2. 长消息：只补偿超出跟随线的距离，让当前消息底部停在输入框上方的基准线。
+  // 3. 不使用 scrollHeight 真底部，避免 follow-spacer 把自动跟随状态误判为“未到底”。
+  if (overflow <= 1) {
+    return false
+  }
+
+  isProgrammaticMessageScroll.value = true
+  viewport.scrollTop += overflow
+  return true
+}
+
+function alignMessagesToFollowLineImmediately(force = false) {
+  if (!force && !shouldAutoFollowMessages.value) {
+    return
+  }
+
+  if (force) {
+    shouldAutoFollowMessages.value = true
+  }
+
+  if (messageScrollRaf) {
+    cancelAnimationFrame(messageScrollRaf)
+    messageScrollRaf = 0
+  }
+  if (messageScrollReleaseRaf) {
+    cancelAnimationFrame(messageScrollReleaseRaf)
+    messageScrollReleaseRaf = 0
+  }
+
+  const viewport = messageViewportRef.value
+  if (!viewport) {
+    return
+  }
+
+  alignMessagesToFollowLineCore(viewport)
+  messageScrollReleaseRaf = window.requestAnimationFrame(() => {
+    isProgrammaticMessageScroll.value = false
+    shouldAutoFollowMessages.value = isMessageViewportAtBottom(viewport)
+    messageScrollReleaseRaf = 0
+  })
+}
+
+function alignInitialMessagesToFollowLine() {
+  const viewport = messageViewportRef.value
+  if (!viewport) {
+    initialFollowAlignmentPending.value = false
+    suppressEmptyStateTransition.value = false
+    return
+  }
+
+  if (messageScrollRaf) {
+    cancelAnimationFrame(messageScrollRaf)
+    messageScrollRaf = 0
+  }
+  if (messageScrollReleaseRaf) {
+    cancelAnimationFrame(messageScrollReleaseRaf)
+    messageScrollReleaseRaf = 0
+  }
+
+  // 1. 新会话首帧必须“先等布局稳定，再在显示前最后一次对齐”。
+  // 2. 欢迎区移除、消息 markdown 渲染、pending 小圆点进入时间线都可能在 nextTick 后再触发布局结算。
+  // 3. 因此这里让列表继续隐藏两帧，最后一帧再按跟随线补偿；短消息仍不会滚动。
+  messageScrollReleaseRaf = window.requestAnimationFrame(() => {
+    messageScrollReleaseRaf = window.requestAnimationFrame(() => {
+      // 1. 等两帧让欢迎区移除、消息 markdown 和 pending 小圆点完成布局结算。
+      // 2. 展示前最后一刻再按跟随线补偿，避免用户看到“先到偏高位置，再被后续跟随拉到基准线”。
+      // 3. 若期间 SSE 又排了自动跟随，这里统一取消并以首帧对齐结果为准。
+      if (messageScrollRaf) {
+        cancelAnimationFrame(messageScrollRaf)
+        messageScrollRaf = 0
+      }
+      alignMessagesToFollowLineCore(viewport)
+      isProgrammaticMessageScroll.value = false
+      shouldAutoFollowMessages.value = isMessageViewportAtBottom(viewport)
+      initialFollowAlignmentPending.value = false
+      suppressEmptyStateTransition.value = false
+      messageScrollReleaseRaf = 0
     })
   })
 }
@@ -2064,24 +2392,6 @@ function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[
             appendAssistantContentChunk(mid, chunk)
           }
         }
-        
-        if (event.payload?.reasoning_content) {
-          const newReasoning = event.payload.reasoning_content
-          const oldReasoning = currentAssistantMessage.reasoning || ''
-          let reasoningChunk = newReasoning
-          if (newReasoning.startsWith(oldReasoning)) {
-            reasoningChunk = newReasoning.slice(oldReasoning.length)
-          }
-          
-          if (reasoningChunk) {
-            currentAssistantMessage.reasoning = oldReasoning + reasoningChunk
-            // 时序化存储推理内容
-            appendAssistantReasoningChunk(mid, reasoningChunk)
-            if (!assistantReasoningSeqMap[mid]) {
-              assistantReasoningSeqMap[mid] = event.seq
-            }
-          }
-        }
         break
       
       case 'tool_call':
@@ -2127,6 +2437,24 @@ function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[
           appendBusinessCardEvent(mid, event.payload.business_card, event.seq)
         }
         break
+      case 'thinking_summary': {
+        const payload = event.payload || {}
+        const detailText = (payload.detail_summary || event.content || '').trim()
+        if (!detailText && typeof payload.duration_seconds !== 'number') break
+        applyThinkingSummary(mid, {
+          backendBlockId: payload.block_id,
+          stage: payload.stage,
+          summary: {
+            summary_seq: payload.summary_seq,
+            short_summary: undefined,
+            detail_summary: detailText,
+            duration_seconds: payload.duration_seconds,
+            final: payload.final,
+          },
+          fromHistory: true,
+        })
+        break
+      }
     }
   }
 
@@ -2267,6 +2595,7 @@ async function loadConversationContextStats(conversationId: string, forceReload 
 async function selectConversation(conversationId: string) {
   cancelEditUserMessage()
   resetConfirmOverlay()
+  conversationTransitionKey.value = conversationId || 'empty'
   selectedConversationId.value = conversationId
 
   // 仅在 Standalone 模式下将状态同步到 URL，实现可刷新/可分享
@@ -2285,7 +2614,22 @@ async function selectConversation(conversationId: string) {
 function startNewConversation() {
   cancelEditUserMessage()
   resetConfirmOverlay()
+  conversationTransitionKey.value = 'empty'
   selectedConversationId.value = ''
+  if (messageScrollRaf) {
+    cancelAnimationFrame(messageScrollRaf)
+    messageScrollRaf = 0
+  }
+  if (messageScrollReleaseRaf) {
+    cancelAnimationFrame(messageScrollReleaseRaf)
+    messageScrollReleaseRaf = 0
+  }
+  const viewport = messageViewportRef.value
+  if (viewport) {
+    // 新建会话会暂时隐藏消息滚动区；若保留旧会话 scrollTop，
+    // 首条消息恢复滚动区时浏览器会直接夹到新范围内，看起来就是“瞬移一节”。
+    viewport.scrollTop = 0
+  }
 
   // 清除 URL 中的 ID
   if (isStandaloneMode.value && route.params.id) {
@@ -2295,6 +2639,7 @@ function startNewConversation() {
   messageInput.value = ''
   activeStreamingMessageId.value = ''
   shouldAutoFollowMessages.value = true
+  suppressEmptyStateTransition.value = false
 }
 
 function isManualThinkingEnabled(mode: ThinkingModeType) {
@@ -2566,11 +2911,14 @@ function prepareAssistantMessageForStreaming(message: AssistantMessage, createdA
   message.content = ''
   message.reasoning = ''
   message.createdAt = createdAt
-  thinkingMessageMap[message.id] = isManualThinkingEnabled(selectedThinkingMode.value)
+  // thinking 态由 applyThinkingSummary 在第一段 thinking_summary 到达时接管，
+  // 这里不再发送瞬间预设，避免占位 block 与真实 block 互相替换造成视觉割裂。
+  delete thinkingMessageMap[message.id]
   reasoningCollapsedMap[message.id] = true
   delete reasoningStartedAtMap[message.id]
   delete reasoningDurationMap[message.id]
   clearToolTraceState(message.id)
+  assistantReasoningSeqMap[message.id] = nextAssistantTimelineSeq()
   toolTraceEventsMap[message.id] = []
   statusTraceEventsMap[message.id] = []
   assistantContentBlocksMap[message.id] = []
@@ -2667,6 +3015,19 @@ function handleStreamExtraEvent(extra: StreamExtraPayload | undefined, assistant
     scheduleScrollMessagesToBottom(true)
   }
 
+  if (extra.kind === 'thinking_summary') {
+    const summary = extra.thinking_summary
+    if (summary) {
+      applyThinkingSummary(assistantMessage.id, {
+        backendBlockId: extra.block_id,
+        stage: extra.stage,
+        summary,
+      })
+      scheduleScrollMessagesToBottom(false)
+    }
+    return
+  }
+
   if (extra.kind === 'business_card' && extra.business_card) {
     appendBusinessCardEvent(assistantMessage.id, extra.business_card)
     scheduleScrollMessagesToBottom(true)
@@ -2700,17 +3061,10 @@ function handleStreamExtraEvent(extra: StreamExtraPayload | undefined, assistant
   }
 }
 
-function shouldSuppressReasoningDeltaByExtraKind(kind?: string) {
-  if (!kind) {
-    return false
-  }
-  return kind === 'status' || kind === 'tool_call' || kind === 'tool_result'
-}
-
 // processSseBlock 负责解析单个 SSE block，并把增量内容落到当前 assistant message 上。
 // 职责边界：
 // 1. 会把同一个 block 里的多行 data: 合并后再解析，兼容标准 SSE 多行数据格式。
-// 2. 同时兼容 choices[0].delta 和平铺 content/reasoning_content 两种载荷，避免后端切换实现时前端失配。
+// 2. 同时兼容 choices[0].delta 和平铺 content 两种载荷，避免后端切换实现时前端失配。
 // 3. 收到 finish_reason 或 [DONE] 时立即收尾，并自动折叠思考框，让最终阅读视图更接近 DeepSeek 风格。
 function processSseBlock(block: string, assistantMessage: AssistantMessage) {
   const dataLines = block
@@ -2752,31 +3106,13 @@ function processSseBlock(block: string, assistantMessage: AssistantMessage) {
   handleStreamExtraEvent(parsed.extra, assistantMessage)
 
   const shouldSuppressVisibleDelta = confirmOnlyStreamMap[assistantMessage.id] === true
-  const shouldSuppressReasoningByExtraKind = shouldSuppressReasoningDeltaByExtraKind(parsed.extra?.kind)
   const choice = parsed.choices?.[0]
   const delta = choice?.delta ?? parsed.delta ?? parsed
   const finishReason = choice?.finish_reason ?? parsed.finish_reason ?? null
 
-  if (
-    !shouldSuppressVisibleDelta &&
-    !shouldSuppressReasoningByExtraKind &&
-    typeof delta?.reasoning_content === 'string' &&
-    delta.reasoning_content
-  ) {
-    // 正文回流后仍允许追加 reasoning（工具调用摘要、阶段状态等），
-    // 但不再切换面板状态，避免 UI 闪烁。
-    if (!assistantMessage.content.trim()) {
-      markReasoningStart(assistantMessage)
-      thinkingMessageMap[assistantMessage.id] = true
-    }
-    if (!assistantReasoningSeqMap[assistantMessage.id]) {
-      assistantReasoningSeqMap[assistantMessage.id] = nextAssistantTimelineSeq()
-    }
-    appendAssistantReasoningChunk(assistantMessage.id, delta.reasoning_content)
-    assistantMessage.reasoning = `${assistantMessage.reasoning || ''}${delta.reasoning_content}`
-  }
-
   if (!shouldSuppressVisibleDelta && typeof delta?.content === 'string' && delta.content) {
+    // 正文开始：先把队列里的残留字符瞬时打出，避免被截断丢失
+    flushAllThinkingStreamsForMessage(assistantMessage.id)
     appendAssistantContentChunk(assistantMessage.id, delta.content)
     if (isThinkingMessage(assistantMessage)) {
       finishCurrentReasoningBlock(assistantMessage.id)
@@ -2915,6 +3251,14 @@ async function sendMessageInternal(options: SendMessageOptions = {}) {
     return
   }
 
+  const shouldRemoveEmptyStateImmediately = !selectedConversationId.value && !isResume
+  if (shouldRemoveEmptyStateImmediately) {
+    // 1. 新会话首条消息发送时，欢迎区如果走 fade-switch leave，会在 0.3s 内继续占布局高度。
+    // 2. 这会让首帧跟随线按“旧高度”计算，随后欢迎区离场后消息视口变高，自动跟随再补一次 scrollTop，看起来就是往下瞬移。
+    // 3. 因此首发只关闭欢迎区离场过渡，不改视觉样式；首帧对齐完成后会在 alignInitialMessagesToFollowLine 中恢复。
+    suppressEmptyStateTransition.value = true
+  }
+
   chatLoading.value = true
 
   const planningTaskClassIdsForRequest = options.requestExtra ? [] : [...pendingPlanningTaskClassIds.value]
@@ -2923,6 +3267,11 @@ async function sendMessageInternal(options: SendMessageOptions = {}) {
     options.resetPlanningSelectionOnSuccess ?? planningTaskClassIdsForRequest.length > 0
   const isNewConversationRound = !selectedConversationId.value
   const draftConversationId = selectedConversationId.value || createDraftConversationId()
+  const shouldSkipInitialProgrammaticScroll = isNewConversationRound && !isResume
+  if (shouldSkipInitialProgrammaticScroll) {
+    initialFollowAlignmentPending.value = true
+    suppressNextMessageLengthAutoScroll.value = true
+  }
 
   if (!selectedConversationId.value) {
     selectedConversationId.value = draftConversationId
@@ -2946,13 +3295,24 @@ async function sendMessageInternal(options: SendMessageOptions = {}) {
     reasoning: '',
   })
 
-  thinkingMessageMap[assistantMessage.id] = isManualThinkingEnabled(selectedThinkingMode.value)
+  // thinking 态由 applyThinkingSummary 在第一段 thinking_summary 到达时接管，
+  // 发送瞬间不预设，避免空占位 block 闪现后被真实 block 替换。
+  assistantReasoningSeqMap[assistantMessage.id] = nextAssistantTimelineSeq()
   reasoningCollapsedMap[assistantMessage.id] = true
   activeStreamingMessageId.value = assistantMessage.id
+  shouldAutoFollowMessages.value = true
 
   messageInput.value = ''
   prependConversationPreview(draftConversationId, text, now)
-  scheduleScrollMessagesToBottom(false, true)
+  if (shouldSkipInitialProgrammaticScroll) {
+    // 新会话首发只按“跟随线”条件滚动：
+    // 短消息不动；长消息才把底部补偿到输入框上方的基准线。
+    // 对齐完成前先隐藏列表，避免用户看到“先上屏再瞬移”的中间帧。
+    void nextTick(() => alignInitialMessagesToFollowLine())
+  } else {
+    // 既有会话继续即时落底，保证追加消息能贴住当前自动跟随位置。
+    void nextTick(() => scrollMessagesToBottomImmediately(true))
+  }
 
   const controller = new AbortController()
   streamAbortController.value = controller
@@ -3004,6 +3364,7 @@ async function sendMessageInternal(options: SendMessageOptions = {}) {
     streamAbortController.value = null
     activeStreamingMessageId.value = ''
     chatLoading.value = false
+    suppressEmptyStateTransition.value = false
   }
 }
 
@@ -3014,6 +3375,10 @@ async function sendMessage(preset?: string) {
 watch(
   () => selectedMessages.value.length,
   () => {
+    if (suppressNextMessageLengthAutoScroll.value) {
+      suppressNextMessageLengthAutoScroll.value = false
+      return
+    }
     scheduleScrollMessagesToBottom(false)
   },
 )
@@ -3063,6 +3428,14 @@ onBeforeUnmount(() => {
     window.clearTimeout(timerId)
   }
   conversationListItemRevealTimerMap.clear()
+  // 兜底：清理所有未结束的 thinking 流式 ticker，防止组件销毁后定时器残留
+  for (const state of thinkingSummaryStreamMap.values()) {
+    if (state.timerId !== null) {
+      window.clearInterval(state.timerId)
+      state.timerId = null
+    }
+  }
+  thinkingSummaryStreamMap.clear()
   releaseHistoryResizeListeners()
   window.removeEventListener('resize', syncHistoryPanelWidthForViewport)
 })
@@ -3183,12 +3556,17 @@ onBeforeUnmount(() => {
           @wheel.passive="handleMessageViewportWheel"
         >
           <transition name="chat-content-fade">
-            <div :key="selectedConversationId" class="assistant-messages__inner">
+            <div :key="conversationTransitionKey" class="assistant-messages__inner">
               <div v-if="shouldShowHistoryFallback" class="assistant-chat__fallback">
                 当前会话的历史消息暂时不可读，但你仍然可以继续追问；后续刷新后会自动恢复。
               </div>
 
-              <TransitionGroup v-if="selectedMessages.length" tag="div" name="message-stagger" class="assistant-message-list">
+              <TransitionGroup
+                tag="div"
+                :name="initialFollowAlignmentPending ? undefined : 'message-stagger'"
+                class="assistant-message-list"
+                :class="{ 'assistant-message-list--aligning': initialFollowAlignmentPending }"
+              >
               <article
                 v-for="dm in displayMessages"
                 :key="dm.id"
@@ -3388,15 +3766,16 @@ onBeforeUnmount(() => {
               </div>
 
             </div>
-            </article>
+              </article>
               </TransitionGroup>
+              <div class="assistant-messages__follow-spacer" aria-hidden="true" />
             </div>
           </transition>
         </div>
 
         <div class="assistant-chat__interaction-group">
           <!-- Welcome Content (Only in empty state) -->
-          <Transition name="fade-switch">
+          <Transition :name="suppressEmptyStateTransition ? undefined : 'fade-switch'">
             <div v-if="(!selectedConversationId || isDraftConversationId(selectedConversationId)) && !selectedMessages.length && !chatLoading" class="assistant-empty">
               <div class="assistant-empty__halo" />
               <div class="assistant-empty__content">
@@ -3405,20 +3784,6 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </Transition>
-
-          <!-- Suggestion Chips -->
-          <div v-if="quickActions.length" class="assistant-actions">
-            <button
-              v-for="action in quickActions"
-              :key="action"
-              type="button"
-              class="assistant-actions__chip"
-              :disabled="chatLoading"
-              @click="sendMessage(action)"
-            >
-              {{ action }}
-            </button>
-          </div>
 
         <div class="_9a2f8e4 assistant-composer-ds" :class="{ 'assistant-composer-ds--confirm': shouldShowDialogConfirmOverlay }">
           <div
@@ -4290,14 +4655,26 @@ onBeforeUnmount(() => {
 .assistant-messages__inner {
   display: flex;
   flex-direction: column;
+  flex: 1 0 auto;
   min-height: 100%;
   min-width: 0;
   width: 100%;
 }
 
 .assistant-message-list {
+  flex: 0 0 auto;
   min-width: 0;
   width: 100%;
+}
+
+.assistant-message-list--aligning {
+  visibility: hidden;
+}
+
+.assistant-messages__follow-spacer {
+  flex: 0 0 168px;
+  height: 168px;
+  pointer-events: none;
 }
 
 .assistant-chat--empty .assistant-messages {
@@ -4553,11 +4930,12 @@ onBeforeUnmount(() => {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 24px 28px 18px;
+  /* 基础内边距只负责边界留白；自动跟随抬高由 follow-spacer + 跟随线补偿完成。 */
+  padding: 24px 28px 32px;
   overscroll-behavior: contain;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 20px;
-  align-content: start;
   scrollbar-gutter: stable;
   background:
     linear-gradient(180deg, rgba(249, 251, 253, 0.42), rgba(255, 255, 255, 0.9) 28%, rgba(255, 255, 255, 1)),
@@ -4929,12 +5307,56 @@ onBeforeUnmount(() => {
   margin-bottom: 8px;
 }
 
+/* 推理框展开收起弹性动效 */
+.reasoning-bounce-enter-active {
+  transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform-origin: top center;
+}
+
+.reasoning-bounce-leave-active {
+  transition: all 0.2s ease;
+  transform-origin: top center;
+}
+
+.reasoning-bounce-enter-from,
+.reasoning-bounce-leave-to {
+  opacity: 0;
+  transform: translateY(-15px);
+}
+
 .chat-message__reasoning-title {
   display: flex;
   align-items: center;
   gap: 8px;
   color: #5a6577;
   position: relative;
+}
+
+.chat-message__reasoning-title--shimmering {
+  overflow: hidden;
+}
+
+.chat-message__reasoning-title--shimmering::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.9),
+    transparent
+  );
+  transform: skewX(-20deg);
+  animation: shimmer-sweep 1.2s infinite linear;
+  pointer-events: none;
+}
+
+@keyframes shimmer-sweep {
+  from { left: -150%; }
+  to { left: 150%; }
 }
 
 /* --- Tooling & Selector Beautification --- */
@@ -5208,6 +5630,13 @@ onBeforeUnmount(() => {
 
 .chat-message__streaming--reasoning {
   padding: 2px 0;
+}
+
+.assistant-timeline__answering-indicator {
+  min-height: 34px;
+  padding: 2px 0 8px;
+  display: flex;
+  align-items: center;
 }
 
 .chat-message__time,
@@ -5506,7 +5935,12 @@ onBeforeUnmount(() => {
   }
 
   .assistant-messages {
-    padding: 20px 18px 16px;
+    padding: 20px 18px 28px;
+  }
+
+  .assistant-messages__follow-spacer {
+    flex-basis: 132px;
+    height: 132px;
   }
 
   .assistant-actions,
@@ -5590,51 +6024,6 @@ onBeforeUnmount(() => {
   .assistant-shell--standalone .assistant-history__content {
     max-height: 260px;
   }
-}
-
-/* 扫光动效：位于标题上的白色光线从左到右划过 */
-.chat-message__reasoning-title--shimmering {
-  overflow: hidden;
-}
-
-.chat-message__reasoning-title--shimmering::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: -100%;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(255, 255, 255, 0.9),
-    transparent
-  );
-  transform: skewX(-20deg);
-  animation: shimmer-sweep 1.2s infinite linear;
-  pointer-events: none;
-}
-
-@keyframes shimmer-sweep {
-  from { left: -150%; }
-  to { left: 150%; }
-}
-
-/* 推理框展开收起弹性动效 */
-.reasoning-bounce-enter-active {
-  transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
-  transform-origin: top center;
-}
-
-.reasoning-bounce-leave-active {
-  transition: all 0.2s ease;
-  transform-origin: top center;
-}
-
-.reasoning-bounce-enter-from,
-.reasoning-bounce-leave-to {
-  opacity: 0;
-  transform: translateY(-15px);
 }
 </style>
 <style>

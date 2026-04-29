@@ -67,7 +67,7 @@ func BuildReasoningSummaryMessages(input ReasoningSummaryPromptInput) []*schema.
 
 	return []*schema.Message{
 		schema.SystemMessage(buildReasoningSummarySystemPrompt()),
-		schema.UserMessage("请把下面的模型思考内容整理成用户可见的进度摘要。\n输入：\n" + string(raw)),
+		schema.UserMessage("请基于 delta_reasoning 生成本轮新增的用户可见阶段摘要；recent_reasoning 仅作上下文，previous_summary 仅作去重参考。\n输入：\n" + string(raw)),
 	}
 }
 
@@ -80,14 +80,22 @@ func buildReasoningSummarySystemPrompt() string {
   "detail_summary": "不超过 max_detail_summary_runes 个字的展开摘要"
 }
 
+字段语义：
+- previous_summary：上一条已经展示给用户的摘要，只用于判断哪些内容已经说过。
+- delta_reasoning：本轮新增 reasoning，是生成 detail_summary 的主要依据。
+- recent_reasoning：全量尾部上下文，只用于补齐题目、变量名、阶段背景，不要按它重写一遍完整摘要。
+
 规则：
-1. 只描述“正在做什么”和“目前推进到哪一步”，不要复述、引用或暴露原始思考链。
-2. 不输出 markdown，不输出代码块，不解释 JSON 以外的内容。
-3. short_summary 要短、稳定、适合前端几秒刷新一次。
-4. detail_summary 不按固定句数限制，而按输入长度控制：字数必须小于等于 max_detail_summary_runes；不需要凑满上限，信息密度优先。
-5. detail_summary 仍然面向用户，不写内部推理细节、隐含假设链、逐步演算。
-6. 若输入为空或噪声较多，用保守摘要，例如“正在整理思路”“正在核对可用信息”。
-7. final=true 时，detail_summary 用完成态语气，说明思考已收拢到下一步答复或动作。`)
+1. 不输出 markdown，不输出代码块，不解释 JSON 以外的内容。
+2. 摘要要像“阶段更新”，不是流水账；优先写新增结论、阶段变化、卡点、修正、下一步动作。
+3. detail_summary 以 delta_reasoning 为主；previous_summary 已覆盖的信息不要大段重复，除非本轮对它有修正或推进。
+4. short_summary 用 8 到 18 个汉字，偏结果或动作短语，例如“补齐边界条件”“转入代码实现”“优化滚动数组”。
+5. detail_summary 用自然的一到两句话表达，优先以具体对象、动作或结果开头，不要把“正在”“当前”“已确定”“已完成”作为默认句首模板；若 previous_summary 已使用类似开头，本轮必须换一种表达。
+6. final=false 时不要用“已完成”概括整体任务；只有 delta_reasoning 明确完成某个局部步骤时，才可描述该局部已经完成。
+7. detail_summary 字数必须小于等于 max_detail_summary_runes；不需要凑满上限，信息密度优先。
+8. 不暴露原始思考链、隐含假设链、逐步演算，只保留用户可见的进展。
+9. 若本轮没有实质新增信息，输出保守但不重复的摘要，例如“沿用上一轮判断，暂无新的可展示进展。”
+10. final=true 时，用完成态语气，说明思考已经收拢到下一步答复或动作。`)
 }
 
 // ReasoningSummaryDetailRuneLimit 返回 detail_summary 的最大字数。
