@@ -78,6 +78,32 @@ func (b *EventBus) Start(ctx context.Context) {
 	b.engine.Start(ctx)
 }
 
+// StartDispatch 单独启动事件总线的 outbox 投递循环。
+//
+// 职责边界：
+// 1. 只暴露 relay/dispatch 运行职责，便于独立进程只负责投递；
+// 2. 不启动消费循环，避免与独立 consumer 进程争抢职责；
+// 3. 不改变 Start(ctx) 的既有组合启动行为。
+func (b *EventBus) StartDispatch(ctx context.Context) {
+	if b == nil || b.engine == nil {
+		return
+	}
+	b.engine.StartDispatch(ctx)
+}
+
+// StartConsume 单独启动事件总线的 Kafka 消费循环。
+//
+// 职责边界：
+// 1. 只暴露 consumer 运行职责，便于独立进程只负责消费；
+// 2. 不扫描 outbox、不投递 Kafka，状态推进仍复用 Engine 既有逻辑；
+// 3. handler 注册仍由调用方在启动前显式完成。
+func (b *EventBus) StartConsume(ctx context.Context) {
+	if b == nil || b.engine == nil {
+		return
+	}
+	b.engine.StartConsume(ctx)
+}
+
 // Close 关闭事件总线资源（producer/consumer）。
 func (b *EventBus) Close() {
 	if b == nil || b.engine == nil {

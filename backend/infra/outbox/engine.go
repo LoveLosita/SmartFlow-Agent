@@ -144,7 +144,33 @@ func (e *Engine) Start(ctx context.Context) {
 		log.Printf("Kafka topic is ready: %s", e.topic)
 	}
 
+	e.StartDispatch(ctx)
+	e.StartConsume(ctx)
+}
+
+// StartDispatch 单独启动 outbox -> Kafka 的投递循环。
+//
+// 职责边界：
+// 1. 只负责启动 dispatch 后台 goroutine，不负责启动 Kafka 消费；
+// 2. 不重复执行 Start 中的 topic readiness 等待，避免改变原 Start(ctx) 的启动语义；
+// 3. ctx 取消后由内部循环自行退出，调用方无需额外停止 goroutine。
+func (e *Engine) StartDispatch(ctx context.Context) {
+	if e == nil {
+		return
+	}
 	go e.startDispatchLoop(ctx)
+}
+
+// StartConsume 单独启动 Kafka -> handler 的消费循环。
+//
+// 职责边界：
+// 1. 只负责启动 consume 后台 goroutine，不负责扫描或投递 outbox；
+// 2. 不注册业务 handler，handler 仍由 RegisterEventHandler 显式注入；
+// 3. ctx 取消或 consumer 返回 context.Canceled 时，内部循环按既有逻辑退出。
+func (e *Engine) StartConsume(ctx context.Context) {
+	if e == nil {
+		return
+	}
 	go e.startConsumeLoop(ctx)
 }
 

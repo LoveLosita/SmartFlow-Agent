@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/api"
@@ -17,6 +19,7 @@ import (
 	ragconfig "github.com/LoveLosita/smartflow/backend/infra/rag/config"
 	"github.com/LoveLosita/smartflow/backend/inits"
 	"github.com/LoveLosita/smartflow/backend/memory"
+	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
 	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	"github.com/LoveLosita/smartflow/backend/middleware"
 	"github.com/LoveLosita/smartflow/backend/model"
@@ -28,14 +31,40 @@ import (
 	"github.com/LoveLosita/smartflow/backend/routers"
 	"github.com/LoveLosita/smartflow/backend/service"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
+	"github.com/go-redis/redis/v8"
 	"github.com/spf13/viper"
+	"gorm.io/gorm"
 )
+
+// appRuntime 承载一次进程启动所需的依赖图。
+//
+// 职责边界：
+// 1. 只负责保存启动期已经装配好的基础设施、仓储、服务和 HTTP handler；
+// 2. 不承载业务逻辑，业务仍然由 service / newAgent / memory 等领域模块负责；
+// 3. 不决定进程角色，api / worker / all 由 StartAPI、StartWorker、StartAll 选择启动哪些生命周期。
+type appRuntime struct {
+	db           *gorm.DB
+	redisClient  *redis.Client
+	cacheRepo    *dao.CacheDAO
+	userRepo     *dao.UserDAO
+	agentRepo    *dao.AgentDAO
+	agentCache   *dao.AgentCache
+	manager      *dao.RepoManager
+	outboxRepo   *outboxinfra.Repository
+	eventBus     *outboxinfra.EventBus
+	memoryModule *memory.Module
+	limiter      *pkg.RateLimiter
+	handlers     *api.ApiHandlers
+}
 
 // loadConfig 加载应用配置。
 func loadConfig() error {
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(".")
+	// 1. 兼容从仓库根目录执行 `go run ./backend/cmd/api` 的场景；
+	// 2. 从 backend 目录执行时仍优先命中当前目录，不改变现有默认行为。
+	viper.AddConfigPath("backend")
 	if err := viper.ReadInConfig(); err != nil {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -43,15 +72,82 @@ func loadConfig() error {
 	return nil
 }
 
-// Start 是应用启动入口。
+// Start 保留历史入口，默认仍按 all 模式启动。
+//
+// 职责边界：
+// 1. 兼容 backend/main.go 以及旧部署命令；
+// 2. 不新增业务语义，只委托给 StartAll；
+// 3. 后续若部署全面切到独立 api/worker，可逐步废弃该兼容入口。
 func Start() {
+	StartAll()
+}
+
+// StartAll 启动迁移期兼容模式：HTTP API 与后台 worker 在同一进程内运行。
+func StartAll() {
+	ctx := context.Background()
+	runtime := mustBuildRuntime(ctx)
+	defer runtime.close()
+
+	runtime.startWorkers(ctx)
+	runtime.startHTTP()
+}
+
+// StartAPI 只启动 Gin API 及其同步 service/dao 依赖，不启动后台 worker。
+//
+// 说明：
+// 1. 该模式仍是“带 service/dao 的 API 单体”，不是最终 API Gateway；
+// 2. API 可以继续写入 outbox，但不负责消费 outbox，也不启动 memory worker；
+// 3. worker 停止时，API 仍可提供同步接口，只是异步能力会延迟处理。
+func StartAPI() {
+	ctx := context.Background()
+	runtime := mustBuildRuntime(ctx)
+	defer runtime.close()
+
+	runtime.startHTTP()
+}
+
+// StartWorker 只启动后台异步能力，不注册 Gin 路由。
+//
+// 运行内容：
+// 1. outbox relay：扫描 pending 消息并投递 Kafka；
+// 2. Kafka consumer：消费事件并分发到业务 handler；
+// 3. memory worker：处理 memory_jobs 后台任务。
+func StartWorker() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	runtime := mustBuildRuntime(ctx)
+	defer runtime.close()
+
+	runtime.startWorkers(ctx)
+	log.Println("Worker process started")
+	<-ctx.Done()
+	log.Println("Worker process stopping")
+}
+
+func mustBuildRuntime(ctx context.Context) *appRuntime {
+	runtime, err := buildRuntime(ctx)
+	if err != nil {
+		log.Fatalf("Failed to initialize application runtime: %v", err)
+	}
+	return runtime
+}
+
+// buildRuntime 装配应用依赖图，但不启动 HTTP 或后台循环。
+//
+// 步骤说明：
+// 1. 先初始化配置、数据库、Redis、模型、RAG、memory 等基础设施；
+// 2. 再构造 DAO / Service / newAgent 依赖；
+// 3. 最后构造 HTTP handlers，供 api/all 模式按需启动；
+// 4. worker 模式暂时也复用完整依赖图，避免同轮迁移拆出两套装配逻辑。
+func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err := loadConfig(); err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		return nil, err
 	}
 
 	db, err := inits.ConnectDB()
 	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
 	rdb := inits.InitRedis()
@@ -59,30 +155,14 @@ func Start() {
 
 	aiHub, err := inits.InitEino()
 	if err != nil {
-		log.Fatalf("Failed to initialize Eino: %v", err)
+		return nil, fmt.Errorf("failed to initialize Eino: %w", err)
 	}
 
-	ragCfg := ragconfig.LoadFromViper()
-	var ragRuntime infrarag.Runtime
-	if ragCfg.Enabled {
-		// 1. 当前项目尚未完成全局观测平台建设，这里先注入一层轻量 Observer；
-		// 2. RAG 内部只依赖 Observer 接口，后续若全项目统一日志/指标系统，只需替换这里；
-		// 3. 这样可以避免 RAG 单独自建一套割裂的日志基础设施。
-		ragLogger := log.Default()
-		ragRuntime, err = infrarag.NewRuntimeFromConfig(context.Background(), ragCfg, infrarag.FactoryDeps{
-			Logger:   ragLogger,
-			Observer: infrarag.NewLoggerObserver(ragLogger),
-		})
-		if err != nil {
-			log.Fatalf("Failed to initialize RAG runtime: %v", err)
-		}
-		log.Printf("RAG runtime initialized: store=%s embed=%s reranker=%s", ragCfg.Store, ragCfg.EmbedProvider, ragCfg.RerankerProvider)
-	} else {
-		log.Println("RAG runtime is disabled")
+	ragRuntime, err := buildRAGRuntime(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	// 1. memory 模块对启动层只暴露一个门面。
-	// 2. 后续若接入统一 DI 容器，也优先注入这个门面，而不是继续暴露内部 repo/service。
 	memoryCfg := memory.LoadConfigFromViper()
 	memoryObserver := memoryobserve.NewLoggerObserver(log.Default())
 	memoryMetrics := memoryobserve.NewMetricsRegistry()
@@ -110,55 +190,94 @@ func Start() {
 	agentRepo := dao.NewAgentDAO(db)
 	outboxRepo := outboxinfra.NewRepository(db)
 
-	// outbox 通用事件总线接线（第二阶段）：
-	// 1. 读取 Kafka 配置；
-	// 2. 创建 infra 级 EventBus；
-	// 3. 显式注册业务事件处理器；
-	// 4. 启动总线后台 dispatch/consume 循环。
-	kafkaCfg := kafkabus.LoadConfig()
-	eventBus, err := outboxinfra.NewEventBus(outboxRepo, kafkaCfg)
+	eventBus, err := buildEventBus(outboxRepo)
 	if err != nil {
-		log.Fatalf("Failed to initialize outbox event bus: %v", err)
+		return nil, err
 	}
-	if eventBus != nil {
-		// 1. 在启动前完成业务事件处理器注册。
-		// 2. memory 事件处理器也统一通过 memoryModule 接入，避免启动层感知内部细节。
-		if err = eventsvc.RegisterChatHistoryPersistHandler(eventBus, outboxRepo, manager); err != nil {
-			log.Fatalf("Failed to register chat history event handler: %v", err)
-		}
-		if err = eventsvc.RegisterTaskUrgencyPromoteHandler(eventBus, outboxRepo, manager); err != nil {
-			log.Fatalf("Failed to register task urgency promote event handler: %v", err)
-		}
-		if err = eventsvc.RegisterChatTokenUsageAdjustHandler(eventBus, outboxRepo, manager); err != nil {
-			log.Fatalf("Failed to register chat token usage adjust event handler: %v", err)
-		}
-		if err = eventsvc.RegisterAgentStateSnapshotHandler(eventBus, outboxRepo, manager); err != nil {
-			log.Fatalf("Failed to register agent state snapshot event handler: %v", err)
-		}
-		if err = eventsvc.RegisterAgentTimelinePersistHandler(eventBus, outboxRepo, agentRepo, cacheRepo); err != nil {
-			log.Fatalf("Failed to register agent timeline persist event handler: %v", err)
-		}
-		if err = eventsvc.RegisterMemoryExtractRequestedHandler(eventBus, outboxRepo, memoryModule); err != nil {
-			log.Fatalf("Failed to register memory extract event handler: %v", err)
-		}
-		eventBus.Start(context.Background())
-		defer eventBus.Close()
-		log.Println("Outbox event bus started")
-	} else {
-		log.Println("Outbox event bus is disabled")
-	}
-
-	memoryModule.StartWorker(context.Background())
 
 	// Service 层初始化。
 	userService := service.NewUserService(userRepo, cacheRepo)
 	taskSv := service.NewTaskService(taskRepo, cacheRepo, eventBus)
+	courseService := buildCourseService(courseRepo, scheduleRepo)
+	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo, manager)
+	scheduleService := service.NewScheduleService(scheduleRepo, userRepo, taskClassRepo, manager, cacheRepo)
+	agentService := service.NewAgentServiceWithSchedule(aiHub, agentRepo, taskRepo, cacheRepo, agentCacheRepo, eventBus, scheduleService, taskSv)
+
+	configureAgentService(
+		agentService,
+		ragRuntime,
+		agentRepo,
+		cacheRepo,
+		taskRepo,
+		taskClassRepo,
+		scheduleRepo,
+		memoryModule,
+		memoryCfg,
+	)
+
+	handlers := buildAPIHandlers(userService, taskSv, taskClassService, courseService, scheduleService, agentService, memoryModule)
+
+	return &appRuntime{
+		db:           db,
+		redisClient:  rdb,
+		cacheRepo:    cacheRepo,
+		userRepo:     userRepo,
+		agentRepo:    agentRepo,
+		agentCache:   agentCacheRepo,
+		manager:      manager,
+		outboxRepo:   outboxRepo,
+		eventBus:     eventBus,
+		memoryModule: memoryModule,
+		limiter:      limiter,
+		handlers:     handlers,
+	}, nil
+}
+
+func buildRAGRuntime(ctx context.Context) (infrarag.Runtime, error) {
+	ragCfg := ragconfig.LoadFromViper()
+	if !ragCfg.Enabled {
+		log.Println("RAG runtime is disabled")
+		return nil, nil
+	}
+
+	// 1. 当前项目尚未完成全局观测平台建设，这里先注入一层轻量 Observer；
+	// 2. RAG 内部只依赖 Observer 接口，后续若全项目统一日志/指标系统，只需替换这里；
+	// 3. 这样可以避免 RAG 单独自建一套割裂的日志基础设施。
+	ragLogger := log.Default()
+	ragRuntime, err := infrarag.NewRuntimeFromConfig(ctx, ragCfg, infrarag.FactoryDeps{
+		Logger:   ragLogger,
+		Observer: infrarag.NewLoggerObserver(ragLogger),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize RAG runtime: %w", err)
+	}
+	log.Printf("RAG runtime initialized: store=%s embed=%s reranker=%s", ragCfg.Store, ragCfg.EmbedProvider, ragCfg.RerankerProvider)
+	return ragRuntime, nil
+}
+
+func buildEventBus(outboxRepo *outboxinfra.Repository) (*outboxinfra.EventBus, error) {
+	// outbox 通用事件总线接线：
+	// 1. API 模式只使用 Publish 写入 outbox，不启动后台循环；
+	// 2. worker/all 模式再显式注册 handler 并启动后台循环；
+	// 3. kafka.enabled=false 时返回 nil，业务按既有降级策略执行。
+	kafkaCfg := kafkabus.LoadConfig()
+	eventBus, err := outboxinfra.NewEventBus(outboxRepo, kafkaCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize outbox event bus: %w", err)
+	}
+	if eventBus == nil {
+		log.Println("Outbox event bus is disabled")
+	}
+	return eventBus, nil
+}
+
+func buildCourseService(courseRepo *dao.CourseDAO, scheduleRepo *dao.ScheduleDAO) *service.CourseService {
 	courseImageResponsesClient := infrallm.NewArkResponsesClient(
 		os.Getenv("ARK_API_KEY"),
 		viper.GetString("agent.baseURL"),
 		viper.GetString("courseImport.visionModel"),
 	)
-	courseService := service.NewCourseService(
+	return service.NewCourseService(
 		courseRepo,
 		scheduleRepo,
 		courseImageResponsesClient,
@@ -168,15 +287,26 @@ func Start() {
 		),
 		viper.GetString("courseImport.visionModel"),
 	)
-	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo, manager)
-	scheduleService := service.NewScheduleService(scheduleRepo, userRepo, taskClassRepo, manager, cacheRepo)
-	agentService := service.NewAgentServiceWithSchedule(aiHub, agentRepo, taskRepo, cacheRepo, agentCacheRepo, eventBus, scheduleService, taskSv)
+}
+
+func configureAgentService(
+	agentService *service.AgentService,
+	ragRuntime infrarag.Runtime,
+	agentRepo *dao.AgentDAO,
+	cacheRepo *dao.CacheDAO,
+	taskRepo *dao.TaskDAO,
+	taskClassRepo *dao.TaskClassDAO,
+	scheduleRepo *dao.ScheduleDAO,
+	memoryModule *memory.Module,
+	memoryCfg memorymodel.Config,
+) {
+	if agentService == nil {
+		return
+	}
 
 	// newAgent 依赖接线。
 	agentService.SetAgentStateStore(dao.NewAgentStateStoreAdapter(cacheRepo))
 
-	// 1. WebSearch provider 初始化：根据配置选择 mock/bocha；
-	// 2. provider 为 nil 时，web_search / web_fetch 返回"暂未启用"，不阻断主流程。
 	var webSearchProvider web.SearchProvider
 	webProvider := viper.GetString("websearch.provider")
 	switch webProvider {
@@ -202,150 +332,200 @@ func Start() {
 		RAGRuntime:        ragRuntime,
 		WebSearchProvider: webSearchProvider,
 		TaskClassWriteDeps: newagenttools.TaskClassWriteDeps{
-			UpsertTaskClass: func(userID int, input newagenttools.TaskClassUpsertInput) (newagenttools.TaskClassUpsertPersistResult, error) {
-				req := input.Request
-				taskClassID := 0
-				created := input.ID == 0
-
-				err := taskClassRepo.Transaction(func(txDAO *dao.TaskClassDAO) error {
-					// 1. 先构造任务类主体，保持与现有 AddOrUpdateTaskClass 口径一致。
-					taskClass := &model.TaskClass{
-						ID:                 input.ID,
-						Name:               &req.Name,
-						Mode:               &req.Mode,
-						SubjectType:        stringPtrOrNil(req.SubjectType),
-						DifficultyLevel:    stringPtrOrNil(req.DifficultyLevel),
-						CognitiveIntensity: stringPtrOrNil(req.CognitiveIntensity),
-						TotalSlots:         &req.Config.TotalSlots,
-						Strategy:           &req.Config.Strategy,
-						ExcludedSlots:      req.Config.ExcludedSlots,
-						ExcludedDaysOfWeek: req.Config.ExcludedDaysOfWeek,
-					}
-					taskClass.AllowFillerCourse = &req.Config.AllowFillerCourse
-
-					// 2. 自动模式下写入日期范围；手动模式允许为空。
-					if req.StartDate != "" {
-						startDate, parseErr := time.ParseInLocation("2006-01-02", req.StartDate, time.Local)
-						if parseErr != nil {
-							return parseErr
-						}
-						taskClass.StartDate = &startDate
-					}
-					if req.EndDate != "" {
-						endDate, parseErr := time.ParseInLocation("2006-01-02", req.EndDate, time.Local)
-						if parseErr != nil {
-							return parseErr
-						}
-						taskClass.EndDate = &endDate
-					}
-
-					// 3. upsert 主体后拿到稳定 task_class_id，供 items 绑定 category_id。
-					updatedID, upsertErr := txDAO.AddOrUpdateTaskClass(userID, taskClass)
-					if upsertErr != nil {
-						return upsertErr
-					}
-					taskClassID = updatedID
-
-					// 4. 构造任务块并批量 upsert。
-					items := make([]model.TaskClassItem, 0, len(req.Items))
-					for _, itemReq := range req.Items {
-						categoryID := taskClassID
-						order := itemReq.Order
-						content := itemReq.Content
-						status := model.TaskItemStatusUnscheduled
-						items = append(items, model.TaskClassItem{
-							ID:           itemReq.ID,
-							CategoryID:   &categoryID,
-							Order:        &order,
-							Content:      &content,
-							EmbeddedTime: itemReq.EmbeddedTime,
-							Status:       &status,
-						})
-					}
-					return txDAO.AddOrUpdateTaskClassItems(userID, items)
-				})
-				if err != nil {
-					return newagenttools.TaskClassUpsertPersistResult{}, err
-				}
-				return newagenttools.TaskClassUpsertPersistResult{
-					TaskClassID: taskClassID,
-					Created:     created,
-				}, nil
-			},
+			UpsertTaskClass: buildTaskClassUpsertFunc(taskClassRepo),
 		},
 	}))
 	agentService.SetScheduleProvider(newagentconv.NewScheduleProvider(scheduleRepo, taskClassRepo))
 	agentService.SetCompactionStore(agentRepo)
 	agentService.SetQuickTaskDeps(newagentmodel.QuickTaskDeps{
-		CreateTask: func(userID int, title string, priorityGroup int, deadlineAt *time.Time, urgencyThresholdAt *time.Time) (int, error) {
-			created, err := taskRepo.AddTask(&model.Task{
-				UserID:             userID,
-				Title:              title,
-				Priority:           priorityGroup,
-				IsCompleted:        false,
-				DeadlineAt:         deadlineAt,
-				UrgencyThresholdAt: urgencyThresholdAt,
-			})
-			if err != nil {
-				return 0, err
-			}
-			return created.ID, nil
-		},
-		QueryTasks: func(ctx context.Context, userID int, params newagentmodel.TaskQueryParams) ([]newagentmodel.TaskQueryResult, error) {
-			req := newagentmodel.TaskQueryRequest{
-				UserID:           userID,
-				Quadrant:         params.Quadrant,
-				SortBy:           params.SortBy,
-				Order:            params.Order,
-				Limit:            params.Limit,
-				IncludeCompleted: params.IncludeCompleted,
-				Keyword:          params.Keyword,
-				DeadlineBefore:   params.DeadlineBefore,
-				DeadlineAfter:    params.DeadlineAfter,
-			}
-			records, err := agentService.QueryTasksForTool(ctx, req)
-			if err != nil {
-				return nil, err
-			}
-			results := make([]newagentmodel.TaskQueryResult, 0, len(records))
-			for _, r := range records {
-				deadlineStr := ""
-				if r.DeadlineAt != nil {
-					deadlineStr = r.DeadlineAt.In(time.Local).Format("2006-01-02 15:04")
-				}
-				results = append(results, newagentmodel.TaskQueryResult{
-					ID:            r.ID,
-					Title:         r.Title,
-					PriorityGroup: r.PriorityGroup,
-					IsCompleted:   r.IsCompleted,
-					DeadlineAt:    deadlineStr,
-				})
-			}
-			return results, nil
-		},
+		CreateTask: buildQuickTaskCreateFunc(taskRepo),
+		QueryTasks: buildQuickTaskQueryFunc(agentService),
 	})
 	agentService.SetMemoryReader(memoryModule, memoryCfg)
+}
 
-	// API 层初始化。
-	userApi := api.NewUserHandler(userService)
-	taskApi := api.NewTaskHandler(taskSv)
-	courseApi := api.NewCourseHandler(courseService)
-	taskClassApi := api.NewTaskClassHandler(taskClassService)
-	scheduleApi := api.NewScheduleAPI(scheduleService)
-	agentApi := api.NewAgentHandler(agentService)
-	memoryApi := api.NewMemoryHandler(memoryModule)
-	handlers := &api.ApiHandlers{
-		UserHandler:      userApi,
-		TaskHandler:      taskApi,
-		TaskClassHandler: taskClassApi,
-		CourseHandler:    courseApi,
-		ScheduleHandler:  scheduleApi,
-		AgentHandler:     agentApi,
-		MemoryHandler:    memoryApi,
+func buildTaskClassUpsertFunc(taskClassRepo *dao.TaskClassDAO) func(userID int, input newagenttools.TaskClassUpsertInput) (newagenttools.TaskClassUpsertPersistResult, error) {
+	return func(userID int, input newagenttools.TaskClassUpsertInput) (newagenttools.TaskClassUpsertPersistResult, error) {
+		req := input.Request
+		taskClassID := 0
+		created := input.ID == 0
+
+		err := taskClassRepo.Transaction(func(txDAO *dao.TaskClassDAO) error {
+			// 1. 先构造任务类主体，保持与现有 AddOrUpdateTaskClass 口径一致。
+			taskClass := &model.TaskClass{
+				ID:                 input.ID,
+				Name:               &req.Name,
+				Mode:               &req.Mode,
+				SubjectType:        stringPtrOrNil(req.SubjectType),
+				DifficultyLevel:    stringPtrOrNil(req.DifficultyLevel),
+				CognitiveIntensity: stringPtrOrNil(req.CognitiveIntensity),
+				TotalSlots:         &req.Config.TotalSlots,
+				Strategy:           &req.Config.Strategy,
+				ExcludedSlots:      req.Config.ExcludedSlots,
+				ExcludedDaysOfWeek: req.Config.ExcludedDaysOfWeek,
+			}
+			taskClass.AllowFillerCourse = &req.Config.AllowFillerCourse
+
+			// 2. 自动模式下写入日期范围；手动模式允许为空。
+			if req.StartDate != "" {
+				startDate, parseErr := time.ParseInLocation("2006-01-02", req.StartDate, time.Local)
+				if parseErr != nil {
+					return parseErr
+				}
+				taskClass.StartDate = &startDate
+			}
+			if req.EndDate != "" {
+				endDate, parseErr := time.ParseInLocation("2006-01-02", req.EndDate, time.Local)
+				if parseErr != nil {
+					return parseErr
+				}
+				taskClass.EndDate = &endDate
+			}
+
+			// 3. upsert 主体后拿到稳定 task_class_id，供 items 绑定 category_id。
+			updatedID, upsertErr := txDAO.AddOrUpdateTaskClass(userID, taskClass)
+			if upsertErr != nil {
+				return upsertErr
+			}
+			taskClassID = updatedID
+
+			// 4. 构造任务块并批量 upsert。
+			items := make([]model.TaskClassItem, 0, len(req.Items))
+			for _, itemReq := range req.Items {
+				categoryID := taskClassID
+				order := itemReq.Order
+				content := itemReq.Content
+				status := model.TaskItemStatusUnscheduled
+				items = append(items, model.TaskClassItem{
+					ID:           itemReq.ID,
+					CategoryID:   &categoryID,
+					Order:        &order,
+					Content:      &content,
+					EmbeddedTime: itemReq.EmbeddedTime,
+					Status:       &status,
+				})
+			}
+			return txDAO.AddOrUpdateTaskClassItems(userID, items)
+		})
+		if err != nil {
+			return newagenttools.TaskClassUpsertPersistResult{}, err
+		}
+		return newagenttools.TaskClassUpsertPersistResult{
+			TaskClassID: taskClassID,
+			Created:     created,
+		}, nil
+	}
+}
+
+func buildQuickTaskCreateFunc(taskRepo *dao.TaskDAO) func(userID int, title string, priorityGroup int, deadlineAt *time.Time, urgencyThresholdAt *time.Time) (int, error) {
+	return func(userID int, title string, priorityGroup int, deadlineAt *time.Time, urgencyThresholdAt *time.Time) (int, error) {
+		created, err := taskRepo.AddTask(&model.Task{
+			UserID:             userID,
+			Title:              title,
+			Priority:           priorityGroup,
+			IsCompleted:        false,
+			DeadlineAt:         deadlineAt,
+			UrgencyThresholdAt: urgencyThresholdAt,
+		})
+		if err != nil {
+			return 0, err
+		}
+		return created.ID, nil
+	}
+}
+
+func buildQuickTaskQueryFunc(agentService *service.AgentService) func(ctx context.Context, userID int, params newagentmodel.TaskQueryParams) ([]newagentmodel.TaskQueryResult, error) {
+	return func(ctx context.Context, userID int, params newagentmodel.TaskQueryParams) ([]newagentmodel.TaskQueryResult, error) {
+		req := newagentmodel.TaskQueryRequest{
+			UserID:           userID,
+			Quadrant:         params.Quadrant,
+			SortBy:           params.SortBy,
+			Order:            params.Order,
+			Limit:            params.Limit,
+			IncludeCompleted: params.IncludeCompleted,
+			Keyword:          params.Keyword,
+			DeadlineBefore:   params.DeadlineBefore,
+			DeadlineAfter:    params.DeadlineAfter,
+		}
+		records, err := agentService.QueryTasksForTool(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		results := make([]newagentmodel.TaskQueryResult, 0, len(records))
+		for _, r := range records {
+			deadlineStr := ""
+			if r.DeadlineAt != nil {
+				deadlineStr = r.DeadlineAt.In(time.Local).Format("2006-01-02 15:04")
+			}
+			results = append(results, newagentmodel.TaskQueryResult{
+				ID:            r.ID,
+				Title:         r.Title,
+				PriorityGroup: r.PriorityGroup,
+				IsCompleted:   r.IsCompleted,
+				DeadlineAt:    deadlineStr,
+			})
+		}
+		return results, nil
+	}
+}
+
+func buildAPIHandlers(
+	userService *service.UserService,
+	taskService *service.TaskService,
+	taskClassService *service.TaskClassService,
+	courseService *service.CourseService,
+	scheduleService *service.ScheduleService,
+	agentService *service.AgentService,
+	memoryModule *memory.Module,
+) *api.ApiHandlers {
+	return &api.ApiHandlers{
+		UserHandler:      api.NewUserHandler(userService),
+		TaskHandler:      api.NewTaskHandler(taskService),
+		TaskClassHandler: api.NewTaskClassHandler(taskClassService),
+		CourseHandler:    api.NewCourseHandler(courseService),
+		ScheduleHandler:  api.NewScheduleAPI(scheduleService),
+		AgentHandler:     api.NewAgentHandler(agentService),
+		MemoryHandler:    api.NewMemoryHandler(memoryModule),
+	}
+}
+
+func (r *appRuntime) startWorkers(ctx context.Context) {
+	if r == nil {
+		return
 	}
 
-	r := routers.RegisterRouters(handlers, cacheRepo, userRepo, limiter)
-	routers.StartEngine(r)
+	if r.eventBus != nil {
+		if err := r.registerEventHandlers(); err != nil {
+			log.Fatalf("Failed to register outbox event handlers: %v", err)
+		}
+		r.eventBus.Start(ctx)
+		log.Println("Outbox event bus started")
+	} else {
+		log.Println("Outbox event bus is disabled")
+	}
+
+	if r.memoryModule != nil {
+		r.memoryModule.StartWorker(ctx)
+	}
+}
+
+func (r *appRuntime) registerEventHandlers() error {
+	// 调用目的：worker/all 启动时复用同一套核心事件注册顺序，避免未来新增入口后复制多份 handler 接线。
+	return eventsvc.RegisterCoreOutboxHandlers(r.eventBus, r.outboxRepo, r.manager, r.agentRepo, r.cacheRepo, r.memoryModule)
+}
+
+func (r *appRuntime) startHTTP() {
+	router := routers.RegisterRouters(r.handlers, r.cacheRepo, r.userRepo, r.limiter)
+	routers.StartEngine(router)
+}
+
+func (r *appRuntime) close() {
+	if r == nil {
+		return
+	}
+	if r.eventBus != nil {
+		r.eventBus.Close()
+	}
 }
 
 func stringPtrOrNil(value string) *string {
