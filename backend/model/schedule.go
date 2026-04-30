@@ -3,15 +3,35 @@ package model
 import "time"
 
 type ScheduleEvent struct {
-	ID            int       `gorm:"primaryKey;autoIncrement" json:"id"`
-	UserID        int       `gorm:"column:user_id;index:idx_user_events;not null" json:"user_id"`
-	Name          string    `gorm:"column:name;type:varchar(255);not null;comment:课程或任务名称" json:"name"`
-	Location      *string   `gorm:"column:location;type:varchar(255);default:'';comment:地点 (教学楼/会议室)" json:"location"`
-	Type          string    `gorm:"column:type;type:enum('course','task');not null;comment:日程类型" json:"type"`
-	RelID         *int      `gorm:"column:rel_id;comment:关联原始数据ID (如教务系统的课程ID)" json:"rel_id"`
-	CanBeEmbedded bool      `gorm:"column:can_be_embedded;not null;default:0;comment:是否允许在此时段嵌入其他任务" json:"can_be_embedded"`
-	StartTime     time.Time `gorm:"column:start_time;type:time;comment:开始时间" json:"start_time"`
-	EndTime       time.Time `gorm:"column:end_time;type:time;comment:结束时间" json:"end_time"`
+	ID       int     `gorm:"primaryKey;autoIncrement" json:"id"`
+	UserID   int     `gorm:"column:user_id;index:idx_user_events;not null" json:"user_id"`
+	Name     string  `gorm:"column:name;type:varchar(255);not null;comment:课程或任务名称" json:"name"`
+	Location *string `gorm:"column:location;type:varchar(255);default:'';comment:地点 (教学楼/会议室)" json:"location"`
+	Type     string  `gorm:"column:type;type:enum('course','task');not null;comment:日程类型" json:"type"`
+	RelID    *int    `gorm:"column:rel_id;comment:关联原始数据ID (如教务系统的课程ID)" json:"rel_id"`
+	// TaskSourceType 标记 type=task 时 rel_id 指向哪个任务来源。
+	//
+	// 职责边界：
+	// 1. 只表达任务日程块的数据来源，不改变 Type 的 course/task 展示语义；
+	// 2. task_item 表示 rel_id 指向 task_items.id，task_pool 表示 rel_id 指向 tasks.id；
+	// 3. 课程事件保持空值，由迁移回填历史 task 事件，避免影响现有课程逻辑。
+	TaskSourceType string `gorm:"column:task_source_type;type:varchar(32);not null;default:'';index:idx_schedule_event_task_source;comment:任务来源 task_item/task_pool" json:"task_source_type,omitempty"`
+	// MakeupForEventID 记录补做块来源事件，用于用户反馈未完成后的审计串联。
+	//
+	// 说明：
+	// 1. 只有主动调度生成补做块时写入；
+	// 2. 不负责校验目标事件是否仍存在，正式 apply 链路需要在事务内重校验；
+	// 3. 为空表示普通日程块或非补做块。
+	MakeupForEventID *int `gorm:"column:makeup_for_event_id;index:idx_schedule_event_makeup_for;comment:补做块对应的原 schedule_event.id" json:"makeup_for_event_id,omitempty"`
+	// ActivePreviewID 记录主动调度预览来源，方便从正式日程反查触发链路。
+	//
+	// 说明：
+	// 1. 该字段只做审计与排障，不作为正式日程主键；
+	// 2. preview 详情仍归 active_schedule_previews 表所有。
+	ActivePreviewID *string   `gorm:"column:active_preview_id;type:varchar(64);index:idx_schedule_event_active_preview;comment:主动调度预览ID" json:"active_preview_id,omitempty"`
+	CanBeEmbedded   bool      `gorm:"column:can_be_embedded;not null;default:0;comment:是否允许在此时段嵌入其他任务" json:"can_be_embedded"`
+	StartTime       time.Time `gorm:"column:start_time;type:time;comment:开始时间" json:"start_time"`
+	EndTime         time.Time `gorm:"column:end_time;type:time;comment:结束时间" json:"end_time"`
 }
 
 type Schedule struct {

@@ -10,6 +10,10 @@ import (
 	"syscall"
 	"time"
 
+	activeadapters "github.com/LoveLosita/smartflow/backend/active_scheduler/adapters"
+	"github.com/LoveLosita/smartflow/backend/active_scheduler/applyadapter"
+	activepreview "github.com/LoveLosita/smartflow/backend/active_scheduler/preview"
+	activesvc "github.com/LoveLosita/smartflow/backend/active_scheduler/service"
 	"github.com/LoveLosita/smartflow/backend/api"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
@@ -198,6 +202,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	// Service 层初始化。
 	userService := service.NewUserService(userRepo, cacheRepo)
 	taskSv := service.NewTaskService(taskRepo, cacheRepo, eventBus)
+	taskSv.SetActiveScheduleDAO(manager.ActiveSchedule)
 	courseService := buildCourseService(courseRepo, scheduleRepo)
 	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo, manager)
 	scheduleService := service.NewScheduleService(scheduleRepo, userRepo, taskClassRepo, manager, cacheRepo)
@@ -215,7 +220,15 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		memoryCfg,
 	)
 
-	handlers := buildAPIHandlers(userService, taskSv, taskClassService, courseService, scheduleService, agentService, memoryModule)
+	activeScheduleDryRun, err := buildActiveScheduleDryRunService(db)
+	if err != nil {
+		return nil, err
+	}
+	activeSchedulePreviewConfirm, err := buildActiveSchedulePreviewConfirmService(db, manager.ActiveSchedule, activeScheduleDryRun)
+	if err != nil {
+		return nil, err
+	}
+	handlers := buildAPIHandlers(userService, taskSv, taskClassService, courseService, scheduleService, agentService, memoryModule, activeScheduleDryRun, activeSchedulePreviewConfirm)
 
 	return &appRuntime{
 		db:           db,
@@ -287,6 +300,19 @@ func buildCourseService(courseRepo *dao.CourseDAO, scheduleRepo *dao.ScheduleDAO
 		),
 		viper.GetString("courseImport.visionModel"),
 	)
+}
+
+func buildActiveScheduleDryRunService(db *gorm.DB) (*activesvc.DryRunService, error) {
+	readers := activeadapters.NewGormReaders(db)
+	return activesvc.NewDryRunService(activeadapters.ReadersFromGorm(readers))
+}
+
+func buildActiveSchedulePreviewConfirmService(db *gorm.DB, activeDAO *dao.ActiveScheduleDAO, dryRun *activesvc.DryRunService) (*activesvc.PreviewConfirmService, error) {
+	previewService, err := activepreview.NewService(activeDAO)
+	if err != nil {
+		return nil, err
+	}
+	return activesvc.NewPreviewConfirmService(dryRun, previewService, activeDAO, applyadapter.NewGormApplyAdapter(db))
 }
 
 func configureAgentService(
@@ -477,6 +503,8 @@ func buildAPIHandlers(
 	scheduleService *service.ScheduleService,
 	agentService *service.AgentService,
 	memoryModule *memory.Module,
+	activeScheduleDryRun *activesvc.DryRunService,
+	activeSchedulePreviewConfirm *activesvc.PreviewConfirmService,
 ) *api.ApiHandlers {
 	return &api.ApiHandlers{
 		UserHandler:      api.NewUserHandler(userService),
@@ -486,6 +514,7 @@ func buildAPIHandlers(
 		ScheduleHandler:  api.NewScheduleAPI(scheduleService),
 		AgentHandler:     api.NewAgentHandler(agentService),
 		MemoryHandler:    api.NewMemoryHandler(memoryModule),
+		ActiveSchedule:   api.NewActiveScheduleAPI(activeScheduleDryRun, activeSchedulePreviewConfirm),
 	}
 }
 

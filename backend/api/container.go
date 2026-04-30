@@ -8,4 +8,5 @@ type ApiHandlers struct {
 	ScheduleHandler  *ScheduleAPI
 	AgentHandler     *AgentHandler
 	MemoryHandler    *MemoryHandler
+	ActiveSchedule   *ActiveScheduleAPI
 }

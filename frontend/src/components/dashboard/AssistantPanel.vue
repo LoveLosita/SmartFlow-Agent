@@ -36,12 +36,36 @@ import type {
   ConversationMeta,
   ThinkingModeType,
   SchedulePreviewData,
-  ThinkingSummaryPayload,
 } from '@/types/dashboard'
 import ScheduleResultCard from '@/components/assistant/ScheduleResultCard.vue'
 import ScheduleFineTuneModal from '@/components/assistant/ScheduleFineTuneModal.vue'
 import { formatConversationTime, formatMessageTime } from '@/utils/date'
 import { renderMarkdown } from '@/utils/markdown'
+import {
+  buildAssistantChatRequestExtra,
+  buildConversationPreviewItem,
+  buildThinkingSummarySignature,
+  buildStatusSummary,
+  buildTaskUpdatePayload,
+  buildToolDetail,
+  createDraftConversationId,
+  createMessageId,
+  formatTaskDeadlineForStatus,
+  getThinkingBackendKey,
+  isAssistantTimelineKind,
+  isDraftConversationId,
+  isLocalEphemeralMessageId,
+  isManualThinkingEnabled,
+  isLegacyToolStatusCode,
+  mapLegacyToolStatusToState,
+  mapToolEventState,
+  mergeConversationListItems,
+  migrateConversationListIds,
+  normalizeStatusCode,
+  normalizeToolSummary,
+  resolveConversationGroupLabel,
+  shouldSkipStatusEvent,
+} from '@/utils/assistantPanelTrace'
 import BusinessCardRenderer from '@/components/assistant/cards/BusinessCardRenderer.vue'
 import ToolCardRenderer from '@/components/dashboard/ToolCardRenderer.vue'
 import type { 
@@ -49,150 +73,24 @@ import type {
   TaskQueryCardData, 
   TaskRecordCardData 
 } from '@/api/schedule_agent'
-
-interface StreamDeltaPayload {
-  content?: string
-}
-
-interface StreamChoicePayload {
-  delta?: StreamDeltaPayload
-  finish_reason?: string | null
-}
-
-interface StreamErrorPayload {
-  message?: string
-}
-
-interface StreamConfirmPayload {
-  interaction_id?: string
-  title?: string
-  summary?: string
-}
-
-interface StreamStatusExtraPayload {
-  code?: string
-  summary?: string
-}
-
-interface StreamToolExtraPayload {
-  name?: string
-  status?: string
-  summary?: string
-  arguments_preview?: string
-  argument_view?: ToolView
-  result_view?: ToolView
-}
-
-interface StreamExtraPayload {
-  kind?: string
-  block_id?: string
-  stage?: string
-  status?: StreamStatusExtraPayload
-  tool?: StreamToolExtraPayload
-  confirm?: StreamConfirmPayload
-  business_card?: TimelineBusinessCardPayload
-  thinking_summary?: ThinkingSummaryPayload
-}
-
-interface StreamEventPayload {
-  choices?: StreamChoicePayload[]
-  delta?: StreamDeltaPayload
-  content?: string
-  finish_reason?: string | null
-  error?: StreamErrorPayload
-  extra?: StreamExtraPayload
-}
-
-type ToolTraceState = 'called' | 'completed' | 'create' | 'blocked'
-
-interface ToolTraceEvent {
-  id: string
-  seq: number
-  state: ToolTraceState
-  summary: string
-  detail?: string
-  toolName?: string
-  argumentView?: ToolView
-  resultView?: ToolView
-}
-
-interface StatusTraceEvent {
-  id: string
-  seq: number
-  code: string
-  stage: string
-  summary: string
-}
-
-
-interface ConversationGroup {
-  key: string
-  label: string
-  items: ConversationListItem[]
-}
-
-interface ConfirmOverlayState {
-  visible: boolean
-  manuallyClosed: boolean
-  interactionId: string
-  title: string
-  summary: string
-}
-
-interface ConversationListItemRevealOptions {
-  animate?: boolean
-}
-
-interface EnsureConversationMetaOptions {
-  forceReload?: boolean
-  syncListItem?: boolean
-  listItemReveal?: ConversationListItemRevealOptions
-}
-
-// 展示用消息：合并连续 assistant 消息后的视图模型
-interface DisplayMessage {
-  /** 第一条源消息的 id，用作 Vue key */
-  id: string
-  role: 'user' | 'assistant' | 'system'
-  /** 合并后的正文内容 */
-  content: string
-  /** 最后一条源消息的时间 */
-  createdAt: string
-  /** 合并后的推理内容 */
-  reasoning?: string
-  /** 原始消息引用列表 */
-  sources: AssistantMessage[]
-  /** 是否为多条合并 */
-  merged: boolean
-}
-
-interface DisplayAssistantBlock {
-  id: string
-  type: 'tool' | 'status' | 'reasoning' | 'content' | 'content_indicator' | 'schedule_card' | 'business_card'
-  seq: number
-  text?: string
-  event?: ToolTraceEvent
-  statusEvent?: StatusTraceEvent
-  schedulePreview?: SchedulePreviewData
-  businessCard?: TimelineBusinessCardPayload
-  /** 所属的源消息 ID，用于状态查询 */
-  sourceId?: string
-  /** 所属的源消息引用，用于渲染辅助信息 */
-  source?: AssistantMessage
-}
-
-interface AssistantContentBlock {
-  id: string
-  seq: number
-  text: string
-}
-
-interface ThinkingSummaryBlockState {
-  blockId: string
-  lastSummarySeq: number
-  lastSignature: string
-  finished: boolean
-}
+import type {
+  ApplyThinkingSummaryOptions,
+  AssistantContentBlock,
+  ConfirmOverlayState,
+  ConversationGroup,
+  ConversationListItemRevealOptions,
+  DisplayAssistantBlock,
+  DisplayMessage,
+  EnsureConversationMetaOptions,
+  StatusTraceEvent,
+  StreamConfirmPayload,
+  StreamEventPayload,
+  StreamExtraPayload,
+  StreamToolExtraPayload,
+  ThinkingSummaryBlockState,
+  ToolTraceEvent,
+  ToolTraceState,
+} from '@/types/assistant-panel'
 
 const props = withDefaults(
   defineProps<{
@@ -588,34 +486,6 @@ const displayMessages = computed<DisplayMessage[]>(() => {
   }
   return result
 })
-
-function resolveConversationGroupLabel(timeText?: string | null) {
-  if (!timeText) {
-    return '更早'
-  }
-
-  const messageDate = new Date(timeText)
-  if (Number.isNaN(messageDate.getTime())) {
-    return '更早'
-  }
-
-  const now = new Date()
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-  const targetDay = new Date(messageDate.getFullYear(), messageDate.getMonth(), messageDate.getDate())
-  const diffDays = Math.floor((today.getTime() - targetDay.getTime()) / (24 * 60 * 60 * 1000))
-
-  if (diffDays <= 0) {
-    return '今天'
-  }
-  if (diffDays < 7) {
-    return '7 天内'
-  }
-  if (diffDays < 30) {
-    return '30 天内'
-  }
-
-  return `${messageDate.getFullYear()}-${String(messageDate.getMonth() + 1).padStart(2, '0')}`
-}
 
 const groupedConversationList = computed<ConversationGroup[]>(() => {
   const orderedGroups: ConversationGroup[] = []
@@ -1080,31 +950,6 @@ function enqueueThinkingDetail(messageId: string, blockId: string, detail: strin
   startThinkingStreamTicker(messageId, blockId)
 }
 
-interface ApplyThinkingSummaryOptions {
-  backendBlockId?: string
-  stage?: string
-  summary: ThinkingSummaryPayload
-  /** 历史回放时使用 timeline 事件自身顺序；实时流未传时按真实到达顺序分配 */
-  eventSeq?: number
-  /** true 表示来自 timeline 历史恢复：不写短摘要、不更新思考态、长摘要一次性写入 */
-  fromHistory?: boolean
-}
-
-function getThinkingBackendKey(opts: Pick<ApplyThinkingSummaryOptions, 'backendBlockId' | 'stage'>) {
-  const backendKeyRaw = (opts.backendBlockId || opts.stage || 'thinking').trim()
-  return backendKeyRaw || 'thinking'
-}
-
-function buildThinkingSummarySignature(summary: ThinkingSummaryPayload) {
-  return [
-    typeof summary.summary_seq === 'number' ? summary.summary_seq : '',
-    (summary.short_summary || '').trim(),
-    (summary.detail_summary || '').trim(),
-    typeof summary.duration_seconds === 'number' ? summary.duration_seconds : '',
-    summary.final === true ? '1' : '0',
-  ].join('\u001f')
-}
-
 function ensureThinkingSummaryBlockBucket(messageId: string) {
   if (!thinkingSummaryBlockStateMap[messageId]) {
     thinkingSummaryBlockStateMap[messageId] = {}
@@ -1261,150 +1106,6 @@ function appendBusinessCardEvent(messageId: string, payload: TimelineBusinessCar
   assistantTimelineLastKindMap[messageId] = 'business_card'
 }
 
-function mapToolEventState(rawStatus?: string): ToolTraceState {
-  const normalized = `${rawStatus || ''}`.trim().toLowerCase()
-  if (normalized === 'start' || normalized === 'calling' || normalized === 'called') {
-    return 'called'
-  }
-  if (normalized === 'create' || normalized === 'created') {
-    return 'create'
-  }
-  if (normalized === 'blocked') {
-    return 'blocked'
-  }
-  if (normalized === 'failed' || normalized === 'error') {
-    return 'blocked'
-  }
-  return 'completed'
-}
-
-function normalizeToolSummary(extra: StreamToolExtraPayload): string {
-  const summary = `${extra.summary || ''}`.trim()
-  if (summary) {
-    return summary
-  }
-  const toolName = `${extra.name || ''}`.trim()
-  if (!toolName) {
-    return '工具事件'
-  }
-  return `已调用工具：${toolName}`
-}
-
-function buildToolDetail(extra: StreamToolExtraPayload): string {
-  const argsPreview = `${extra.arguments_preview || ''}`.trim()
-  if (!argsPreview || argsPreview === '{}') {
-    return ''
-  }
-  return argsPreview
-}
-
-function normalizeStatusCode(rawCode?: string) {
-  const code = `${rawCode || ''}`.trim().toLowerCase()
-  if (!code) {
-    return 'status'
-  }
-  return code
-}
-
-function mapStatusCodeLabel(code: string) {
-  const labelMap: Record<string, string> = {
-    accepted: '请求已接收',
-    planning: '正在规划',
-    resumed: '继续处理中',
-    confirmed: '确认后继续执行',
-    rejected: '已取消并重新规划',
-    executing: '正在执行',
-    plan_confirm: '等待计划确认',
-    tool_confirm: '等待操作确认',
-    ask_user: '等待补充信息',
-    confirm: '等待用户确认',
-    interrupted: '会话已中断',
-    summarizing: '正在生成总结',
-    done: '流程已结束',
-    rough_building: '正在生成初始排课方案',
-    rough_build_failed: '初始排课失败',
-    rough_build_done: '初始排课已完成',
-    rough_build_done_no_refine: '初始排课已完成',
-    order_guard_initialized: '已记录顺序基线',
-    order_guard_passed: '顺序校验通过',
-    order_guard_restored: '顺序已自动恢复',
-    order_guard_restore_skipped: '顺序恢复已跳过',
-    context_compact_start: '正在压缩上下文',
-    context_compact_done: '上下文压缩完成',
-    plan_auto_confirmed: '计划已自动确认',
-  }
-  return labelMap[code] || '状态已更新'
-}
-
-function buildStatusSummary(extra: StreamExtraPayload): string {
-  const summary = `${extra.status?.summary || ''}`.trim()
-  if (summary) {
-    return summary
-  }
-  return mapStatusCodeLabel(normalizeStatusCode(extra.status?.code))
-}
-
-function isLegacyToolStatusCode(code: string) {
-  return code === 'tool_call' || code === 'tool_result' || code === 'tool_blocked'
-}
-
-function mapLegacyToolStatusToState(code: string): ToolTraceState {
-  if (code === 'tool_call') {
-    return 'called'
-  }
-  if (code === 'tool_blocked') {
-    return 'blocked'
-  }
-  return 'completed'
-}
-
-function shouldSkipStatusEvent(code: string, stage = '') {
-  // confirm_request 已有专属卡片，避免重复显示同语义状态行。
-  if (stage === 'confirm' && (code === 'plan_confirm' || code === 'tool_confirm' || code === 'confirm')) {
-    return true
-  }
-
-  const hiddenStatusCodes = new Set([
-    'accepted',
-    'ask_user',
-    'planning',
-    'resumed',
-    'confirmed',
-    'rejected',
-    'executing',
-    'summarizing',
-    'done',
-    'rough_building',
-    'order_guard_initialized',
-    'order_guard_passed',
-    'order_guard_restored',
-    'order_guard_restore_skipped',
-    'context_compact_start',
-    'context_compact_done',
-    'plan_auto_confirmed',
-  ])
-
-  if (hiddenStatusCodes.has(code)) {
-    return true
-  }
-  return false
-}
-
-function isAssistantTimelineKind(kind: string) {
-  const assistantKinds = new Set([
-    'assistant_text',
-    'tool_call',
-    'tool_result',
-    'confirm_request',
-    'schedule_completed',
-    'interrupt',
-    'status',
-    'business_card',
-    'thinking_summary',
-  ])
-  return assistantKinds.has(kind)
-}
-
 function isToolTraceExpanded(eventId: string) {
   return toolTraceExpandedMap[eventId] === true
 }
@@ -1450,18 +1151,6 @@ function clearConfirmStreamFlags(messageId: string) {
   delete confirmVisiblePrefixMap[messageId]
 }
 
-function createDraftConversationId() {
-  return `draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-}
-
-function createMessageId(role: AssistantMessage['role']) {
-  return `${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-}
-
-function isDraftConversationId(conversationId: string) {
-  return conversationId.startsWith('draft-')
-}
-
 function upsertConversationMeta(meta: ConversationMeta) {
   conversationMetaMap[meta.conversation_id] = meta
 }
@@ -1495,26 +1184,11 @@ function migrateConversationState(fromConversationId: string, toConversationId: 
     delete conversationMetaMap[fromConversationId]
   }
 
-  const latestMap = new Map<string, ConversationListItem>()
-  const deduplicated: ConversationListItem[] = []
-  const seen = new Set<string>()
-
-  for (const item of conversationList.value) {
-    const nextItem =
-      item.conversation_id === fromConversationId ? { ...item, conversation_id: toConversationId } : item
-    latestMap.set(nextItem.conversation_id, nextItem)
-  }
-
-  for (const item of conversationList.value) {
-    const nextId = item.conversation_id === fromConversationId ? toConversationId : item.conversation_id
-    if (seen.has(nextId)) {
-      continue
-    }
-    seen.add(nextId)
-    deduplicated.push(latestMap.get(nextId)!)
-  }
-
-  conversationList.value = deduplicated
+  conversationList.value = migrateConversationListIds(
+    conversationList.value,
+    fromConversationId,
+    toConversationId,
+  )
 
   if (selectedConversationId.value === fromConversationId) {
     selectedConversationId.value = toConversationId
@@ -1530,37 +1204,18 @@ function migrateConversationState(fromConversationId: string, toConversationId: 
 // 2. 不负责决定选中哪个会话，选中逻辑交给 ensureSelectedConversationAfterListLoad。
 // 3. 本地尚未完成 round-trip 的 draft 会话会原样保留，避免用户发出首条消息后列表瞬间丢失。
 function mergeConversationList(items: ConversationListItem[]) {
-  const merged = [...conversationList.value, ...items]
-  const latestMap = new Map<string, ConversationListItem>()
-  const deduplicated: ConversationListItem[] = []
-  const seen = new Set<string>()
-
-  for (const item of merged) {
-    latestMap.set(item.conversation_id, item)
-  }
-
-  for (const item of merged) {
-    if (seen.has(item.conversation_id)) {
-      continue
-    }
-    seen.add(item.conversation_id)
-    deduplicated.push(latestMap.get(item.conversation_id) ?? item)
-  }
-
-  conversationList.value = deduplicated
+  conversationList.value = mergeConversationListItems(conversationList.value, items)
 }
 
 function prependConversationPreview(conversationId: string, previewText: string, createdAt: string) {
   const current = conversationList.value.find((item) => item.conversation_id === conversationId)
-  const nextItem: ConversationListItem = {
-    conversation_id: conversationId,
-    title: current?.title || previewText.slice(0, 24),
-    has_title: current?.has_title ?? false,
-    message_count: Math.max(current?.message_count ?? 0, conversationMessagesMap[conversationId]?.length ?? 0),
-    last_message_at: createdAt,
-    status: current?.status || 'active',
-    created_at: current?.created_at || createdAt,
-  }
+  const nextItem = buildConversationPreviewItem(
+    conversationId,
+    previewText,
+    createdAt,
+    current,
+    conversationMessagesMap[conversationId]?.length ?? 0,
+  )
 
   conversationList.value = [
     nextItem,
@@ -1664,10 +1319,6 @@ function findMessageIndex(messageId: string) {
 function isLatestAssistantMessage(messageId: string) {
   const lastAssistant = [...selectedMessages.value].reverse().find((message) => message.role === 'assistant')
   return lastAssistant?.id === messageId
-}
-
-function isLocalEphemeralMessageId(id: string) {
-  return /^(user|assistant|system)-\d{13}-[a-z0-9]+$/i.test(id)
 }
 
 function resolvePromptBeforeAssistantMessage(messageId: string) {
@@ -2766,10 +2417,6 @@ function startNewConversation() {
   suppressEmptyStateTransition.value = false
 }
 
-function isManualThinkingEnabled(mode: ThinkingModeType) {
-  return mode === 'true'
-}
-
 async function openFineTuneModal(data: SchedulePreviewData) {
   // 1. 如果点击的是占位卡片（尚未加载详情），则触发实时拉取。
   if ((data as any).is_placeholder) {
@@ -2901,13 +2548,7 @@ async function handleSaveTask() {
   try {
     if (isEditMode.value && editingTaskId.value) {
       const taskId = editingTaskId.value
-      const updateData = {
-        task_id: taskId,
-        title: taskForm.title.trim(),
-        priority_group: taskForm.priority_group,
-        deadline_at: taskForm.deadline_at ? (typeof taskForm.deadline_at === 'string' ? taskForm.deadline_at : taskForm.deadline_at.toISOString()) : null,
-        urgency_threshold_at: taskForm.urgency_threshold_at ? (typeof taskForm.urgency_threshold_at === 'string' ? taskForm.urgency_threshold_at : taskForm.urgency_threshold_at.toISOString()) : null,
-      }
+      const updateData = buildTaskUpdatePayload(taskId, taskForm)
       await updateTask(updateData)
 
       // 同步更新本地状态映射，让所有历史卡片实时联动
@@ -2915,11 +2556,7 @@ async function handleSaveTask() {
         taskStatusMap[taskId].title = updateData.title
         taskStatusMap[taskId].priority_group = updateData.priority_group
         // 格式化截止时间用于展示
-        taskStatusMap[taskId].deadline_at = taskForm.deadline_at 
-          ? (taskForm.deadline_at instanceof Date 
-              ? taskForm.deadline_at.toLocaleDateString('zh-CN').replace(/\//g, '-')
-              : String(taskForm.deadline_at).split('T')[0])
-          : null
+        taskStatusMap[taskId].deadline_at = formatTaskDeadlineForStatus(taskForm.deadline_at)
       }
 
       ElMessage.success('任务详情已更新')
@@ -2961,19 +2598,7 @@ function applyConfirmOverlay(confirmPayload?: StreamConfirmPayload) {
 function buildChatRequestExtra(
   planningTaskClassIds: number[] = [],
 ): ChatRequestExtra | undefined {
-  const extra: ChatRequestExtra = {}
-  
-  // 1. 任务类别过滤：将智能编排所需的 task_class_ids 透传给后端。
-  if (planningTaskClassIds.length > 0) {
-    extra.task_class_ids = [...planningTaskClassIds]
-  }
-
-  // 2. 执行模式控制：若开启“自动执行”，则透传 always_execute 标志，跳过工具调用确认逻辑。
-  if (selectedExecutionMode.value === 'always') {
-    extra.always_execute = true
-  }
-
-  return Object.keys(extra).length > 0 ? extra : undefined
+  return buildAssistantChatRequestExtra(planningTaskClassIds, selectedExecutionMode.value)
 }
 
 function handlePlanningSelectionApplied(taskClassIds: number[]) {

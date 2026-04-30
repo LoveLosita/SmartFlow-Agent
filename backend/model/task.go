@@ -39,6 +39,13 @@ type Task struct {
 	// 7.3 为空表示该任务不参与自动平移；
 	// 7.4 该字段参与"懒触发平移"复合索引。
 	UrgencyThresholdAt *time.Time `gorm:"column:urgency_threshold_at;index:idx_user_done_threshold_priority,priority:3"`
+	// 8. 任务预计占用节数。
+	//
+	// 说明：
+	// 8.1 主动调度只消费该字段，不在调度阶段重新推断任务复杂度；
+	// 8.2 MVP 约定有效范围为 1~4，模型层仅提供默认值，具体截断由主动调度上下文构造负责；
+	// 8.3 默认 1 节，兼容历史任务与未显式填写的任务。
+	EstimatedSections int `gorm:"column:estimated_sections;not null;default:1"`
 }
 
 type UserAddTaskResponse struct {

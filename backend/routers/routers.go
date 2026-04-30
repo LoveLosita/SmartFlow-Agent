@@ -112,6 +112,14 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, userRepo *d
 			memoryGroup.DELETE("/items/:id", middleware.IdempotencyMiddleware(cache), handlers.MemoryHandler.DeleteItem)
 			memoryGroup.POST("/items/:id/restore", middleware.IdempotencyMiddleware(cache), handlers.MemoryHandler.RestoreItem)
 		}
+		activeScheduleGroup := apiGroup.Group("/active-schedule")
+		{
+			activeScheduleGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
+			activeScheduleGroup.POST("/dry-run", handlers.ActiveSchedule.DryRun)
+			activeScheduleGroup.POST("/preview", handlers.ActiveSchedule.CreatePreview)
+			activeScheduleGroup.GET("/preview/:preview_id", handlers.ActiveSchedule.GetPreview)
+			activeScheduleGroup.POST("/preview/:preview_id/confirm", handlers.ActiveSchedule.ConfirmPreview)
+		}
 	}
 	// 初始化Gin引擎
 	log.Println("Routes setup completed")

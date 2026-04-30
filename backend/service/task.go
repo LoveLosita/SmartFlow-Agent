@@ -38,6 +38,8 @@ type TaskService struct {
 	cache *dao.CacheDAO
 	// eventPublisher 负责发布 outbox 事件（可能为空：例如未启用 Kafka/总线时）。
 	eventPublisher outboxinfra.EventPublisher
+	// activeScheduleDAO 负责维护主动调度 due job；为空时保持旧任务链路兼容。
+	activeScheduleDAO *dao.ActiveScheduleDAO
 }
 
 // NewTaskService 创建 TaskService 实例。
@@ -50,6 +52,17 @@ func NewTaskService(taskDAO *dao.TaskDAO, cacheDAO *dao.CacheDAO, eventPublisher
 		dao:            taskDAO,
 		cache:          cacheDAO,
 		eventPublisher: eventPublisher,
+	}
+}
+
+// SetActiveScheduleDAO 注入主动调度自有表仓储。
+//
+// 职责边界：
+// 1. 只负责迁移期依赖接线，避免扩大 TaskService 构造函数调用面；
+// 2. 不改变任务主流程语义，未注入时主动调度 job 同步自动降级为 no-op。
+func (ts *TaskService) SetActiveScheduleDAO(activeScheduleDAO *dao.ActiveScheduleDAO) {
+	if ts != nil {
+		ts.activeScheduleDAO = activeScheduleDAO
 	}
 }
 
@@ -70,6 +83,7 @@ func (ts *TaskService) AddTask(ctx context.Context, req *model.UserAddTaskReques
 	if err != nil {
 		return nil, err
 	}
+	ts.syncActiveScheduleJobBestEffort(ctx, createdTask)
 	// 4. 返回对外响应 DTO。
 	response := conv.ModelToUserAddTaskResponse(createdTask)
 	return response, nil
@@ -112,6 +126,7 @@ func (ts *TaskService) CompleteTask(ctx context.Context, req *model.UserComplete
 		AlreadyCompleted: alreadyCompleted,
 		Status:           "completed",
 	}
+	ts.cancelActiveScheduleJobBestEffort(ctx, updatedTask.UserID, updatedTask.ID, "task_completed")
 	return resp, nil
 }
 
@@ -488,6 +503,7 @@ func (ts *TaskService) UpdateTask(ctx context.Context, req *model.UserUpdateTask
 		}
 		return model.GetUserTaskResp{}, err
 	}
+	ts.syncActiveScheduleJobBestEffort(ctx, updatedTask)
 
 	// 5. 转换为响应 DTO。
 	return conv.ModelToGetUserTaskResp(updatedTask), nil
@@ -515,6 +531,7 @@ func (ts *TaskService) DeleteTask(ctx context.Context, req *model.UserCompleteTa
 		}
 		return 0, err
 	}
+	ts.cancelActiveScheduleJobBestEffort(ctx, deletedTask.UserID, deletedTask.ID, "task_deleted")
 
 	return deletedTask.ID, nil
 }
