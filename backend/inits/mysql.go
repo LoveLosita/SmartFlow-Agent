@@ -25,6 +25,7 @@ func autoMigrateModels(db *gorm.DB) error {
 		&model.ActiveScheduleTrigger{},
 		&model.ActiveSchedulePreview{},
 		&model.NotificationRecord{},
+		&model.UserNotificationChannel{},
 		&model.AgentOutboxMessage{},
 		&model.AgentScheduleState{},
 		&model.AgentStateSnapshotRecord{},

@@ -2,7 +2,7 @@
 
 ## 0. Handoff 说明
 
-本文档已收口为第二阶段主动调度 MVP 的最终实施版。截至 2026-04-30，后端第一至第三阶段已实现并通过本地 API + DB 验收；接手者请优先阅读本节、第 10 章装配边界和第 14 章验证 checklist，再从第四阶段继续推进。
+本文档已收口为第二阶段主动调度 MVP 的最终实施版。截至 2026-04-30，后端第一至第四阶段主体代码已实现并通过本地 `go test ./...`；真实飞书 webhook 配置接口和 `important_urgent_task` 主动触发端到端链路已通过本地后端验收。接手者请优先阅读本节、第 10 章装配边界和第 14 章验证 checklist，再从第五阶段剩余验收继续推进。
 
 当前核心共识：
 
@@ -34,6 +34,7 @@
 24. `compress_with_next_dynamic_task` 第一轮实现先关闭，不生成该候选；保留 schema 和文档口径，待新增补做块主链路稳定后再打开。
 25. 飞书第一版使用 mock / webhook 跑通主动触达闭环，不阻塞在用户 open_id 绑定体系上。
 26. notification 去重窗口第一版固定为 30 分钟。
+27. 真实飞书第一版走“用户级 Webhook 触发器”而不是群自定义机器人协议：后端按 `user_id` 查用户配置的 webhook URL，POST 极简业务 JSON；私聊、群聊、分支和后续动作由用户在飞书流程里自行编排。
 
 ### 0.1 多阶段推进计划
 
@@ -57,14 +58,15 @@
 3. task_pool 正式落库写 `schedule_events(type=task, task_source_type=task_pool, rel_id=tasks.id)`。
 4. 补做块新增 event，不移动原已排任务。
 
-第四阶段：worker 与 notification。（待实施）
+第四阶段：worker 与 notification。（主体代码已完成，真实 webhook 配置接口已验收）
 
 1. 接入 `active_schedule.triggered` worker handler 和 due job scanner。
 2. 接入 `notification.feishu.requested` handler。
-3. 先使用 mock provider，再接测试 webhook。
+3. 先使用 mock provider，再接用户级飞书 Webhook 触发器 provider。
 4. `notification_records` 支持幂等、状态流转和 provider retry。
+5. 新增用户通知配置入口：保存 / 查询 / 删除 / 测试当前用户的飞书 webhook。
 
-第五阶段：端到端验收与收口。（待实施）
+第五阶段：端到端验收与收口。（部分验收中）
 
 1. 跑通 `api / worker / all` 三种启动模式。
 2. 按第 14 章 checklist 验证 dry-run、trigger、preview、notification、confirm apply、失败注入。
@@ -125,6 +127,19 @@
    - 已实现 preview 写入、详情查询、`apply_id + idempotency_key`、候选转换、同步 apply adapter。
    - `add_task_pool_to_schedule` 已能正式写入 `schedule_events(type=task, task_source_type=task_pool, rel_id=tasks.id)` 和对应 `schedules`。
    - `create_makeup` 转换与 adapter 已预留并实现基本写入路径，但尚需在第四 / 第五阶段结合正式 unfinished feedback worker 场景补端到端验收。
+4. 第四阶段：worker 与 notification 主体代码。
+   - 已接入 `active_schedule.triggered` worker handler、due job scanner、`notification.feishu.requested` handler 和 notification retry loop。
+   - 已新增 `backend/notification` provider / service 分层，mock provider 保留，真实投递切到用户级飞书 Webhook 触发器 provider。
+   - 已新增 `user_notification_channels` model / DAO，并接入 AutoMigrate 与 `RepoManager`。
+   - 已开放当前用户飞书 webhook 配置接口：
+     ```text
+     GET    /api/v1/notification/channels/feishu
+     PUT    /api/v1/notification/channels/feishu
+     DELETE /api/v1/notification/channels/feishu
+     POST   /api/v1/notification/channels/feishu/test
+     ```
+   - `cmd/start.go` 已把正式 notification service 注入为 `WebhookFeishuProvider`；测试配置接口与正式投递复用同一个 provider 实例。
+   - 用户未配置或禁用 webhook 时，通知记录进入 `skipped`，不阻塞主动调度 preview 链路。
 
 本轮实测结果：
 
@@ -144,23 +159,38 @@
 5. 测试命令：
    - 已在 `backend` 目录执行 `go test ./...` 并通过。
    - 已按项目规则清理根目录 `.gocache`。
+6. 第四阶段本轮自动化结果：
+   - 临时新增 `backend/notification/webhook_provider_test.go` 验证 payload 拼装、飞书 webhook URL 校验与脱敏规则；测试通过后已按项目规则删除临时 `*_test.go`。
+   - 已再次执行 `go test ./...` 并通过；`GOCACHE` 明确指向项目根目录 `.gocache`，命令结束后已清理。
+   - 后端按最新代码启动后，已注册本地测试账号 `codex_webhook_0430_183147`（user_id=6）。
+   - 已调用 `PUT /api/v1/notification/channels/feishu` 保存用户飞书 webhook；接口返回 `configured=true`、`enabled=true`、脱敏回显为 `https://www.feishu.cn/flow/api/trigger-webhook/e889...6624`。
+   - 已调用 `POST /api/v1/notification/channels/feishu/test`；接口返回 `status=success`、`outcome=success`，`last_test_status=success`，`last_test_at=2026-04-30T18:31:47.885+08:00`。
+7. 第五阶段 `important_urgent_task` 端到端验收结果：
+   - 测试账号：`codex_e2e_0430_185311 / 123456`，当前本地环境 user_id 为 7。
+   - 已保存同一个飞书 webhook 配置，创建测试任务 `task_id=82`，同步 dry-run 返回 `decision=select_candidate` 且候选数为 1。
+   - 已调用 `POST /api/v1/active-schedule/trigger` 写入正式 trigger：`trigger_id=ast_39a7f87a-d037-4361-82e5-03f58e4733a3`，`trace_id=trace_api_trigger_7_1777546391942562200`。
+   - worker 已生成 preview：`preview_id=asp_e6701977-aeed-4bef-9964-29d26014f73d`，`active_schedule_triggers.status=preview_generated`，`active_schedule_previews.status=ready`。
+   - outbox 两段均消费成功：`active_schedule.triggered` 对应 outbox id 2986 为 `consumed`；`notification.feishu.requested` 对应 outbox id 2987 为 `consumed`。
+   - notification 投递成功：`notification_records.id=2`，`status=sent`，`attempt_count=1`，`provider_message_id=feishu_webhook_2_1777546395537770600`。
+   - `provider_request_json.event=smartflow.schedule_adjustment_ready`，`message.title=SmartFlow 日程调整建议`，`message.action_url=https://smartflow.example.com/schedule-adjust/asp_e6701977-aeed-4bef-9964-29d26014f73d`。
+   - 飞书 webhook 响应：HTTP 200，响应体 `{"code":0,"data":{},"msg":"success"}`。
+8. 第五阶段补充自动验收结果：
+   - skipped 场景：测试账号 `codex_skip_idem_0430_185759`（user_id=8）未配置 webhook，正式 trigger `ast_da60cd1c-1909-4855-ad5d-53125b19fb76` 生成 preview `asp_9e5c9c46-3460-4065-a2b8-1d531cf0c8aa`；`notification_records.id=3` 进入 `skipped`，`last_error_code=recipient_missing`，两段 outbox 均为 `consumed`。
+   - trigger 幂等：同一账号、同一 task、同一 `idempotency_key` 重复调用 `POST /api/v1/active-schedule/trigger`，第二次返回同一个 trigger_id，`dedupe_hit=true`。
+   - confirm apply 成功与幂等：对 preview `asp_e6701977-aeed-4bef-9964-29d26014f73d` 确认 candidate `add_task_pool_to_schedule:82:9:4:3`，生成 `apply_id=asap_039719fda4f2ae75f1d3d1fe`、`schedule_events.id=2488`、`schedules.id=5177`；同一幂等键重复确认返回同一个 apply_id 和 event_id，DB 中该 preview 只落 1 条正式事件。
+   - `unfinished_feedback` 端到端：基于 `schedule_events.id=2488` 触发 `unfinished_feedback`，trigger `ast_25aced9e-554a-4021-9075-7166cf268480` 生成补做块 preview `asp_555e4cb9-b3c4-4e5e-8830-bd271c99e346`；`notification_records.id=4` 为 `sent`，飞书 webhook HTTP 200，响应体 `{"code":0,"data":{},"msg":"success"}`。
+   - failed 场景：测试账号 `codex_fail_0430_190101`（user_id=10）配置 `https://www.feishu.cn:81/...` 不可达端口，trigger `ast_cd8b2de9-d836-4470-ad6a-c02c32142274` 生成 preview `asp_e5db98b2-b6bc-4683-8664-ae3d7eb76c25`；`notification_records.id=6` 进入 `failed`，`last_error_code=provider_timeout`，并写入 `next_retry_at`。
+   - retry loop 恢复：将 `notification_records.id=6` 对应用户 webhook 改回真实地址并把 `next_retry_at` 调到当前时间，后台 retry loop 自动重试后该记录变为 `sent`，最终 `attempt_count=3`，HTTP 200。
+   - dead 场景：测试账号 `codex_dead_runtime_0430_190150`（user_id=11）通过 DB 注入非法 `http://` webhook URL，trigger `ast_fc162833-7223-4aba-89c9-194ecdfbcf40` 生成 preview `asp_731f7cb2-c5dd-4629-83cd-627bec901e30`；`notification_records.id=7` 进入 `dead`，`last_error_code=invalid_url`，`next_retry_at=NULL`。
+   - api-only 启动边界：仅启动 API 后，健康检查通过；测试账号 `codex_api_mode_0430_190708`（user_id=12）创建任务 `task_id=87` 并调用正式 trigger，得到 `trigger_id=ast_b48c955f-dcb3-4e87-a296-fd98583e4807`、`status=pending`。等待 6 秒后 DB 确认 `active_schedule_triggers.status=pending`、preview 数为 0、notification 数为 0、outbox id 3008 为 `active_schedule.triggered / pending`，证明 API 模式只写入 outbox，不启动 worker 消费。
+   - worker-only 启动边界：仅启动 worker 后，HTTP 健康检查超时，符合“不注册 API 路由”预期；worker 消费 api-only 留下的 outbox id 3008，`active_schedule_triggers.status=preview_generated`，生成 preview `asp_badb4be4-cf2c-4f9b-9719-cbe92f50abed`，`notification_records.id=8` 因该用户未配置 webhook 进入 `skipped`，`notification.feishu.requested` outbox id 3009 为 `consumed`。
 
 下一阶段入口：
 
-1. 第四阶段从 worker 与 notification 开始，不需要重做 dry-run / preview / confirm 主链路。
-2. 重点实现：
-   - `active_schedule.triggered` worker handler。
-   - due job scanner：扫描到期 `active_schedule_jobs`，生成正式 trigger。
-   - `notification_records` 状态机与 repo。
-   - `notification.feishu.requested` handler。
-   - 飞书 mock / webhook provider，通知链接固定为 `/schedule-adjust/{preview_id}`。
-   - LLM summary 优先，固定模板 fallback。
-   - 通知去重窗口固定 30 分钟，按 `user_id + trigger_type + time_window` 聚合。
-3. 第五阶段再做完整端到端收口：
-   - `api / worker / all` 三种启动方式。
-   - `important_urgent_task` 与 `unfinished_feedback` 两条主触发。
-   - notification 成功 / 失败 / 重试。
-   - confirm apply 成功、冲突失败、过期拒绝、重复提交幂等。
+1. 下一步继续第五阶段剩余验收，不需要重做 dry-run / preview / confirm 主链路，也不需要重做第四阶段 provider / handler 主体代码。
+2. 第五阶段剩余重点：
+   - confirm apply 冲突失败、过期拒绝。
+   - 更完整的边界清理：测试数据隔离策略、失败注入脚本化、前端真实地址替换 `smartflow.example.com`。
 4. 工作区注意：
    - 另一个前端对话可能在改前端；后端阶段不要碰 `frontend` 相关改动。
    - 当前允许单个 Go 文件 700 行以内；超过 700 再评估拆分。
@@ -4321,6 +4351,99 @@ updated_at
 4. 若同一 `dedupe_key` 已存在 `pending / sending / sent` 记录，应避免重复创建新通知；如果上一条是 `failed`，可按重试策略推进，而不是新建多条相同飞书。
 5. 记录表只负责通知投递状态，不负责 apply 状态；apply 状态仍属于 `active_schedule_previews`。
 
+### 13.20.1 飞书 Webhook 触发器与多用户配置
+
+本轮真实飞书接入不使用群自定义机器人 `msg_type=text/post` 协议，而是使用飞书 Webhook 触发器。后端只负责把“SmartFlow 生成了一条日程调整建议”这个业务事实 POST 给用户配置的 webhook；飞书侧如何私聊、群发、分支、追加查询或调用其它流程，全部由用户在飞书工作流中编排。
+
+用户级配置表建议：
+
+```text
+user_notification_channels
+- id
+- user_id
+- channel                 # feishu_webhook
+- enabled
+- webhook_url             # 用户复制的飞书 Webhook 触发器 URL
+- auth_type               # none / bearer
+- bearer_token            # 可选；飞书触发器启用 Bearer Token 时使用
+- last_test_status        # success / failed
+- last_test_error
+- last_test_at
+- created_at
+- updated_at
+```
+
+管理接口建议：
+
+```text
+GET    /api/v1/notification/channels/feishu
+PUT    /api/v1/notification/channels/feishu
+DELETE /api/v1/notification/channels/feishu
+POST   /api/v1/notification/channels/feishu/test
+```
+
+接口语义：
+
+1. `PUT` 保存当前用户的 webhook 配置；`webhook_url` 必须是 HTTPS URL，域名第一版限制为 `www.feishu.cn` 或 `feishu.cn`。
+2. `GET` 返回当前用户配置状态，`webhook_url / bearer_token` 只允许脱敏回显。
+3. `DELETE` 关闭并软删除当前用户飞书通知配置。
+4. `test` 使用同一套 provider 发送测试 JSON，并把 `last_test_status / last_test_error / last_test_at` 写回配置表。
+5. 未配置或未启用时，真实通知不报错阻断主链路，`notification_records.status` 记为 `skipped`，表示当前用户没有启用飞书触达。
+
+发送给飞书 Webhook 触发器的业务 JSON 固定从简：
+
+```json
+{
+  "event": "smartflow.schedule_adjustment_ready",
+  "version": "1",
+  "notification_id": 123,
+  "user_id": 5,
+  "preview_id": "asp_xxx",
+  "trigger_id": "ast_xxx",
+  "trigger_type": "important_urgent_task",
+  "target_type": "task_pool",
+  "target_id": 81,
+  "message": {
+    "title": "SmartFlow 日程调整建议",
+    "summary": "把重要且紧急任务放入滚动 24 小时内的空闲节次。",
+    "action_text": "查看并确认调整",
+    "action_url": "https://smartflow.example.com/schedule-adjust/asp_xxx"
+  },
+  "trace_id": "trace_xxx",
+  "sent_at": "2026-04-30T17:34:52+08:00"
+}
+```
+
+拼装规则：
+
+1. `message.title` 固定为 `SmartFlow 日程调整建议`。
+2. `message.summary` 优先使用 preview 的 `notification_summary`，为空时使用 notification fallback 文案。
+3. `message.action_text` 固定为 `查看并确认调整`。
+4. `message.action_url` 使用 `frontend_base_url + target_url`；若 `target_url` 已经是完整 HTTPS URL，则直接使用。
+5. 其它字段只做飞书流程编排、排障和审计，不要求用户流程全部使用。
+
+飞书侧推荐消息模板：
+
+```text
+{{message.title}}
+
+{{message.summary}}  {{message.action_text}}
+{{message.action_url}}
+```
+
+真实 provider 状态映射：
+
+1. HTTP 2xx 且响应体 `code=0` 或响应体为空：视为成功，`notification_records.status=sent`。
+2. 网络错误、超时、HTTP 429、HTTP 5xx：视为临时失败，进入 `failed` 并按现有 retry loop 重试。
+3. URL 非法、未配置、未启用：视为 `skipped`，不重试。
+4. HTTP 401 / 403 或飞书明确返回鉴权失败：视为不可恢复失败，进入 `dead`。
+
+安全约束：
+
+1. webhook URL 本身等同密钥，接口和日志必须脱敏，禁止完整回显。
+2. bearer token 同样禁止完整回显；后续若引入统一密钥加密能力，再把明文存储替换为加密存储。
+3. 测试接口可以暴露成功 / 失败分类，但不能把完整 webhook 或 token 打到响应和日志里。
+
 ### 13.21 为什么事件契约要提前独立
 
 事件契约可以理解为异步消息世界里的 IDL。Thrift / gRPC 描述同步 RPC 的请求、响应和字段语义；事件契约描述某个业务事实或异步动作的事件名、版本、payload、幂等键和消费语义。
@@ -4459,6 +4582,7 @@ active_schedule_jobs
 active_schedule_triggers
 active_schedule_previews
 notification_records
+user_notification_channels
 outbox / event bus 消费状态
 schedule_events
 schedules
@@ -4530,6 +4654,8 @@ tasks
 | 飞书 provider 返回临时失败 | `notification_records.status=failed`，递增 `attempt_count`，写 `last_error / next_retry_at` |
 | 重试到达上限或不可恢复错误 | `notification_records.status=dead`，不再自动重试 |
 | 同一 `user_id + trigger_type + time_window` 内重复通知 | 命中 `dedupe_key`，不重复创建多条待发送通知 |
+| 用户未配置或禁用飞书 webhook | `notification_records.status=skipped`，不重试，不影响 preview 查询 |
+| 调用飞书 webhook 测试接口 | 写入 / 更新 `user_notification_channels.last_test_status / last_test_at`，飞书流程收到极简 JSON |
 
 ### 14.8 confirm apply checklist
 

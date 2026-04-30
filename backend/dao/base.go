@@ -16,6 +16,7 @@ type RepoManager struct {
 	User           *UserDAO
 	Agent          *AgentDAO
 	ActiveSchedule *ActiveScheduleDAO
+	Notification   *NotificationChannelDAO
 }
 
 func NewManager(db *gorm.DB) *RepoManager {
@@ -28,6 +29,7 @@ func NewManager(db *gorm.DB) *RepoManager {
 		User:           NewUserDAO(db),
 		Agent:          NewAgentDAO(db),
 		ActiveSchedule: NewActiveScheduleDAO(db),
+		Notification:   NewNotificationChannelDAO(db),
 	}
 }
 
@@ -47,6 +49,7 @@ func (m *RepoManager) WithTx(tx *gorm.DB) *RepoManager {
 		User:           m.User.WithTx(tx),
 		Agent:          m.Agent.WithTx(tx),
 		ActiveSchedule: m.ActiveSchedule.WithTx(tx),
+		Notification:   m.Notification.WithTx(tx),
 	}
 }
 

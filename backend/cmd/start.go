@@ -12,6 +12,7 @@ import (
 
 	activeadapters "github.com/LoveLosita/smartflow/backend/active_scheduler/adapters"
 	"github.com/LoveLosita/smartflow/backend/active_scheduler/applyadapter"
+	activejob "github.com/LoveLosita/smartflow/backend/active_scheduler/job"
 	activepreview "github.com/LoveLosita/smartflow/backend/active_scheduler/preview"
 	activesvc "github.com/LoveLosita/smartflow/backend/active_scheduler/service"
 	"github.com/LoveLosita/smartflow/backend/api"
@@ -31,6 +32,7 @@ import (
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 	"github.com/LoveLosita/smartflow/backend/newAgent/tools/web"
+	"github.com/LoveLosita/smartflow/backend/notification"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/LoveLosita/smartflow/backend/routers"
 	"github.com/LoveLosita/smartflow/backend/service"
@@ -47,18 +49,21 @@ import (
 // 2. 不承载业务逻辑，业务仍然由 service / newAgent / memory 等领域模块负责；
 // 3. 不决定进程角色，api / worker / all 由 StartAPI、StartWorker、StartAll 选择启动哪些生命周期。
 type appRuntime struct {
-	db           *gorm.DB
-	redisClient  *redis.Client
-	cacheRepo    *dao.CacheDAO
-	userRepo     *dao.UserDAO
-	agentRepo    *dao.AgentDAO
-	agentCache   *dao.AgentCache
-	manager      *dao.RepoManager
-	outboxRepo   *outboxinfra.Repository
-	eventBus     *outboxinfra.EventBus
-	memoryModule *memory.Module
-	limiter      *pkg.RateLimiter
-	handlers     *api.ApiHandlers
+	db                    *gorm.DB
+	redisClient           *redis.Client
+	cacheRepo             *dao.CacheDAO
+	userRepo              *dao.UserDAO
+	agentRepo             *dao.AgentDAO
+	agentCache            *dao.AgentCache
+	manager               *dao.RepoManager
+	outboxRepo            *outboxinfra.Repository
+	eventBus              *outboxinfra.EventBus
+	memoryModule          *memory.Module
+	activeJobScanner      *activejob.Scanner
+	activeTriggerWorkflow *activesvc.TriggerWorkflowService
+	notificationService   *notification.NotificationService
+	limiter               *pkg.RateLimiter
+	handlers              *api.ApiHandlers
 }
 
 // loadConfig 加载应用配置。
@@ -220,7 +225,12 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		memoryCfg,
 	)
 
-	activeScheduleDryRun, err := buildActiveScheduleDryRunService(db)
+	activeReaders := activeadapters.NewGormReaders(db)
+	activeScheduleDryRun, err := activesvc.NewDryRunService(activeadapters.ReadersFromGorm(activeReaders))
+	if err != nil {
+		return nil, err
+	}
+	activeScheduleTrigger, err := activesvc.NewTriggerService(manager.ActiveSchedule, eventBus)
 	if err != nil {
 		return nil, err
 	}
@@ -228,21 +238,55 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
-	handlers := buildAPIHandlers(userService, taskSv, taskClassService, courseService, scheduleService, agentService, memoryModule, activeScheduleDryRun, activeSchedulePreviewConfirm)
+	// 1. 生产投递先切到用户级飞书 Webhook provider，mock provider 文件继续保留给后续单测和本地隔离验证。
+	// 2. provider 与配置测试接口共用同一个实例，保证“测试成功”和“正式投递”走同一套 URL 校验、JSON 拼装和 HTTP 结果分类。
+	feishuProvider, err := notification.NewWebhookFeishuProvider(manager.Notification, notification.WebhookFeishuProviderOptions{
+		FrontendBaseURL: viper.GetString("notification.frontendBaseURL"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	notificationService, err := notification.NewNotificationService(manager.ActiveSchedule, feishuProvider, notification.ServiceOptions{})
+	if err != nil {
+		return nil, err
+	}
+	notificationChannelService, err := notification.NewChannelService(manager.Notification, feishuProvider, notification.ChannelServiceOptions{})
+	if err != nil {
+		return nil, err
+	}
+	var activeTriggerWorkflow *activesvc.TriggerWorkflowService
+	var activeJobScanner *activejob.Scanner
+	if eventBus != nil {
+		activeTriggerWorkflow, err = activesvc.NewTriggerWorkflowService(manager.ActiveSchedule, activeScheduleDryRun, outboxRepo, kafkabus.LoadConfig())
+		if err != nil {
+			return nil, err
+		}
+		activeJobScanner, err = activejob.NewScanner(manager.ActiveSchedule, activeadapters.ReadersFromGorm(activeReaders), activeScheduleTrigger, activejob.ScannerOptions{
+			ScanEvery: viper.GetDuration("activeScheduler.jobScanEvery"),
+			Limit:     viper.GetInt("activeScheduler.jobScanLimit"),
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	handlers := buildAPIHandlers(userService, taskSv, taskClassService, courseService, scheduleService, agentService, memoryModule, activeScheduleDryRun, activeSchedulePreviewConfirm, activeScheduleTrigger, notificationChannelService)
 
 	return &appRuntime{
-		db:           db,
-		redisClient:  rdb,
-		cacheRepo:    cacheRepo,
-		userRepo:     userRepo,
-		agentRepo:    agentRepo,
-		agentCache:   agentCacheRepo,
-		manager:      manager,
-		outboxRepo:   outboxRepo,
-		eventBus:     eventBus,
-		memoryModule: memoryModule,
-		limiter:      limiter,
-		handlers:     handlers,
+		db:                    db,
+		redisClient:           rdb,
+		cacheRepo:             cacheRepo,
+		userRepo:              userRepo,
+		agentRepo:             agentRepo,
+		agentCache:            agentCacheRepo,
+		manager:               manager,
+		outboxRepo:            outboxRepo,
+		eventBus:              eventBus,
+		memoryModule:          memoryModule,
+		activeJobScanner:      activeJobScanner,
+		activeTriggerWorkflow: activeTriggerWorkflow,
+		notificationService:   notificationService,
+		limiter:               limiter,
+		handlers:              handlers,
 	}, nil
 }
 
@@ -505,6 +549,8 @@ func buildAPIHandlers(
 	memoryModule *memory.Module,
 	activeScheduleDryRun *activesvc.DryRunService,
 	activeSchedulePreviewConfirm *activesvc.PreviewConfirmService,
+	activeScheduleTrigger *activesvc.TriggerService,
+	notificationChannelService *notification.ChannelService,
 ) *api.ApiHandlers {
 	return &api.ApiHandlers{
 		UserHandler:      api.NewUserHandler(userService),
@@ -514,7 +560,8 @@ func buildAPIHandlers(
 		ScheduleHandler:  api.NewScheduleAPI(scheduleService),
 		AgentHandler:     api.NewAgentHandler(agentService),
 		MemoryHandler:    api.NewMemoryHandler(memoryModule),
-		ActiveSchedule:   api.NewActiveScheduleAPI(activeScheduleDryRun, activeSchedulePreviewConfirm),
+		ActiveSchedule:   api.NewActiveScheduleAPI(activeScheduleDryRun, activeSchedulePreviewConfirm, activeScheduleTrigger),
+		Notification:     api.NewNotificationAPI(notificationChannelService),
 	}
 }
 
@@ -536,11 +583,30 @@ func (r *appRuntime) startWorkers(ctx context.Context) {
 	if r.memoryModule != nil {
 		r.memoryModule.StartWorker(ctx)
 	}
+	if r.activeJobScanner != nil {
+		r.activeJobScanner.Start(ctx)
+		log.Println("Active schedule due job scanner started")
+	}
+	if r.notificationService != nil {
+		r.notificationService.StartRetryLoop(ctx, viper.GetDuration("notification.retryScanEvery"), viper.GetInt("notification.retryBatchSize"))
+		log.Println("Notification retry scanner started")
+	}
 }
 
 func (r *appRuntime) registerEventHandlers() error {
 	// 调用目的：worker/all 启动时复用同一套核心事件注册顺序，避免未来新增入口后复制多份 handler 接线。
-	return eventsvc.RegisterCoreOutboxHandlers(r.eventBus, r.outboxRepo, r.manager, r.agentRepo, r.cacheRepo, r.memoryModule)
+	if err := eventsvc.RegisterCoreOutboxHandlers(r.eventBus, r.outboxRepo, r.manager, r.agentRepo, r.cacheRepo, r.memoryModule); err != nil {
+		return err
+	}
+	if err := eventsvc.RegisterActiveScheduleTriggeredHandler(r.eventBus, r.outboxRepo, r.activeTriggerWorkflow); err != nil {
+		return fmt.Errorf("注册主动调度触发 handler 失败: %w", err)
+	}
+	// 调用目的：飞书通知事件消费与 notification retry loop 复用同一个服务实例，
+	// 保证后续接入真实 provider 时只需要替换启动期注入配置。
+	if err := eventsvc.RegisterFeishuNotificationHandler(r.eventBus, r.outboxRepo, r.notificationService); err != nil {
+		return fmt.Errorf("注册飞书通知 handler 失败: %w", err)
+	}
+	return nil
 }
 
 func (r *appRuntime) startHTTP() {

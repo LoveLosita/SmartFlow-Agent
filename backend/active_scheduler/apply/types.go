@@ -93,6 +93,33 @@ func newApplyError(code ErrorCode, message string, err error) error {
 	return &ApplyError{Code: code, Message: message, Err: err}
 }
 
+// NewApplyError 构造 confirm/apply 链路可分类业务错误。
+//
+// 职责边界：
+// 1. 供 service/API 层把预览归属、幂等冲突、adapter 业务拒绝转换为统一错误语义；
+// 2. 不负责写 preview 状态，也不决定 HTTP 状态码；
+// 3. cause 仅用于保留底层错误，展示给前端的文案应放在 message。
+func NewApplyError(code ErrorCode, message string, cause error) error {
+	return newApplyError(code, message, cause)
+}
+
+// AsApplyError 尝试把 error 还原为 ApplyError。
+//
+// 职责边界：
+// 1. 只做 errors.As 类型判断，方便 API 层统一映射业务错误；
+// 2. 不把未知错误强行归类，避免数据库或系统故障被误判为 4xx；
+// 3. 返回 bool=false 时，调用方应按普通系统错误处理。
+func AsApplyError(err error) (*ApplyError, bool) {
+	if err == nil {
+		return nil, false
+	}
+	var applyErr *ApplyError
+	if errors.As(err, &applyErr) {
+		return applyErr, true
+	}
+	return nil, false
+}
+
 func errorCodeOf(err error) ErrorCode {
 	if err == nil {
 		return ""

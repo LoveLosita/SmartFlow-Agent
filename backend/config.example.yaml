@@ -40,6 +40,12 @@ kafka:
   retryBatchSize: 100
   maxRetry: 20
 
+# 通知投递配置。
+notification:
+  frontendBaseURL: "http://localhost:5173"
+  retryScanEvery: 1m
+  retryBatchSize: 50
+
 # 时间与学期边界配置。
 time:
   zone: "Asia/Shanghai"

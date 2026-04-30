@@ -9,4 +9,5 @@ type ApiHandlers struct {
 	AgentHandler     *AgentHandler
 	MemoryHandler    *MemoryHandler
 	ActiveSchedule   *ActiveScheduleAPI
+	Notification     *NotificationAPI
 }

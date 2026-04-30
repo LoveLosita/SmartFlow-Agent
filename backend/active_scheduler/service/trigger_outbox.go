@@ -1,0 +1,219 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
+	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
+	"github.com/LoveLosita/smartflow/backend/model"
+	sharedevents "github.com/LoveLosita/smartflow/backend/shared/events"
+)
+
+const requestedNotificationDedupeWindow = 30 * time.Minute
+
+// EnqueueActiveScheduleTriggeredInTx 在事务内写入 active_schedule.triggered outbox 消息。
+//
+// 职责边界：
+// 1. 只负责把已经校验好的事件契约写入 outbox；
+// 2. 不负责创建 trigger 记录，trigger 真值应由调用方先落库；
+// 3. 失败时返回 error，让上层决定是否整体回滚与重试。
+func EnqueueActiveScheduleTriggeredInTx(
+	ctx context.Context,
+	outboxRepo *outboxinfra.Repository,
+	kafkaCfg kafkabus.Config,
+	payload sharedevents.ActiveScheduleTriggeredPayload,
+) error {
+	return enqueueContractEventInTx(
+		ctx,
+		outboxRepo,
+		kafkaCfg,
+		sharedevents.ActiveScheduleTriggeredEventType,
+		sharedevents.ActiveScheduleTriggeredEventVersion,
+		payload.MessageKey(),
+		payload.AggregateID(),
+		payload.AggregateID(),
+		payload,
+		payload.Validate,
+	)
+}
+
+// EnqueueNotificationFeishuRequestedInTx 在事务内写入 notification.feishu.requested outbox 消息。
+//
+// 职责边界：
+// 1. 只做事件契约序列化和 outbox 入队；
+// 2. 不负责 notification_records 幂等与 provider 调用；
+// 3. 失败时直接返回，让 trigger -> preview -> notification 保持同事务回滚。
+func EnqueueNotificationFeishuRequestedInTx(
+	ctx context.Context,
+	outboxRepo *outboxinfra.Repository,
+	kafkaCfg kafkabus.Config,
+	payload sharedevents.FeishuNotificationRequestedPayload,
+) error {
+	return enqueueContractEventInTx(
+		ctx,
+		outboxRepo,
+		kafkaCfg,
+		sharedevents.NotificationFeishuRequestedEventType,
+		sharedevents.NotificationFeishuRequestedEventVersion,
+		payload.MessageKey(),
+		payload.AggregateID(),
+		payload.AggregateID(),
+		payload,
+		payload.Validate,
+	)
+}
+
+// BuildTriggeredPayloadFromModel 把持久化 trigger 还原成事件载荷。
+//
+// 职责边界：
+// 1. 只做 model -> contract DTO 映射；
+// 2. 不校验 trigger 是否应该被处理，业务真值判断由 scanner / worker 完成；
+// 3. 若 payload_json 不是合法 JSON，返回 error，让调用方回滚本次触发。
+func BuildTriggeredPayloadFromModel(row model.ActiveScheduleTrigger) (sharedevents.ActiveScheduleTriggeredPayload, error) {
+	var rawPayload json.RawMessage
+	if row.PayloadJSON != nil && strings.TrimSpace(*row.PayloadJSON) != "" {
+		rawPayload = json.RawMessage(strings.TrimSpace(*row.PayloadJSON))
+		if !json.Valid(rawPayload) {
+			return sharedevents.ActiveScheduleTriggeredPayload{}, errors.New("trigger payload_json 不是合法 JSON")
+		}
+	}
+
+	payload := sharedevents.ActiveScheduleTriggeredPayload{
+		TriggerID:      row.ID,
+		UserID:         row.UserID,
+		TriggerType:    row.TriggerType,
+		Source:         row.Source,
+		TargetType:     row.TargetType,
+		TargetID:       row.TargetID,
+		FeedbackID:     row.FeedbackID,
+		IdempotencyKey: row.IdempotencyKey,
+		DedupeKey:      row.DedupeKey,
+		MockNow:        row.MockNow,
+		IsMockTime:     row.IsMockTime,
+		RequestedAt:    row.RequestedAt,
+		Payload:        rawPayload,
+		TraceID:        row.TraceID,
+	}
+	if err := payload.Validate(); err != nil {
+		return sharedevents.ActiveScheduleTriggeredPayload{}, err
+	}
+	return payload, nil
+}
+
+// BuildFeishuRequestedPayload 生成通知事件载荷。
+//
+// 职责边界：
+// 1. 只做 trigger/preview 快照到通知契约的拼装；
+// 2. 不判断是否真的要发通知，上层应先根据 decision.ShouldNotify 决定是否调用；
+// 3. fallback 文案只做兜底，不替代后续 notification handler 的 provider 级策略。
+func BuildFeishuRequestedPayload(
+	triggerRow model.ActiveScheduleTrigger,
+	previewID string,
+	notificationSummary string,
+	requestedAt time.Time,
+) sharedevents.FeishuNotificationRequestedPayload {
+	summary := strings.TrimSpace(notificationSummary)
+	return sharedevents.FeishuNotificationRequestedPayload{
+		UserID:       triggerRow.UserID,
+		TriggerID:    triggerRow.ID,
+		PreviewID:    strings.TrimSpace(previewID),
+		TriggerType:  triggerRow.TriggerType,
+		TargetType:   triggerRow.TargetType,
+		TargetID:     triggerRow.TargetID,
+		DedupeKey:    BuildNotificationDedupeKey(triggerRow.UserID, triggerRow.TriggerType, triggerRow.RequestedAt),
+		TargetURL:    fmt.Sprintf("/schedule-adjust/%s", strings.TrimSpace(previewID)),
+		SummaryText:  summary,
+		FallbackText: buildNotificationFallbackText(summary, strings.TrimSpace(previewID)),
+		TraceID:      triggerRow.TraceID,
+		RequestedAt:  requestedAt,
+	}
+}
+
+// BuildNotificationDedupeKey 生成通知 30 分钟窗口去重键。
+//
+// 说明：
+// 1. 第一版按 user_id + trigger_type + time_window 聚合；
+// 2. 当 requested_at 缺失时回退到当前时间，避免空值直接写出脏 dedupe_key；
+// 3. 不拼 preview_id，保证同一窗口内多次重试只会落到同一组通知记录。
+func BuildNotificationDedupeKey(userID int, triggerType string, requestedAt time.Time) string {
+	if requestedAt.IsZero() {
+		requestedAt = time.Now()
+	}
+	windowStart := requestedAt.Truncate(requestedNotificationDedupeWindow)
+	return fmt.Sprintf("%d:%s:%s",
+		userID,
+		strings.TrimSpace(triggerType),
+		windowStart.Format(time.RFC3339),
+	)
+}
+
+func enqueueContractEventInTx(
+	ctx context.Context,
+	outboxRepo *outboxinfra.Repository,
+	kafkaCfg kafkabus.Config,
+	eventType string,
+	eventVersion string,
+	messageKey string,
+	aggregateID string,
+	eventID string,
+	payload any,
+	validate func() error,
+) error {
+	if outboxRepo == nil {
+		return errors.New("outbox repository 不能为空")
+	}
+	if validate == nil {
+		return errors.New("事件校验函数不能为空")
+	}
+	if err := validate(); err != nil {
+		return err
+	}
+
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	cfg := normalizeKafkaConfig(kafkaCfg)
+	wrapped := outboxinfra.OutboxEventPayload{
+		EventID:      strings.TrimSpace(eventID),
+		EventType:    eventType,
+		EventVersion: strings.TrimSpace(eventVersion),
+		AggregateID:  strings.TrimSpace(aggregateID),
+		Payload:      payloadJSON,
+	}
+	_, err = outboxRepo.CreateMessage(ctx, eventType, cfg.Topic, strings.TrimSpace(messageKey), wrapped, cfg.MaxRetry)
+	return err
+}
+
+func normalizeKafkaConfig(cfg kafkabus.Config) kafkabus.Config {
+	if strings.TrimSpace(cfg.Topic) == "" {
+		cfg.Topic = kafkabus.DefaultTopic
+	}
+	if cfg.MaxRetry <= 0 {
+		cfg.MaxRetry = 20
+	}
+	return cfg
+}
+
+func buildNotificationFallbackText(summary string, previewID string) string {
+	link := fmt.Sprintf("/schedule-adjust/%s", previewID)
+	if summary == "" {
+		return "你有一条新的日程调整建议，请查看：" + link
+	}
+	return summary + "，请查看：" + link
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}

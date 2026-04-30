@@ -116,9 +116,18 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, userRepo *d
 		{
 			activeScheduleGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
 			activeScheduleGroup.POST("/dry-run", handlers.ActiveSchedule.DryRun)
+			activeScheduleGroup.POST("/trigger", handlers.ActiveSchedule.Trigger)
 			activeScheduleGroup.POST("/preview", handlers.ActiveSchedule.CreatePreview)
 			activeScheduleGroup.GET("/preview/:preview_id", handlers.ActiveSchedule.GetPreview)
 			activeScheduleGroup.POST("/preview/:preview_id/confirm", handlers.ActiveSchedule.ConfirmPreview)
+		}
+		notificationGroup := apiGroup.Group("/notification")
+		{
+			notificationGroup.Use(middleware.JWTTokenAuth(cache), middleware.RateLimitMiddleware(limiter, 20, 1))
+			notificationGroup.GET("/channels/feishu", handlers.Notification.GetFeishuWebhook)
+			notificationGroup.PUT("/channels/feishu", handlers.Notification.SaveFeishuWebhook)
+			notificationGroup.DELETE("/channels/feishu", handlers.Notification.DeleteFeishuWebhook)
+			notificationGroup.POST("/channels/feishu/test", handlers.Notification.TestFeishuWebhook)
 		}
 	}
 	// 初始化Gin引擎
