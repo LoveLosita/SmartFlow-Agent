@@ -9,6 +9,7 @@ import (
 	"time"
 
 	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
+	taskmodel "github.com/LoveLosita/smartflow/backend/model"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagentrouter "github.com/LoveLosita/smartflow/backend/newAgent/router"
@@ -41,6 +42,7 @@ type quickTaskDecision struct {
 	Title              string `json:"title,omitempty"`
 	DeadlineAt         string `json:"deadline_at,omitempty"`
 	PriorityGroup      *int   `json:"priority_group,omitempty"`
+	EstimatedSections  *int   `json:"estimated_sections,omitempty"`
 	UrgencyThresholdAt string `json:"urgency_threshold_at,omitempty"`
 	TaskID             *int   `json:"task_id,omitempty"`
 
@@ -137,8 +139,8 @@ func RunQuickTaskNode(ctx context.Context, input QuickTaskNodeInput) error {
 			}
 			break
 		}
-		log.Printf("[DEBUG] quick_task: 解析结果 chat=%s action=%s title=%s deadline_at=%s priority_group=%v urgency_threshold_at=%q",
-			flowState.ConversationID, decision.Action, decision.Title, decision.DeadlineAt, decision.PriorityGroup, decision.UrgencyThresholdAt)
+		log.Printf("[DEBUG] quick_task: 解析结果 chat=%s action=%s title=%s deadline_at=%s priority_group=%v estimated_sections=%v urgency_threshold_at=%q",
+			flowState.ConversationID, decision.Action, decision.Title, decision.DeadlineAt, decision.PriorityGroup, decision.EstimatedSections, decision.UrgencyThresholdAt)
 
 		// 阶段二：流式推送标签后正文。
 		if visible != "" {
@@ -266,6 +268,7 @@ func handleQuickTaskCreate(
 	if priorityGroup == 0 {
 		priorityGroup = quickNoteFallbackPriority(deadline)
 	}
+	estimatedSections := taskmodel.NormalizeEstimatedSections(decision.EstimatedSections)
 
 	var urgencyThreshold *time.Time
 	if raw := strings.TrimSpace(decision.UrgencyThresholdAt); raw != "" {
@@ -280,9 +283,9 @@ func handleQuickTaskCreate(
 		urgencyThreshold = &fallback
 	}
 
-	log.Printf("[DEBUG] quick_task: CreateTask 参数 chat=%s title=%s priorityGroup=%d deadline=%v urgencyThreshold=%v urgency_raw=%q",
-		flowState.ConversationID, title, priorityGroup, deadline, urgencyThreshold, decision.UrgencyThresholdAt)
-	taskID, err := input.QuickTaskDeps.CreateTask(flowState.UserID, title, priorityGroup, deadline, urgencyThreshold)
+	log.Printf("[DEBUG] quick_task: CreateTask 参数 chat=%s title=%s priorityGroup=%d estimatedSections=%d deadline=%v urgencyThreshold=%v urgency_raw=%q estimated_raw=%v",
+		flowState.ConversationID, title, priorityGroup, estimatedSections, deadline, urgencyThreshold, decision.UrgencyThresholdAt, decision.EstimatedSections)
+	taskID, err := input.QuickTaskDeps.CreateTask(flowState.UserID, title, priorityGroup, estimatedSections, deadline, urgencyThreshold)
 	if err != nil {
 		return quickTaskActionResult{AssistantText: fmt.Sprintf("记录失败了（%s），稍后再试试？", err)}
 	}
@@ -290,7 +293,7 @@ func handleQuickTaskCreate(
 	flowState.UsedQuickNote = true
 	return quickTaskActionResult{
 		AssistantText: "已帮你记下这条任务。",
-		BusinessCard:  buildTaskRecordBusinessCard(taskID, title, priorityGroup, deadline, urgencyThreshold),
+		BusinessCard:  buildTaskRecordBusinessCard(taskID, title, priorityGroup, estimatedSections, deadline, urgencyThreshold),
 	}
 }
 
@@ -351,13 +354,14 @@ func handleQuickTaskQuery(
 	}
 }
 
-func buildTaskRecordBusinessCard(taskID int, title string, priorityGroup int, deadline *time.Time, urgencyThreshold *time.Time) *newagentstream.StreamBusinessCardExtra {
+func buildTaskRecordBusinessCard(taskID int, title string, priorityGroup int, estimatedSections int, deadline *time.Time, urgencyThreshold *time.Time) *newagentstream.StreamBusinessCardExtra {
 	data := map[string]any{
-		"id":             taskID,
-		"title":          strings.TrimSpace(title),
-		"priority_group": priorityGroup,
-		"priority_label": newagentshared.PriorityLabelCN(priorityGroup),
-		"status":         "todo",
+		"id":                 taskID,
+		"title":              strings.TrimSpace(title),
+		"priority_group":     priorityGroup,
+		"estimated_sections": estimatedSections,
+		"priority_label":     newagentshared.PriorityLabelCN(priorityGroup),
+		"status":             "todo",
 	}
 	if formatted := formatQuickTaskTime(deadline); formatted != "" {
 		data["deadline_at"] = formatted
@@ -383,11 +387,12 @@ func buildTaskQueryBusinessCard(params newagentmodel.TaskQueryParams, results []
 	taskItems := make([]map[string]any, 0, len(results))
 	for _, task := range results {
 		item := map[string]any{
-			"id":             task.ID,
-			"title":          strings.TrimSpace(task.Title),
-			"priority_group": task.PriorityGroup,
-			"priority_label": newagentshared.PriorityLabelCN(task.PriorityGroup),
-			"is_completed":   task.IsCompleted,
+			"id":                 task.ID,
+			"title":              strings.TrimSpace(task.Title),
+			"priority_group":     task.PriorityGroup,
+			"estimated_sections": task.EstimatedSections,
+			"priority_label":     newagentshared.PriorityLabelCN(task.PriorityGroup),
+			"is_completed":       task.IsCompleted,
 		}
 		if deadline := strings.TrimSpace(task.DeadlineAt); deadline != "" {
 			item["deadline_at"] = deadline

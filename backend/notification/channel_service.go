@@ -154,7 +154,7 @@ func (s *ChannelService) TestFeishuWebhook(ctx context.Context, userID int) (Tes
 		TriggerType:    "manual_test",
 		TargetType:     "notification_channel",
 		TargetID:       0,
-		TargetURL:      "/schedule-adjust/asp_test_webhook",
+		TargetURL:      "/assistant/00000000-0000-0000-0000-000000000000",
 		MessageText:    "这是一条 SmartFlow 飞书 Webhook 测试消息。",
 		TraceID:        traceID,
 		AttemptCount:   1,

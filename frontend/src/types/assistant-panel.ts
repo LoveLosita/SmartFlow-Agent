@@ -1,4 +1,4 @@
-import type { TimelineBusinessCardPayload, ToolView } from '@/api/schedule_agent'
+import type { ActiveSchedulePreviewDetail, TimelineBusinessCardPayload, ToolView } from '@/api/schedule_agent'
 import type {
   AssistantMessage,
   ConversationListItem,
@@ -129,6 +129,8 @@ export interface DisplayAssistantBlock {
   event?: ToolTraceEvent
   statusEvent?: StatusTraceEvent
   schedulePreview?: SchedulePreviewData
+  schedulePreviewKind?: 'schedule' | 'active_schedule'
+  activeSchedulePreview?: ActiveSchedulePreviewDetail
   businessCard?: TimelineBusinessCardPayload
   /** 所属的源消息 ID，用于状态查询。 */
   sourceId?: string

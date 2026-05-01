@@ -67,6 +67,7 @@ func (s *AgentService) QueryTasksForTool(ctx context.Context, req newagentmodel.
 			ID:                 task.ID,
 			Title:              task.Title,
 			PriorityGroup:      task.Priority,
+			EstimatedSections:  model.NormalizeEstimatedSections(&task.EstimatedSections),
 			IsCompleted:        task.IsCompleted,
 			DeadlineAt:         task.DeadlineAt,
 			UrgencyThresholdAt: task.UrgencyThresholdAt,

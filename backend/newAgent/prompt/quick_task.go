@@ -22,7 +22,7 @@ const quickTaskSystemPrompt = `
 
 JSON 字段说明：
 - action：只能是 create / query / ask
-- create 时：title 必填，deadline_at 必填，priority_group 必填，范围 1-4；urgency_threshold_at 满足条件时填写，条件在下面
+- create 时：title 必填，deadline_at 必填，priority_group 必填，范围 1-4；estimated_sections 必填，范围 1-4，不确定默认 1；urgency_threshold_at 满足条件时填写，条件在下面
 - query 时：quadrant 可选 1-4，keyword 可选，limit 可选，deadline_after/deadline_before 可选（用于截止时间窗口筛选）
 - ask 时：question 必填
 
@@ -37,9 +37,9 @@ JSON 字段说明：
 
 示例：
 
-<SMARTFLOW_DECISION>{"action":"create","title":"明天开会","deadline_at":"明天下午3点"}</SMARTFLOW_DECISION>
+<SMARTFLOW_DECISION>{"action":"create","title":"明天开会","deadline_at":"明天下午3点","estimated_sections":1}</SMARTFLOW_DECISION>
 好的，我来帮你记一下。
-<SMARTFLOW_DECISION>{"action":"create","title":"下周交报告","deadline_at":"下周五 18:00","priority_group":2,"urgency_threshold_at":"下周四 09:00"}</SMARTFLOW_DECISION>
+<SMARTFLOW_DECISION>{"action":"create","title":"下周交报告","deadline_at":"下周五 18:00","priority_group":2,"estimated_sections":2,"urgency_threshold_at":"下周四 09:00"}</SMARTFLOW_DECISION>
 好的，我也帮你记一下。
 
 <SMARTFLOW_DECISION>{"action":"query","limit":5}</SMARTFLOW_DECISION>

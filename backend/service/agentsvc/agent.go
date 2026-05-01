@@ -26,12 +26,13 @@ import (
 )
 
 type AgentService struct {
-	AIHub          *inits.AIHub
-	repo           *dao.AgentDAO
-	taskRepo       *dao.TaskDAO
-	cacheDAO       *dao.CacheDAO
-	agentCache     *dao.AgentCache
-	eventPublisher outboxinfra.EventPublisher
+	AIHub                    *inits.AIHub
+	repo                     *dao.AgentDAO
+	taskRepo                 *dao.TaskDAO
+	cacheDAO                 *dao.CacheDAO
+	agentCache               *dao.AgentCache
+	activeScheduleSessionDAO *dao.ActiveScheduleSessionDAO
+	eventPublisher           outboxinfra.EventPublisher
 
 	// ── 排程计划依赖（函数注入，避免 service 包循环依赖）──
 
@@ -66,24 +67,34 @@ type AgentService struct {
 	memoryCfg        memorymodel.Config
 	memoryObserver   memoryobserve.Observer
 	memoryMetrics    memoryobserve.MetricsRecorder
+	activeRerunFunc  ActiveScheduleSessionRerunFunc
 }
 
 // NewAgentService 构造 AgentService。
 // 这里通过依赖注入把“模型、仓储、缓存、异步持久化通道”统一交给服务层管理，
 // 便于后续在单测中替换实现，或在启动流程中按环境切换配置。
-func NewAgentService(aiHub *inits.AIHub, repo *dao.AgentDAO, taskRepo *dao.TaskDAO, cacheDAO *dao.CacheDAO, agentRedis *dao.AgentCache, eventPublisher outboxinfra.EventPublisher) *AgentService {
+func NewAgentService(
+	aiHub *inits.AIHub,
+	repo *dao.AgentDAO,
+	taskRepo *dao.TaskDAO,
+	cacheDAO *dao.CacheDAO,
+	agentRedis *dao.AgentCache,
+	activeSessionDAO *dao.ActiveScheduleSessionDAO,
+	eventPublisher outboxinfra.EventPublisher,
+) *AgentService {
 	// 全局注册一次 token 采集 callback：
 	// 1. 只注册一次，避免重复处理；
 	// 2. 只有带 RequestTokenMeter 的请求上下文才会真正累加。
 	ensureTokenMeterCallbackRegistered()
 
 	return &AgentService{
-		AIHub:          aiHub,
-		repo:           repo,
-		taskRepo:       taskRepo,
-		cacheDAO:       cacheDAO,
-		agentCache:     agentRedis,
-		eventPublisher: eventPublisher,
+		AIHub:                    aiHub,
+		repo:                     repo,
+		taskRepo:                 taskRepo,
+		cacheDAO:                 cacheDAO,
+		agentCache:               agentRedis,
+		activeScheduleSessionDAO: activeSessionDAO,
+		eventPublisher:           eventPublisher,
 	}
 }
 

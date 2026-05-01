@@ -20,6 +20,7 @@ type TaskQueryTaskRecord struct {
 	ID                 int
 	Title              string
 	PriorityGroup      int
+	EstimatedSections  int
 	IsCompleted        bool
 	DeadlineAt         *time.Time
 	UrgencyThresholdAt *time.Time

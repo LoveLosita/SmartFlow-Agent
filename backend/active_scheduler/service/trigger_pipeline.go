@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	activegraph "github.com/LoveLosita/smartflow/backend/active_scheduler/graph"
 	activepreview "github.com/LoveLosita/smartflow/backend/active_scheduler/preview"
 	"github.com/LoveLosita/smartflow/backend/active_scheduler/trigger"
 	"github.com/LoveLosita/smartflow/backend/dao"
@@ -28,38 +29,57 @@ const (
 //
 // 职责边界：
 // 1. 只推进主动调度 trigger 的后台状态机，不负责启动 outbox worker；
-// 2. dry-run 与 preview 复用现有 service，不再单独实现第二套候选生成逻辑；
+// 2. dry-run 与选择器都复用 active_scheduler 独立模块，不再往 newAgent 里塞主动调度逻辑；
 // 3. notification 只发布 requested 事件，不直接接真实飞书 provider。
 type TriggerWorkflowService struct {
-	activeDAO *dao.ActiveScheduleDAO
-	dryRun    *DryRunService
-	outbox    *outboxinfra.Repository
-	kafkaCfg  kafkabus.Config
-	clock     func() time.Time
+	activeDAO   *dao.ActiveScheduleDAO
+	graphRunner *activegraph.Runner
+	outbox      *outboxinfra.Repository
+	kafkaCfg    kafkabus.Config
+	agentDAO    *dao.AgentDAO
+	sessionDAO  *dao.ActiveScheduleSessionDAO
+	clock       func() time.Time
 }
 
 func NewTriggerWorkflowService(
 	activeDAO *dao.ActiveScheduleDAO,
-	dryRun *DryRunService,
+	graphRunner *activegraph.Runner,
 	outboxRepo *outboxinfra.Repository,
 	kafkaCfg kafkabus.Config,
+) (*TriggerWorkflowService, error) {
+	return NewTriggerWorkflowServiceWithOptions(activeDAO, graphRunner, outboxRepo, kafkaCfg)
+}
+
+// NewTriggerWorkflowServiceWithOptions 创建主动调度 trigger 编排服务，并允许注入迁移期可选能力。
+func NewTriggerWorkflowServiceWithOptions(
+	activeDAO *dao.ActiveScheduleDAO,
+	graphRunner *activegraph.Runner,
+	outboxRepo *outboxinfra.Repository,
+	kafkaCfg kafkabus.Config,
+	opts ...TriggerWorkflowOption,
 ) (*TriggerWorkflowService, error) {
 	if activeDAO == nil {
 		return nil, errors.New("active schedule dao 不能为空")
 	}
-	if dryRun == nil {
-		return nil, errors.New("dry-run service 不能为空")
+	if graphRunner == nil {
+		return nil, errors.New("active scheduler graph runner 不能为空")
 	}
 	if outboxRepo == nil {
 		return nil, errors.New("outbox repository 不能为空")
 	}
-	return &TriggerWorkflowService{
-		activeDAO: activeDAO,
-		dryRun:    dryRun,
-		outbox:    outboxRepo,
-		kafkaCfg:  kafkaCfg,
-		clock:     time.Now,
-	}, nil
+	svc := &TriggerWorkflowService{
+		activeDAO:   activeDAO,
+		graphRunner: graphRunner,
+		outbox:      outboxRepo,
+		kafkaCfg:    kafkaCfg,
+		clock:       time.Now,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(svc)
+		}
+	}
+	return svc, nil
 }
 
 func (s *TriggerWorkflowService) SetClock(clock func() time.Time) {
@@ -68,12 +88,15 @@ func (s *TriggerWorkflowService) SetClock(clock func() time.Time) {
 	}
 }
 
+// TriggerWorkflowOption 是 trigger 编排服务的可选注入项。
+type TriggerWorkflowOption func(*TriggerWorkflowService)
+
 // ProcessTriggeredInTx 在 outbox 消费事务内推进 trigger 主链路。
 //
 // 步骤化说明：
 // 1. 先锁 trigger 行，确保同一 trigger 在并发 worker 下只能由一个事务推进；
 // 2. 再把状态切到 processing，避免排障时看不出消息已经被消费；
-// 3. 复用 dry-run + preview service 生成预览；若发现已有 preview，则直接复用，避免重复写库；
+// 3. 复用 active scheduler graph 跑 dry-run + 受限选择；若发现已有 preview，则直接复用，避免重复写库；
 // 4. preview 成功后回写 trigger 状态，并在同一事务里补发 notification.requested outbox；
 // 5. 任一步失败都返回 error，由外层 handler 负责记录 failed 状态并触发 outbox retry。
 func (s *TriggerWorkflowService) ProcessTriggeredInTx(
@@ -81,7 +104,7 @@ func (s *TriggerWorkflowService) ProcessTriggeredInTx(
 	tx *gorm.DB,
 	payload sharedevents.ActiveScheduleTriggeredPayload,
 ) error {
-	if s == nil || s.activeDAO == nil || s.dryRun == nil || s.outbox == nil {
+	if s == nil || s.activeDAO == nil || s.graphRunner == nil || s.outbox == nil {
 		return errors.New("trigger workflow service 未初始化")
 	}
 	if tx == nil {
@@ -125,14 +148,18 @@ func (s *TriggerWorkflowService) ProcessTriggeredInTx(
 	}
 
 	domainTrigger := buildDomainTriggerFromModel(*triggerRow, payload)
-	dryRunResult, err := s.dryRun.DryRun(ctx, domainTrigger)
+	graphResult, err := s.graphRunner.Run(ctx, domainTrigger)
 	if err != nil {
 		return err
 	}
-	if len(dryRunResult.Candidates) == 0 {
+	if graphResult == nil || graphResult.DryRunData == nil {
+		return errors.New("active scheduler graph 返回空结果")
+	}
+	dryRunData := graphResult.DryRunData
+	if len(dryRunData.Candidates) == 0 {
 		return s.markClosedWithoutPreview(ctx, txDAO, triggerRow.ID, now)
 	}
-	if !dryRunResult.Observation.Decision.ShouldNotify && !dryRunResult.Observation.Decision.ShouldWritePreview {
+	if !dryRunData.Observation.Decision.ShouldNotify && !dryRunData.Observation.Decision.ShouldWritePreview {
 		return s.markClosedWithoutPreview(ctx, txDAO, triggerRow.ID, now)
 	}
 
@@ -141,11 +168,15 @@ func (s *TriggerWorkflowService) ProcessTriggeredInTx(
 		return err
 	}
 	previewResp, err := previewService.CreatePreview(ctx, activepreview.CreatePreviewRequest{
-		ActiveContext: dryRunResult.Context,
-		Observation:   dryRunResult.Observation,
-		Candidates:    dryRunResult.Candidates,
-		TriggerID:     triggerRow.ID,
-		GeneratedAt:   now,
+		ActiveContext:       dryRunData.Context,
+		Observation:         dryRunData.Observation,
+		Candidates:          dryRunData.Candidates,
+		TriggerID:           triggerRow.ID,
+		GeneratedAt:         now,
+		SelectedCandidateID: graphResult.SelectionResult.SelectedCandidateID,
+		ExplanationText:     graphResult.SelectionResult.ExplanationText,
+		NotificationSummary: graphResult.SelectionResult.NotificationSummary,
+		FallbackUsed:        graphResult.SelectionResult.FallbackUsed,
 	})
 	if err != nil {
 		return err
@@ -162,8 +193,14 @@ func (s *TriggerWorkflowService) ProcessTriggeredInTx(
 		return err
 	}
 
-	if !dryRunResult.Observation.Decision.ShouldNotify {
+	if !dryRunData.Observation.Decision.ShouldNotify {
 		return nil
+	}
+
+	// 1. 离线通知发出前，先把用户点击后要进入的助手会话和主动调度 session 预热好。
+	// 2. 这一步和 preview / notification outbox 在同一事务内提交，避免出现“飞书已送达但会话空白”的断裂状态。
+	if err := s.bootstrapActiveScheduleConversationInTx(ctx, tx, *triggerRow, previewResp.Detail, graphResult.SelectionResult, now); err != nil {
+		return err
 	}
 
 	notificationPayload := BuildFeishuRequestedPayload(

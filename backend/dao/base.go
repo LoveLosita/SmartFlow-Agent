@@ -8,28 +8,30 @@ import (
 
 // RepoManager 聚合所有 DAO，供服务层做跨仓储事务编排。
 type RepoManager struct {
-	db             *gorm.DB
-	Schedule       *ScheduleDAO
-	Task           *TaskDAO
-	Course         *CourseDAO
-	TaskClass      *TaskClassDAO
-	User           *UserDAO
-	Agent          *AgentDAO
-	ActiveSchedule *ActiveScheduleDAO
-	Notification   *NotificationChannelDAO
+	db                    *gorm.DB
+	Schedule              *ScheduleDAO
+	Task                  *TaskDAO
+	Course                *CourseDAO
+	TaskClass             *TaskClassDAO
+	User                  *UserDAO
+	Agent                 *AgentDAO
+	ActiveSchedule        *ActiveScheduleDAO
+	ActiveScheduleSession *ActiveScheduleSessionDAO
+	Notification          *NotificationChannelDAO
 }
 
 func NewManager(db *gorm.DB) *RepoManager {
 	return &RepoManager{
-		db:             db,
-		Schedule:       NewScheduleDAO(db),
-		Task:           NewTaskDAO(db),
-		Course:         NewCourseDAO(db),
-		TaskClass:      NewTaskClassDAO(db),
-		User:           NewUserDAO(db),
-		Agent:          NewAgentDAO(db),
-		ActiveSchedule: NewActiveScheduleDAO(db),
-		Notification:   NewNotificationChannelDAO(db),
+		db:                    db,
+		Schedule:              NewScheduleDAO(db),
+		Task:                  NewTaskDAO(db),
+		Course:                NewCourseDAO(db),
+		TaskClass:             NewTaskClassDAO(db),
+		User:                  NewUserDAO(db),
+		Agent:                 NewAgentDAO(db),
+		ActiveSchedule:        NewActiveScheduleDAO(db),
+		ActiveScheduleSession: NewActiveScheduleSessionDAO(db),
+		Notification:          NewNotificationChannelDAO(db),
 	}
 }
 
@@ -41,15 +43,16 @@ func NewManager(db *gorm.DB) *RepoManager {
 // 3. 适用于 outbox 消费处理器这类“基础设施事务 + 业务事务合并”的场景。
 func (m *RepoManager) WithTx(tx *gorm.DB) *RepoManager {
 	return &RepoManager{
-		db:             tx,
-		Schedule:       m.Schedule.WithTx(tx),
-		Task:           m.Task.WithTx(tx),
-		TaskClass:      m.TaskClass.WithTx(tx),
-		Course:         m.Course.WithTx(tx),
-		User:           m.User.WithTx(tx),
-		Agent:          m.Agent.WithTx(tx),
-		ActiveSchedule: m.ActiveSchedule.WithTx(tx),
-		Notification:   m.Notification.WithTx(tx),
+		db:                    tx,
+		Schedule:              m.Schedule.WithTx(tx),
+		Task:                  m.Task.WithTx(tx),
+		TaskClass:             m.TaskClass.WithTx(tx),
+		Course:                m.Course.WithTx(tx),
+		User:                  m.User.WithTx(tx),
+		Agent:                 m.Agent.WithTx(tx),
+		ActiveSchedule:        m.ActiveSchedule.WithTx(tx),
+		ActiveScheduleSession: m.ActiveScheduleSession.WithTx(tx),
+		Notification:          m.Notification.WithTx(tx),
 	}
 }
 

@@ -48,19 +48,40 @@ type Task struct {
 	EstimatedSections int `gorm:"column:estimated_sections;not null;default:1"`
 }
 
+// NormalizeEstimatedSections 将预计节数收敛到 MVP 允许范围。
+//
+// 职责边界：
+// 1. 只处理默认值与越界收敛，不判断业务优先级，也不关心调用方来源；
+// 2. nil、0、负数统一回退到 1；超过 4 的值收敛到 4，保证写库与读回口径一致。
+func NormalizeEstimatedSections(raw *int) int {
+	if raw == nil {
+		return 1
+	}
+	value := *raw
+	if value < 1 {
+		return 1
+	}
+	if value > 4 {
+		return 4
+	}
+	return value
+}
+
 type UserAddTaskResponse struct {
-	ID            int        `json:"id"`
-	Title         string     `json:"title"`
-	PriorityGroup int        `json:"priority_group"`
-	DeadlineAt    *time.Time `json:"deadline_at"`
-	Status        string     `json:"status"`
-	CreatedAt     time.Time  `json:"created_at"`
+	ID                int        `json:"id"`
+	Title             string     `json:"title"`
+	PriorityGroup     int        `json:"priority_group"`
+	EstimatedSections int        `json:"estimated_sections"`
+	DeadlineAt        *time.Time `json:"deadline_at"`
+	Status            string     `json:"status"`
+	CreatedAt         time.Time  `json:"created_at"`
 }
 
 type UserAddTaskRequest struct {
-	Title         string     `json:"title"`
-	PriorityGroup int        `json:"priority_group"`
-	DeadlineAt    *time.Time `json:"deadline_at"`
+	Title             string     `json:"title"`
+	PriorityGroup     int        `json:"priority_group"`
+	EstimatedSections int        `json:"estimated_sections"`
+	DeadlineAt        *time.Time `json:"deadline_at"`
 }
 
 // UserCompleteTaskRequest 是"标记任务完成"接口的请求体。
@@ -114,6 +135,7 @@ type GetUserTaskResp struct {
 	UserID             int    `json:"user_id"`
 	Title              string `json:"title"`
 	PriorityGroup      int    `json:"priority_group"`
+	EstimatedSections  int    `json:"estimated_sections"`
 	Status             string `json:"status"`
 	Deadline           string `json:"deadline"`
 	IsCompleted        bool   `json:"is_completed"`

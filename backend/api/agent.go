@@ -156,7 +156,7 @@ func (api *AgentHandler) ChatAgent(c *gin.Context) {
 // 设计说明：
 // 1) 该接口用于配合 SSE 聊天链路：标题异步生成后，前端可通过 conversation_id 拉取；
 // 2) 不依赖 SSE header 动态更新，避免“header 必须首包前写入”的协议限制；
-// 3) 会话不存在时返回 400，避免前端把无效会话当成系统错误。
+// 3) 会话不存在或不属于当前用户时返回 404，避免前端把无效会话误判成参数类型错误。
 func (api *AgentHandler) GetConversationMeta(c *gin.Context) {
 	// 1. 读取 query 参数并做基础校验。
 	conversationID := strings.TrimSpace(c.Query("conversation_id"))
@@ -175,9 +175,9 @@ func (api *AgentHandler) GetConversationMeta(c *gin.Context) {
 	// 4. 调 service 查询会话元信息。
 	meta, err := api.svc.GetConversationMeta(ctx, userID, conversationID)
 	if err != nil {
-		// 会话不存在按参数错误处理，返回 400 给前端更直观。
+		// 会话不存在或越权访问时返回 404，让前端能和“参数格式错误”区分开。
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusBadRequest, respond.WrongParamType)
+			c.JSON(http.StatusNotFound, respond.ConversationNotFound)
 			return
 		}
 		respond.DealWithError(c, err)
@@ -255,7 +255,7 @@ func (api *AgentHandler) GetConversationList(c *gin.Context) {
 // 说明：
 // 1. 该接口是新前端刷新重建的单一来源；
 // 2. 返回结果已按 seq 升序，前端按数组顺序渲染即可；
-// 3. 会话不存在时统一返回 400，避免误判成系统异常。
+// 3. 会话不存在或不属于当前用户时统一返回 404，避免误判成参数格式问题。
 func (api *AgentHandler) GetConversationTimeline(c *gin.Context) {
 	conversationID := strings.TrimSpace(c.Query("conversation_id"))
 	if conversationID == "" {
@@ -271,7 +271,7 @@ func (api *AgentHandler) GetConversationTimeline(c *gin.Context) {
 	timeline, err := api.svc.GetConversationTimeline(ctx, userID, conversationID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusBadRequest, respond.WrongParamType)
+			c.JSON(http.StatusNotFound, respond.ConversationNotFound)
 			return
 		}
 		respond.DealWithError(c, err)

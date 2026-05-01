@@ -87,12 +87,21 @@ func (s *AgentService) runNewAgentGraph(
 
 	// 3. retry 机制已下线，不再构建重试元数据。
 
-	// 4. 从 StateStore 加载或创建 RuntimeState。
+	// 4. 如果当前 conversation 被主动调度 session 占管，先走 session 分支，不进入普通 newAgent。
+	//    这样 waiting_user_reply / rerunning 期间，用户消息会先推动主动调度闭环，而不是误进自由聊天。
+	if handled, sessionErr := s.handleActiveScheduleSessionChat(requestCtx, userMessage, traceID, requestStart, userID, chatID, resolvedModelName, outChan, errChan); sessionErr != nil {
+		pushErrNonBlocking(errChan, sessionErr)
+		return
+	} else if handled {
+		return
+	}
+
+	// 5. 从 StateStore 加载或创建 RuntimeState。
 	//    恢复场景（confirm/ask_user）同时拿到快照中保存的 ConversationContext，
 	//    其中包含工具调用/结果等中间消息，保证后续 LLM 调用的消息链完整。
 	runtimeState, savedConversationContext, savedScheduleState, savedOriginalScheduleState := s.loadOrCreateRuntimeState(requestCtx, chatID, userID)
 
-	// 5. 构造 ConversationContext。
+	// 6. 构造 ConversationContext。
 	//    优先使用快照中恢复的 ConversationContext（含工具调用/结果），
 	//    无快照时从 Redis LLM 历史缓存加载。
 	var conversationContext *newagentmodel.ConversationContext
@@ -105,17 +114,17 @@ func (s *AgentService) runNewAgentGraph(
 	} else {
 		conversationContext = s.loadConversationContext(requestCtx, chatID, userMessage)
 	}
-	// 5.1. 在 graph 执行前统一补充与当前输入相关的记忆上下文（预取管线模式）。
-	// 5.1.1 先读 Redis 预取缓存注入到 ConversationContext，再启动后台 goroutine 做完整检索；
-	// 5.1.2 返回的 channel 传入 Deps，供 Execute/Plan 节点在启动前消费最新记忆；
-	// 5.1.3 检索失败只降级为"本轮不注入记忆"，不阻断主链路。
+	// 6.1. 在 graph 执行前统一补充与当前输入相关的记忆上下文（预取管线模式）。
+	// 6.1.1 先读 Redis 预取缓存注入到 ConversationContext，再启动后台 goroutine 做完整检索；
+	// 6.1.2 返回的 channel 传入 Deps，供 Execute/Plan 节点在启动前消费最新记忆；
+	// 6.1.3 检索失败只降级为"本轮不注入记忆"，不阻断主链路。
 	memoryFuture := s.injectMemoryContext(requestCtx, conversationContext, userID, chatID, userMessage)
 
-	// 5.5 将前端传入的 thinkingMode 写入 CommonState，供 ChatNode 及下游节点读取。
+	// 6.5 将前端传入的 thinkingMode 写入 CommonState，供 ChatNode 及下游节点读取。
 	cs := runtimeState.EnsureCommonState()
 	cs.ThinkingMode = thinkingMode
 
-	// 5.6 若 extra 携带 task_class_ids，校验后写入 CommonState（仅首轮/尚未设置时生效，跨轮持久化）。
+	// 6.6 若 extra 携带 task_class_ids，校验后写入 CommonState（仅首轮/尚未设置时生效，跨轮持久化）。
 	if taskClassIDs := readAgentExtraIntSlice(extra, "task_class_ids"); len(taskClassIDs) > 0 {
 		cs := runtimeState.EnsureCommonState()
 		if len(cs.TaskClassIDs) == 0 {
@@ -135,7 +144,7 @@ func (s *AgentService) runNewAgentGraph(
 
 	cs = runtimeState.EnsureCommonState()
 
-	// 5.7 先把本轮用户输入落库，确保后续可见 assistant 消息按真实时间线追加。
+	// 6.7 先把本轮用户输入落库，确保后续可见 assistant 消息按真实时间线追加。
 	userMsg := schema.UserMessage(userMessage)
 	if err := s.persistNewAgentConversationMessage(requestCtx, userID, chatID, userMsg, 0); err != nil {
 		pushErrNonBlocking(errChan, err)
@@ -158,7 +167,7 @@ func (s *AgentService) runNewAgentGraph(
 		return s.persistNewAgentConversationMessage(persistCtx, userID, chatID, msg, 0)
 	}
 
-	// 6. 构造 AgentGraphRequest。
+	// 7. 构造 AgentGraphRequest。
 	var (
 		confirmAction       string
 		resumeInteractionID string
@@ -175,16 +184,16 @@ func (s *AgentService) runNewAgentGraph(
 	}
 	graphRequest.Normalize()
 
-	// 7. 适配 LLM clients（从 AIHub 的 ark.ChatModel 转换为 newAgent LLM Client）。
-	// 7.1 Chat/Deliver 使用 Pro 模型：路由分流、闲聊、交付总结属于标准复杂度。
-	// 7.2 Plan/Execute 使用 Max 模型：规划和 ReAct 循环需要深度推理能力。
+	// 8. 适配 LLM clients（从 AIHub 的 ark.ChatModel 转换为 newAgent LLM Client）。
+	// 8.1 Chat/Deliver 使用 Pro 模型：路由分流、闲聊、交付总结属于标准复杂度。
+	// 8.2 Plan/Execute 使用 Max 模型：规划和 ReAct 循环需要深度推理能力。
 	chatClient := infrallm.WrapArkClient(s.AIHub.Pro)
 	planClient := infrallm.WrapArkClient(s.AIHub.Max)
 	executeClient := infrallm.WrapArkClient(s.AIHub.Max)
 	deliverClient := infrallm.WrapArkClient(s.AIHub.Pro)
 	summaryClient := infrallm.WrapArkClient(s.AIHub.Lite)
 
-	// 8. 适配 SSE emitter。
+	// 9. 适配 SSE emitter。
 	sseEmitter := newagentstream.NewSSEPayloadEmitter(outChan)
 	chunkEmitter := newagentstream.NewChunkEmitter(sseEmitter, traceID, resolvedModelName, requestStart.Unix())
 	chunkEmitter.SetReasoningSummaryFunc(s.makeReasoningSummaryFunc(summaryClient))
@@ -193,7 +202,7 @@ func (s *AgentService) runNewAgentGraph(
 		s.persistNewAgentTimelineExtraEvent(context.Background(), userID, chatID, extra)
 	})
 
-	// 9. 构造 AgentGraphDeps（由 cmd/start.go 注入的依赖）。
+	// 10. 构造 AgentGraphDeps（由 cmd/start.go 注入的依赖）。
 	deps := newagentmodel.AgentGraphDeps{
 		ChatClient:            chatClient,
 		PlanClient:            planClient,
@@ -214,7 +223,7 @@ func (s *AgentService) runNewAgentGraph(
 		QuickTaskDeps:         s.quickTaskDeps,
 	}
 
-	// 10. 构造 AgentGraphRunInput 并运行 graph。
+	// 11. 构造 AgentGraphRunInput 并运行 graph。
 	runInput := newagentmodel.AgentGraphRunInput{
 		RuntimeState:          runtimeState,
 		ConversationContext:   conversationContext,
@@ -240,10 +249,10 @@ func (s *AgentService) runNewAgentGraph(
 		return
 	}
 
-	// 11. 持久化聊天历史（用户消息 + 助手回复）。
+	// 12. 持久化聊天历史（用户消息 + 助手回复）。
 	requestTotalTokens := snapshotRequestTokenMeter(requestCtx).TotalTokens
 	s.adjustNewAgentRequestTokenUsage(requestCtx, userID, chatID, requestTotalTokens)
-	// 11.5. 将最终状态快照异步写入 MySQL（通过 outbox）。
+	// 12.5. 将最终状态快照异步写入 MySQL（通过 outbox）。
 	// Deliver 节点已将快照保存到 Redis（2h TTL），此处通过 outbox 异步写入 MySQL 做永久存储。
 	if finalState != nil {
 		snapshot := &newagentmodel.AgentStateSnapshot{
@@ -253,7 +262,7 @@ func (s *AgentService) runNewAgentGraph(
 		eventsvc.PublishAgentStateSnapshot(requestCtx, s.eventPublisher, snapshot, chatID, userID)
 	}
 
-	// 11.6. graph 完成后条件触发记忆抽取。
+	// 12.6. graph 完成后条件触发记忆抽取。
 	// 说明：
 	// 1. 只有本轮未走快捷随口记任务路径时才触发记忆抽取；
 	// 2. 避免随口记创建的 Task 与记忆系统产生语义冲突。
@@ -269,10 +278,10 @@ func (s *AgentService) runNewAgentGraph(
 	// 排程预览缓存由 Deliver 节点负责写入（通过注入的 WriteSchedulePreview func），
 	// 保证只有任务真正完成时才写，中断路径不写中间态。
 
-	// 12. 发送 OpenAI 兼容的流式结束标记，告知客户端 stream 已完成。
+	// 13. 发送 OpenAI 兼容的流式结束标记，告知客户端 stream 已完成。
 	_ = chunkEmitter.EmitDone()
 
-	// 13. 异步生成会话标题。
+	// 14. 异步生成会话标题。
 	s.ensureConversationTitleAsync(userID, chatID)
 }
 

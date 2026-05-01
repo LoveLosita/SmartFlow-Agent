@@ -622,6 +622,131 @@ func (d *CacheDAO) DeleteConversationTimelineFromCache(ctx context.Context, user
 // Key 设计：
 // 1. 使用 smartflow:agent_state 前缀，与现有 key 命名空间隔离；
 // 2. 使用 conversationID 作为唯一标识，因为 agent 状态是按会话维度持久化的。
+const activeScheduleSessionCacheTTL = 2 * time.Hour
+
+// activeScheduleSessionKey 生成 session_id 维度的主动调度会话缓存 key。
+func (d *CacheDAO) activeScheduleSessionKey(sessionID string) string {
+	return fmt.Sprintf("smartflow:active_schedule_session:s:%s", strings.TrimSpace(sessionID))
+}
+
+// activeScheduleSessionConversationKey 生成 user_id + conversation_id 维度的主动调度会话缓存 key。
+func (d *CacheDAO) activeScheduleSessionConversationKey(userID int, conversationID string) string {
+	return fmt.Sprintf("smartflow:active_schedule_session:u:%d:c:%s", userID, strings.TrimSpace(conversationID))
+}
+
+// SetActiveScheduleSessionToCache 同步写入主动调度会话缓存。
+//
+// 步骤化说明：
+// 1. 先校验 snapshot 和主键，避免把无效会话写进 Redis；
+// 2. 再把同一份快照写入 session_id / conversation_id 两个维度的 key；
+// 3. 若 conversation_id 还没绑定，只写 session_id key，避免生成空路由 key。
+func (d *CacheDAO) SetActiveScheduleSessionToCache(ctx context.Context, snapshot *model.ActiveScheduleSessionSnapshot) error {
+	if d == nil || d.client == nil {
+		return errors.New("cache dao is not initialized")
+	}
+	if snapshot == nil {
+		return errors.New("active schedule session snapshot is nil")
+	}
+
+	sessionID := strings.TrimSpace(snapshot.SessionID)
+	if sessionID == "" {
+		return errors.New("session_id is empty")
+	}
+
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("marshal active schedule session cache failed: %w", err)
+	}
+
+	pipe := d.client.Pipeline()
+	pipe.Set(ctx, d.activeScheduleSessionKey(sessionID), data, activeScheduleSessionCacheTTL)
+	if conversationID := strings.TrimSpace(snapshot.ConversationID); conversationID != "" && snapshot.UserID > 0 {
+		pipe.Set(ctx, d.activeScheduleSessionConversationKey(snapshot.UserID, conversationID), data, activeScheduleSessionCacheTTL)
+	}
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+// GetActiveScheduleSessionFromCache 按 session_id 读取主动调度会话缓存。
+func (d *CacheDAO) GetActiveScheduleSessionFromCache(ctx context.Context, sessionID string) (*model.ActiveScheduleSessionSnapshot, error) {
+	if d == nil || d.client == nil {
+		return nil, errors.New("cache dao is not initialized")
+	}
+
+	normalizedSessionID := strings.TrimSpace(sessionID)
+	if normalizedSessionID == "" {
+		return nil, errors.New("session_id is empty")
+	}
+
+	raw, err := d.client.Get(ctx, d.activeScheduleSessionKey(normalizedSessionID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var snapshot model.ActiveScheduleSessionSnapshot
+	if err = json.Unmarshal([]byte(raw), &snapshot); err != nil {
+		return nil, fmt.Errorf("unmarshal active schedule session cache failed: %w", err)
+	}
+	return &snapshot, nil
+}
+
+// GetActiveScheduleSessionFromConversationCache 按 user_id + conversation_id 读取主动调度会话缓存。
+func (d *CacheDAO) GetActiveScheduleSessionFromConversationCache(ctx context.Context, userID int, conversationID string) (*model.ActiveScheduleSessionSnapshot, error) {
+	if d == nil || d.client == nil {
+		return nil, errors.New("cache dao is not initialized")
+	}
+	if userID <= 0 {
+		return nil, fmt.Errorf("invalid user_id: %d", userID)
+	}
+
+	normalizedConversationID := strings.TrimSpace(conversationID)
+	if normalizedConversationID == "" {
+		return nil, errors.New("conversation_id is empty")
+	}
+
+	raw, err := d.client.Get(ctx, d.activeScheduleSessionConversationKey(userID, normalizedConversationID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var snapshot model.ActiveScheduleSessionSnapshot
+	if err = json.Unmarshal([]byte(raw), &snapshot); err != nil {
+		return nil, fmt.Errorf("unmarshal active schedule session cache failed: %w", err)
+	}
+	return &snapshot, nil
+}
+
+// DeleteActiveScheduleSessionFromCache 删除主动调度会话缓存。
+//
+// 说明：
+// 1. 会同时清理 session_id 和 conversation_id 两个维度，避免旧路由缓存残留；
+// 2. conversation_id 为空时只清 session_id key；
+// 3. 删除操作本身幂等，即使 key 不存在也视为成功。
+func (d *CacheDAO) DeleteActiveScheduleSessionFromCache(ctx context.Context, sessionID string, userID int, conversationID string) error {
+	if d == nil || d.client == nil {
+		return errors.New("cache dao is not initialized")
+	}
+
+	normalizedSessionID := strings.TrimSpace(sessionID)
+	if normalizedSessionID == "" {
+		return errors.New("session_id is empty")
+	}
+
+	keys := []string{d.activeScheduleSessionKey(normalizedSessionID)}
+	if userID > 0 {
+		if normalizedConversationID := strings.TrimSpace(conversationID); normalizedConversationID != "" {
+			keys = append(keys, d.activeScheduleSessionConversationKey(userID, normalizedConversationID))
+		}
+	}
+	return d.client.Del(ctx, keys...).Err()
+}
+
 func (d *CacheDAO) agentStateKey(conversationID string) string {
 	return fmt.Sprintf("smartflow:agent_state:%s", conversationID)
 }

@@ -20,10 +20,13 @@ import {
 import {
   getSchedulePreview,
   getConversationTimeline,
+  getActiveSchedulePreview,
   type TimelineEvent,
   type TimelineToolPayload,
   type TimelineConfirmPayload,
-  type ToolView
+  type ToolView,
+  type ActiveSchedulePreviewDetail,
+  type ActiveSchedulePreviewEntry,
 } from '@/api/schedule_agent'
 import { refreshToken } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
@@ -34,6 +37,7 @@ import type {
   ConversationContextStats,
   ConversationListItem,
   ConversationMeta,
+  HybridScheduleEntry,
   ThinkingModeType,
   SchedulePreviewData,
 } from '@/types/dashboard'
@@ -158,6 +162,7 @@ const conversationList = ref<ConversationListItem[]>([])
 const conversationMetaMap = reactive<Record<string, ConversationMeta>>({})
 const conversationMessagesMap = reactive<Record<string, AssistantMessage[]>>({})
 const unavailableHistoryMap = reactive<Record<string, boolean>>({})
+const conversationHistoryLoadErrorMap = reactive<Record<string, string>>({})
 const thinkingMessageMap = reactive<Record<string, boolean>>({})
 const reasoningCollapsedMap = reactive<Record<string, boolean>>({})
 const reasoningStartedAtMap = reactive<Record<string, number>>({})
@@ -193,6 +198,8 @@ const THINKING_STREAM_FLUSH_THRESHOLD = 100
 const isFineTuneModalVisible = ref(false)
 const fineTuneLoading = ref(false)
 const activeFineTuneData = ref<SchedulePreviewData | null>(null)
+const activeFineTuneKind = ref<'schedule' | 'active_schedule'>('schedule')
+const activeFineTuneActiveDetail = ref<ActiveSchedulePreviewDetail | null>(null)
 
 // 任务状态叠加层，用于实时同步和交互
 interface TaskStatusState {
@@ -289,27 +296,14 @@ async function hydrateTaskStatuses(conversationId: string) {
   messages.forEach(msg => {
     // 同时也扫描消息本身可能附带的 extra（用于 SSE 在线消息）
     if (msg.extra?.business_card) {
-      const card = msg.extra.business_card
-      if (card.card_type === 'task_query') {
-        const data = card.data as any
-        data.tasks?.forEach((t: any) => { if (t.id) ids.add(t.id) })
-      } else if (card.card_type === 'task_record') {
-        const data = card.data as any
-        if (data.id) ids.add(data.id)
-      }
+      collectTaskIdsFromBusinessCard(msg.extra.business_card).forEach((id) => ids.add(id))
     }
 
     // 扫描历史恢复的卡片事件
     const cardList = businessCardEventsMap[msg.id]
     if (cardList) {
       cardList.forEach(card => {
-        if (card.card_type === 'task_query') {
-          const data = card.data as any
-          data.tasks?.forEach((t: any) => { if (t.id) ids.add(t.id) })
-        } else if (card.card_type === 'task_record') {
-          const data = card.data as any
-          if (data.id) ids.add(data.id)
-        }
+        collectTaskIdsFromBusinessCard(card).forEach((id) => ids.add(id))
       })
     }
   })
@@ -542,16 +536,22 @@ const selectedConversationSubtitle = computed(() => {
   return `消息 ${messageCount} 条 · 最近更新 ${formatConversationTime(lastMessageAt)}`
 })
 
-const shouldShowHistoryFallback = computed(() => {
-  if (!selectedConversationId.value) {
-    return false
+const selectedConversationHistoryNotice = computed(() => {
+  const conversationId = selectedConversationId.value
+  if (!conversationId || isDraftConversationId(conversationId)) {
+    return ''
   }
 
-  return (
-    unavailableHistoryMap[selectedConversationId.value] === true &&
-    rawSelectedMessages.value.length === 0 &&
-    (selectedConversation.value?.message_count ?? 0) > 0
-  )
+  if (unavailableHistoryMap[conversationId] !== true || rawSelectedMessages.value.length > 0) {
+    return ''
+  }
+
+  const errorText = (conversationHistoryLoadErrorMap[conversationId] || '').toLowerCase()
+  if (errorText.includes('conversation not found')) {
+    return '当前会话不存在或不属于当前账号，请切换到自己的会话。'
+  }
+
+  return '当前会话的历史消息暂时不可读，但你仍然可以继续追问；后续刷新后会自动恢复。'
 })
 
 const selectedConversationContextStats = computed(() => {
@@ -1106,6 +1106,143 @@ function appendBusinessCardEvent(messageId: string, payload: TimelineBusinessCar
   assistantTimelineLastKindMap[messageId] = 'business_card'
 }
 
+function isActiveSchedulePreviewCard(payload: TimelineBusinessCardPayload): payload is TimelineBusinessCardPayload & {
+  card_type: 'active_schedule_preview'
+  data: ActiveSchedulePreviewDetail
+} {
+  return payload.card_type === 'active_schedule_preview'
+}
+
+function isActiveSchedulePreviewDetail(value: unknown): value is ActiveSchedulePreviewDetail {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+  const detail = value as Partial<ActiveSchedulePreviewDetail>
+  return typeof detail.preview_id === 'string' && detail.preview_id.trim().length > 0
+}
+
+function needsActiveSchedulePreviewHydration(detail: ActiveSchedulePreviewDetail | null | undefined) {
+  if (!detail) {
+    return true
+  }
+  return !Array.isArray(detail.changes) || !Array.isArray(detail.before?.entries) || !Array.isArray(detail.after?.entries)
+}
+
+function resolveActiveSchedulePreviewSummary(
+  detail: ActiveSchedulePreviewDetail,
+  payload?: Pick<TimelineBusinessCardPayload, 'title' | 'summary'>,
+) {
+  const candidates = [
+    payload?.summary,
+    payload?.title,
+    detail.notification_summary,
+    detail.explanation,
+    detail.selected_candidate?.summary,
+  ]
+  for (const candidate of candidates) {
+    const text = `${candidate || ''}`.trim()
+    if (text) {
+      return text
+    }
+  }
+  return '已生成主动调度建议'
+}
+
+function buildActiveScheduleHybridEntry(
+  entry: ActiveSchedulePreviewEntry,
+  status: 'existing' | 'suggested',
+): HybridScheduleEntry | null {
+  // 1. 当前微调弹窗必须依赖周 / 星期 / 节次坐标渲染棋盘。
+  // 2. 若后端暂未给出完整坐标，则先跳过该条，避免把无效块渲染到错误位置。
+  // 3. 后续若后端补齐更多 entry 语义，再继续扩展这层映射，而不是在 UI 里兜底猜位置。
+  if (!entry.week || !entry.day_of_week || !entry.section_from || !entry.section_to) {
+    return null
+  }
+
+  const isCourse = entry.source_type === 'course'
+  return {
+    week: entry.week,
+    day_of_week: entry.day_of_week,
+    section_from: entry.section_from,
+    section_to: entry.section_to,
+    name: entry.title || '未命名事项',
+    type: isCourse ? 'course' : 'task',
+    status,
+    task_item_id: isCourse ? 0 : entry.source_id,
+    task_class_id: 0,
+    event_id: entry.source_id,
+    can_be_embedded: isCourse ? entry.editable : false,
+    block_for_suggested: isCourse,
+    context_tag: entry.source_type,
+  }
+}
+
+function buildSchedulePreviewFromActiveDetail(
+  conversationId: string,
+  detail: ActiveSchedulePreviewDetail,
+  payload?: Pick<TimelineBusinessCardPayload, 'title' | 'summary'>,
+): SchedulePreviewData {
+  // 1. 现有微调弹窗依赖 hybrid_entries，因此这里把主动调度 before/after 轻量翻译为旧预览结构。
+  // 2. before.entries 作为“当前已存在棋盘”，after.entries 中 status=added 的条目作为“待确认建议块”。
+  // 3. 这层只做前端展示适配，不擅自改写后端 preview 语义；真正的 confirm 仍走主动调度专用 API。
+  const existingEntries = (detail.before?.entries || [])
+    .map((entry) => buildActiveScheduleHybridEntry(entry, 'existing'))
+    .filter((entry): entry is HybridScheduleEntry => Boolean(entry))
+  const suggestedEntries = (detail.after?.entries || [])
+    .filter((entry) => entry.status === 'added')
+    .map((entry) => buildActiveScheduleHybridEntry(entry, 'suggested'))
+    .filter((entry): entry is HybridScheduleEntry => Boolean(entry))
+
+  return {
+    conversation_id: conversationId,
+    trace_id: detail.trace_id || '',
+    summary: resolveActiveSchedulePreviewSummary(detail, payload),
+    candidate_plans: [],
+    hybrid_entries: [...existingEntries, ...suggestedEntries],
+    task_class_ids: [],
+    generated_at: detail.generated_at || new Date().toISOString(),
+  }
+}
+
+function collectTaskIdsFromBusinessCard(payload: TimelineBusinessCardPayload): number[] {
+  const ids = new Set<number>()
+
+  if (payload.card_type === 'task_query') {
+    (payload.data as TaskQueryCardData).tasks?.forEach((task) => {
+      if (task.id) {
+        ids.add(task.id)
+      }
+    })
+    return Array.from(ids)
+  }
+
+  if (payload.card_type === 'task_record') {
+    const id = (payload.data as TaskRecordCardData).id
+    if (id) {
+      ids.add(id)
+    }
+    return Array.from(ids)
+  }
+
+  if (!isActiveSchedulePreviewDetail(payload.data)) {
+    return []
+  }
+
+  const detail = payload.data
+  detail.changes?.forEach((change) => {
+    if ((change.target_type === 'task_pool' || change.change_type === 'add_task_pool_to_schedule') && change.target_id > 0) {
+      ids.add(change.target_id)
+    }
+  })
+  detail.after?.entries?.forEach((entry) => {
+    if (entry.source_type === 'task_pool' && entry.source_id > 0) {
+      ids.add(entry.source_id)
+    }
+  })
+
+  return Array.from(ids)
+}
+
 function isToolTraceExpanded(eventId: string) {
   return toolTraceExpandedMap[eventId] === true
 }
@@ -1566,6 +1703,21 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
 
     const businessCards = businessCardEventsMap[source.id] || []
     for (const card of businessCards) {
+      if (isActiveSchedulePreviewCard(card)) {
+        const activeSchedulePreview = card.data
+        blocks.push({
+          id: `${source.id}:active-schedule-card:${(card as any)._seq}`,
+          type: 'schedule_card',
+          seq: (card as any)._seq,
+          schedulePreview: buildSchedulePreviewFromActiveDetail(source.id, activeSchedulePreview, card),
+          schedulePreviewKind: 'active_schedule',
+          activeSchedulePreview,
+          sourceId: source.id,
+          source,
+        })
+        continue
+      }
+
       blocks.push({
         id: `${source.id}:card:${(card as any)._seq}`,
         type: 'business_card',
@@ -1582,6 +1734,7 @@ function getDisplayAssistantBlocks(dm: DisplayMessage): DisplayAssistantBlock[] 
         type: 'schedule_card',
         seq: scheduleResultSeqMap[source.id] || 1000000,
         schedulePreview: scheduleResultMap[source.id],
+        schedulePreviewKind: 'schedule',
         sourceId: source.id,
         source,
       })
@@ -2256,11 +2409,14 @@ async function loadConversationMessages(conversationId: string, forceReload = fa
     const events = await getConversationTimeline(conversationId)
     conversationMessagesMap[conversationId] = rebuildStateFromTimeline(conversationId, events)
     unavailableHistoryMap[conversationId] = false
+    delete conversationHistoryLoadErrorMap[conversationId]
     // 时间线恢复后，立即启动任务状态同步（Hydration）
     void hydrateTaskStatuses(conversationId)
   } catch (error) {
     console.error('Failed to load timeline:', error)
     unavailableHistoryMap[conversationId] = true
+    conversationHistoryLoadErrorMap[conversationId] =
+      error instanceof Error ? error.message : '会话历史加载失败'
     ensureConversationBucket(conversationId)
   }
 }
@@ -2417,17 +2573,28 @@ function startNewConversation() {
   suppressEmptyStateTransition.value = false
 }
 
-async function openFineTuneModal(data: SchedulePreviewData) {
-  // 1. 如果点击的是占位卡片（尚未加载详情），则触发实时拉取。
+async function openFineTuneModal(
+  data: SchedulePreviewData,
+  options: {
+    previewKind?: 'schedule' | 'active_schedule'
+    activePreviewDetail?: ActiveSchedulePreviewDetail | null
+  } = {},
+) {
+  const previewKind = options.previewKind || 'schedule'
+  activeFineTuneKind.value = previewKind
+  activeFineTuneActiveDetail.value = options.activePreviewDetail ?? null
+
+  // 1. 普通排程预览仍沿用原来的实时拉取逻辑。
+  // 2. 主动调度预览优先复用时间线里携带的 detail；若只有 preview_id，则按需补拉。
   if ((data as any).is_placeholder) {
     if (fineTuneLoading.value) return
-    
+
     fineTuneLoading.value = true
     try {
       const realData = await getSchedulePreview(selectedConversationId.value)
       // 成功后覆盖占位符，下次点击无需再查
       activeFineTuneData.value = realData
-      
+
       // 这里的逻辑主要是为了同步界面上的 card 状态（如果是合并消息，对应的 id 为 dm.id）
       for (const mid of Object.keys(scheduleResultMap)) {
         if ((scheduleResultMap[mid] as any).is_placeholder) {
@@ -2441,6 +2608,36 @@ async function openFineTuneModal(data: SchedulePreviewData) {
     } finally {
       fineTuneLoading.value = false
     }
+  } else if (previewKind === 'active_schedule') {
+    let activeDetail = activeFineTuneActiveDetail.value
+    if (needsActiveSchedulePreviewHydration(activeDetail) && activeDetail?.preview_id) {
+      if (fineTuneLoading.value) return
+
+      fineTuneLoading.value = true
+      try {
+        activeDetail = await getActiveSchedulePreview(activeDetail.preview_id)
+        activeFineTuneActiveDetail.value = activeDetail
+      } catch (error: any) {
+        console.error('Load active schedule preview failed:', error)
+        ElMessage.warning('主动调度预览正在生成中，请稍候再试...')
+        return
+      } finally {
+        fineTuneLoading.value = false
+      }
+    }
+
+    if (!activeDetail) {
+      ElMessage.warning('主动调度预览数据不完整')
+      return
+    }
+
+    activeFineTuneData.value = buildSchedulePreviewFromActiveDetail(
+      selectedConversationId.value,
+      activeDetail,
+      {
+        summary: data.summary,
+      },
+    )
   } else {
     activeFineTuneData.value = data
   }
@@ -2450,6 +2647,8 @@ async function openFineTuneModal(data: SchedulePreviewData) {
 
 function closeFineTuneModal() {
   isFineTuneModalVisible.value = false
+  activeFineTuneKind.value = 'schedule'
+  activeFineTuneActiveDetail.value = null
 }
 
 function handleScheduleSaved() {
@@ -2781,16 +2980,7 @@ function handleStreamExtraEvent(extra: StreamExtraPayload | undefined, assistant
     appendBusinessCardEvent(assistantMessage.id, extra.business_card)
     scheduleScrollMessagesToBottom(true)
     
-    // SSE 在线接收到新卡片时，也尝试同步一次其状态（主要针对立即生成的任务）
-    const card = extra.business_card
-    const ids: number[] = []
-    if (card.card_type === 'task_query') {
-      (card.data as TaskQueryCardData).tasks?.forEach(t => { if (t.id) ids.push(t.id) })
-    } else if (card.card_type === 'task_record') {
-      const id = (card.data as TaskRecordCardData).id
-      if (id) ids.push(id)
-    }
-    
+    const ids = collectTaskIdsFromBusinessCard(extra.business_card)
     if (ids.length > 0) {
       ids.forEach(id => {
         if (!taskStatusMap[id]) {
@@ -2991,6 +3181,15 @@ async function sendMessageInternal(options: SendMessageOptions = {}) {
   const isResume = Boolean(options.requestExtra?.resume)
   if ((!text && !isResume) || chatLoading.value) {
     return
+  }
+
+  const currentConversationId = selectedConversationId.value
+  if (currentConversationId && !isDraftConversationId(currentConversationId)) {
+    const historyErrorText = (conversationHistoryLoadErrorMap[currentConversationId] || '').toLowerCase()
+    if (historyErrorText.includes('conversation not found')) {
+      ElMessage.warning('当前会话不存在或不属于当前账号，请切换到自己的会话后再发送。')
+      return
+    }
   }
 
   // 1. 有 confirm 覆盖层且不是“覆盖层按钮触发”的发送时，阻止误发送。
@@ -3305,8 +3504,8 @@ onBeforeUnmount(() => {
         >
           <transition name="chat-content-fade">
             <div :key="conversationTransitionKey" class="assistant-messages__inner">
-              <div v-if="shouldShowHistoryFallback" class="assistant-chat__fallback">
-                当前会话的历史消息暂时不可读，但你仍然可以继续追问；后续刷新后会自动恢复。
+              <div v-if="selectedConversationHistoryNotice" class="assistant-chat__fallback">
+                {{ selectedConversationHistoryNotice }}
               </div>
 
               <TransitionGroup
@@ -3489,7 +3688,10 @@ onBeforeUnmount(() => {
                   <template v-else-if="block.type === 'schedule_card' && block.schedulePreview">
                     <ScheduleResultCard
                       :summary="block.schedulePreview.summary"
-                      @click="openFineTuneModal(block.schedulePreview)"
+                      @click="openFineTuneModal(block.schedulePreview, {
+                        previewKind: block.schedulePreviewKind,
+                        activePreviewDetail: block.activeSchedulePreview,
+                      })"
                     />
                   </template>
 
@@ -3722,6 +3924,8 @@ onBeforeUnmount(() => {
   <ScheduleFineTuneModal
     :visible="isFineTuneModalVisible"
     :preview-data="activeFineTuneData"
+    :preview-kind="activeFineTuneKind"
+    :active-preview-detail="activeFineTuneActiveDetail"
     @close="closeFineTuneModal"
     @saved="handleScheduleSaved"
   />

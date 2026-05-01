@@ -65,9 +65,10 @@ func (s *Service) SetClock(clock func() time.Time) {
 // CreatePreview 把 dry-run 结果保存为 ready preview。
 //
 // 职责边界：
-// 1. 只消费已经完成的 dry-run 结果，不重新读取任务/日程事实；
-// 2. MVP 没有 LLM 选择器，固定使用后端排序后的 top1 candidate 作为 selected_candidate；
-// 3. 写库后只返回详情 DTO，不发布通知、不正式应用候选、不回写 trigger。
+//  1. 只消费已经完成的 dry-run 结果，不重新读取任务/日程事实；
+//  2. 优先吃上层 selection 结果中的 selected_candidate_id / explanation / notification 摘要；
+//     若上层未显式传入，则为了兼容旧链路继续回退到 top1 candidate；
+//  3. 写库后只返回详情 DTO，不发布通知、不正式应用候选、不回写 trigger。
 func (s *Service) CreatePreview(ctx context.Context, req CreatePreviewRequest) (*CreatePreviewResponse, error) {
 	if s == nil || s.repo == nil {
 		return nil, fmt.Errorf("%w: preview service 未初始化", ErrInvalidPreviewRequest)
@@ -97,9 +98,15 @@ func (s *Service) CreatePreview(ctx context.Context, req CreatePreviewRequest) (
 		previewID = "asp_" + uuid.NewString()
 	}
 
-	// 1. 先构造所有展示快照，再写库；任何 JSON 转换失败都提前返回，避免落入半结构化记录。
-	selected := req.Candidates[0]
-	snapshot := buildSnapshot(activeContext, req.Observation, req.Candidates, selected)
+	// 1. 先解析选中的候选，再构造展示快照；任何 JSON 转换失败都提前返回，避免落入半结构化记录。
+	//    1.1 若上层已经给出 selected_candidate_id，就严格按该候选落库，避免 preview 与选择结果不一致。
+	//    1.2 若未给出，则继续沿用后端候选顺序的第一条，保持旧流程兼容。
+	//    1.3 若指定 ID 不在候选列表中，直接返回错误，避免写入一份错位的 preview。
+	selected, err := pickSelectedCandidate(req.Candidates, req.SelectedCandidateID)
+	if err != nil {
+		return nil, err
+	}
+	snapshot := buildSnapshot(activeContext, req.Observation, req.Candidates, selected, req.FallbackUsed)
 	baseVersion := strings.TrimSpace(req.BaseVersion)
 	if baseVersion == "" {
 		baseVersion = buildBaseVersion(activeContext, snapshot.changes)
@@ -168,6 +175,24 @@ func (s *Service) now() time.Time {
 		return time.Now()
 	}
 	return s.clock()
+}
+
+func pickSelectedCandidate(candidates []candidate.Candidate, selectedCandidateID string) (candidate.Candidate, error) {
+	if len(candidates) == 0 {
+		return candidate.Candidate{}, fmt.Errorf("%w: dry-run 链路未生成可保存候选", ErrInvalidPreviewRequest)
+	}
+
+	selectedCandidateID = strings.TrimSpace(selectedCandidateID)
+	if selectedCandidateID == "" {
+		return candidates[0], nil
+	}
+
+	for _, item := range candidates {
+		if strings.TrimSpace(item.CandidateID) == selectedCandidateID {
+			return item, nil
+		}
+	}
+	return candidate.Candidate{}, fmt.Errorf("%w: selected_candidate_id 不在候选列表中", ErrInvalidPreviewRequest)
 }
 
 func buildPreviewModel(
@@ -256,6 +281,7 @@ func buildSnapshot(
 	observation observe.Result,
 	candidates []candidate.Candidate,
 	selected candidate.Candidate,
+	fallbackUsed bool,
 ) rawPreviewSnapshot {
 	selectedDTO := candidateDTO(selected)
 	candidateDTOs := make([]CandidateDTO, 0, len(candidates))
@@ -276,6 +302,6 @@ func buildSnapshot(
 		before:            before,
 		changes:           changes,
 		after:             after,
-		risk:              riskDTO(selected, observation, changes),
+		risk:              riskDTO(selected, observation, changes, fallbackUsed),
 	}
 }

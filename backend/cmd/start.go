@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -12,9 +13,12 @@ import (
 
 	activeadapters "github.com/LoveLosita/smartflow/backend/active_scheduler/adapters"
 	"github.com/LoveLosita/smartflow/backend/active_scheduler/applyadapter"
+	activegraph "github.com/LoveLosita/smartflow/backend/active_scheduler/graph"
 	activejob "github.com/LoveLosita/smartflow/backend/active_scheduler/job"
 	activepreview "github.com/LoveLosita/smartflow/backend/active_scheduler/preview"
+	activesel "github.com/LoveLosita/smartflow/backend/active_scheduler/selection"
 	activesvc "github.com/LoveLosita/smartflow/backend/active_scheduler/service"
+	activeTrigger "github.com/LoveLosita/smartflow/backend/active_scheduler/trigger"
 	"github.com/LoveLosita/smartflow/backend/api"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
@@ -30,12 +34,14 @@ import (
 	"github.com/LoveLosita/smartflow/backend/model"
 	newagentconv "github.com/LoveLosita/smartflow/backend/newAgent/conv"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
+	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 	"github.com/LoveLosita/smartflow/backend/newAgent/tools/web"
 	"github.com/LoveLosita/smartflow/backend/notification"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/LoveLosita/smartflow/backend/routers"
 	"github.com/LoveLosita/smartflow/backend/service"
+	agentsvcsvc "github.com/LoveLosita/smartflow/backend/service/agentsvc"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 	"github.com/go-redis/redis/v8"
 	"github.com/spf13/viper"
@@ -211,7 +217,17 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	courseService := buildCourseService(courseRepo, scheduleRepo)
 	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo, manager)
 	scheduleService := service.NewScheduleService(scheduleRepo, userRepo, taskClassRepo, manager, cacheRepo)
-	agentService := service.NewAgentServiceWithSchedule(aiHub, agentRepo, taskRepo, cacheRepo, agentCacheRepo, eventBus, scheduleService, taskSv)
+	agentService := service.NewAgentServiceWithSchedule(
+		aiHub,
+		agentRepo,
+		taskRepo,
+		cacheRepo,
+		agentCacheRepo,
+		manager.ActiveScheduleSession,
+		eventBus,
+		scheduleService,
+		taskSv,
+	)
 
 	configureAgentService(
 		agentService,
@@ -238,6 +254,15 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 1. 主动调度选择器单独复用 Pro 模型，LLM 失败时由 selection 层显式回退到确定性候选；
+	// 2. dry-run 与 selection 通过 graph runner 串起来，避免 trigger_pipeline 再拼第二套候选逻辑。
+	activeScheduleLLMClient := infrallm.WrapArkClient(aiHub.Pro)
+	activeScheduleSelector := activesel.NewService(activeScheduleLLMClient)
+	activeScheduleGraphRunner, err := activegraph.NewRunner(activeScheduleDryRun.AsGraphDryRunFunc(), activeScheduleSelector)
+	if err != nil {
+		return nil, err
+	}
+	agentService.SetActiveScheduleSessionRerunFunc(buildActiveScheduleSessionRerunFunc(manager.ActiveSchedule, activeScheduleGraphRunner, activeSchedulePreviewConfirm))
 	// 1. 生产投递先切到用户级飞书 Webhook provider，mock provider 文件继续保留给后续单测和本地隔离验证。
 	// 2. provider 与配置测试接口共用同一个实例，保证“测试成功”和“正式投递”走同一套 URL 校验、JSON 拼装和 HTTP 结果分类。
 	feishuProvider, err := notification.NewWebhookFeishuProvider(manager.Notification, notification.WebhookFeishuProviderOptions{
@@ -257,7 +282,13 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	var activeTriggerWorkflow *activesvc.TriggerWorkflowService
 	var activeJobScanner *activejob.Scanner
 	if eventBus != nil {
-		activeTriggerWorkflow, err = activesvc.NewTriggerWorkflowService(manager.ActiveSchedule, activeScheduleDryRun, outboxRepo, kafkabus.LoadConfig())
+		activeTriggerWorkflow, err = activesvc.NewTriggerWorkflowServiceWithOptions(
+			manager.ActiveSchedule,
+			activeScheduleGraphRunner,
+			outboxRepo,
+			kafkabus.LoadConfig(),
+			activesvc.WithActiveScheduleSessionBridge(manager.Agent, manager.ActiveScheduleSession),
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -357,6 +388,166 @@ func buildActiveSchedulePreviewConfirmService(db *gorm.DB, activeDAO *dao.Active
 		return nil, err
 	}
 	return activesvc.NewPreviewConfirmService(dryRun, previewService, activeDAO, applyadapter.NewGormApplyAdapter(db))
+}
+
+// buildActiveScheduleSessionRerunFunc 把主动调度 graph / preview 能力装成聊天入口可调用的 rerun 闭包。
+//
+// 说明：
+// 1. 这里只做最小接线：复用现有 trigger -> graph -> preview 组件，不把 worker/notification 再搬一遍；
+// 2. 成功时返回 session 状态、assistant 文本和业务卡片数据；
+// 3. 失败时直接把 error 交回聊天入口，由上层统一写失败日志和 SSE 错误。
+func buildActiveScheduleSessionRerunFunc(
+	activeDAO *dao.ActiveScheduleDAO,
+	graphRunner *activegraph.Runner,
+	previewConfirm *activesvc.PreviewConfirmService,
+) agentsvcsvc.ActiveScheduleSessionRerunFunc {
+	return func(
+		ctx context.Context,
+		session *model.ActiveScheduleSessionSnapshot,
+		userMessage string,
+		traceID string,
+		requestStart time.Time,
+	) (*agentsvcsvc.ActiveScheduleSessionRerunResult, error) {
+		if activeDAO == nil || graphRunner == nil || previewConfirm == nil {
+			return nil, fmt.Errorf("主动调度 rerun 依赖未初始化")
+		}
+		if session == nil {
+			return nil, fmt.Errorf("主动调度 session 不能为空")
+		}
+
+		triggerRow, err := activeDAO.GetTriggerByID(ctx, session.TriggerID)
+		if err != nil {
+			return nil, err
+		}
+		// 1. 当前最小接线先复用“原 trigger + 最新数据库事实”重跑 active scheduler graph。
+		// 2. 用户这次回复的正文已经由聊天入口写进 conversation/timeline，但还没有下沉到 active_scheduler readers。
+		// 3. 后续若要让 ask_user 回复直接改写 graph 事实源，应在 reader/context builder 层继续补这一跳。
+		domainTrigger := activeTrigger.ActiveScheduleTrigger{
+			TriggerID:      triggerRow.ID,
+			UserID:         triggerRow.UserID,
+			TriggerType:    activeTrigger.TriggerType(triggerRow.TriggerType),
+			Source:         activeTrigger.SourceUserFeedback,
+			TargetType:     activeTrigger.TargetType(triggerRow.TargetType),
+			TargetID:       triggerRow.TargetID,
+			FeedbackID:     triggerRow.FeedbackID,
+			IdempotencyKey: triggerRow.IdempotencyKey,
+			MockNow:        nil,
+			IsMockTime:     false,
+			RequestedAt:    requestStart,
+			TraceID:        traceID,
+		}
+		if err := domainTrigger.Validate(); err != nil {
+			return nil, err
+		}
+
+		graphResult, err := graphRunner.Run(ctx, domainTrigger)
+		if err != nil {
+			return nil, err
+		}
+		if graphResult == nil || graphResult.DryRunData == nil || graphResult.DryRunData.Context == nil {
+			return nil, fmt.Errorf("主动调度 graph 返回空结果")
+		}
+
+		selectionResult := graphResult.SelectionResult
+		state := session.State
+		state.LastCandidateID = strings.TrimSpace(selectionResult.SelectedCandidateID)
+		state.LastNotificationID = ""
+		state.FailedReason = ""
+		state.MissingInfo = cloneStringSlice(graphResult.DryRunData.Context.DerivedFacts.MissingInfo)
+
+		switch selectionResult.Action {
+		case activesel.ActionSelectCandidate:
+			if !graphResult.DryRunData.Observation.Decision.ShouldWritePreview {
+				return nil, fmt.Errorf("主动调度 graph 选择了候选，但未产出可写 preview")
+			}
+			previewResp, err := previewConfirm.CreatePreviewFromDryRun(ctx, activepreview.CreatePreviewRequest{
+				ActiveContext:       graphResult.DryRunData.Context,
+				Observation:         graphResult.DryRunData.Observation,
+				Candidates:          graphResult.DryRunData.Candidates,
+				TriggerID:           triggerRow.ID,
+				GeneratedAt:         requestStart,
+				SelectedCandidateID: selectionResult.SelectedCandidateID,
+				ExplanationText:     selectionResult.ExplanationText,
+				NotificationSummary: selectionResult.NotificationSummary,
+				FallbackUsed:        selectionResult.FallbackUsed,
+			})
+			if err != nil {
+				return nil, err
+			}
+			state.PendingQuestion = ""
+			state.MissingInfo = nil
+			state.FailedReason = ""
+			expiresAt := previewResp.Detail.ExpiresAt
+			state.ExpiresAt = &expiresAt
+
+			return &agentsvcsvc.ActiveScheduleSessionRerunResult{
+				AssistantText: firstNonEmptyString(selectionResult.ExplanationText, selectionResult.NotificationSummary, previewResp.Detail.Explanation, previewResp.Detail.Notification, "主动调度建议已更新。"),
+				BusinessCard: &newagentstream.StreamBusinessCardExtra{
+					CardType: "active_schedule_preview",
+					Title:    "SmartFlow 日程调整建议",
+					Summary:  firstNonEmptyString(selectionResult.NotificationSummary, previewResp.Detail.Notification, previewResp.Detail.Explanation),
+					Data:     previewDetailToMap(previewResp.Detail),
+				},
+				SessionState:  state,
+				SessionStatus: model.ActiveScheduleSessionStatusReadyPreview,
+				PreviewID:     previewResp.Detail.PreviewID,
+			}, nil
+
+		case activesel.ActionAskUser:
+			question := firstNonEmptyString(selectionResult.AskUserQuestion, selectionResult.ExplanationText, "请继续补充主动调度需要的信息。")
+			state.PendingQuestion = question
+			state.ExpiresAt = nil
+			return &agentsvcsvc.ActiveScheduleSessionRerunResult{
+				AssistantText: question,
+				SessionState:  state,
+				SessionStatus: model.ActiveScheduleSessionStatusWaitingUserReply,
+			}, nil
+
+		default:
+			assistantText := firstNonEmptyString(selectionResult.ExplanationText, selectionResult.NotificationSummary, "当前主动调度暂时没有需要继续处理的内容。")
+			state.PendingQuestion = ""
+			state.MissingInfo = nil
+			state.ExpiresAt = nil
+			return &agentsvcsvc.ActiveScheduleSessionRerunResult{
+				AssistantText: assistantText,
+				SessionState:  state,
+				SessionStatus: model.ActiveScheduleSessionStatusIgnored,
+			}, nil
+		}
+	}
+}
+
+// previewDetailToMap 将 active_schedule preview 详情转成通用 map，供 timeline business_card 直接复用。
+func previewDetailToMap(detail activepreview.ActiveSchedulePreviewDetail) map[string]any {
+	raw, err := json.Marshal(detail)
+	if err != nil {
+		return map[string]any{}
+	}
+	var output map[string]any
+	if err := json.Unmarshal(raw, &output); err != nil {
+		return map[string]any{}
+	}
+	return output
+}
+
+// firstNonEmptyString 负责在一组候选文本里挑出第一条可展示内容。
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// cloneStringSlice 负责复制 string 切片，避免直接复用底层数组被后续修改。
+func cloneStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	copied := make([]string, len(values))
+	copy(copied, values)
+	return copied
 }
 
 func configureAgentService(
@@ -487,12 +678,13 @@ func buildTaskClassUpsertFunc(taskClassRepo *dao.TaskClassDAO) func(userID int, 
 	}
 }
 
-func buildQuickTaskCreateFunc(taskRepo *dao.TaskDAO) func(userID int, title string, priorityGroup int, deadlineAt *time.Time, urgencyThresholdAt *time.Time) (int, error) {
-	return func(userID int, title string, priorityGroup int, deadlineAt *time.Time, urgencyThresholdAt *time.Time) (int, error) {
+func buildQuickTaskCreateFunc(taskRepo *dao.TaskDAO) func(userID int, title string, priorityGroup int, estimatedSections int, deadlineAt *time.Time, urgencyThresholdAt *time.Time) (int, error) {
+	return func(userID int, title string, priorityGroup int, estimatedSections int, deadlineAt *time.Time, urgencyThresholdAt *time.Time) (int, error) {
 		created, err := taskRepo.AddTask(&model.Task{
 			UserID:             userID,
 			Title:              title,
 			Priority:           priorityGroup,
+			EstimatedSections:  model.NormalizeEstimatedSections(&estimatedSections),
 			IsCompleted:        false,
 			DeadlineAt:         deadlineAt,
 			UrgencyThresholdAt: urgencyThresholdAt,
@@ -528,11 +720,12 @@ func buildQuickTaskQueryFunc(agentService *service.AgentService) func(ctx contex
 				deadlineStr = r.DeadlineAt.In(time.Local).Format("2006-01-02 15:04")
 			}
 			results = append(results, newagentmodel.TaskQueryResult{
-				ID:            r.ID,
-				Title:         r.Title,
-				PriorityGroup: r.PriorityGroup,
-				IsCompleted:   r.IsCompleted,
-				DeadlineAt:    deadlineStr,
+				ID:                r.ID,
+				Title:             r.Title,
+				PriorityGroup:     r.PriorityGroup,
+				EstimatedSections: model.NormalizeEstimatedSections(&r.EstimatedSections),
+				IsCompleted:       r.IsCompleted,
+				DeadlineAt:        deadlineStr,
 			})
 		}
 		return results, nil

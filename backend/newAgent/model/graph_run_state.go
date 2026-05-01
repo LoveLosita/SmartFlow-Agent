@@ -108,7 +108,7 @@ type AgentGraphDeps struct {
 // 2. 这里只保留“创建任务 / 查询任务”两类轻量能力，避免再回退到已下线的孤立工具链。
 type QuickTaskDeps struct {
 	// CreateTask 创建一条四象限任务，返回 task_id。
-	CreateTask func(userID int, title string, priorityGroup int, deadlineAt *time.Time, urgencyThresholdAt *time.Time) (taskID int, err error)
+	CreateTask func(userID int, title string, priorityGroup int, estimatedSections int, deadlineAt *time.Time, urgencyThresholdAt *time.Time) (taskID int, err error)
 	// QueryTasks 按条件查询用户任务列表。
 	QueryTasks func(ctx context.Context, userID int, params TaskQueryParams) ([]TaskQueryResult, error)
 }

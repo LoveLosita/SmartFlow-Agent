@@ -54,8 +54,8 @@ func (p FeishuNotificationRequestedPayload) Validate() error {
 	if targetURL == "" {
 		return errors.New("target_url 不能为空")
 	}
-	if !strings.HasPrefix(targetURL, "/schedule-adjust/") {
-		return errors.New("target_url 必须是 /schedule-adjust/{preview_id} 站内相对路径")
+	if !strings.HasPrefix(targetURL, "/assistant/") {
+		return errors.New("target_url 必须是 /assistant/{conversation_id} 站内相对路径")
 	}
 	if strings.Contains(targetURL, "://") || strings.HasPrefix(targetURL, "//") {
 		return errors.New("target_url 不允许携带外部链接")

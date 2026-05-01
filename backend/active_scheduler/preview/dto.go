@@ -22,10 +22,12 @@ type CreatePreviewRequest struct {
 	Candidates          []candidate.Candidate                   `json:"-"`
 	PreviewID           string                                  `json:"preview_id,omitempty"`
 	TriggerID           string                                  `json:"trigger_id,omitempty"`
+	SelectedCandidateID string                                  `json:"selected_candidate_id,omitempty"`
 	BaseVersion         string                                  `json:"base_version,omitempty"`
 	GeneratedAt         time.Time                               `json:"generated_at,omitempty"`
 	ExplanationText     string                                  `json:"explanation_text,omitempty"`
 	NotificationSummary string                                  `json:"notification_summary,omitempty"`
+	FallbackUsed        bool                                    `json:"fallback_used,omitempty"`
 }
 
 // CreatePreviewResponse 是写入 preview 后可直接返回给 API 的响应 DTO。

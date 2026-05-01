@@ -174,7 +174,7 @@ func entryFromEvent(event ports.ScheduleEventFact) SchedulePreviewEntry {
 	return entry
 }
 
-func riskDTO(selected candidate.Candidate, observation observe.Result, changes []ActiveScheduleChangeItem) RiskDTO {
+func riskDTO(selected candidate.Candidate, observation observe.Result, changes []ActiveScheduleChangeItem, fallbackUsed bool) RiskDTO {
 	affectedIDs := make([]int, 0)
 	seen := make(map[int]bool)
 	for _, change := range changes {
@@ -198,7 +198,7 @@ func riskDTO(selected candidate.Candidate, observation observe.Result, changes [
 		RiskMetrics:  observation.Metrics.Risk,
 		AffectedIDs:  affectedIDs,
 		RequiresLLM:  observation.Decision.LLMSelectionRequired,
-		FallbackUsed: observation.Decision.FallbackCandidateID == selected.CandidateID,
+		FallbackUsed: fallbackUsed,
 	}
 }
 

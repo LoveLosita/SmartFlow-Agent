@@ -334,6 +334,11 @@ var ( //请求相关的响应
 		Info:   "schedule plan preview not found",
 	}
 
+	ConversationNotFound = Response{ //会话不存在或不属于当前用户
+		Status: "40401",
+		Info:   "conversation not found",
+	}
+
 	MissingConversationID = Response{ //确认/恢复请求缺少会话ID
 		Status: "40054",
 		Info:   "conversation_id is required when confirm_action is present",

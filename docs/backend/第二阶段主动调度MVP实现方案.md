@@ -7,7 +7,7 @@
 当前核心共识：
 
 1. 主动调度主链路走固定 graph / service pipeline，不进入 ReAct 工具循环。
-2. 第一版触发源先做 `important_urgent_task` 与 `unfinished_feedback`。
+2. 第一版触发类型先做 `important_urgent_task` 与 `unfinished_feedback`，对应的业务目标分别是 task_pool 进日程和未完成反馈补做。
 3. task 创建 / 更新时按 `urgency_threshold_at` upsert 主动调度 job；task 完成后把 job 标记为 `canceled`。
 4. schedule 动态任务默认 `assumed_completed`，只有用户明确反馈未完成才触发补救。
 5. 调度触发信号需要持久化，用于幂等、审计、排障和串联 trigger -> preview -> notification -> apply。
@@ -17,24 +17,26 @@
 7. 主动调度预览新增 `active_schedule_previews`，不塞进 `agent_schedule_states`。
 8. 预览保存 `base_version + before_summary + preview_changes`，不保存全量 before 快照。
 9. 第一版不做 apply 成功后的撤销按钮；apply 失败必须事务不落库并回写失败原因。
-10. 用户确认入口走主动调度详情页和确认 API，不走 Agent resume；详情页采用助手卡片式体验，支持拖动 after 方案后确认。
+10. 用户确认入口走现有助手会话页和主动调度确认 API，不走 Agent resume；前端复用助手卡片式体验，支持拖动 after 方案后确认。
 11. 预览有效期 1 小时。
 12. 未完成补救第一版只生成新补做块，不直接移动原已排任务。
 13. `schedule.apply.requested` 第一版不走 outbox 异步消费，确认 API 内同步完成重校验和正式应用；成功 / 失败直接回写预览状态。
 14. 应用幂等使用独立 `apply_id + idempotency_key`，`preview_id + candidate_id` 只用于定位候选，不作为一次确认尝试的幂等键。
-15. 飞书通知必须包含唯一预览链接 `/schedule-adjust/{preview_id}`；通知文案优先由 LLM 生成摘要，固定模板仅作为失败兜底。
+15. 飞书通知必须包含唯一会话链接 `/assistant/{conversation_id}`；若会话尚未创建，后端先预创建 `conversation_id` 并绑定主动调度 session 后再发通知。通知文案第一版先复用候选 / preview summary，固定模板作为兜底；LLM summary 作为后续增强分支，不作为当前已验收前提。
 16. 飞书通知幂等按 `user_id + trigger_type + time_window` 聚合，不按 `preview_id`；第一版落 `notification_records` 表支撑可观测与失败重试。
 17. `api / worker / all` 启动边界第一阶段已完成；主动调度 MVP 可直接挂到 worker / 事件链路，不需要等待启动边界拆分。
 18. 主动调度第一版采用“准独立模块”策略：不放进 `backend/service/active_scheduler`，而是放在 `backend/active_scheduler`；MVP 暂不拆独立 Go module / 独立进程。
 19. 事件契约第一版提前放入 `backend/shared/events`，只承载 event type、event version、payload DTO 和基础校验，不放业务逻辑。
 20. 主动调度采用 port / adapter 依赖边界：主链路不散落依赖其它领域 DAO；自有表用自有 repo；读取外部事实走 reader port；正式写入走 apply/service port。
 21. 主动调度验收以“后端链路可观测 + 动作-预期 checklist”为准，覆盖 dry-run、trigger、worker、preview、notification、confirm apply、幂等、过期和失败回写。
-22. 本轮给 `tasks` 新增 `estimated_sections`，默认 1，MVP 允许 1~4 节；主动调度只消费该字段，不在调度阶段重新推断任务复杂度。
+22. 本轮给 `tasks` 新增 `estimated_sections`，模型层、普通任务创建请求和 quick task 创建入口以及主动调度消费侧都已接上，默认 1，MVP 允许 1~4 节；本轮验收已完成收口。
 23. 本轮给 `schedule_events` 新增来源与审计字段：`task_source_type / makeup_for_event_id / active_preview_id`。
 24. `compress_with_next_dynamic_task` 第一轮实现先关闭，不生成该候选；保留 schema 和文档口径，待新增补做块主链路稳定后再打开。
 25. 飞书第一版使用 mock / webhook 跑通主动触达闭环，不阻塞在用户 open_id 绑定体系上。
 26. notification 去重窗口第一版固定为 30 分钟。
 27. 真实飞书第一版走“用户级 Webhook 触发器”而不是群自定义机器人协议：后端按 `user_id` 查用户配置的 webhook URL，POST 极简业务 JSON；私聊、群聊、分支和后续动作由用户在飞书流程里自行编排。
+28. 主动调度进入聊天页时新增 `active_schedule_sessions` 作为路由桥：conversation 只承载用户可见历史，session 负责 `waiting_user_reply / rerunning` 的管辖权和 `ready_preview` 后的释放。
+29. 主动调度的三层口径要分开：触发来源分 worker 自动触发、API 验收入口、用户在聊天页内的主动入口和 `ask_user` 回复；业务目标分 `important_urgent_task -> task_pool 进日程` 与 `unfinished_feedback -> 新补做块`；投递方式上，只有后台离线自动触达才走飞书，用户已经在会话内时不再先发飞书通知。
 
 ### 0.1 多阶段推进计划
 
@@ -73,6 +75,18 @@
 3. 根据日志和测试结果补齐 trace 字段与错误码。
 4. 主链路稳定后再评估是否打开压缩融合候选。
 
+第六阶段：主动调度 graph 补齐、会话桥与聊天页合流。（待实施）
+
+0. `estimated_sections` 写入入口已经补完：普通任务创建请求、转换层和 quick task / 随口记创建任务时，都会把 LLM 估计的 1~4 节写入 `tasks.estimated_sections`；主动调度只消费该字段，不在 graph 内重新猜任务耗时。
+1. 补主动调度 Eino graph：把现有 `BuildContext -> Observe -> GenerateCandidates -> CreatePreview` 固定 pipeline 整理成 graph 节点，并新增 LLM 解释 / 有限选择、`ask_user`、fallback 分支；当前代码里的 first-fit / `Candidates[0]` 只能作为过渡实现。
+2. 升级候选生成与裁决：生成 topN 合法候选，输出 `capacity_fit / risk_level` 两个公开维度；后端负责粗排和默认裁决，LLM 只在接近候选间做有限选择，并负责解释与补全兜底。
+3. 新增 `active_schedule_sessions`，记录 `session_id / user_id / conversation_id / trigger_id / current_preview_id / status / state_json` 等核心字段；`state_json` 里收纳 `pending_question / missing_info / last_candidate_id / last_notification_id / expires_at / failed_reason` 这类轻量状态。
+4. `active_schedule_sessions` 也要接入缓存链路：chat 路由先查 session 热缓存，再回源 DB，状态变化后同步回填；构造用户消息时把 session 上下文、preview 和卡片 payload 一并缓存，避免反复从 DB 重组。
+5. notification 发出前由后端预创建或绑定 `conversation_id`，飞书 `action_url` 指向现有 `/assistant/{conversation_id}` 路由，不再新增独立 `/schedule-adjust/{preview_id}` 主入口。
+6. 后端在 newAgent 入口按 session 状态决定是否拦截普通聊天：`waiting_user_reply / rerunning` 由主动调度 graph 同步推进；`ready_preview / applied / ignored / expired / failed` 释放给正常聊天链路。
+7. 前端只做最小适配：复用 `AssistantPanel.vue`、`ScheduleResultCard` 和 `ScheduleFineTuneModal`，timeline 新增主动调度卡片类型，按钮动作按类型分支到主动调度 confirm API。
+8. 用户在聊天页补充偏好或缺失事实时，后端先更新 memory / 本轮事实，再重跑 active scheduler graph，生成新 preview 后通过 SSE / timeline 推送同一张卡片形态。
+
 ### 0.2 子代理并行推进计划
 
 可在实现阶段使用 3 到 5 个子代理并行推进，但必须按文件所有权拆分，避免互相覆盖。
@@ -108,8 +122,8 @@
 已完成阶段：
 
 1. 第一阶段：数据结构与事件契约。
-   - 已新增 `tasks.estimated_sections`，默认 1。
-   - 已新增 `schedule_events.task_source_type / makeup_for_event_id / active_preview_id`。
+  - 已新增 `tasks.estimated_sections`，默认 1；普通任务创建和 quick task 创建入口已透传，主动调度消费侧也已接上。
+  - 已新增 `schedule_events.task_source_type / makeup_for_event_id / active_preview_id`。
    - 已新增主动调度相关 model / DAO / 事件契约：`backend/model/active_schedule.go`、`backend/dao/active_schedule.go`、`backend/shared/events`。
    - AutoMigrate 已接入，并对历史 `schedule_events.type=task` 做 `task_source_type=task_item` 回填。
 2. 第二阶段：主动调度 dry-run 主链路。
@@ -172,7 +186,7 @@
    - worker 已生成 preview：`preview_id=asp_e6701977-aeed-4bef-9964-29d26014f73d`，`active_schedule_triggers.status=preview_generated`，`active_schedule_previews.status=ready`。
    - outbox 两段均消费成功：`active_schedule.triggered` 对应 outbox id 2986 为 `consumed`；`notification.feishu.requested` 对应 outbox id 2987 为 `consumed`。
    - notification 投递成功：`notification_records.id=2`，`status=sent`，`attempt_count=1`，`provider_message_id=feishu_webhook_2_1777546395537770600`。
-   - `provider_request_json.event=smartflow.schedule_adjustment_ready`，`message.title=SmartFlow 日程调整建议`，`message.action_url=https://smartflow.example.com/schedule-adjust/asp_e6701977-aeed-4bef-9964-29d26014f73d`。
+    - `provider_request_json.event=smartflow.schedule_adjustment_ready`，`message.title=SmartFlow 日程调整建议`，`message.action_url=http://localhost:5173/assistant/conv_xxx`。
    - 飞书 webhook 响应：HTTP 200，响应体 `{"code":0,"data":{},"msg":"success"}`。
 8. 第五阶段补充自动验收结果：
    - skipped 场景：测试账号 `codex_skip_idem_0430_185759`（user_id=8）未配置 webhook，正式 trigger `ast_da60cd1c-1909-4855-ad5d-53125b19fb76` 生成 preview `asp_9e5c9c46-3460-4065-a2b8-1d531cf0c8aa`；`notification_records.id=3` 进入 `skipped`，`last_error_code=recipient_missing`，两段 outbox 均为 `consumed`。
@@ -190,7 +204,7 @@
 1. 下一步继续第五阶段剩余验收，不需要重做 dry-run / preview / confirm 主链路，也不需要重做第四阶段 provider / handler 主体代码。
 2. 第五阶段剩余重点：
    - confirm apply 冲突失败、过期拒绝。
-   - 更完整的边界清理：测试数据隔离策略、失败注入脚本化、前端真实地址替换 `smartflow.example.com`。
+   - 更完整的边界清理：测试数据隔离策略、失败注入脚本化、前端真实地址替换为正式域名配置。
 4. 工作区注意：
    - 另一个前端对话可能在改前端；后端阶段不要碰 `frontend` 相关改动。
    - 当前允许单个 Go 文件 700 行以内；超过 700 再评估拆分。
@@ -246,8 +260,8 @@
 
 ### 4.2 已拍板结论
 
-1. 第一版触发源是否只做两个：`important_urgent_task` 和 `unfinished_feedback`？
-   - 已确认：第一版先做这两类主触发。`fatigue_feedback` 可作为用户反馈类的后续扩展，不抢第一轮主链路。
+1. 第一版触发类型是否只做两个：`important_urgent_task` 和 `unfinished_feedback`？
+   - 已确认：第一版先做这两类主触发，对应 task_pool 进日程和未完成反馈补做。`fatigue_feedback` 可作为用户反馈类的后续扩展，不抢第一轮主链路。
 2. API 测试触发是否允许直接同步返回诊断结果，还是必须也写入 outbox 后异步消费？
    - 已确认：两种都保留。`dry-run` 同步返回诊断结果，不写预览、不发通知；`trigger` 走正式异步链路，写预览并发布通知事件。
 3. `mock_now` 是否只允许测试接口传入，后台真实 worker 禁止传入？
@@ -968,7 +982,7 @@ context 构造成功后，后续 observe 可依赖以下事实已经可用：
 
 ### 6.1 业务实现逻辑简述
 
-主动观测能力参考 `analyze_health`：后端先做结构化观测，再生成候选，让 LLM 做选择题。
+主动观测能力参考 `analyze_health`：后端先做结构化观测，再生成候选；LLM 主要负责解释、有限裁决和信息不足时的追问，不再承担主裁决责任。
 
 第一版候选限制为 1 到 3 个，动作范围包括：
 
@@ -1732,15 +1746,15 @@ POST /active-schedule/previews/{preview_id}/ignore
 飞书和 Web 路由：
 
 ```text
-/schedule-adjust/{preview_id}
+/assistant/{conversation_id}
 ```
 
 页面打开流程：
 
 ```text
-1. Web 路由解析 preview_id。
-2. 前端调用 GET /active-schedule/previews/{preview_id}。
-3. 后端校验 preview 属于当前用户。
+1. Web 路由解析 conversation_id。
+2. 前端先加载 conversation 历史，再按当前会话上下文拉取主动调度 preview。
+3. 后端通过 `active_schedule_sessions` 校验当前会话是否还在主动调度管辖期。
 4. 返回详情 DTO。
 5. 前端根据 can_confirm / expired / apply_status 展示确认、忽略或历史状态。
 ```
@@ -1879,8 +1893,8 @@ expires_at = generated_at + 1h
 
 隔离原因：
 
-1. 主动调度 preview 可能来自后台 worker，没有 `conversation_id`。
-2. 主动调度 preview 绑定 `trigger_id / preview_id / expires_at / apply_status`。
+1. 主动调度 preview 只管预览内容本身，不直接承担 `conversation_id` 这类路由职责；会话由 `active_schedule_sessions` 单独承接。
+2. 主动调度 preview 绑定 `trigger_id / preview_id / expires_at / apply_status`，语义集中且便于审计。
 3. 会话排程预览是 Agent state 的派生视图，不适合承载后台通知和 apply 审计。
 
 #### 7.3.11 错误处理与可观测
@@ -1909,7 +1923,7 @@ expires_at = generated_at + 1h
 集成测试：
 
 1. worker 写入 `active_schedule_previews` 后，GET 详情能读取完整 before/after。
-2. 飞书链接 `/schedule-adjust/{preview_id}` 能进入详情页并读取同一 preview。
+2. 飞书链接 `/assistant/{conversation_id}` 能进入会话页并读取同一 preview。
 3. confirm 原始候选成功，状态变为 `applied`。
 4. confirm 拖动后的 `edited_changes` 成功，应用内容以 edited changes 为准。
 5. preview 过期后 confirm 被拒绝。
@@ -2390,11 +2404,11 @@ trace_id
 ### 9.2 已拍板结论
 
 1. 第一版飞书通知文案是否只需要固定模板？
-   - 已确认：不只用固定模板。既然主动调度链路已经调用 LLM，通知文案优先由 LLM 生成简短 summary。
-   - 已确认：固定模板作为 fallback，只有 LLM 生成失败、超时或返回空内容时使用，避免通知链路因为文案生成失败而整体中断。
+   - 已确认：第一版先不把 LLM summary 当作已实现分支。通知文案优先复用候选 / preview summary，固定模板作为 fallback。
+   - 已确认：后续如果接入 LLM summary provider，也必须是可失败的增强分支，不能影响通知链路本身。
 2. 通知是否必须包含跳转链接？如果包含，Web 端预览详情 URL 规则是什么？
    - 已确认：必须包含跳转链接。
-   - 已确认：URL 规则采用 `/schedule-adjust/{preview_id}`，每个主动调度 preview 对应一个唯一调整链接。
+   - 已确认：URL 规则采用现有助手会话路由 `/assistant/{conversation_id}`，每个主动调度会话在发通知前先绑定或预创建 `conversation_id`。
 3. 通知幂等键是否按 `preview_id`，还是按 `user_id + trigger_type + time_window`？
    - 已确认：按 `user_id + trigger_type + time_window` 聚合去重，不按 `preview_id`。
    - 已确认：MVP 语义是同一用户同一触发类型在同一时间窗口内只推一次飞书，避免短时间重复打扰；具体 time_window 长度在表结构与状态机阶段细化。
@@ -2465,7 +2479,7 @@ FeishuNotificationRequested
   target_type
   target_id
   dedupe_key
-  target_url               # /schedule-adjust/{preview_id}
+  target_url               # /assistant/{conversation_id}
   summary_text             # LLM 已生成摘要，可为空
   fallback_text
   trace_id
@@ -2482,7 +2496,7 @@ aggregate_id = preview_id
 校验规则：
 
 1. `user_id / preview_id / target_url / dedupe_key` 必填。
-2. `target_url` 必须是站内相对路径，例如 `/schedule-adjust/{preview_id}`，不允许 provider payload 携带任意外部跳转链接。
+2. `target_url` 必须是站内相对路径，例如 `/assistant/{conversation_id}`，不允许 provider payload 携带任意外部跳转链接。
 3. `summary_text` 可为空；为空时 handler 使用 fallback 文案。
 4. payload 不直接复用 `active_schedule_previews` DB model。
 
@@ -2599,7 +2613,7 @@ notification:
 
 说明：
 
-1. `baseURL` 用于把 `/schedule-adjust/{preview_id}` 拼成飞书可点击链接。
+1. `baseURL` 用于把 `/assistant/{conversation_id}` 拼成飞书可点击链接。
 2. 本地和测试环境默认 `provider=mock`。
 3. `notification.enabled=false` 时不调用 provider，但仍可按需要写 `skipped` record 便于验证链路。
 4. `dedupeWindow` 默认可先与 `important_urgent_task` 的 30 分钟触发去重窗口保持一致。
@@ -2625,8 +2639,8 @@ notification:
 1. summary 为空：使用 fallback。
 2. summary 过长：截断或使用 fallback，避免飞书卡片超限。
 3. summary 包含不允许的链接：去除链接或使用 fallback。
-4. LLM summary 失败不能阻断通知投递。
-5. `fallback_used=true` 必须记录到 `notification_records`，方便排查 LLM 文案质量。
+4. summary 生成或校验失败不能阻断通知投递。
+5. `fallback_used=true` 必须记录到 `notification_records`，方便排查通知文案质量。
 
 #### 9.3.7 通知处理流程
 
@@ -2858,7 +2872,7 @@ notification_provider_latency_ms
 人工验收：
 
 1. 使用 mock provider 验证 dry-run 不发通知、正式 trigger 发通知记录。
-2. 使用测试飞书 webhook 收到包含 `/schedule-adjust/{preview_id}` 的消息。
+2. 使用测试飞书 webhook 收到包含 `/assistant/{conversation_id}` 的消息。
 3. 模拟 provider 失败后能看到 failed / retry / sent 状态变化。
 4. 30 分钟窗口内重复触发，不重复收到飞书。
 
@@ -3363,7 +3377,7 @@ backend/service/events/notification_feishu_requested.go
 ### 12.2 最终实施拍板
 
 1. 主动调度相关表和状态机按 4.3 / 7.3 / 9.3 / 10.3 执行。
-2. `tasks` 本轮新增 `estimated_sections`，默认 1，MVP 允许 1~4。
+2. `tasks` 本轮新增 `estimated_sections`，默认 1，MVP 允许 1~4；模型层、普通创建入口和主动调度消费侧都已接上。
 3. `schedule_events` 本轮新增 `task_source_type / makeup_for_event_id / active_preview_id`。
 4. `compress_with_next_dynamic_task` 第一轮关闭，不生成候选。
 5. 飞书第一轮使用 mock / webhook，不依赖用户 open_id 绑定。
@@ -3487,7 +3501,7 @@ backend/service/events/notification_feishu_requested.go
 1. 主动调度预览新增独立持久化结构，建议命名为 `active_schedule_previews`。
 2. 不复用 `agent_schedule_states` 作为主动调度预览主存储，原因：
    - `agent_schedule_states` 强绑定 `conversation_id`，更适合会话内智能排程快照。
-   - 主动调度来自后台 worker，可能没有会话上下文。
+   - 主动调度来自后台 worker，conversation 入口由 `active_schedule_sessions` 在通知前绑定，不塞进 preview 主表。
    - 主动调度预览需要绑定 `trigger_id / candidate_id / expires_at / apply_status / notification_status`，语义与会话快照不同。
 3. 展示协议可以复用：
    - 抽通用 `SchedulePreviewChangeItem` / before-after schema。
@@ -3523,30 +3537,26 @@ backend/service/events/notification_feishu_requested.go
 
 ### 12.12 用户确认入口与聊天增强预留
 
-1. MVP 不走现有 Agent resume 协议，新增主动调度详情页与主动调度确认 API。
-2. 飞书通知包含 LLM 生成的简短摘要和详情页链接，默认进入：
+1. MVP 不再把主动调度做成独立详情页主入口，而是直接进入现有助手会话页，复用 `AssistantPanel.vue` 的历史、卡片和确认体验。
+2. 飞书通知在发送前由后端预创建或绑定 `conversation_id`，最终跳转链接使用现有路由：
    ```text
-   /schedule-adjust/{preview_id}
+   /assistant/{conversation_id}
    ```
-3. 详情页体验采用“助手卡片式”设计，但后端不依赖完整 Agent Chat：
-   - 顶部展示助手解释文案。
-   - 中间展示日程前后对比卡片。
+3. 会话页表现尽量不变，后端在 timeline 中注入主动调度消息和卡片：
+   - 顶部仍然是助手解释文案。
+   - 中间仍然复用日程前后对比卡片。
    - 展示触发原因、建议理由、风险和不调整后果。
    - 支持用户拖动调整 after 方案。
    - 支持确认应用、忽略 / 拒绝。
-4. 拖动后的确认请求必须携带 `edited_changes`，后端重新校验，不信任前端坐标。
-5. 确认 API 建议语义：
+4. 拖动后的确认请求仍然必须携带 `edited_changes`，后端重新校验，不信任前端坐标。
+5. 确认 API 仍然走主动调度自己的确认语义：
    ```text
    POST /active-schedule/previews/:preview_id/confirm
    ```
    请求包含 `candidate_id / action / edited_changes / idempotency_key`。
-6. 后续增强可把同一个 `preview_id` 导入聊天页：
-   ```text
-   /agent/chat?active_preview_id=xxx
-   ```
-   聊天页加载同一份主动调度预览，由助手吐出解释消息和同一张日程卡片。
-7. 聊天增强必须复用 `active_schedule_previews / preview_changes / confirm API`，不能另起一套确认和应用协议。
-8. 若用户从详情页点击“和助手讨论”，再创建或绑定 `conversation_id`；主动调度预览本身的 `conversation_id` 保持可空。
+6. 前端只需要一个很小的分支：当 timeline item 是主动调度业务卡片时，按钮动作走主动调度 confirm / discuss；其它消息仍走正常聊天链路。
+7. 主动调度和普通聊天共用同一个 `conversation_id` 历史，但路由管辖权仍由 `active_schedule_sessions` 控制，`waiting_user_reply / rerunning` 未释放前不进入普通 newAgent 自由聊天。
+8. 聊天增强必须复用 `active_schedule_previews / preview_changes / confirm API`，不能另起一套确认和应用协议，也不能为了主动调度再建一套独立页面。
 
 ### 12.13 预览过期策略
 
@@ -3583,9 +3593,9 @@ backend/service/events/notification_feishu_requested.go
    - 固定模板只作为 fallback，用于 LLM 超时、失败、返回空内容或内容校验不过时。
 2. 飞书通知必须包含跳转链接：
    ```text
-   /schedule-adjust/{preview_id}
+   /assistant/{conversation_id}
    ```
-   每个 `preview_id` 对应唯一详情 / 调整页面，用户从飞书点击后回系统查看并确认。
+   每个 `conversation_id` 对应一段已预创建的助手会话，用户从飞书点击后直接进入同一会话页查看并确认。
 3. 通知幂等键按 `user_id + trigger_type + time_window` 聚合，而不是按 `preview_id`。
 4. MVP 的去重含义是：同一用户、同一触发类型、同一时间窗口内只发一条飞书，避免主动调度在短时间内重复打扰用户。
 5. 飞书 provider 第一版可以放在 backend worker 内，但必须同步落 `notification_records` 表。
@@ -3935,7 +3945,7 @@ ActiveScheduleTrigger
 
 ### 13.10 LLM 在选择题模式里的作用
 
-后端给候选，并不代表 LLM 没有价值。后端负责合法性和硬约束，LLM 负责软约束仲裁与表达。
+后端给候选，并不代表 LLM 没有价值，但它的决策权要收窄。后端负责合法性、粗排和默认裁决，LLM 负责解释、有限裁决和补全兜底。
 
 后端擅长：
 
@@ -3947,18 +3957,19 @@ ActiveScheduleTrigger
 
 LLM 擅长：
 
-1. 结合用户刚才语气判断是否疲劳。
-2. 在候选分数接近时，根据 memory 软偏好选更容易被接受的方案。
-3. 把结构化风险翻译成用户能理解的解释。
-4. ask_user 时问得更自然，不让用户觉得被系统打断。
-5. notify_only 时用提醒语气，而不是制造焦虑。
+1. 把结构化风险翻译成用户能理解的解释。
+2. 在候选非常接近、后端粗排已经给出多个合法方案时，做有限的软裁决。
+3. ask_user 时问得更自然，不让用户觉得被系统打断。
+4. notify_only 时用提醒语气，而不是制造焦虑。
+5. 在后端已经判断“信息不足”时，生成更合适的追问措辞。
 
 边界：
 
 1. LLM 不判断候选是否合法。
 2. LLM 不自由构造新候选。
-3. LLM 只在 `decision.action=select_candidate` 时从候选里选。
-4. `close / ask_user / notify_only` 时，LLM 只负责表达后端裁决理由。
+3. LLM 不负责主排序，后端粗排结果优先。
+4. LLM 只在 `decision.action=select_candidate` 时从候选里做有限选择。
+5. `close / ask_user / notify_only` 时，LLM 主要负责表达与追问，不负责改写业务裁决。
 
 一句话：后端保证不出错，LLM 负责更像人。
 
@@ -3980,7 +3991,7 @@ LLM 擅长：
 
 1. 没有 issue -> `close`。
 2. 有 issue，但缺关键事实 -> `ask_user`。
-3. 有 issue，且有合法 candidates -> `select_candidate`。
+3. 有 issue，且有合法 candidates -> 先由后端粗排，再由 LLM 在接近候选间做有限选择。
 4. 有 issue，但没有合法 candidates：
    - 如果能通过一个明确问题继续推进 -> `ask_user`。
    - 如果问用户也不能立刻推进，只是需要提醒 -> `notify_only`。
@@ -3989,7 +4000,7 @@ LLM 擅长：
 
 1. `close`：重要且紧急 task 已经在 schedule 里，或任务已完成。
 2. `ask_user`：用户说“刚才那个没做完”，但系统无法定位是哪条 schedule_event；或容量不足，需要问能否延后结束时间。
-3. `select_candidate`：找到合法的加入日程 / 未完成补救候选；压缩融合第一轮关闭，后续打开后再纳入该分支。
+3. `select_candidate`：找到合法的加入日程 / 未完成补救候选；压缩融合第一轮关闭，后续打开后再纳入该分支。若候选之间差异很小，LLM 只负责在解释和偏好上做有限补充，不代替后端决策。
 4. `notify_only`：有风险但没有安全可挪的任务，也没有一个明确问题能继续推进。
 
 ### 13.12 未完成补救的局部重排不是全量粗排
@@ -4100,27 +4111,27 @@ apply_error
 
 ### 13.16 确认入口为什么先做详情页，而不是直接聊天页
 
-聊天页效果最好，但第一版直接做完整聊天页会引入很多复杂度：
+聊天页效果最好，但第一版直接把主动调度完全塞进自由聊天也会引入很多复杂度：
 
-1. 后台 preview 没有天然 `conversation_id`。
-2. 用户拖动卡片后，要同步到 Agent state 还是 active preview。
-3. 用户一句“换晚点”是否重新跑 graph。
-4. 聊天 SSE、卡片状态、确认状态要保持一致。
-5. notification 和 agent channel 容易混边界。
+1. trigger / preview 发出时，session 可能还没有预创建 conversation，需要先由后端补齐。
+2. 用户拖动卡片后，需要明确是改 conversation 历史，还是改 active preview 的当前态。
+3. 用户一句“换晚点”到底是继续补信息，还是重新跑 graph，需要 session 状态来裁决。
+4. 聊天 SSE、卡片状态、确认状态要保持一致，不能让前端自己猜路由归属。
+5. notification 和 agent channel 容易混边界，必须由后端先定谁在管这段对话。
 
 折中方案：
 
-1. MVP 做主动调度详情页。
-2. UI 设计成助手卡片式：
+1. 后端先创建或绑定 `conversation_id`，再把飞书链接发到现有 `/assistant/{conversation_id}` 路由。
+2. `active_schedule_sessions` 专门记录这段会话对主动调度流程意味着什么，不替代 conversation 表。
+3. UI 仍然采用助手卡片式：
    - 顶部助手解释。
    - 中间日程对比卡片。
    - 支持拖动 after。
    - 支持确认 / 忽略。
-3. 后端仍走 `active_schedule_previews` 和确认 API，不依赖完整 Agent Chat。
-4. 后续可以通过 `/agent/chat?active_preview_id=xxx` 把同一份 preview 导入聊天页。
-5. 聊天增强必须复用同一套 preview / changes / confirm API。
+4. 前端只做一个很小的 timeline 类型分支：主动调度卡片走主动调度按钮，普通消息仍走原来的聊天动作。
+5. 后端继续复用 `active_schedule_previews` 和确认 API，不依赖完整 Agent Chat 去重新设计卡片协议。
 
-这样第一版稳定，后续聊天效果也能接上，不会重写链路。
+这样第一版仍然稳定，后续如果要进一步开放自由聊天，也只是在 session 释放后接回原来的聊天链路，不会重写整套入口。
 
 ### 13.17 预览 1 小时过期的具体语义
 
@@ -4263,16 +4274,16 @@ none -> expired
 
 第一版建议同一个 preview 只允许成功 apply 一次。`failed` 后是否允许换一个候选再次确认，先不作为 MVP 主路径；若要支持，应生成新的 `apply_id`，并明确旧失败记录如何保留，避免审计链路被覆盖。
 
-### 13.20 飞书通知为什么需要 LLM 摘要、链接和记录表
+### 13.20 飞书通知为什么需要摘要、链接和记录表
 
 飞书第一版只做“提醒用户回系统确认”，不在飞书内应用日程，也不做复杂聊天。但它仍然是用户会感知到的主动打扰，因此要兼顾表达质量、跳转确定性和投递可观测。
 
 通知文案：
 
-1. 主动调度链路已经让 LLM 参与候选选择和解释，此时让 LLM 生成一段 summary 成本很低。
-2. LLM summary 比固定模板更能解释“为什么现在提醒你”，例如任务即将变紧急、刚才反馈未完成、后续日程被挤压等。
-3. summary 只负责表达，不负责决定是否通知、通知谁、跳到哪里；这些仍由后端结构化字段决定。
-4. 固定模板必须保留为 fallback，避免 LLM 超时、失败、内容为空或内容校验不过时，整条通知链路直接断掉。
+1. 当前第一版先复用候选 / preview summary，不把 LLM summary 当作通知链路的硬依赖。
+2. summary 只负责表达，不负责决定是否通知、通知谁、跳到哪里；这些仍由后端结构化字段决定。
+3. 固定模板必须保留为 fallback，避免 summary 为空、过长、包含不允许内容或后续增强分支失败时，整条通知链路直接断掉。
+4. 后续如果补接 LLM summary provider，它只能作为增强，不应改变通知是否能够发出这一层级的可靠性。
 
 推荐 fallback 方向：
 
@@ -4283,15 +4294,15 @@ none -> expired
 链接规则：
 
 ```text
-/schedule-adjust/{preview_id}
+/assistant/{conversation_id}
 ```
 
 原因：
 
-1. 每个主动调度 preview 都有唯一 `preview_id`，天然适合作为详情页定位键。
-2. 用户从飞书点进来后，只进入系统详情页，不在飞书里直接应用日程，避免外部 IM 承担高风险写操作。
-3. URL 不暴露 `candidate_id / apply_id`，因为用户进入详情页后仍可查看候选、拖动 after 方案并生成新的确认尝试。
-4. 如果后续接入聊天增强，也应由详情页或聊天页读取同一个 `preview_id`，不能另起一套确认协议。
+1. 每条主动调度通知在发出前都绑定一个 `conversation_id`，用户点进来后直接进入现有助手会话页。
+2. 用户从飞书点进来后，仍然只在系统内确认，不在飞书里直接应用日程，避免外部 IM 承担高风险写操作。
+3. URL 不暴露 `candidate_id / apply_id`，因为用户进入会话页后仍可查看候选、拖动 after 方案并生成新的确认尝试。
+4. `preview_id / trigger_id` 由 `active_schedule_sessions` 在后端解析，前端 URL 不长期承担业务状态拼装。
 
 通知幂等键按：
 
@@ -4321,7 +4332,7 @@ user_id
 trigger_id
 preview_id
 dedupe_key              # user_id + trigger_type + time_window
-target_url              # /schedule-adjust/{preview_id}
+target_url              # /assistant/{conversation_id}
 summary_text
 fallback_used
 status                  # pending / sending / sent / failed / dead
@@ -4399,6 +4410,7 @@ POST   /api/v1/notification/channels/feishu/test
   "notification_id": 123,
   "user_id": 5,
   "preview_id": "asp_xxx",
+  "conversation_id": "conv_xxx",
   "trigger_id": "ast_xxx",
   "trigger_type": "important_urgent_task",
   "target_type": "task_pool",
@@ -4407,7 +4419,7 @@ POST   /api/v1/notification/channels/feishu/test
     "title": "SmartFlow 日程调整建议",
     "summary": "把重要且紧急任务放入滚动 24 小时内的空闲节次。",
     "action_text": "查看并确认调整",
-    "action_url": "https://smartflow.example.com/schedule-adjust/asp_xxx"
+     "action_url": "http://localhost:5173/assistant/conv_xxx"
   },
   "trace_id": "trace_xxx",
   "sent_at": "2026-04-30T17:34:52+08:00"
@@ -4557,7 +4569,7 @@ MVP 里这些端口的 adapter 可以在 `backend` 内调用现有 service。若
 
 ### 14.1 验证目标
 
-主动调度 MVP 的验收重点在后端闭环，而不是前端页面完成度。前端第一版只需要能打开 `/schedule-adjust/{preview_id}`、展示预览、提交确认即可；核心验证应覆盖：
+主动调度 MVP 的验收重点在后端闭环，而不是前端页面完成度。前端第一版只需要能打开现有 `/assistant/{conversation_id}` 会话页、展示主动调度卡片、提交确认即可；核心验证应覆盖：
 
 1. 触发是否正确：task 到达 `urgency_threshold_at`、用户反馈未完成、API 测试触发都能进入统一链路。
 2. 去重是否正确：同一触发不会重复生成预览、重复通知或重复 apply。
@@ -4648,8 +4660,8 @@ tasks
 | --- | --- |
 | preview 生成成功 | 发布 `notification.feishu.requested` 或等价 outbox 事件 |
 | notification handler 收到事件 | 先写 `notification_records`，再调用 provider |
-| LLM summary 生成成功 | 飞书文案使用 summary，包含 `/schedule-adjust/{preview_id}` |
-| LLM summary 失败 / 超时 / 空内容 | 使用固定 fallback 文案，通知链路不中断 |
+| summary 生成成功 | 飞书文案使用候选 / preview summary，包含 `/assistant/{conversation_id}` |
+| summary 为空 / 过长 / 校验失败 | 使用固定 fallback 文案，通知链路不中断 |
 | 飞书 provider 返回成功 | `notification_records.status=sent`，记录 `sent_at / provider_response_json` |
 | 飞书 provider 返回临时失败 | `notification_records.status=failed`，递增 `attempt_count`，写 `last_error / next_retry_at` |
 | 重试到达上限或不可恢复错误 | `notification_records.status=dead`，不再自动重试 |
@@ -4661,7 +4673,7 @@ tasks
 
 | 动作 | 预期 |
 | --- | --- |
-| 用户打开 `/schedule-adjust/{preview_id}` | 能读取 preview 详情；如果已过期，页面显示不可确认 |
+| 用户打开 `/assistant/{conversation_id}` | 能读取主动调度会话历史和 preview 详情；如果已过期，页面显示不可确认 |
 | 用户确认原候选 | confirm API 生成 `apply_id`，写入 `applying`，同步重校验后事务写正式日程 |
 | 用户拖动 after 方案后确认 | 请求携带 `edited_changes`，后端重新校验坐标和目标，不信任前端 |
 | task_pool 候选确认成功 | 写入 `schedule_events(type=task, task_source_type=task_pool, rel_id=tasks.id)` 和对应 `schedules` 原子节次 |
@@ -4686,7 +4698,7 @@ tasks
 | 动作 | 预期 |
 | --- | --- |
 | 构造 LLM 选择超时 | 使用后端 fallback 决策或标记失败，trigger 状态可排障 |
-| 构造 LLM summary 超时 | 使用固定通知模板，preview 仍可通知 |
+| 构造 summary 为空或校验失败 | 使用固定通知模板，preview 仍可通知 |
 | 构造 DB 写 preview 失败 | trigger 标记 failed，不发布 notification |
 | 构造 notification provider 失败 | preview 保留，notification record 进入 failed / retry，不影响 preview 查询 |
 | 构造 apply 写 schedule 中途失败 | 事务回滚，`schedule_events / schedules` 不产生半写状态 |
@@ -4738,7 +4750,7 @@ tasks
    - retry 后成功：同一条 record 变为 `sent`，不新建重复通知。
    - 真实飞书 webhook / open_id 受限时，必须记录为“需要用户验收”，不能用 mock 结果冒充真实 provider 验收。
 6. 手工验收：
-   - 使用 `/schedule-adjust/{preview_id}` 打开详情页。
+- 使用 `/assistant/{conversation_id}` 打开会话页。
    - 拖动 after 方案并确认。
    - 查看飞书测试消息跳转。
 

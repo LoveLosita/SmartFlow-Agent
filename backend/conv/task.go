@@ -8,10 +8,11 @@ import (
 
 func UserAddTaskRequestToModel(request *model.UserAddTaskRequest, userID int) *model.Task {
 	return &model.Task{
-		Title:      request.Title,
-		Priority:   request.PriorityGroup,
-		DeadlineAt: request.DeadlineAt,
-		UserID:     userID,
+		Title:             request.Title,
+		Priority:          request.PriorityGroup,
+		EstimatedSections: model.NormalizeEstimatedSections(&request.EstimatedSections),
+		DeadlineAt:        request.DeadlineAt,
+		UserID:            userID,
 	}
 }
 
@@ -21,12 +22,13 @@ func ModelToUserAddTaskResponse(task *model.Task) *model.UserAddTaskResponse {
 		status = "completed"
 	}
 	return &model.UserAddTaskResponse{
-		ID:            task.ID,
-		Title:         task.Title,
-		PriorityGroup: task.Priority,
-		DeadlineAt:    task.DeadlineAt,
-		Status:        status,
-		CreatedAt:     time.Now(), // 创建时间为当前时间
+		ID:                task.ID,
+		Title:             task.Title,
+		PriorityGroup:     task.Priority,
+		EstimatedSections: model.NormalizeEstimatedSections(&task.EstimatedSections),
+		DeadlineAt:        task.DeadlineAt,
+		Status:            status,
+		CreatedAt:         time.Now(), // 创建时间为当前时间
 	}
 }
 
@@ -53,6 +55,7 @@ func ModelToGetUserTasksResp(tasks []model.Task) []model.GetUserTaskResp {
 			UserID:             task.UserID,
 			Title:              task.Title,
 			PriorityGroup:      task.Priority,
+			EstimatedSections:  model.NormalizeEstimatedSections(&task.EstimatedSections),
 			Status:             status,
 			Deadline:           deadline,
 			IsCompleted:        task.IsCompleted,
@@ -81,6 +84,7 @@ func ModelToGetUserTaskResp(task *model.Task) model.GetUserTaskResp {
 		UserID:             task.UserID,
 		Title:              task.Title,
 		PriorityGroup:      task.Priority,
+		EstimatedSections:  model.NormalizeEstimatedSections(&task.EstimatedSections),
 		Status:             status,
 		Deadline:           deadline,
 		IsCompleted:        task.IsCompleted,

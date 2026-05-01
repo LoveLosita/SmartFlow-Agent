@@ -2,11 +2,19 @@
 import { ref, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { HybridScheduleEntry, PlacedItem, SchedulePreviewData } from '@/types/dashboard'
-import { saveScheduleState, applyBatchIntoSchedule } from '@/api/schedule_agent'
+import {
+  saveScheduleState,
+  applyBatchIntoSchedule,
+  confirmActiveSchedulePreview,
+  type ActiveScheduleConfirmChange,
+  type ActiveSchedulePreviewDetail,
+} from '@/api/schedule_agent'
 
 const props = defineProps<{
   previewData: SchedulePreviewData | null
   visible: boolean
+  previewKind?: 'schedule' | 'active_schedule'
+  activePreviewDetail?: ActiveSchedulePreviewDetail | null
 }>()
 
 const emit = defineEmits<{
@@ -91,6 +99,56 @@ function buildPlacedItems(): PlacedItem[] {
     }))
 }
 
+function resolveItemSlot(item: HybridScheduleEntry) {
+  return {
+    week: item.week,
+    day_of_week: item.day_of_week,
+    section_from: item.section_from,
+    section_to: item.section_to,
+    duration_sections: item.section_to - item.section_from + 1,
+  }
+}
+
+function resolveActiveChangeItem(change: ActiveSchedulePreviewDetail['changes'][number]) {
+  if (change.target_type === 'task_pool' || change.change_type === 'add_task_pool_to_schedule') {
+    return suggestedItems.value.find(item => item.task_item_id === change.target_id)
+  }
+  return suggestedItems.value.find(item => item.event_id === change.target_id)
+}
+
+function buildActiveEditedChanges(): ActiveScheduleConfirmChange[] {
+  if (!props.activePreviewDetail) {
+    return []
+  }
+
+  return props.activePreviewDetail.changes.map((change) => {
+    const currentItem = resolveActiveChangeItem(change)
+    const slot = currentItem ? resolveItemSlot(currentItem) : undefined
+    const fallbackSlot = change.to_slot
+    const week = slot?.week ?? fallbackSlot?.start.week ?? 1
+    const dayOfWeek = slot?.day_of_week ?? fallbackSlot?.start.day_of_week ?? 1
+    const sectionFrom = slot?.section_from ?? fallbackSlot?.start.section ?? 1
+    const sectionTo = slot?.section_to ?? fallbackSlot?.end.section ?? sectionFrom
+    const durationSections = slot?.duration_sections ?? fallbackSlot?.duration_sections ?? Math.max(1, sectionTo - sectionFrom + 1)
+
+    return {
+      change_id: change.change_id,
+      type: change.change_type,
+      target_type: change.target_type,
+      target_id: change.target_id,
+      task_id: change.target_type === 'task_pool' ? change.target_id : undefined,
+      event_id: change.target_type === 'schedule_event' ? change.target_id : undefined,
+      week,
+      day_of_week: dayOfWeek,
+      section_from: sectionFrom,
+      section_to: sectionTo,
+      duration_sections: durationSections,
+      edited_allowed: change.edited_allowed,
+      metadata: change.metadata,
+    }
+  })
+}
+
 /**
  * 暂存至 State (Redis)
  */
@@ -130,33 +188,50 @@ async function handleOfficialSave() {
 
   isSaving.value = true
   try {
-    // 按 task_class_id 分组
-    const courseIndex = buildCoursePositionIndex(suggestedItems.value)
-    const groups = new Map<number, PlacedItem[]>()
-    suggestedItems.value.forEach(e => {
-      if (e.type === 'task' && e.status === 'suggested' && e.task_class_id) {
-        if (!groups.has(e.task_class_id)) groups.set(e.task_class_id, [])
-        groups.get(e.task_class_id)!.push({
-          task_item_id: e.task_item_id,
-          week: e.week,
-          day_of_week: e.day_of_week,
-          start_section: e.section_from,
-          end_section: e.section_to,
-          embed_course_event_id: resolveEmbedCourseEventId(e, courseIndex),
-        })
+    if (props.previewKind === 'active_schedule') {
+      const activeDetail = props.activePreviewDetail
+      if (!activeDetail) {
+        throw new Error('主动调度预览数据不完整')
       }
-    })
 
-    const promises = Array.from(groups.entries()).map(([classId, groupItems]) => 
-      applyBatchIntoSchedule(classId, groupItems, `${officialSaveIdempotencyKey.value}-${classId}`)
-    )
+      const payload = {
+        candidate_id: activeDetail.selected_candidate.candidate_id,
+        action: 'confirm' as const,
+        edited_changes: buildActiveEditedChanges(),
+        idempotency_key: officialSaveIdempotencyKey.value,
+      }
 
-    await Promise.all(promises)
-    ElMessage.success('日程已正式保存到数据库')
-    
+      await confirmActiveSchedulePreview(activeDetail.preview_id, payload)
+      ElMessage.success('主动调度已确认')
+    } else {
+      // 按 task_class_id 分组
+      const courseIndex = buildCoursePositionIndex(suggestedItems.value)
+      const groups = new Map<number, PlacedItem[]>()
+      suggestedItems.value.forEach(e => {
+        if (e.type === 'task' && e.status === 'suggested' && e.task_class_id) {
+          if (!groups.has(e.task_class_id)) groups.set(e.task_class_id, [])
+          groups.get(e.task_class_id)!.push({
+            task_item_id: e.task_item_id,
+            week: e.week,
+            day_of_week: e.day_of_week,
+            start_section: e.section_from,
+            end_section: e.section_to,
+            embed_course_event_id: resolveEmbedCourseEventId(e, courseIndex),
+          })
+        }
+      })
+
+      const promises = Array.from(groups.entries()).map(([classId, groupItems]) =>
+        applyBatchIntoSchedule(classId, groupItems, `${officialSaveIdempotencyKey.value}-${classId}`),
+      )
+
+      await Promise.all(promises)
+      ElMessage.success('日程已正式保存到数据库')
+    }
+
     // 保存成功后刷新幂等键，虽然通常弹窗会关闭，但这是为了逻辑严密
     officialSaveIdempotencyKey.value = crypto.randomUUID()
-    
+
     emit('saved')
     emit('close')
   } catch (error: any) {

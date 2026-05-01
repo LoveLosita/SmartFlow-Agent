@@ -16,10 +16,19 @@ type AgentService = agentsvc.AgentService
 // NewAgentService 是迁移期兼容构造函数。
 //
 // 说明：
-// 1) 外部调用签名不变，新增排程依赖通过可选方式注入（见 NewAgentServiceWithSchedule）；
-// 2) 真实构造逻辑已下沉到 service/agentsvc 包。
-func NewAgentService(aiHub *inits.AIHub, repo *dao.AgentDAO, taskRepo *dao.TaskDAO, cacheDAO *dao.CacheDAO, agentRedis *dao.AgentCache, eventPublisher outboxinfra.EventPublisher) *AgentService {
-	return agentsvc.NewAgentService(aiHub, repo, taskRepo, cacheDAO, agentRedis, eventPublisher)
+// 1) 继续保留 service 层入口形式，避免 api/cmd 侧直接感知 agentsvc 包路径；
+// 2) 主动调度 session DAO 也在这里显式透传，避免聊天入口再去回查全局单例；
+// 3) 真实构造逻辑已下沉到 service/agentsvc 包。
+func NewAgentService(
+	aiHub *inits.AIHub,
+	repo *dao.AgentDAO,
+	taskRepo *dao.TaskDAO,
+	cacheDAO *dao.CacheDAO,
+	agentRedis *dao.AgentCache,
+	activeSessionDAO *dao.ActiveScheduleSessionDAO,
+	eventPublisher outboxinfra.EventPublisher,
+) *AgentService {
+	return agentsvc.NewAgentService(aiHub, repo, taskRepo, cacheDAO, agentRedis, activeSessionDAO, eventPublisher)
 }
 
 // NewAgentServiceWithSchedule 在基础 AgentService 上注入排程依赖。
@@ -27,18 +36,19 @@ func NewAgentService(aiHub *inits.AIHub, repo *dao.AgentDAO, taskRepo *dao.TaskD
 // 设计目的：
 // 1) 通过函数注入避免 agentsvc 包直接依赖 service 层的 ScheduleService；
 // 2) 排程依赖为可选：未注入时排程路由自动回退到普通聊天；
-// 3) 保持 NewAgentService 签名不变，向下兼容。
+// 3) 主动调度 session DAO 仍沿用统一构造注入，避免排程分支自己拼装仓储。
 func NewAgentServiceWithSchedule(
 	aiHub *inits.AIHub,
 	repo *dao.AgentDAO,
 	taskRepo *dao.TaskDAO,
 	cacheDAO *dao.CacheDAO,
 	agentRedis *dao.AgentCache,
+	activeSessionDAO *dao.ActiveScheduleSessionDAO,
 	eventPublisher outboxinfra.EventPublisher,
 	scheduleSvc *ScheduleService,
 	taskSvc *TaskService,
 ) *AgentService {
-	svc := agentsvc.NewAgentService(aiHub, repo, taskRepo, cacheDAO, agentRedis, eventPublisher)
+	svc := agentsvc.NewAgentService(aiHub, repo, taskRepo, cacheDAO, agentRedis, activeSessionDAO, eventPublisher)
 
 	// 注入排程依赖：将 service 层方法包装为函数闭包，避免循环依赖。
 	if scheduleSvc != nil {

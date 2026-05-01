@@ -118,6 +118,7 @@ func BuildFeishuRequestedPayload(
 	requestedAt time.Time,
 ) sharedevents.FeishuNotificationRequestedPayload {
 	summary := strings.TrimSpace(notificationSummary)
+	targetURL := fmt.Sprintf("/assistant/%s", buildActiveScheduleConversationID(triggerRow.ID))
 	return sharedevents.FeishuNotificationRequestedPayload{
 		UserID:       triggerRow.UserID,
 		TriggerID:    triggerRow.ID,
@@ -126,9 +127,9 @@ func BuildFeishuRequestedPayload(
 		TargetType:   triggerRow.TargetType,
 		TargetID:     triggerRow.TargetID,
 		DedupeKey:    BuildNotificationDedupeKey(triggerRow.UserID, triggerRow.TriggerType, triggerRow.RequestedAt),
-		TargetURL:    fmt.Sprintf("/schedule-adjust/%s", strings.TrimSpace(previewID)),
+		TargetURL:    targetURL,
 		SummaryText:  summary,
-		FallbackText: buildNotificationFallbackText(summary, strings.TrimSpace(previewID)),
+		FallbackText: buildNotificationFallbackText(summary, targetURL),
 		TraceID:      triggerRow.TraceID,
 		RequestedAt:  requestedAt,
 	}
@@ -201,8 +202,8 @@ func normalizeKafkaConfig(cfg kafkabus.Config) kafkabus.Config {
 	return cfg
 }
 
-func buildNotificationFallbackText(summary string, previewID string) string {
-	link := fmt.Sprintf("/schedule-adjust/%s", previewID)
+func buildNotificationFallbackText(summary string, targetURL string) string {
+	link := strings.TrimSpace(targetURL)
 	if summary == "" {
 		return "你有一条新的日程调整建议，请查看：" + link
 	}

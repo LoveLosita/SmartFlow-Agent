@@ -26,10 +26,11 @@ type TaskQueryParams struct {
 // 2. 结果既可用于 quick_task 节点文本回复，也可供 service 装配其他轻量输出；
 // 3. 不负责序列化策略和文案渲染。
 type TaskQueryResult struct {
-	ID            int    `json:"id"`
-	Title         string `json:"title"`
-	PriorityGroup int    `json:"priority_group"`
-	PriorityLabel string `json:"priority_label"`
-	IsCompleted   bool   `json:"is_completed"`
-	DeadlineAt    string `json:"deadline_at,omitempty"`
+	ID                int    `json:"id"`
+	Title             string `json:"title"`
+	PriorityGroup     int    `json:"priority_group"`
+	EstimatedSections int    `json:"estimated_sections"`
+	PriorityLabel     string `json:"priority_label"`
+	IsCompleted       bool   `json:"is_completed"`
+	DeadlineAt        string `json:"deadline_at,omitempty"`
 }
