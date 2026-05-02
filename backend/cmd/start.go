@@ -13,6 +13,7 @@ import (
 
 	activeadapters "github.com/LoveLosita/smartflow/backend/active_scheduler/adapters"
 	"github.com/LoveLosita/smartflow/backend/active_scheduler/applyadapter"
+	activefeedbacklocate "github.com/LoveLosita/smartflow/backend/active_scheduler/feedbacklocate"
 	activegraph "github.com/LoveLosita/smartflow/backend/active_scheduler/graph"
 	activejob "github.com/LoveLosita/smartflow/backend/active_scheduler/job"
 	activepreview "github.com/LoveLosita/smartflow/backend/active_scheduler/preview"
@@ -223,6 +224,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		taskRepo,
 		cacheRepo,
 		agentCacheRepo,
+		manager.ActiveSchedule,
 		manager.ActiveScheduleSession,
 		eventBus,
 		scheduleService,
@@ -258,11 +260,12 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	// 2. dry-run 与 selection 通过 graph runner 串起来，避免 trigger_pipeline 再拼第二套候选逻辑。
 	activeScheduleLLMClient := infrallm.WrapArkClient(aiHub.Pro)
 	activeScheduleSelector := activesel.NewService(activeScheduleLLMClient)
+	activeScheduleFeedbackLocator := activefeedbacklocate.NewService(activeReaders, activeScheduleLLMClient)
 	activeScheduleGraphRunner, err := activegraph.NewRunner(activeScheduleDryRun.AsGraphDryRunFunc(), activeScheduleSelector)
 	if err != nil {
 		return nil, err
 	}
-	agentService.SetActiveScheduleSessionRerunFunc(buildActiveScheduleSessionRerunFunc(manager.ActiveSchedule, activeScheduleGraphRunner, activeSchedulePreviewConfirm))
+	agentService.SetActiveScheduleSessionRerunFunc(buildActiveScheduleSessionRerunFunc(manager.ActiveSchedule, activeScheduleGraphRunner, activeSchedulePreviewConfirm, activeScheduleFeedbackLocator))
 	// 1. 生产投递先切到用户级飞书 Webhook provider，mock provider 文件继续保留给后续单测和本地隔离验证。
 	// 2. provider 与配置测试接口共用同一个实例，保证“测试成功”和“正式投递”走同一套 URL 校验、JSON 拼装和 HTTP 结果分类。
 	feishuProvider, err := notification.NewWebhookFeishuProvider(manager.Notification, notification.WebhookFeishuProviderOptions{
@@ -390,16 +393,17 @@ func buildActiveSchedulePreviewConfirmService(db *gorm.DB, activeDAO *dao.Active
 	return activesvc.NewPreviewConfirmService(dryRun, previewService, activeDAO, applyadapter.NewGormApplyAdapter(db))
 }
 
-// buildActiveScheduleSessionRerunFunc 把主动调度 graph / preview 能力装成聊天入口可调用的 rerun 闭包。
+// buildActiveScheduleSessionRerunFunc 把主动调度定位器 / graph / preview 能力装成聊天入口可调用的 rerun 闭包。
 //
 // 说明：
-// 1. 这里只做最小接线：复用现有 trigger -> graph -> preview 组件，不把 worker/notification 再搬一遍；
+// 1. 这里只做最小接线：复用现有定位器 -> trigger -> graph -> preview 组件，不把 worker/notification 再搬一遍；
 // 2. 成功时返回 session 状态、assistant 文本和业务卡片数据；
 // 3. 失败时直接把 error 交回聊天入口，由上层统一写失败日志和 SSE 错误。
 func buildActiveScheduleSessionRerunFunc(
 	activeDAO *dao.ActiveScheduleDAO,
 	graphRunner *activegraph.Runner,
 	previewConfirm *activesvc.PreviewConfirmService,
+	feedbackLocator *activefeedbacklocate.Service,
 ) agentsvcsvc.ActiveScheduleSessionRerunFunc {
 	return func(
 		ctx context.Context,
@@ -419,16 +423,74 @@ func buildActiveScheduleSessionRerunFunc(
 		if err != nil {
 			return nil, err
 		}
-		// 1. 当前最小接线先复用“原 trigger + 最新数据库事实”重跑 active scheduler graph。
-		// 2. 用户这次回复的正文已经由聊天入口写进 conversation/timeline，但还没有下沉到 active_scheduler readers。
-		// 3. 后续若要让 ask_user 回复直接改写 graph 事实源，应在 reader/context builder 层继续补这一跳。
+		resolvedTargetType := activeTrigger.TargetType(triggerRow.TargetType)
+		resolvedTargetID := triggerRow.TargetID
+		needsFeedbackLocate := activeTrigger.TriggerType(triggerRow.TriggerType) == activeTrigger.TriggerTypeUnfinishedFeedback &&
+			(resolvedTargetID <= 0 || containsString(session.State.MissingInfo, "feedback_target"))
+
+		// 1. unfinished_feedback 在目标缺失时先走定位器，把用户补充信息转成可校验的 schedule_event。
+		// 2. 定位失败时直接 ask_user，不硬猜 target_id，也不继续跑 graph。
+		// 3. 定位成功后只改本次 domainTrigger 的 target_type / target_id，不写正式日程。
+		if needsFeedbackLocate {
+			if feedbackLocator == nil {
+				question := firstNonEmptyString(
+					activefeedbacklocate.BuildAskUserQuestion(session.State.MissingInfo),
+					session.State.PendingQuestion,
+				)
+				nextState := session.State
+				nextState.PendingQuestion = question
+				nextState.MissingInfo = appendMissingString(nextState.MissingInfo, "feedback_target")
+				nextState.LastCandidateID = ""
+				nextState.LastNotificationID = ""
+				nextState.FailedReason = ""
+				nextState.ExpiresAt = nil
+				return &agentsvcsvc.ActiveScheduleSessionRerunResult{
+					AssistantText: question,
+					SessionState:  nextState,
+					SessionStatus: model.ActiveScheduleSessionStatusWaitingUserReply,
+				}, nil
+			}
+			locateResult, locateErr := feedbackLocator.Resolve(ctx, activefeedbacklocate.Request{
+				UserID:          triggerRow.UserID,
+				UserMessage:     userMessage,
+				PendingQuestion: session.State.PendingQuestion,
+				MissingInfo:     cloneStringSlice(session.State.MissingInfo),
+			})
+			if locateErr != nil {
+				return nil, locateErr
+			}
+			if locateResult.ShouldAskUser() {
+				question := firstNonEmptyString(
+					locateResult.AskUserQuestion,
+					activefeedbacklocate.BuildAskUserQuestion(session.State.MissingInfo),
+					session.State.PendingQuestion,
+				)
+				nextState := session.State
+				nextState.PendingQuestion = question
+				nextState.MissingInfo = appendMissingString(nextState.MissingInfo, "feedback_target")
+				nextState.LastCandidateID = ""
+				nextState.LastNotificationID = ""
+				nextState.FailedReason = ""
+				nextState.ExpiresAt = nil
+				return &agentsvcsvc.ActiveScheduleSessionRerunResult{
+					AssistantText: question,
+					SessionState:  nextState,
+					SessionStatus: model.ActiveScheduleSessionStatusWaitingUserReply,
+				}, nil
+			}
+			resolvedTargetType = activeTrigger.TargetType(locateResult.TargetType)
+			resolvedTargetID = locateResult.TargetID
+		}
+
+		// 1. 定位完成后再构造 domainTrigger，避免 unfinished_feedback 的 target_id 为空时误触校验失败。
+		// 2. 这里仍然复用现有 graph -> preview 链路，不写新排程引擎。
 		domainTrigger := activeTrigger.ActiveScheduleTrigger{
 			TriggerID:      triggerRow.ID,
 			UserID:         triggerRow.UserID,
 			TriggerType:    activeTrigger.TriggerType(triggerRow.TriggerType),
 			Source:         activeTrigger.SourceUserFeedback,
-			TargetType:     activeTrigger.TargetType(triggerRow.TargetType),
-			TargetID:       triggerRow.TargetID,
+			TargetType:     resolvedTargetType,
+			TargetID:       resolvedTargetID,
 			FeedbackID:     triggerRow.FeedbackID,
 			IdempotencyKey: triggerRow.IdempotencyKey,
 			MockNow:        nil,
@@ -548,6 +610,35 @@ func cloneStringSlice(values []string) []string {
 	copied := make([]string, len(values))
 	copy(copied, values)
 	return copied
+}
+
+// appendMissingString 负责把缺失字段名补回状态数组，避免 ask_user 分支把原始缺失项冲掉。
+func appendMissingString(values []string, next string) []string {
+	trimmed := strings.TrimSpace(next)
+	if trimmed == "" {
+		return cloneStringSlice(values)
+	}
+	for _, value := range values {
+		if strings.TrimSpace(value) == trimmed {
+			return cloneStringSlice(values)
+		}
+	}
+	result := cloneStringSlice(values)
+	return append(result, trimmed)
+}
+
+// containsString 负责判断 missing_info 里是否已经标记过某个缺失项。
+func containsString(values []string, target string) bool {
+	trimmed := strings.TrimSpace(target)
+	if trimmed == "" {
+		return false
+	}
+	for _, value := range values {
+		if strings.TrimSpace(value) == trimmed {
+			return true
+		}
+	}
+	return false
 }
 
 func configureAgentService(

@@ -192,6 +192,44 @@ func (d *ActiveScheduleSessionDAO) UpdateActiveScheduleSessionFieldsBySessionID(
 		Updates(normalizedUpdates).Error
 }
 
+// TryTransitionActiveScheduleSessionStatusBySessionID 按 session_id 原子切换主动调度会话状态。
+//
+// 职责边界：
+// 1. 只负责“当前状态仍为 fromStatus 时才切到 toStatus”的轻量 CAS，不写 state_json 和 preview_id；
+// 2. 返回 true 表示本次调用抢到了状态推进权，可以继续执行后续 rerun；
+// 3. 返回 false 表示已有其他请求先推进了状态，调用方应降级为占管提示，避免重复生成 preview。
+func (d *ActiveScheduleSessionDAO) TryTransitionActiveScheduleSessionStatusBySessionID(ctx context.Context, sessionID string, fromStatus string, toStatus string) (bool, error) {
+	if err := d.ensureDB(); err != nil {
+		return false, err
+	}
+
+	normalizedSessionID := strings.TrimSpace(sessionID)
+	if normalizedSessionID == "" {
+		return false, errors.New("session_id is empty")
+	}
+
+	normalizedFrom, err := normalizeActiveScheduleSessionStatus(fromStatus)
+	if err != nil {
+		return false, fmt.Errorf("invalid active schedule session from status: %w", err)
+	}
+	normalizedTo, err := normalizeActiveScheduleSessionStatus(toStatus)
+	if err != nil {
+		return false, fmt.Errorf("invalid active schedule session to status: %w", err)
+	}
+
+	result := d.db.WithContext(ctx).
+		Model(&model.ActiveScheduleSession{}).
+		Where("session_id = ? AND status = ?", normalizedSessionID, normalizedFrom).
+		Updates(map[string]any{
+			"status":     normalizedTo,
+			"updated_at": time.Now(),
+		})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
+}
+
 // UpdateActiveScheduleSessionFieldsByConversationID 按 user_id + conversation_id 更新最新记录的局部字段。
 //
 // 步骤化说明：

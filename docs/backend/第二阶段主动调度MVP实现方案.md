@@ -2,7 +2,7 @@
 
 ## 0. Handoff 说明
 
-本文档已收口为第二阶段主动调度 MVP 的最终实施版。截至 2026-04-30，后端第一至第四阶段主体代码已实现并通过本地 `go test ./...`；真实飞书 webhook 配置接口和 `important_urgent_task` 主动触发端到端链路已通过本地后端验收。接手者请优先阅读本节、第 10 章装配边界和第 14 章验证 checklist，再从第五阶段剩余验收继续推进。
+本文档已收口为第二阶段主动调度 MVP 的最终实施版。截至 2026-05-02，后端第一至第四阶段主体代码已实现并通过本地 `go test ./...`；真实飞书 webhook 配置接口、`/assistant/{conversation_id}` 会话链接和 `important_urgent_task` 主动触发端到端链路已通过本地后端验收。阶段进度看板请以《主动调度缺口分阶段实施计划.md》为准，那里会把已完成阶段标成 `[x]`。接手者请优先阅读本节、第 10 章装配边界和第 14 章验证 checklist，再从第五阶段剩余验收继续推进。
 
 当前核心共识：
 
@@ -60,7 +60,7 @@
 3. task_pool 正式落库写 `schedule_events(type=task, task_source_type=task_pool, rel_id=tasks.id)`。
 4. 补做块新增 event，不移动原已排任务。
 
-第四阶段：worker 与 notification。（主体代码已完成，真实 webhook 配置接口已验收）
+第四阶段：worker 与 notification。（已完成，真实 webhook 配置接口已验收）
 
 1. 接入 `active_schedule.triggered` worker handler 和 due job scanner。
 2. 接入 `notification.feishu.requested` handler。
@@ -75,7 +75,7 @@
 3. 根据日志和测试结果补齐 trace 字段与错误码。
 4. 主链路稳定后再评估是否打开压缩融合候选。
 
-第六阶段：主动调度 graph 补齐、会话桥与聊天页合流。（待实施）
+第六阶段：主动调度 graph 补齐、会话桥与聊天页合流。（主体已完成，剩余最终验收与文档收口）
 
 0. `estimated_sections` 写入入口已经补完：普通任务创建请求、转换层和 quick task / 随口记创建任务时，都会把 LLM 估计的 1~4 节写入 `tasks.estimated_sections`；主动调度只消费该字段，不在 graph 内重新猜任务耗时。
 1. 补主动调度 Eino graph：把现有 `BuildContext -> Observe -> GenerateCandidates -> CreatePreview` 固定 pipeline 整理成 graph 节点，并新增 LLM 解释 / 有限选择、`ask_user`、fallback 分支；当前代码里的 first-fit / `Candidates[0]` 只能作为过渡实现。
@@ -141,7 +141,7 @@
    - 已实现 preview 写入、详情查询、`apply_id + idempotency_key`、候选转换、同步 apply adapter。
    - `add_task_pool_to_schedule` 已能正式写入 `schedule_events(type=task, task_source_type=task_pool, rel_id=tasks.id)` 和对应 `schedules`。
    - `create_makeup` 转换与 adapter 已预留并实现基本写入路径，但尚需在第四 / 第五阶段结合正式 unfinished feedback worker 场景补端到端验收。
-4. 第四阶段：worker 与 notification 主体代码。
+4. 第四阶段：worker 与 notification 主体代码（已完成）。
    - 已接入 `active_schedule.triggered` worker handler、due job scanner、`notification.feishu.requested` handler 和 notification retry loop。
    - 已新增 `backend/notification` provider / service 分层，mock provider 保留，真实投递切到用户级飞书 Webhook 触发器 provider。
    - 已新增 `user_notification_channels` model / DAO，并接入 AutoMigrate 与 `RepoManager`。
@@ -201,16 +201,29 @@
 
 下一阶段入口：
 
-1. 下一步继续第五阶段剩余验收，不需要重做 dry-run / preview / confirm 主链路，也不需要重做第四阶段 provider / handler 主体代码。
-2. 第五阶段剩余重点：
-   - confirm apply 冲突失败、过期拒绝。
+1. 下一步继续第五阶段剩余验收，不需要重做 dry-run / preview / confirm 主链路，也不需要重做第四阶段 provider / handler 主体代码，也不需要重做第六阶段 graph / session bridge / 聊天页合流主体代码。
+2. 第五阶段剩余重点已经收口为负向边界和脚本化验收：
+   - 保留前置验证：`go build ./cmd/all`、backend 下 `go test ./...`，并清理本次生成的 `.gocache`。
+   - 阶段 3 主链路不再全量重跑，只做 1 条真实 chat 烟测确认入口未回归。
+   - preview 过期、重复 confirm、candidate / preview 篡改、preview 与 session 不匹配都必须拒绝。
+   - 冲突失败或不可写入场景必须失败并保留可排障状态。
+   - trigger 幂等、notification 状态矩阵、outbox 重复消费和 `api / worker / all` 启动边界必须补齐证据。
    - 更完整的边界清理：测试数据隔离策略、失败注入脚本化、前端真实地址替换为正式域名配置。
-4. 工作区注意：
+3. 工作区注意：
    - 另一个前端对话可能在改前端；后端阶段不要碰 `frontend` 相关改动。
    - 当前允许单个 Go 文件 700 行以内；超过 700 再评估拆分。
    - 每次执行 `go test` 后必须清理根目录 `.gocache`。
    - 后续阶段必须优先自动化验收：能由代码、API、DB 查询、日志查询验证的内容，由实现者自己跑完并记录结果。
    - 如果受限于外部账号、真实飞书环境、浏览器人工交互、权限或本地环境，导致某项验收无法完成，不能默认为通过，也不能在报告中省略；必须明确写出未验收项、阻塞原因、建议由用户执行的操作和预期结果。
+
+### 0.4 2026-05-02 最新验收记录
+
+这轮接手时，周四窗口的主动调度最小闭环已经再次跑通，可作为周报截图和阶段 5 续验的基线。
+
+1. 测试账号使用 `test0424 / 123456`，任务为“做马原大作业”，并把 `mock_now` 固定到 `2026-04-30T01:14:21+08:00` 的周四窗口，避免周六空窗造成的误判。
+2. trigger `ast_1bb62e3e-f2cf-48a9-8f29-1461b99bff6b` 生成 preview `asp_e79db789-ba16-4108-a843-cd33c03aa3f6`，会话 `ce525dc0-101a-50ca-8993-7fc466328de2` 挂接当前 preview，`notification_records.id=22` 发送成功。
+3. DB 里 `active_schedule_triggers.status=preview_generated`、`active_schedule_previews.status=ready`、`active_schedule_sessions.status=ready_preview`，而 `schedule_events` 对该 preview 的正式写入计数为 0，说明这次只到预览态，还没有执行正式 apply。
+4. 浏览器里能看到周四列同时存在已有课程和待确认任务块，证明“滚动 24 小时窗口 + 课程事实 + task_pool 预览”的展示链路是完整的。
 
 ## 1. 文档目的
 

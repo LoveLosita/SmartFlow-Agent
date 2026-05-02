@@ -31,6 +31,7 @@ type AgentService struct {
 	taskRepo                 *dao.TaskDAO
 	cacheDAO                 *dao.CacheDAO
 	agentCache               *dao.AgentCache
+	activeScheduleDAO        *dao.ActiveScheduleDAO
 	activeScheduleSessionDAO *dao.ActiveScheduleSessionDAO
 	eventPublisher           outboxinfra.EventPublisher
 
@@ -79,6 +80,7 @@ func NewAgentService(
 	taskRepo *dao.TaskDAO,
 	cacheDAO *dao.CacheDAO,
 	agentRedis *dao.AgentCache,
+	activeScheduleDAO *dao.ActiveScheduleDAO,
 	activeSessionDAO *dao.ActiveScheduleSessionDAO,
 	eventPublisher outboxinfra.EventPublisher,
 ) *AgentService {
@@ -93,6 +95,7 @@ func NewAgentService(
 		taskRepo:                 taskRepo,
 		cacheDAO:                 cacheDAO,
 		agentCache:               agentRedis,
+		activeScheduleDAO:        activeScheduleDAO,
 		activeScheduleSessionDAO: activeSessionDAO,
 		eventPublisher:           eventPublisher,
 	}

@@ -25,10 +25,11 @@ func NewAgentService(
 	taskRepo *dao.TaskDAO,
 	cacheDAO *dao.CacheDAO,
 	agentRedis *dao.AgentCache,
+	activeScheduleDAO *dao.ActiveScheduleDAO,
 	activeSessionDAO *dao.ActiveScheduleSessionDAO,
 	eventPublisher outboxinfra.EventPublisher,
 ) *AgentService {
-	return agentsvc.NewAgentService(aiHub, repo, taskRepo, cacheDAO, agentRedis, activeSessionDAO, eventPublisher)
+	return agentsvc.NewAgentService(aiHub, repo, taskRepo, cacheDAO, agentRedis, activeScheduleDAO, activeSessionDAO, eventPublisher)
 }
 
 // NewAgentServiceWithSchedule 在基础 AgentService 上注入排程依赖。
@@ -43,12 +44,13 @@ func NewAgentServiceWithSchedule(
 	taskRepo *dao.TaskDAO,
 	cacheDAO *dao.CacheDAO,
 	agentRedis *dao.AgentCache,
+	activeScheduleDAO *dao.ActiveScheduleDAO,
 	activeSessionDAO *dao.ActiveScheduleSessionDAO,
 	eventPublisher outboxinfra.EventPublisher,
 	scheduleSvc *ScheduleService,
 	taskSvc *TaskService,
 ) *AgentService {
-	svc := agentsvc.NewAgentService(aiHub, repo, taskRepo, cacheDAO, agentRedis, activeSessionDAO, eventPublisher)
+	svc := agentsvc.NewAgentService(aiHub, repo, taskRepo, cacheDAO, agentRedis, activeScheduleDAO, activeSessionDAO, eventPublisher)
 
 	// 注入排程依赖：将 service 层方法包装为函数闭包，避免循环依赖。
 	if scheduleSvc != nil {

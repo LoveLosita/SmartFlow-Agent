@@ -75,7 +75,7 @@ func (p ActiveScheduleTriggeredPayload) Validate() error {
 	if !isAllowedActiveScheduleTargetType(p.TargetType) {
 		return errors.New("target_type 不在主动调度第一版允许范围内")
 	}
-	if p.TargetID <= 0 {
+	if p.TargetID <= 0 && strings.TrimSpace(p.TriggerType) != ActiveScheduleTriggerTypeUnfinishedFeedback {
 		return errors.New("target_id 必须大于 0")
 	}
 	if p.RequestedAt.IsZero() {

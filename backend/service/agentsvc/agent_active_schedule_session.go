@@ -114,6 +114,27 @@ func (s *AgentService) persistActiveScheduleSessionBestEffort(ctx context.Contex
 	return nil
 }
 
+// persistActiveScheduleTriggerPreviewBestEffort 负责把 rerun 产生的新 preview_id 同步回 trigger。
+//
+// 职责边界：
+// 1. 只维护 trigger -> preview 的审计指针，不修改 preview 内容，也不推进 confirm/apply 状态；
+// 2. trigger_id 或 preview_id 为空时直接跳过，避免把不完整 rerun 结果写入触发记录；
+// 3. DAO 未注入时保持迁移期兼容，调用方仍以 session 写回作为主流程。
+func (s *AgentService) persistActiveScheduleTriggerPreviewBestEffort(ctx context.Context, triggerID string, previewID string) error {
+	if s == nil || s.activeScheduleDAO == nil {
+		return nil
+	}
+	normalizedTriggerID := strings.TrimSpace(triggerID)
+	normalizedPreviewID := strings.TrimSpace(previewID)
+	if normalizedTriggerID == "" || normalizedPreviewID == "" {
+		return nil
+	}
+	return s.activeScheduleDAO.UpdateTriggerFields(ctx, normalizedTriggerID, map[string]any{
+		"preview_id": &normalizedPreviewID,
+		"updated_at": time.Now(),
+	})
+}
+
 // handleActiveScheduleSessionChat 处理被主动调度 session 占管的聊天入口。
 //
 // 步骤化说明：
@@ -165,25 +186,64 @@ func (s *AgentService) handleActiveScheduleSessionChat(
 		}
 		// 1. 收到用户补充信息后，先把 session 切成 rerunning，避免并发请求继续按旧状态走普通聊天。
 		// 2. 这个阶段只是状态切换，不代表 graph 已经完成。
-		session.Status = model.ActiveScheduleSessionStatusRerunning
-		if err := s.persistActiveScheduleSessionBestEffort(ctx, session); err != nil {
+		// 3. 这里必须使用 DB CAS 抢占 rerun 权限，避免两条补充消息同时读到 waiting_user_reply 后重复生成 preview。
+		switched, err := s.activeScheduleSessionDAO.TryTransitionActiveScheduleSessionStatusBySessionID(
+			ctx,
+			session.SessionID,
+			model.ActiveScheduleSessionStatusWaitingUserReply,
+			model.ActiveScheduleSessionStatusRerunning,
+		)
+		if err != nil {
 			return true, err
+		}
+		if !switched {
+			if err := s.respondActiveScheduleRerunning(ctx, userID, chatID, traceID, resolvedModelName, requestStart, outChan); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+		session.Status = model.ActiveScheduleSessionStatusRerunning
+		if s.cacheDAO != nil {
+			if cacheErr := s.cacheDAO.SetActiveScheduleSessionToCache(ctx, session); cacheErr != nil {
+				log.Printf("回填主动调度 rerunning session 缓存失败 session=%s err=%v", session.SessionID, cacheErr)
+			}
 		}
 		return true, s.runActiveScheduleSessionRerun(ctx, session, trimmedMessage, traceID, requestStart, resolvedModelName, outChan, errChan)
 	case model.ActiveScheduleSessionStatusRerunning:
 		// 1. rerunning 是占管中的过渡态，说明当前会话已经在重跑或刚开始重跑。
 		// 2. 这里不再触发第二次 rerun，只给用户一个可见的等待提示。
 		if trimmedMessage != "" {
-			assistantText := "主动调度正在重新生成建议，请稍后再试。"
-			if err := s.persistNewAgentConversationMessage(ctx, userID, chatID, schema.AssistantMessage(assistantText, nil), 0); err != nil {
+			if err := s.respondActiveScheduleRerunning(ctx, userID, chatID, traceID, resolvedModelName, requestStart, outChan); err != nil {
 				return true, err
 			}
-			emitActiveScheduleAssistantChunk(outChan, traceID, resolvedModelName, requestStart, assistantText, nil)
 		}
 		return true, nil
 	default:
 		return false, nil
 	}
+}
+
+// respondActiveScheduleRerunning 负责在重复补充命中并发保护时写入可见提示。
+//
+// 职责边界：
+// 1. 只写聊天历史和 SSE 文本，不推进 session、trigger、preview 状态；
+// 2. 用于 rerunning 状态或 CAS 抢占失败后的兜底提示，避免再次触发 graph；
+// 3. 写入失败时返回 error，让上层按聊天入口的错误通道处理。
+func (s *AgentService) respondActiveScheduleRerunning(
+	ctx context.Context,
+	userID int,
+	chatID string,
+	traceID string,
+	resolvedModelName string,
+	requestStart time.Time,
+	outChan chan<- string,
+) error {
+	assistantText := "主动调度正在重新生成建议，请稍后再试。"
+	if err := s.persistNewAgentConversationMessage(ctx, userID, chatID, schema.AssistantMessage(assistantText, nil), 0); err != nil {
+		return err
+	}
+	emitActiveScheduleAssistantChunk(outChan, traceID, resolvedModelName, requestStart, assistantText, nil)
+	return nil
 }
 
 // runActiveScheduleSessionRerun 负责把 waiting_user_reply 的用户补充同步推进成新的主动调度结果。
@@ -230,15 +290,20 @@ func (s *AgentService) runActiveScheduleSessionRerun(
 	}
 	session.Status = finalStatus
 	session.State = result.SessionState
-	if strings.TrimSpace(result.PreviewID) != "" {
-		session.CurrentPreviewID = strings.TrimSpace(result.PreviewID)
-	} else if session.Status != model.ActiveScheduleSessionStatusReadyPreview {
-		session.CurrentPreviewID = ""
+	previewID := strings.TrimSpace(result.PreviewID)
+	if previewID != "" {
+		session.CurrentPreviewID = previewID
 	}
 	if session.Status == model.ActiveScheduleSessionStatusReadyPreview {
 		session.State.PendingQuestion = ""
 		session.State.MissingInfo = nil
 		session.State.FailedReason = ""
+	}
+
+	if previewID != "" {
+		if err := s.persistActiveScheduleTriggerPreviewBestEffort(ctx, session.TriggerID, previewID); err != nil {
+			return err
+		}
 	}
 
 	if err := s.persistActiveScheduleSessionBestEffort(ctx, session); err != nil {

@@ -1,5 +1,19 @@
 # 第二阶段主动调度 MVP 功能预期
 
+## 0. 当前状态摘要（2026-05-02）
+
+本文档仍作为主动调度 MVP 的产品边界说明；具体实现拆分、表结构和阶段进度以《第二阶段主动调度 MVP 实现方案.md》和《主动调度缺口分阶段实施计划.md》为准。
+
+截至当前仓库状态，MVP 主闭环已经从“功能预期”推进到可演示、可排障的实现状态：
+
+1. `important_urgent_task` 已能从任务池生成主动调度 trigger，写入 `active_schedule_previews`，并通过飞书 webhook 触达用户。
+2. 飞书链接已统一进入 `/assistant/{conversation_id}`，不再使用独立 `/schedule-adjust/{preview_id}` 入口。
+3. 用户进入助手页后，可以看到主动调度卡片，并打开日程预览与精排弹窗；确认前只展示 preview，不写正式 `schedule_events`。
+4. 用户确认后才进入同步 apply 链路；apply 失败必须回写可排障状态，不能半写正式日程。
+5. `unfinished_feedback` 的“定位 -> ask_user -> 重跑 graph -> 刷新 preview”闭环已经落地，阶段 5 不再重复全套主链路，只保留 1 条真实 chat 烟测确认入口未回归。
+
+演示和验收时需要特别注意：主动调度窗口是“从当前时刻起滚动 24 小时”，不是自然日或整周。如果窗口落在周六且该用户没有课程，预览里只出现待安排任务是符合语义的；需要展示“已有课程 + 待确认任务”同屏时，应把 `mock_now` 固定到有课程的周四窗口。
+
 ## 1. 文档目的
 
 本文档先讨论第二阶段最终想做成什么功能，不进入具体代码拆分和表结构实现。
@@ -530,20 +544,40 @@ assumed_completed
 
 ---
 
-## 11. MVP 验收标准
+## 11. MVP 验收标准与当前状态
 
-第一版功能算完成，需要满足：
+第一版验收按“已落地口径、阶段 5 主验收、后置能力”三类看，避免把后续演进项混进本轮收口。
+
+已落地并作为 MVP 口径的能力：
 
 1. 只扫描滚动 24 小时内的问题。
 2. 能识别四象限“重要且紧急”池中尚未进入日程视图的任务。
-3. 能在用户反馈未完成后，识别受影响的 schedule 任务与后继任务。
-4. 动态任务计划时间过去后默认按已完成推进，不主动追问。
-5. 当前动态任务失败且影响后继时，能按“局部重排 -> 延后结束 -> 压缩融合”顺序生成候选。
-6. 能输出结构化 metrics / issues / decision / candidates。
-7. 候选项必须来自后端，不让 LLM 自由生成正式写库参数；LLM 只做解释、追问和有限选择。
-8. 不直接写正式 schedule，只写预览或触达用户。
-9. 能发布 `notification.feishu.requested` 提醒用户回系统确认。
-10. 用户确认后才允许进入正式应用链路。
+3. 能输出结构化 `metrics / issues / decision / candidates`。
+4. 候选项必须来自后端，不让 LLM 自由生成正式写库参数；LLM 只做解释、追问和有限选择。
+5. 确认前不直接写正式 `schedule_events / schedules`，只写 `active_schedule_previews` 或触达用户。
+6. 能发布 `notification.feishu.requested`，并通过 `notification_records` 记录 `sent / failed / dead / skipped` 等状态。
+7. 飞书触达后进入 `/assistant/{conversation_id}`，由助手会话页承载预览、微调和确认。
+8. 用户确认后才允许进入同步 apply 链路；成功写正式日程，失败回写预览状态和错误原因。
+9. `unfinished_feedback` 已支持用户补充事实后的 `ask_user -> rerun -> ready_preview` 闭环。
+10. 动态任务计划时间过去后默认按 `assumed_completed` 推进，不主动追问。
+
+阶段 5 主验收重点：
+
+1. preview 过期后 confirm 必须拒绝。
+2. 同一 preview 重复 confirm 只能生效一次。
+3. 错误 `candidate_id`、跨用户 `preview_id`、preview 与 session 不匹配都必须拒绝。
+4. 冲突或不可写入时，apply 应失败并保留可排障状态。
+5. 相同 `idempotency_key / dedupe_key` 不能重复生成有效 trigger / preview / notification。
+6. notification 要覆盖未配置 webhook 的 `skipped`、临时失败的 `failed/retry`、永久失败的 `dead` 和成功的 `sent`。
+7. 重复消费同一 `notification.feishu.requested` 不能重复投递或重复写 `notification_records`。
+8. `api / worker / all` 三种启动边界相关 handler / job 注册不能缺失。
+
+后置能力，不作为当前 MVP 完成阻塞：
+
+1. 课程变化触发、疲劳反馈触发和更复杂的跨天全局重排。
+2. `compress_with_next_dynamic_task` 压缩融合候选，当前只保留 schema / 口径，不默认生成。
+3. apply 成功后的撤销按钮和完整回滚体验。
+4. 更细颗粒的偏好打破策略，例如哪些偏好是硬约束、哪些偏好可在高风险任务前让位。
 
 ---
 
@@ -563,9 +597,18 @@ assumed_completed
 
 ---
 
-## 13. 待讨论问题
+## 13. 已收口与后续演进问题
 
-1. 主动观测能力是否最终落成独立工具，以及具体命名是什么。
-2. 四象限懒加载轮换要如何补齐：后台 worker 定时刷新、主动调度前同步刷新，还是抽公共轮换服务。
-3. 前后对比回滚机制复用现有哪条链路，是否需要新增主动调度预览类型。
-4. 魔改粗排时，哪些用户偏好可以被打破，哪些偏好必须保持为硬约束。
+已收口：
+
+1. 主动观测能力当前落在 `backend/active_scheduler` 准独立模块内，主链路走 graph / service pipeline，不进入 ReAct 工具循环。
+2. 主入口统一到 `/assistant/{conversation_id}`，飞书只负责触达和跳转，不在飞书内完成复杂确认。
+3. 预览独立写入 `active_schedule_previews`，不塞进 `agent_schedule_states`；正式 apply 仍走后端重校验。
+4. task_pool 任务进入正式日程时使用 `schedule_events.task_source_type=task_pool`，不创建孤儿 `task_item`。
+
+后续演进：
+
+1. 四象限懒加载轮换仍建议继续评估后台刷新或抽公共轮换服务，避免主动调度读取到过期任务池。
+2. 前后对比与回滚体验还可以继续增强，但不影响当前“确认前只预览、确认后同步 apply”的 MVP 语义。
+3. 压缩融合和复杂偏好打破策略暂不打开，等主链路和失败注入脚本稳定后再评估。
+4. 课程变化、疲劳反馈和跨天计划优化后置到后续版本。
