@@ -64,7 +64,7 @@ type appRuntime struct {
 	agentCache            *dao.AgentCache
 	manager               *dao.RepoManager
 	outboxRepo            *outboxinfra.Repository
-	eventBus              *outboxinfra.EventBus
+	eventBus              eventsvc.OutboxBus
 	memoryModule          *memory.Module
 	activeJobScanner      *activejob.Scanner
 	activeTriggerWorkflow *activesvc.TriggerWorkflowService
@@ -88,46 +88,39 @@ func loadConfig() error {
 	return nil
 }
 
-// Start 保留历史入口，默认仍按 all 模式启动。
-//
-// 职责边界：
-// 1. 兼容 backend/main.go 以及旧部署命令；
-// 2. 不新增业务语义，只委托给 StartAll；
-// 3. 后续若部署全面切到独立 api/worker，可逐步废弃该兼容入口。
+// Start 保留历史兼容入口，当前默认等价于 StartAll。
+// 1. 兼容 backend/main.go 和旧部署命令。
+// 2. 不新增业务语义，只转发给 StartAll。
+// 3. 后续若全面切到独立 api/worker 启动，本入口只保留过渡兼容。
 func Start() {
 	StartAll()
 }
 
-// StartAll 启动迁移期兼容模式：HTTP API 与后台 worker 在同一进程内运行。
+// StartAll 启动当前仓库的完整运行态：HTTP API + 后台 worker。
+// 这仍然是迁移期的兼容装配，不是终态的“一个服务一个 main.go”模型。
 func StartAll() {
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	runtime := mustBuildRuntime(ctx)
 	defer runtime.close()
 
 	runtime.startWorkers(ctx)
-	runtime.startHTTP()
+	runtime.startHTTP(ctx)
 }
 
-// StartAPI 只启动 Gin API 及其同步 service/dao 依赖，不启动后台 worker。
-//
-// 说明：
-// 1. 该模式仍是“带 service/dao 的 API 单体”，不是最终 API Gateway；
-// 2. API 可以继续写入 outbox，但不负责消费 outbox，也不启动 memory worker；
-// 3. worker 停止时，API 仍可提供同步接口，只是异步能力会延迟处理。
+// StartAPI 只启动 Gin API 和其同步依赖，不启动后台 worker。
+// 这仍是迁移期的单体 API 模式，不是终态的独立网关。
 func StartAPI() {
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	runtime := mustBuildRuntime(ctx)
 	defer runtime.close()
 
-	runtime.startHTTP()
+	runtime.startHTTP(ctx)
 }
 
 // StartWorker 只启动后台异步能力，不注册 Gin 路由。
-//
-// 运行内容：
-// 1. outbox relay：扫描 pending 消息并投递 Kafka；
-// 2. Kafka consumer：消费事件并分发到业务 handler；
-// 3. memory worker：处理 memory_jobs 后台任务。
+// 当前包含 outbox relay / Kafka consumer / memory worker / 主动调度扫描 / 通知重试。
 func StartWorker() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -305,7 +298,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	}
 	handlers := buildAPIHandlers(userService, taskSv, taskClassService, courseService, scheduleService, agentService, memoryModule, activeScheduleDryRun, activeSchedulePreviewConfirm, activeScheduleTrigger, notificationChannelService)
 
-	return &appRuntime{
+	runtime := &appRuntime{
 		db:                    db,
 		redisClient:           rdb,
 		cacheRepo:             cacheRepo,
@@ -321,7 +314,13 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		notificationService:   notificationService,
 		limiter:               limiter,
 		handlers:              handlers,
-	}, nil
+	}
+	if runtime.eventBus != nil {
+		if err := runtime.registerEventHandlers(); err != nil {
+			return nil, err
+		}
+	}
+	return runtime, nil
 }
 
 func buildRAGRuntime(ctx context.Context) (infrarag.Runtime, error) {
@@ -346,16 +345,24 @@ func buildRAGRuntime(ctx context.Context) (infrarag.Runtime, error) {
 	return ragRuntime, nil
 }
 
-func buildEventBus(outboxRepo *outboxinfra.Repository) (*outboxinfra.EventBus, error) {
-	// outbox 通用事件总线接线：
-	// 1. API 模式只使用 Publish 写入 outbox，不启动后台循环；
-	// 2. worker/all 模式再显式注册 handler 并启动后台循环；
+func buildEventBus(outboxRepo *outboxinfra.Repository) (eventsvc.OutboxBus, error) {
+	// outbox 多 service 门面装配：
+	// 1. 按 service 维度创建独立 engine，topic / group 由 service 名称推导；
+	// 2. 对外仍然只暴露一个 Publish / Start / Close 门面；
 	// 3. kafka.enabled=false 时返回 nil，业务按既有降级策略执行。
 	kafkaCfg := kafkabus.LoadConfig()
-	eventBus, err := outboxinfra.NewEventBus(outboxRepo, kafkaCfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize outbox event bus: %w", err)
+	serviceBuses := make(map[string]eventsvc.OutboxBus, len(eventsvc.OutboxServiceNames()))
+	for _, serviceName := range eventsvc.OutboxServiceNames() {
+		bus, err := eventsvc.NewServiceOutboxBus(outboxRepo, kafkaCfg, serviceName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize outbox event bus for service %s: %w", serviceName, err)
+		}
+		if bus != nil {
+			serviceBuses[serviceName] = bus
+		}
 	}
+
+	eventBus := eventsvc.NewRoutedOutboxBus(serviceBuses)
 	if eventBus == nil {
 		log.Println("Outbox event bus is disabled")
 	}
@@ -855,9 +862,6 @@ func (r *appRuntime) startWorkers(ctx context.Context) {
 	}
 
 	if r.eventBus != nil {
-		if err := r.registerEventHandlers(); err != nil {
-			log.Fatalf("Failed to register outbox event handlers: %v", err)
-		}
 		r.eventBus.Start(ctx)
 		log.Println("Outbox event bus started")
 	} else {
@@ -878,24 +882,25 @@ func (r *appRuntime) startWorkers(ctx context.Context) {
 }
 
 func (r *appRuntime) registerEventHandlers() error {
-	// 调用目的：worker/all 启动时复用同一套核心事件注册顺序，避免未来新增入口后复制多份 handler 接线。
-	if err := eventsvc.RegisterCoreOutboxHandlers(r.eventBus, r.outboxRepo, r.manager, r.agentRepo, r.cacheRepo, r.memoryModule); err != nil {
+	// 调用目的：在运行时启动前一次性完成“事件类型 -> 服务归属 -> handler”的显式接线，避免 API 模式发布事件时拿不到路由表。
+	if err := eventsvc.RegisterAllOutboxHandlers(
+		r.eventBus,
+		r.outboxRepo,
+		r.manager,
+		r.agentRepo,
+		r.cacheRepo,
+		r.memoryModule,
+		r.activeTriggerWorkflow,
+		r.notificationService,
+	); err != nil {
 		return err
-	}
-	if err := eventsvc.RegisterActiveScheduleTriggeredHandler(r.eventBus, r.outboxRepo, r.activeTriggerWorkflow); err != nil {
-		return fmt.Errorf("注册主动调度触发 handler 失败: %w", err)
-	}
-	// 调用目的：飞书通知事件消费与 notification retry loop 复用同一个服务实例，
-	// 保证后续接入真实 provider 时只需要替换启动期注入配置。
-	if err := eventsvc.RegisterFeishuNotificationHandler(r.eventBus, r.outboxRepo, r.notificationService); err != nil {
-		return fmt.Errorf("注册飞书通知 handler 失败: %w", err)
 	}
 	return nil
 }
 
-func (r *appRuntime) startHTTP() {
+func (r *appRuntime) startHTTP(ctx context.Context) {
 	router := routers.RegisterRouters(r.handlers, r.cacheRepo, r.userRepo, r.limiter)
-	routers.StartEngine(router)
+	routers.StartEngine(ctx, router)
 }
 
 func (r *appRuntime) close() {

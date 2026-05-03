@@ -20,7 +20,7 @@ import (
 // 2. 不承担 notification_records 状态机细节，状态流转全部下沉到 notification 模块；
 // 3. 不在 handler 内部创建 provider/service，避免事件消费与 retry loop 使用两套不同配置。
 func RegisterFeishuNotificationHandler(
-	bus *outboxinfra.EventBus,
+	bus OutboxBus,
 	outboxRepo *outboxinfra.Repository,
 	svc *notification.NotificationService,
 ) error {
@@ -33,23 +33,27 @@ func RegisterFeishuNotificationHandler(
 	if svc == nil {
 		return errors.New("notification service is nil")
 	}
+	eventOutboxRepo, err := scopedOutboxRepoForEvent(outboxRepo, sharedevents.NotificationFeishuRequestedEventType)
+	if err != nil {
+		return err
+	}
 
 	handler := func(ctx context.Context, envelope kafkabus.Envelope) error {
 		// 1. 先校验 event_version，避免未来协议破坏性升级后旧 handler 误吃新消息。
 		// 2. 当前阶段只接受 v1；版本不匹配属于不可恢复协议错误，直接标记 dead。
 		eventVersion := strings.TrimSpace(envelope.EventVersion)
 		if eventVersion != "" && eventVersion != sharedevents.NotificationFeishuRequestedEventVersion {
-			_ = outboxRepo.MarkDead(ctx, envelope.OutboxID, "notification.feishu.requested event_version 不匹配: "+eventVersion)
+			_ = eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, "notification.feishu.requested event_version 不匹配: "+eventVersion)
 			return nil
 		}
 
 		var payload sharedevents.FeishuNotificationRequestedPayload
 		if unmarshalErr := json.Unmarshal(envelope.Payload, &payload); unmarshalErr != nil {
-			_ = outboxRepo.MarkDead(ctx, envelope.OutboxID, "解析 notification.feishu.requested 载荷失败: "+unmarshalErr.Error())
+			_ = eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, "解析 notification.feishu.requested 载荷失败: "+unmarshalErr.Error())
 			return nil
 		}
 		if validateErr := payload.Validate(); validateErr != nil {
-			_ = outboxRepo.MarkDead(ctx, envelope.OutboxID, "notification.feishu.requested 载荷非法: "+validateErr.Error())
+			_ = eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, "notification.feishu.requested 载荷非法: "+validateErr.Error())
 			return nil
 		}
 
@@ -58,7 +62,7 @@ func RegisterFeishuNotificationHandler(
 			return handleErr
 		}
 
-		if consumeErr := outboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, nil); consumeErr != nil {
+		if consumeErr := eventOutboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, nil); consumeErr != nil {
 			return consumeErr
 		}
 

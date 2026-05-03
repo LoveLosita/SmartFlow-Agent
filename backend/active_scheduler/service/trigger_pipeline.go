@@ -209,7 +209,7 @@ func (s *TriggerWorkflowService) ProcessTriggeredInTx(
 		previewResp.Detail.Notification,
 		now,
 	)
-	return EnqueueNotificationFeishuRequestedInTx(ctx, s.outbox.WithTx(tx), s.kafkaCfg, notificationPayload)
+	return EnqueueNotificationFeishuRequestedInTx(ctx, s.outbox.WithTx(tx), s.kafkaCfg.MaxRetry, notificationPayload)
 }
 
 // MarkTriggerFailedBestEffort 在事务外补记 trigger failed 状态，供 outbox retry 前排障。

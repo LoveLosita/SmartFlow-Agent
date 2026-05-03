@@ -30,7 +30,7 @@ const (
 // 2. 通过 outbox 统一消费事务入口，保证“业务成功 + consumed 推进”原子一致；
 // 3. 非法载荷直接标记 dead，避免无意义重试。
 func RegisterChatTokenUsageAdjustHandler(
-	bus *outboxinfra.EventBus,
+	bus OutboxBus,
 	outboxRepo *outboxinfra.Repository,
 	repoManager *dao.RepoManager,
 ) error {
@@ -43,20 +43,24 @@ func RegisterChatTokenUsageAdjustHandler(
 	if repoManager == nil {
 		return errors.New("repo manager is nil")
 	}
+	eventOutboxRepo, err := scopedOutboxRepoForEvent(outboxRepo, EventTypeChatTokenUsageAdjustRequested)
+	if err != nil {
+		return err
+	}
 
 	handler := func(ctx context.Context, envelope kafkabus.Envelope) error {
 		var payload model.ChatTokenUsageAdjustPayload
 		if unmarshalErr := json.Unmarshal(envelope.Payload, &payload); unmarshalErr != nil {
-			_ = outboxRepo.MarkDead(ctx, envelope.OutboxID, "解析会话 token 调整载荷失败: "+unmarshalErr.Error())
+			_ = eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, "解析会话 token 调整载荷失败: "+unmarshalErr.Error())
 			return nil
 		}
 
 		if payload.UserID <= 0 || payload.TokensDelta <= 0 || payload.ConversationID == "" {
-			_ = outboxRepo.MarkDead(ctx, envelope.OutboxID, "会话 token 调整载荷无效: user_id/conversation_id/tokens_delta 非法")
+			_ = eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, "会话 token 调整载荷无效: user_id/conversation_id/tokens_delta 非法")
 			return nil
 		}
 
-		return outboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
+		return eventOutboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
 			txM := repoManager.WithTx(tx)
 			return txM.Agent.AdjustTokenUsageInTx(ctx, payload.UserID, payload.ConversationID, payload.TokensDelta)
 		})

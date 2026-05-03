@@ -30,7 +30,7 @@ const (
 // 3. 通过 outbox 通用事务入口把"业务写入 + consumed 推进"合并为一个事务；
 // 4. 当前版本仅注册新路由键（chat.history.persist.requested），不再注册旧兼容键。
 func RegisterChatHistoryPersistHandler(
-	bus *outboxinfra.EventBus,
+	bus OutboxBus,
 	outboxRepo *outboxinfra.Repository,
 	repoManager *dao.RepoManager,
 ) error {
@@ -44,6 +44,10 @@ func RegisterChatHistoryPersistHandler(
 	if repoManager == nil {
 		return errors.New("repo manager is nil")
 	}
+	eventOutboxRepo, err := scopedOutboxRepoForEvent(outboxRepo, EventTypeChatHistoryPersistRequested)
+	if err != nil {
+		return err
+	}
 
 	// 2. 定义统一处理器：
 	// 2.1 解析 payload；
@@ -53,12 +57,12 @@ func RegisterChatHistoryPersistHandler(
 		var payload model.ChatHistoryPersistPayload
 		if unmarshalErr := json.Unmarshal(envelope.Payload, &payload); unmarshalErr != nil {
 			// 2.1 payload 非法属于不可恢复错误，直接标 dead，避免无意义重试。
-			_ = outboxRepo.MarkDead(ctx, envelope.OutboxID, "解析聊天持久化载荷失败: "+unmarshalErr.Error())
+			_ = eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, "解析聊天持久化载荷失败: "+unmarshalErr.Error())
 			return nil
 		}
 
 		// 2.2 使用 outbox 通用消费事务，保证"业务写入 + consumed 状态推进"原子一致。
-		return outboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
+		return eventOutboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
 			// 2.2.1 基于同一个 tx 构造 RepoManager，复用你现有跨包事务模型。
 			txM := repoManager.WithTx(tx)
 			// 2.2.2 在同事务内写入聊天历史与会话计数。

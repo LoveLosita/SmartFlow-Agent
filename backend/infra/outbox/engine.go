@@ -40,19 +40,19 @@ type PublishRequest struct {
 	Payload      any
 }
 
-// Engine 是 Outbox + Kafka 通用异步引擎。
+// Engine 是单个服务的 Outbox + Kafka 异步引擎。
 //
 // 职责边界：
-// 1. 负责 outbox 扫描、kafka 投递、kafka 消费、状态机推进；
+// 1. 负责一个服务目录下的 outbox 扫描、Kafka 投递、Kafka 消费、状态机推进；
 // 2. 负责 event_type -> handler 路由；
-// 3. 不负责任何业务语义（业务由 handler 承担）。
+// 3. 不负责任何跨服务路由决策，跨服务分发由 EventBus 门面完成。
 type Engine struct {
 	repo     *Repository
 	producer *kafkabus.Producer
 	consumer *kafkabus.Consumer
 
 	brokers   []string
-	topic     string
+	route     ServiceRoute
 	maxRetry  int
 	scanEvery time.Duration
 	scanBatch int
@@ -61,11 +61,12 @@ type Engine struct {
 	handlers   map[string]MessageHandler
 }
 
-// NewEngine 创建异步引擎。
+// NewEngine 创建单服务异步引擎。
 //
 // 规则：
 // 1. kafka.enabled=false 时返回 nil，调用方可降级同步；
-// 2. producer/consumer 任一步失败都会回收已创建资源。
+// 2. serviceName 非空时优先使用服务级默认目录，topic/group/table 不再沿用共享终态；
+// 3. producer/consumer 任一步失败都会回收已创建资源。
 func NewEngine(repo *Repository, cfg kafkabus.Config) (*Engine, error) {
 	if !cfg.Enabled {
 		return nil, nil
@@ -74,6 +75,11 @@ func NewEngine(repo *Repository, cfg kafkabus.Config) (*Engine, error) {
 		return nil, errors.New("outbox repository is nil")
 	}
 
+	route := resolveEngineRoute(repo, cfg)
+	cfg.Topic = route.Topic
+	cfg.GroupID = route.GroupID
+
+	serviceRepo := repo.WithRoute(route)
 	producer, err := kafkabus.NewProducer(cfg)
 	if err != nil {
 		return nil, err
@@ -85,11 +91,11 @@ func NewEngine(repo *Repository, cfg kafkabus.Config) (*Engine, error) {
 	}
 
 	return &Engine{
-		repo:      repo,
+		repo:      serviceRepo,
 		producer:  producer,
 		consumer:  consumer,
 		brokers:   cfg.Brokers,
-		topic:     cfg.Topic,
+		route:     route,
 		maxRetry:  cfg.MaxRetry,
 		scanEvery: cfg.RetryScanInterval,
 		scanBatch: cfg.RetryBatchSize,
@@ -118,7 +124,7 @@ func (e *Engine) RegisterEventHandler(eventType string, handler MessageHandler) 
 	e.handlersMu.Lock()
 	defer e.handlersMu.Unlock()
 	if _, exists := e.handlers[eventType]; exists {
-		log.Printf("outbox handler 覆盖注册: event_type=%s", eventType)
+		log.Printf("outbox handler 覆盖注册: service=%s event_type=%s", e.route.ServiceName, eventType)
 	}
 	e.handlers[eventType] = handler
 	return nil
@@ -137,11 +143,20 @@ func (e *Engine) Start(ctx context.Context) {
 		return
 	}
 
-	log.Printf("outbox engine starting: topic=%s brokers=%v retry_scan=%s batch=%d", e.topic, e.brokers, e.scanEvery, e.scanBatch)
-	if err := kafkabus.WaitTopicReady(ctx, e.brokers, e.topic, 30*time.Second); err != nil {
+	log.Printf(
+		"outbox engine starting: service=%s table=%s topic=%s group=%s brokers=%v retry_scan=%s batch=%d",
+		e.route.ServiceName,
+		e.route.TableName,
+		e.route.Topic,
+		e.route.GroupID,
+		e.brokers,
+		e.scanEvery,
+		e.scanBatch,
+	)
+	if err := kafkabus.WaitTopicReady(ctx, e.brokers, e.route.Topic, 30*time.Second); err != nil {
 		log.Printf("Kafka topic not ready before consume loop start: %v", err)
 	} else {
-		log.Printf("Kafka topic is ready: %s", e.topic)
+		log.Printf("Kafka topic is ready: %s", e.route.Topic)
 	}
 
 	e.StartDispatch(ctx)
@@ -149,11 +164,6 @@ func (e *Engine) Start(ctx context.Context) {
 }
 
 // StartDispatch 单独启动 outbox -> Kafka 的投递循环。
-//
-// 职责边界：
-// 1. 只负责启动 dispatch 后台 goroutine，不负责启动 Kafka 消费；
-// 2. 不重复执行 Start 中的 topic readiness 等待，避免改变原 Start(ctx) 的启动语义；
-// 3. ctx 取消后由内部循环自行退出，调用方无需额外停止 goroutine。
 func (e *Engine) StartDispatch(ctx context.Context) {
 	if e == nil {
 		return
@@ -162,11 +172,6 @@ func (e *Engine) StartDispatch(ctx context.Context) {
 }
 
 // StartConsume 单独启动 Kafka -> handler 的消费循环。
-//
-// 职责边界：
-// 1. 只负责启动 consume 后台 goroutine，不负责扫描或投递 outbox；
-// 2. 不注册业务 handler，handler 仍由 RegisterEventHandler 显式注入；
-// 3. ctx 取消或 consumer 返回 context.Canceled 时，内部循环按既有逻辑退出。
 func (e *Engine) StartConsume(ctx context.Context) {
 	if e == nil {
 		return
@@ -202,7 +207,7 @@ func (e *Engine) Enqueue(ctx context.Context, eventType, messageKey string, payl
 // 步骤：
 // 1. 标准化 event_type/version/key；
 // 2. payload 序列化；
-// 3. 写入 outbox（仅本地写库，不做 kafka 网络 IO）。
+// 3. 写入当前服务的 outbox 表，不再由调用方手传 topic。
 func (e *Engine) Publish(ctx context.Context, req PublishRequest) error {
 	if e == nil {
 		return errors.New("outbox engine is nil")
@@ -227,7 +232,7 @@ func (e *Engine) Publish(ctx context.Context, req PublishRequest) error {
 		return err
 	}
 
-	_, err = e.repo.CreateMessage(ctx, eventType, e.topic, messageKey, OutboxEventPayload{
+	_, err = e.repo.CreateMessage(ctx, eventType, messageKey, OutboxEventPayload{
 		EventID:      strings.TrimSpace(req.EventID),
 		EventType:    eventType,
 		EventVersion: eventVersion,
@@ -246,13 +251,13 @@ func (e *Engine) startDispatchLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			pendingMessages, err := e.repo.ListDueMessages(ctx, e.scanBatch)
+			pendingMessages, err := e.repo.ListDueMessages(ctx, e.route.ServiceName, e.scanBatch)
 			if err != nil {
 				log.Printf("扫描 outbox 失败: %v", err)
 				continue
 			}
 			if len(pendingMessages) > 0 {
-				log.Printf("outbox due messages=%d, start dispatch", len(pendingMessages))
+				log.Printf("outbox due messages=%d, service=%s start dispatch", len(pendingMessages), e.route.ServiceName)
 			}
 
 			for _, msg := range pendingMessages {
@@ -287,18 +292,23 @@ func (e *Engine) dispatchOne(ctx context.Context, outboxID int64) error {
 	if eventPayload.EventID == "" {
 		eventPayload.EventID = strconv.FormatInt(outboxMsg.ID, 10)
 	}
+	serviceName := strings.TrimSpace(outboxMsg.ServiceName)
+	if serviceName == "" {
+		serviceName = e.route.ServiceName
+	}
 
 	envelope := kafkabus.Envelope{
 		OutboxID:     outboxMsg.ID,
 		EventID:      eventPayload.EventID,
 		EventType:    eventPayload.EventType,
 		EventVersion: eventPayload.EventVersion,
+		ServiceName:  serviceName,
 		AggregateID:  eventPayload.AggregateID,
 		Payload:      eventPayload.PayloadJSON,
 	}
 	raw, err := json.Marshal(envelope)
 	if err != nil {
-		markErr := e.repo.MarkDead(ctx, outboxMsg.ID, "序列化 outbox 包装失败: "+err.Error())
+		markErr := e.repo.MarkDead(ctx, outboxMsg.ID, "序列化 outbox 封装失败: "+err.Error())
 		if markErr != nil {
 			log.Printf("标记 outbox 死信失败(id=%d): %v", outboxMsg.ID, markErr)
 		}
@@ -329,7 +339,7 @@ func (e *Engine) startConsumeLoop(ctx context.Context) {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
-			log.Printf("Kafka 消费拉取失败(topic=%s): %v", e.topic, err)
+			log.Printf("Kafka 消费拉取失败(topic=%s): %v", e.route.Topic, err)
 			time.Sleep(300 * time.Millisecond)
 			continue
 		}
@@ -344,11 +354,11 @@ func (e *Engine) handleMessage(ctx context.Context, msg segmentkafka.Message) er
 	var envelope kafkabus.Envelope
 	if err := json.Unmarshal(msg.Value, &envelope); err != nil {
 		_ = e.consumer.Commit(ctx, msg)
-		return fmt.Errorf("解析 Kafka 包装失败: %w", err)
+		return fmt.Errorf("解析 Kafka 封装失败: %w", err)
 	}
 	if envelope.OutboxID <= 0 {
 		_ = e.consumer.Commit(ctx, msg)
-		return errors.New("Kafka 包装缺少 outbox_id")
+		return errors.New("Kafka 封装缺少 outbox_id")
 	}
 
 	eventType := strings.TrimSpace(envelope.EventType)
@@ -360,9 +370,36 @@ func (e *Engine) handleMessage(ctx context.Context, msg segmentkafka.Message) er
 		return nil
 	}
 
+	runtimeServiceName := strings.TrimSpace(e.route.ServiceName)
+	if runtimeServiceName != "" {
+		messageServiceName := strings.TrimSpace(envelope.ServiceName)
+		if messageServiceName == "" {
+			if resolvedServiceName, ok := ResolveEventService(eventType); ok {
+				messageServiceName = resolvedServiceName
+			}
+		}
+		if messageServiceName == "" || messageServiceName != runtimeServiceName {
+			log.Printf(
+				"跳过非本服务事件: runtime_service=%s message_service=%s event_type=%s outbox_id=%d",
+				runtimeServiceName,
+				messageServiceName,
+				eventType,
+				envelope.OutboxID,
+			)
+			if err := e.consumer.Commit(ctx, msg); err != nil {
+				return err
+			}
+			return nil
+		}
+	}
+
 	handler, ok := e.getHandler(eventType)
 	if !ok {
-		_ = e.repo.MarkDead(ctx, envelope.OutboxID, "未知事件类型: "+eventType)
+		if runtimeServiceName == "" {
+			_ = e.repo.MarkDead(ctx, envelope.OutboxID, "未知事件类型: "+eventType)
+		} else {
+			_ = e.repo.MarkDead(ctx, envelope.OutboxID, "本服务未注册 handler: "+eventType)
+		}
 		if err := e.consumer.Commit(ctx, msg); err != nil {
 			return err
 		}
@@ -380,4 +417,52 @@ func (e *Engine) handleMessage(ctx context.Context, msg segmentkafka.Message) er
 	}
 
 	return e.consumer.Commit(ctx, msg)
+}
+
+func resolveEngineRoute(repo *Repository, cfg kafkabus.Config) ServiceRoute {
+	route := ServiceRoute{
+		ServiceName: strings.TrimSpace(cfg.ServiceName),
+		Topic:       strings.TrimSpace(cfg.Topic),
+		GroupID:     strings.TrimSpace(cfg.GroupID),
+	}
+	if repo != nil {
+		repoRoute := normalizeServiceRoute(repo.route)
+		if route.ServiceName == "" {
+			route.ServiceName = repoRoute.ServiceName
+		}
+		if route.TableName == "" {
+			route.TableName = repoRoute.TableName
+		}
+		if route.Topic == "" {
+			route.Topic = repoRoute.Topic
+		}
+		if route.GroupID == "" {
+			route.GroupID = repoRoute.GroupID
+		}
+	}
+
+	if route.ServiceName != "" {
+		defaultRoute := DefaultServiceRoute(route.ServiceName)
+		if route.TableName == "" {
+			route.TableName = defaultRoute.TableName
+		}
+		if route.Topic == "" {
+			route.Topic = defaultRoute.Topic
+		}
+		if route.GroupID == "" {
+			route.GroupID = defaultRoute.GroupID
+		}
+		return normalizeServiceRoute(route)
+	}
+
+	if route.TableName == "" {
+		route.TableName = DefaultServiceRoute(ServiceNameAgent).TableName
+	}
+	if route.Topic == "" {
+		route.Topic = kafkabus.DefaultTopic
+	}
+	if route.GroupID == "" {
+		route.GroupID = kafkabus.DefaultGroup
+	}
+	return normalizeServiceRoute(route)
 }

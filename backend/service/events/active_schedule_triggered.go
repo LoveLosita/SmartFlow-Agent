@@ -32,7 +32,7 @@ type ActiveScheduleTriggeredProcessor interface {
 // 3. 若事务返回 error，则 best-effort 回写 trigger failed，并把错误交给 outbox 做 retry；
 // 4. 这里不直接 import active_scheduler 的具体实现，避免 service/events 和业务编排层互相反向耦合。
 func RegisterActiveScheduleTriggeredHandler(
-	bus *outboxinfra.EventBus,
+	bus OutboxBus,
 	outboxRepo *outboxinfra.Repository,
 	processor ActiveScheduleTriggeredProcessor,
 ) error {
@@ -45,24 +45,28 @@ func RegisterActiveScheduleTriggeredHandler(
 	if processor == nil {
 		return errors.New("active schedule triggered processor is nil")
 	}
+	eventOutboxRepo, err := scopedOutboxRepoForEvent(outboxRepo, sharedevents.ActiveScheduleTriggeredEventType)
+	if err != nil {
+		return err
+	}
 
 	handler := func(ctx context.Context, envelope kafkabus.Envelope) error {
 		if !isAllowedTriggeredEventVersion(envelope.EventVersion) {
-			_ = outboxRepo.MarkDead(ctx, envelope.OutboxID, fmt.Sprintf("active_schedule.triggered 版本不受支持: %s", envelope.EventVersion))
+			_ = eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, fmt.Sprintf("active_schedule.triggered 版本不受支持: %s", envelope.EventVersion))
 			return nil
 		}
 
 		var payload sharedevents.ActiveScheduleTriggeredPayload
 		if unmarshalErr := json.Unmarshal(envelope.Payload, &payload); unmarshalErr != nil {
-			_ = outboxRepo.MarkDead(ctx, envelope.OutboxID, "解析 active_schedule.triggered 载荷失败: "+unmarshalErr.Error())
+			_ = eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, "解析 active_schedule.triggered 载荷失败: "+unmarshalErr.Error())
 			return nil
 		}
 		if validateErr := payload.Validate(); validateErr != nil {
-			_ = outboxRepo.MarkDead(ctx, envelope.OutboxID, "active_schedule.triggered 载荷非法: "+validateErr.Error())
+			_ = eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, "active_schedule.triggered 载荷非法: "+validateErr.Error())
 			return nil
 		}
 
-		err := outboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
+		err := eventOutboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
 			return processor.ProcessTriggeredInTx(ctx, tx, payload)
 		})
 		if err != nil {

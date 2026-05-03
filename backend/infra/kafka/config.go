@@ -19,6 +19,8 @@ type Config struct {
 	Brokers []string
 	Topic   string
 	GroupID string
+	// ServiceName 表示当前进程所属的 outbox 服务；为空时保持单体全量模式。
+	ServiceName string
 	// RetryScanInterval/RetryBatchSize/MaxRetry 作用于 outbox 扫描与失败重试。
 	RetryScanInterval time.Duration
 	RetryBatchSize    int
@@ -40,9 +42,13 @@ func LoadConfig() Config {
 		Brokers:           brokers,
 		Topic:             strings.TrimSpace(viper.GetString("kafka.topic")),
 		GroupID:           strings.TrimSpace(viper.GetString("kafka.groupID")),
+		ServiceName:       strings.TrimSpace(viper.GetString("outbox.serviceName")),
 		RetryScanInterval: viper.GetDuration("kafka.retryScanInterval"),
 		RetryBatchSize:    viper.GetInt("kafka.retryBatchSize"),
 		MaxRetry:          viper.GetInt("kafka.maxRetry"),
+	}
+	if cfg.ServiceName == "" {
+		cfg.ServiceName = strings.TrimSpace(viper.GetString("kafka.serviceName"))
 	}
 	if cfg.Topic == "" {
 		cfg.Topic = DefaultTopic

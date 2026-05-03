@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 
+	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/spf13/viper"
 	"gorm.io/driver/mysql"
@@ -26,7 +27,6 @@ func autoMigrateModels(db *gorm.DB) error {
 		&model.ActiveSchedulePreview{},
 		&model.NotificationRecord{},
 		&model.UserNotificationChannel{},
-		&model.AgentOutboxMessage{},
 		&model.AgentScheduleState{},
 		&model.ActiveScheduleSession{},
 		&model.AgentStateSnapshotRecord{},
@@ -41,8 +41,32 @@ func autoMigrateModels(db *gorm.DB) error {
 			return fmt.Errorf("auto migrate failed for %T: %w", m, err)
 		}
 	}
+	if err := autoMigrateOutboxTables(db); err != nil {
+		return err
+	}
 	if err := backfillAutoMigrateData(db); err != nil {
 		return err
+	}
+	return nil
+}
+
+// autoMigrateOutboxTables 按服务目录一次性创建各服务的 outbox 物理表。
+//
+// 职责边界：
+// 1. 只创建 outbox 目录，不改写业务表；
+// 2. 每张表都复用同一套模型结构，保证字段和索引一致；
+// 3. 这里显式列出服务目录，避免把共享单表误当成终态。
+func autoMigrateOutboxTables(db *gorm.DB) error {
+	// 1. 这里必须按服务目录读取最终生效的 table 名，而不能只看默认内置映射。
+	// 2. 这样即使后续通过配置覆盖 outbox.services.*.table，启动建表也会和运行时写入保持一致。
+	for _, serviceName := range outboxinfra.ServiceNames() {
+		cfg, ok := outboxinfra.ResolveServiceConfig(serviceName)
+		if !ok {
+			return fmt.Errorf("resolve outbox config failed for service %s", serviceName)
+		}
+		if err := db.Table(cfg.TableName).AutoMigrate(&model.AgentOutboxMessage{}); err != nil {
+			return fmt.Errorf("auto migrate outbox table failed for %s (%s): %w", cfg.Name, cfg.TableName, err)
+		}
 	}
 	return nil
 }

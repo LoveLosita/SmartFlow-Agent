@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
 	"github.com/LoveLosita/smartflow/backend/model"
 	sharedevents "github.com/LoveLosita/smartflow/backend/shared/events"
@@ -25,13 +24,13 @@ const requestedNotificationDedupeWindow = 30 * time.Minute
 func EnqueueActiveScheduleTriggeredInTx(
 	ctx context.Context,
 	outboxRepo *outboxinfra.Repository,
-	kafkaCfg kafkabus.Config,
+	maxRetry int,
 	payload sharedevents.ActiveScheduleTriggeredPayload,
 ) error {
 	return enqueueContractEventInTx(
 		ctx,
 		outboxRepo,
-		kafkaCfg,
+		maxRetry,
 		sharedevents.ActiveScheduleTriggeredEventType,
 		sharedevents.ActiveScheduleTriggeredEventVersion,
 		payload.MessageKey(),
@@ -51,13 +50,13 @@ func EnqueueActiveScheduleTriggeredInTx(
 func EnqueueNotificationFeishuRequestedInTx(
 	ctx context.Context,
 	outboxRepo *outboxinfra.Repository,
-	kafkaCfg kafkabus.Config,
+	maxRetry int,
 	payload sharedevents.FeishuNotificationRequestedPayload,
 ) error {
 	return enqueueContractEventInTx(
 		ctx,
 		outboxRepo,
-		kafkaCfg,
+		maxRetry,
 		sharedevents.NotificationFeishuRequestedEventType,
 		sharedevents.NotificationFeishuRequestedEventVersion,
 		payload.MessageKey(),
@@ -156,7 +155,7 @@ func BuildNotificationDedupeKey(userID int, triggerType string, requestedAt time
 func enqueueContractEventInTx(
 	ctx context.Context,
 	outboxRepo *outboxinfra.Repository,
-	kafkaCfg kafkabus.Config,
+	maxRetry int,
 	eventType string,
 	eventVersion string,
 	messageKey string,
@@ -179,8 +178,10 @@ func enqueueContractEventInTx(
 	if err != nil {
 		return err
 	}
+	if maxRetry <= 0 {
+		maxRetry = 20
+	}
 
-	cfg := normalizeKafkaConfig(kafkaCfg)
 	wrapped := outboxinfra.OutboxEventPayload{
 		EventID:      strings.TrimSpace(eventID),
 		EventType:    eventType,
@@ -188,18 +189,10 @@ func enqueueContractEventInTx(
 		AggregateID:  strings.TrimSpace(aggregateID),
 		Payload:      payloadJSON,
 	}
-	_, err = outboxRepo.CreateMessage(ctx, eventType, cfg.Topic, strings.TrimSpace(messageKey), wrapped, cfg.MaxRetry)
+	// 1. 这里只负责把已经校验过的事件契约写入 outbox；具体 service/table/topic 由仓库按 eventType 解析。
+	// 2. 这样 active scheduler 侧不再显式依赖 topic，后续切服务级路由时只需要维护事件归属表。
+	_, err = outboxRepo.CreateMessage(ctx, eventType, strings.TrimSpace(messageKey), wrapped, maxRetry)
 	return err
-}
-
-func normalizeKafkaConfig(cfg kafkabus.Config) kafkabus.Config {
-	if strings.TrimSpace(cfg.Topic) == "" {
-		cfg.Topic = kafkabus.DefaultTopic
-	}
-	if cfg.MaxRetry <= 0 {
-		cfg.MaxRetry = 20
-	}
-	return cfg
 }
 
 func buildNotificationFallbackText(summary string, targetURL string) string {

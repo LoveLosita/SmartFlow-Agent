@@ -1,9 +1,13 @@
 // Package routers 路由配置
-// 定义所有HTTP路由和路由组
+// 定义所有 HTTP 路由和路由组
 package routers
 
 import (
+	"context"
+	"errors"
 	"log"
+	"net/http"
+	"time"
 
 	"github.com/LoveLosita/smartflow/backend/api"
 	"github.com/LoveLosita/smartflow/backend/dao"
@@ -13,23 +17,45 @@ import (
 	"github.com/spf13/viper"
 )
 
-// StartEngine 注册路由
-func StartEngine(r *gin.Engine) {
-	// 从配置中获取端口
+// StartEngine 启动 HTTP 服务，并在上下文取消时尽量优雅退出。
+func StartEngine(ctx context.Context, r *gin.Engine) {
+	// 1. 先解析端口，保持和历史行为一致。
+	// 2. 再用 http.Server 托管 gin engine，方便在取消信号到来时执行 Shutdown。
 	port := viper.GetString("server.port")
 	if port == "" {
-		port = "8080" // 默认端口
+		port = "8080"
 	}
 
-	// 启动服务器
-	log.Printf("Server starting on port %s...", port)
-	if err := r.Run(":" + port); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: r,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		log.Printf("Server starting on port %s...", port)
+		errCh <- srv.ListenAndServe()
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("Failed to shutdown server gracefully: %v", err)
+		}
+		if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("Failed to start server: %v", err)
+		}
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("Failed to start server: %v", err)
+		}
 	}
 }
 
 func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, userRepo *dao.UserDAO, limiter *pkg.RateLimiter) *gin.Engine {
-	// 初始化Gin引擎
+	// 初始化 Gin 引擎
 	r := gin.Default()
 	// 在这里注册所有的路由和路由组
 	apiGroup := r.Group("/api/v1")
@@ -130,7 +156,7 @@ func RegisterRouters(handlers *api.ApiHandlers, cache *dao.CacheDAO, userRepo *d
 			notificationGroup.POST("/channels/feishu/test", handlers.Notification.TestFeishuWebhook)
 		}
 	}
-	// 初始化Gin引擎
+	// 初始化 Gin 引擎
 	log.Println("Routes setup completed")
 	return r
 }

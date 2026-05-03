@@ -31,7 +31,7 @@ const (
 // 2. 只处理 `task.urgency.promote.requested` 事件，不处理其他业务事件；
 // 3. 通过 `ConsumeAndMarkConsumed` 把“业务更新 + outbox consumed 推进”放进同一事务。
 func RegisterTaskUrgencyPromoteHandler(
-	bus *outboxinfra.EventBus,
+	bus OutboxBus,
 	outboxRepo *outboxinfra.Repository,
 	repoManager *dao.RepoManager,
 ) error {
@@ -45,25 +45,29 @@ func RegisterTaskUrgencyPromoteHandler(
 	if repoManager == nil {
 		return errors.New("repo manager is nil")
 	}
+	eventOutboxRepo, err := scopedOutboxRepoForEvent(outboxRepo, EventTypeTaskUrgencyPromoteRequested)
+	if err != nil {
+		return err
+	}
 
 	// 2. 定义统一处理函数。
 	handler := func(ctx context.Context, envelope kafkabus.Envelope) error {
 		// 2.1 先解析 payload；解析失败属于不可恢复错误，直接标记 dead。
 		var payload model.TaskUrgencyPromoteRequestedPayload
 		if unmarshalErr := json.Unmarshal(envelope.Payload, &payload); unmarshalErr != nil {
-			_ = outboxRepo.MarkDead(ctx, envelope.OutboxID, "解析任务紧急性平移载荷失败: "+unmarshalErr.Error())
+			_ = eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, "解析任务紧急性平移载荷失败: "+unmarshalErr.Error())
 			return nil
 		}
 
 		// 2.2 做轻量参数净化，避免脏数据进入 DAO。
 		payload.TaskIDs = sanitizePositiveUniqueIntIDs(payload.TaskIDs)
 		if payload.UserID <= 0 || len(payload.TaskIDs) == 0 {
-			_ = outboxRepo.MarkDead(ctx, envelope.OutboxID, "任务紧急性平移载荷无效: user_id 或 task_ids 非法")
+			_ = eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, "任务紧急性平移载荷无效: user_id 或 task_ids 非法")
 			return nil
 		}
 
 		// 2.3 统一走 outbox 消费事务入口，保证“业务成功 -> consumed”原子一致。
-		return outboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
+		return eventOutboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
 			// 2.3.1 基于同一 tx 构造 RepoManager，复用现有跨 DAO 事务模式。
 			txM := repoManager.WithTx(tx)
 			// 2.3.2 以消费时刻为准做条件更新，确保“到线”判定与真实落库时刻一致。

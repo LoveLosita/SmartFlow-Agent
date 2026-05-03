@@ -18,6 +18,8 @@ type Envelope struct {
 	EventType string `json:"event_type"`
 	// EventVersion 是事件版本号（默认 v1）。
 	EventVersion string `json:"event_version,omitempty"`
+	// ServiceName 是事件归属服务；空值通常表示旧兼容消息或全量模式。
+	ServiceName string `json:"service_name,omitempty"`
 	// AggregateID 是聚合主键（例如 conversation_id），用于追踪同一业务对象事件流。
 	AggregateID string `json:"aggregate_id,omitempty"`
 

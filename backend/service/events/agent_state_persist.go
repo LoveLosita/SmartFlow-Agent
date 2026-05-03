@@ -35,7 +35,7 @@ type AgentStateSnapshotPayload struct {
 // 2. 使用 upsert 语义，同一 conversation_id 只保留最新快照；
 // 3. 通过 outbox 通用消费事务保证"业务写入 + consumed 推进"原子一致。
 func RegisterAgentStateSnapshotHandler(
-	bus *outboxinfra.EventBus,
+	bus OutboxBus,
 	outboxRepo *outboxinfra.Repository,
 	repoManager *dao.RepoManager,
 ) error {
@@ -48,15 +48,19 @@ func RegisterAgentStateSnapshotHandler(
 	if repoManager == nil {
 		return errors.New("repo manager is nil")
 	}
+	eventOutboxRepo, err := scopedOutboxRepoForEvent(outboxRepo, EventTypeAgentStateSnapshotPersist)
+	if err != nil {
+		return err
+	}
 
 	handler := func(ctx context.Context, envelope kafkabus.Envelope) error {
 		var payload AgentStateSnapshotPayload
 		if unmarshalErr := json.Unmarshal(envelope.Payload, &payload); unmarshalErr != nil {
-			_ = outboxRepo.MarkDead(ctx, envelope.OutboxID, "解析快照载荷失败: "+unmarshalErr.Error())
+			_ = eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, "解析快照载荷失败: "+unmarshalErr.Error())
 			return nil
 		}
 
-		return outboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
+		return eventOutboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
 			record := model.AgentStateSnapshotRecord{
 				ConversationID: payload.ConversationID,
 				UserID:         payload.UserID,

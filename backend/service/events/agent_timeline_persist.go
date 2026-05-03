@@ -25,7 +25,7 @@ const EventTypeAgentTimelinePersistRequested = "agent.timeline.persist.requested
 // 3. 通过 outbox 通用消费事务，把“时间线写库 + consumed 推进”放进同一事务；
 // 4. 若遇到 seq 唯一键冲突，会先判定是否属于重放幂等，再决定是否补新 seq 并回填 Redis。
 func RegisterAgentTimelinePersistHandler(
-	bus *outboxinfra.EventBus,
+	bus OutboxBus,
 	outboxRepo *outboxinfra.Repository,
 	agentRepo *dao.AgentDAO,
 	cacheDAO *dao.CacheDAO,
@@ -40,12 +40,16 @@ func RegisterAgentTimelinePersistHandler(
 	if agentRepo == nil {
 		return errors.New("agent repo is nil")
 	}
+	eventOutboxRepo, err := scopedOutboxRepoForEvent(outboxRepo, EventTypeAgentTimelinePersistRequested)
+	if err != nil {
+		return err
+	}
 
 	handler := func(ctx context.Context, envelope kafkabus.Envelope) error {
 		var payload model.ChatTimelinePersistPayload
 		if unmarshalErr := json.Unmarshal(envelope.Payload, &payload); unmarshalErr != nil {
 			// 1. payload 无法反序列化属于不可恢复错误，直接标 dead，避免无意义重试。
-			_ = outboxRepo.MarkDead(ctx, envelope.OutboxID, "解析时间线持久化载荷失败: "+unmarshalErr.Error())
+			_ = eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, "解析时间线持久化载荷失败: "+unmarshalErr.Error())
 			return nil
 		}
 
@@ -53,7 +57,7 @@ func RegisterAgentTimelinePersistHandler(
 		if !payload.HasValidIdentity() {
 			// 2. 这里只校验“能否唯一定位一条 timeline 记录”的最小字段集合。
 			// 3. content / payload_json 是否为空由事件类型自行决定，不在这里一刀切限制。
-			_ = outboxRepo.MarkDead(ctx, envelope.OutboxID, "时间线持久化载荷非法: user_id/conversation_id/seq/kind 非法")
+			_ = eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, "时间线持久化载荷非法: user_id/conversation_id/seq/kind 非法")
 			return nil
 		}
 
@@ -61,7 +65,7 @@ func RegisterAgentTimelinePersistHandler(
 		finalSeq := payload.Seq
 
 		// 4. 统一走 outbox 消费事务入口，保证“业务写入成功 -> consumed”原子一致。
-		err := outboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
+		err := eventOutboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
 			finalPayload, repaired, persistErr := persistConversationTimelineEventInTx(ctx, tx, agentRepo.WithTx(tx), payload)
 			if persistErr != nil {
 				return persistErr

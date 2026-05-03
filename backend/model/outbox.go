@@ -22,10 +22,11 @@ const (
 type AgentOutboxMessage struct {
 	ID int64 `gorm:"column:id;primaryKey;autoIncrement"`
 
-	EventType  string `gorm:"column:biz_type;type:varchar(64);not null;index:idx_outbox_status_next,priority:3;comment:事件类型"`
-	Topic      string `gorm:"column:topic;type:varchar(128);not null;comment:Kafka Topic"`
-	MessageKey string `gorm:"column:message_key;type:varchar(128);not null;comment:Kafka 消息键"`
-	Payload    string `gorm:"column:payload;type:longtext;not null;comment:业务载荷(JSON)"`
+	EventType   string `gorm:"column:biz_type;type:varchar(64);not null;index:idx_outbox_status_next,priority:3;comment:事件类型"`
+	ServiceName string `gorm:"column:service_name;type:varchar(64);not null;default:'';index:idx_outbox_service_name,priority:1;comment:所属服务"`
+	Topic       string `gorm:"column:topic;type:varchar(128);not null;comment:Kafka Topic"`
+	MessageKey  string `gorm:"column:message_key;type:varchar(128);not null;comment:Kafka 消息键"`
+	Payload     string `gorm:"column:payload;type:longtext;not null;comment:业务载荷(JSON)"`
 
 	Status      string     `gorm:"column:status;type:varchar(32);not null;index:idx_outbox_status_next,priority:1;comment:pending/published/consumed/dead"`
 	RetryCount  int        `gorm:"column:retry_count;not null;default:0;comment:已重试次数"`
@@ -40,5 +41,8 @@ type AgentOutboxMessage struct {
 }
 
 func (AgentOutboxMessage) TableName() string {
+	// 1. 这里保留历史兼容默认表名，避免非 outbox 基础设施调用直接失效。
+	// 2. 服务级多表路由由 backend/infra/outbox 显式通过 db.Table(...) 控制。
+	// 3. 这样既能兼容旧代码，也不会把共享单表当成终态。
 	return "agent_outbox_messages"
 }

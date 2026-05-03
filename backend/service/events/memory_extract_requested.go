@@ -33,7 +33,7 @@ const (
 // 2. 不在消费回调里执行 LLM 重计算；
 // 3. 通过 memory.Module.WithTx(tx) 复用同一套接入门面，保证事务边界仍由 outbox 掌控。
 func RegisterMemoryExtractRequestedHandler(
-	bus *outboxinfra.EventBus,
+	bus OutboxBus,
 	outboxRepo *outboxinfra.Repository,
 	memoryModule *memory.Module,
 ) error {
@@ -46,20 +46,24 @@ func RegisterMemoryExtractRequestedHandler(
 	if memoryModule == nil {
 		return errors.New("memory module is nil")
 	}
+	eventOutboxRepo, err := scopedOutboxRepoForEvent(outboxRepo, EventTypeMemoryExtractRequested)
+	if err != nil {
+		return err
+	}
 
 	handler := func(ctx context.Context, envelope kafkabus.Envelope) error {
 		var payload model.MemoryExtractRequestedPayload
 		if unmarshalErr := json.Unmarshal(envelope.Payload, &payload); unmarshalErr != nil {
-			_ = outboxRepo.MarkDead(ctx, envelope.OutboxID, "解析记忆抽取载荷失败: "+unmarshalErr.Error())
+			_ = eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, "解析记忆抽取载荷失败: "+unmarshalErr.Error())
 			return nil
 		}
 
 		if validateErr := validateMemoryExtractPayload(payload); validateErr != nil {
-			_ = outboxRepo.MarkDead(ctx, envelope.OutboxID, "记忆抽取载荷非法: "+validateErr.Error())
+			_ = eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, "记忆抽取载荷非法: "+validateErr.Error())
 			return nil
 		}
 
-		return outboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
+		return eventOutboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
 			jobPayload := memorymodel.ExtractJobPayload{
 				UserID:          payload.UserID,
 				ConversationID:  strings.TrimSpace(payload.ConversationID),
@@ -87,7 +91,7 @@ func RegisterMemoryExtractRequestedHandler(
 func EnqueueMemoryExtractRequestedInTx(
 	ctx context.Context,
 	outboxRepo *outboxinfra.Repository,
-	kafkaCfg kafkabus.Config,
+	maxRetry int,
 	chatPayload model.ChatHistoryPersistPayload,
 ) error {
 	if !isMemoryWriteEnabled() {
@@ -107,6 +111,10 @@ func EnqueueMemoryExtractRequestedInTx(
 		return err
 	}
 
+	if maxRetry <= 0 {
+		maxRetry = 20
+	}
+
 	outboxPayload := outboxinfra.OutboxEventPayload{
 		EventType:    EventTypeMemoryExtractRequested,
 		EventVersion: outboxinfra.DefaultEventVersion,
@@ -114,13 +122,14 @@ func EnqueueMemoryExtractRequestedInTx(
 		Payload:      payloadJSON,
 	}
 
+	// 1. 这里只传 eventType 与消息键，服务归属、outbox 表和 Kafka topic 统一交给仓库路由层解析。
+	// 2. 这样聊天持久化链路不会继续感知 memory 服务的物理 topic，避免拆服务时出现双写口径。
 	_, err = outboxRepo.CreateMessage(
 		ctx,
 		EventTypeMemoryExtractRequested,
-		kafkaCfg.Topic,
 		strings.TrimSpace(chatPayload.ConversationID),
 		outboxPayload,
-		kafkaCfg.MaxRetry,
+		maxRetry,
 	)
 	return err
 }

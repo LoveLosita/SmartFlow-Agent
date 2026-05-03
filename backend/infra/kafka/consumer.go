@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
+	"strings"
 
 	segmentkafka "github.com/segmentio/kafka-go"
 )
@@ -13,7 +14,13 @@ type Consumer struct {
 
 func NewConsumer(cfg Config) (*Consumer, error) {
 	if len(cfg.Brokers) == 0 {
-		return nil, errors.New("kafka brokers 未配置")
+		return nil, errors.New("kafka brokers not configured")
+	}
+	if strings.TrimSpace(cfg.Topic) == "" {
+		return nil, errors.New("kafka topic not configured")
+	}
+	if strings.TrimSpace(cfg.GroupID) == "" {
+		return nil, errors.New("kafka groupID not configured")
 	}
 	reader := segmentkafka.NewReader(segmentkafka.ReaderConfig{
 		Brokers:        cfg.Brokers,
@@ -30,14 +37,14 @@ func NewConsumer(cfg Config) (*Consumer, error) {
 // Dequeue 从 Kafka 拉取一条消息（不自动提交 offset）。
 func (c *Consumer) Dequeue(ctx context.Context) (segmentkafka.Message, error) {
 	if c == nil || c.reader == nil {
-		return segmentkafka.Message{}, errors.New("kafka consumer 未初始化")
+		return segmentkafka.Message{}, errors.New("kafka consumer not initialized")
 	}
 	return c.reader.FetchMessage(ctx)
 }
 
 func (c *Consumer) Commit(ctx context.Context, msg segmentkafka.Message) error {
 	if c == nil || c.reader == nil {
-		return errors.New("kafka consumer 未初始化")
+		return errors.New("kafka consumer not initialized")
 	}
 	return c.reader.CommitMessages(ctx, msg)
 }
