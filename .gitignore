@@ -19,6 +19,7 @@ backend/config.yaml
 *.log
 /tmp/
 /frontend/dist/
+/scripts/
 
 # 5. IDE 与系统文件
 .idea/

@@ -149,6 +149,9 @@ func (g *Generator) addTaskPoolCandidate(ctx *schedulercontext.ActiveScheduleCon
 }
 
 func (g *Generator) createMakeupCandidate(ctx *schedulercontext.ActiveScheduleContext) (Candidate, bool) {
+	if ctx == nil || ctx.FeedbackFacts.TargetTaskItemID <= 0 {
+		return Candidate{}, false
+	}
 	span, ok := firstContiguousFreeSpan(ctx.ScheduleFacts.FreeSlots, 1)
 	if !ok {
 		return Candidate{}, false
