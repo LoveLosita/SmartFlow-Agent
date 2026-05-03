@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/LoveLosita/smartflow/backend/infra/rag/core"
+	"github.com/LoveLosita/smartflow/backend/services/rag/core"
 )
 
 // TextChunker 是默认文本切块器。

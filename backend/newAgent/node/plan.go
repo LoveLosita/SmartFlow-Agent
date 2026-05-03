@@ -10,11 +10,11 @@ import (
 
 	"github.com/google/uuid"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagentrouter "github.com/LoveLosita/smartflow/backend/newAgent/router"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -34,7 +34,7 @@ type PlanNodeInput struct {
 	RuntimeState          *newagentmodel.AgentRuntimeState
 	ConversationContext   *newagentmodel.ConversationContext
 	UserInput             string
-	Client                *infrallm.Client
+	Client                *llmservice.Client
 	ChunkEmitter          *newagentstream.ChunkEmitter
 	ResumeNode            string
 	AlwaysExecute         bool                          // true 时计划生成后自动确认，不进入 confirm 节点
@@ -87,7 +87,7 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 	reader, err := input.Client.Stream(
 		ctx,
 		messages,
-		infrallm.GenerateOptions{
+		llmservice.GenerateOptions{
 			Temperature: 0.2,
 			// 显式设置上限，避免依赖框架默认值（默认 4096）导致长决策被截断。
 			// 注意：当前模型接口 max_tokens 上限为 131072，超过会 400。
@@ -149,7 +149,7 @@ func RunPlanNode(ctx context.Context, input PlanNodeInput) error {
 			return fmt.Errorf("规划解析失败，原始输出=%s", result.RawBuffer)
 		}
 
-		decision, parseErr := infrallm.ParseJSONObject[newagentmodel.PlanDecision](result.DecisionJSON)
+		decision, parseErr := llmservice.ParseJSONObject[newagentmodel.PlanDecision](result.DecisionJSON)
 		if parseErr != nil {
 			return fmt.Errorf("规划决策 JSON 解析失败: %w (raw=%s)", parseErr, result.RawBuffer)
 		}
@@ -390,9 +390,9 @@ func buildPinnedPlanText(steps []newagentmodel.PlanStep) string {
 
 // resolveThinkingMode 根据配置布尔值返回对应的 ThinkingMode。
 // 供 plan / execute / deliver 节点统一使用。
-func resolveThinkingMode(enabled bool) infrallm.ThinkingMode {
+func resolveThinkingMode(enabled bool) llmservice.ThinkingMode {
 	if enabled {
-		return infrallm.ThinkingModeEnabled
+		return llmservice.ThinkingModeEnabled
 	}
-	return infrallm.ThinkingModeDisabled
+	return llmservice.ThinkingModeDisabled
 }

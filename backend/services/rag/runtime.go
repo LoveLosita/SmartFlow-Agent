@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	ragconfig "github.com/LoveLosita/smartflow/backend/infra/rag/config"
-	"github.com/LoveLosita/smartflow/backend/infra/rag/core"
-	"github.com/LoveLosita/smartflow/backend/infra/rag/corpus"
+	ragconfig "github.com/LoveLosita/smartflow/backend/services/rag/config"
+	"github.com/LoveLosita/smartflow/backend/services/rag/core"
+	"github.com/LoveLosita/smartflow/backend/services/rag/corpus"
 )
 
 type runtime struct {
@@ -343,7 +343,7 @@ func (r *runtime) recoverPublicPanic(
 		return
 	}
 
-	// 1. runtime 是 RAG Infra 对业务侧暴露的最终方法面，任何下层 panic 都不应再穿透到业务协程。
+	// 1. runtime 是 RAG service 对业务侧暴露的最终方法面，任何下层 panic 都不应再穿透到业务协程。
 	// 2. 这里统一把 panic 转成 error，并补一条结构化观测，方便继续排查是哪一层依赖失控。
 	// 3. 保留 stack 是为了在“进程不崩”的前提下仍能定位根因，避免只剩一句 recovered 无法复盘。
 	panicErr := fmt.Errorf("rag runtime panic recovered: corpus=%s operation=%s panic=%v", corpusName, operation, recovered)

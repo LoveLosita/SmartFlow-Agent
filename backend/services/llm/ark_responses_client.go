@@ -11,11 +11,6 @@ import (
 )
 
 // ArkResponsesMessage 描述一次 Responses 输入消息。
-//
-// 职责边界：
-// 1. 负责表达角色与多模态内容（文本/图片）；
-// 2. 不负责业务 prompt 生成；
-// 3. 不负责输出 JSON 的字段校验。
 type ArkResponsesMessage struct {
 	Role        string
 	Text        string
@@ -23,7 +18,7 @@ type ArkResponsesMessage struct {
 	ImageDetail string
 }
 
-// ArkResponsesOptions 描述 Responses 生成选项。
+// ArkResponsesOptions 描述 Responses 调用参数。
 type ArkResponsesOptions struct {
 	Model           string
 	Temperature     float64
@@ -32,14 +27,14 @@ type ArkResponsesOptions struct {
 	TextFormat      string
 }
 
-// ArkResponsesUsage 统一透传 token 使用量。
+// ArkResponsesUsage 统一转写 token usage。
 type ArkResponsesUsage struct {
 	InputTokens  int64
 	OutputTokens int64
 	TotalTokens  int64
 }
 
-// ArkResponsesResult 是 Ark Responses 的统一输出结构。
+// ArkResponsesResult 是 Responses 调用的统一输出结构。
 type ArkResponsesResult struct {
 	Text             string
 	Status           string
@@ -56,11 +51,9 @@ type ArkResponsesClient struct {
 }
 
 // NewArkResponsesClient 创建 Ark SDK Responses 客户端。
-//
-// 说明：
-// 1. model 为空时返回 nil，表示当前能力未启用；
-// 2. baseURL 为空时使用 SDK 默认地址；
-// 3. 仅负责客户端创建，不做连通性探测。
+// 1. model 为空时直接返回 nil，表示这条能力没有启用。
+// 2. baseURL 为空时使用 SDK 默认地址。
+// 3. 这里只负责本地构造，不做连通性探测。
 func NewArkResponsesClient(apiKey string, baseURL string, model string) *ArkResponsesClient {
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -104,7 +97,7 @@ func (c *ArkResponsesClient) GenerateText(ctx context.Context, messages []ArkRes
 	return result, nil
 }
 
-// GenerateArkResponsesJSON 先调用 Responses，再解析为 JSON 结构体。
+// GenerateArkResponsesJSON 先调用 Responses，再解析成 JSON 结构体。
 func GenerateArkResponsesJSON[T any](ctx context.Context, client *ArkResponsesClient, messages []ArkResponsesMessage, options ArkResponsesOptions) (*T, *ArkResponsesResult, error) {
 	if client == nil {
 		return nil, nil, errors.New("ark responses client is not ready")

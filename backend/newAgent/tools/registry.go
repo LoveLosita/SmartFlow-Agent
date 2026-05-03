@@ -5,9 +5,9 @@ import (
 	"sort"
 	"strings"
 
-	infrarag "github.com/LoveLosita/smartflow/backend/infra/rag"
 	"github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
 	"github.com/LoveLosita/smartflow/backend/newAgent/tools/web"
+	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
 )
 
 // ToolHandler 约定所有工具的统一执行签名。
@@ -32,7 +32,7 @@ type ToolSchemaEntry struct {
 // 2. 某些依赖即便暂未使用也允许保留，避免业务层重新到处 new；
 // 3. 具体依赖缺失时由对应工具自行返回结构化失败结果。
 type DefaultRegistryDeps struct {
-	RAGRuntime infrarag.Runtime
+	RAGRuntime ragservice.Runtime
 
 	// WebSearchProvider 为 nil 时，web_search / web_fetch 仍会注册，
 	// 但 handler 会返回“暂未启用”的只读 observation，不阻断主流程。

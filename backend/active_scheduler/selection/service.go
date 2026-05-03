@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/active_scheduler/candidate"
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 )
 
 const selectionMaxTokens = 1200
@@ -22,7 +22,7 @@ const selectionMaxTokens = 1200
 // 2. LLM 失败、输出非法或选择不存在候选时，回退到后端 fallback candidate；
 // 3. 不写 preview、不发通知、不修改正式日程。
 type Service struct {
-	client *infrallm.Client
+	client *llmservice.Client
 	clock  func() time.Time
 	logger *log.Logger
 }
@@ -33,7 +33,7 @@ type Service struct {
 // 1. client 允许为空；为空时选择器只走确定性 fallback，便于本地测试和降级；
 // 2. 真正的模型接入在 cmd/start.go 中完成：aiHub.Pro -> llm.Client -> selection.Service；
 // 3. 选择器本身不持有模型配置，只表达本业务域的 prompt 和结果校验。
-func NewService(client *infrallm.Client) *Service {
+func NewService(client *llmservice.Client) *Service {
 	return &Service{
 		client: client,
 		clock:  time.Now,
@@ -70,19 +70,19 @@ func (s *Service) Select(ctx context.Context, req SelectRequest) (Result, error)
 		return buildFallbackResult(req, "选择器 prompt 构造失败: "+err.Error()), nil
 	}
 
-	messages := infrallm.BuildSystemUserMessages(
+	messages := llmservice.BuildSystemUserMessages(
 		strings.TrimSpace(selectionSystemPrompt),
 		nil,
 		userPrompt,
 	)
-	resp, rawResult, err := infrallm.GenerateJSON[llmSelectionResponse](
+	resp, rawResult, err := llmservice.GenerateJSON[llmSelectionResponse](
 		ctx,
 		s.client,
 		messages,
-		infrallm.GenerateOptions{
+		llmservice.GenerateOptions{
 			Temperature: 0.1,
 			MaxTokens:   selectionMaxTokens,
-			Thinking:    infrallm.ThinkingModeDisabled,
+			Thinking:    llmservice.ThinkingModeDisabled,
 			Metadata: map[string]any{
 				"stage":           "active_scheduler_select",
 				"candidate_count": len(req.Candidates),
@@ -275,7 +275,7 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func truncateRaw(raw *infrallm.TextResult) string {
+func truncateRaw(raw *llmservice.TextResult) string {
 	if raw == nil {
 		return ""
 	}

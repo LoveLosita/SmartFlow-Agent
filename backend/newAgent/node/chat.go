@@ -11,11 +11,11 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagentrouter "github.com/LoveLosita/smartflow/backend/newAgent/router"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 )
 
 const (
@@ -50,7 +50,7 @@ type ChatNodeInput struct {
 	UserInput             string
 	ConfirmAction         string
 	ResumeInteractionID   string
-	Client                *infrallm.Client
+	Client                *llmservice.Client
 	ChunkEmitter          *newagentstream.ChunkEmitter
 	CompactionStore       newagentmodel.CompactionStore // 上下文压缩持久化
 	PersistVisibleMessage newagentmodel.PersistVisibleMessageFunc
@@ -107,9 +107,9 @@ func RunChatNode(ctx context.Context, input ChatNodeInput) error {
 	})
 	logNodeLLMContext(chatStageName, "routing", flowState, messages)
 
-	reader, err := input.Client.Stream(ctx, messages, infrallm.GenerateOptions{
+	reader, err := input.Client.Stream(ctx, messages, llmservice.GenerateOptions{
 		Temperature: 0.7,
-		Thinking:    infrallm.ThinkingModeDisabled,
+		Thinking:    llmservice.ThinkingModeDisabled,
 		Metadata: map[string]any{
 			"stage": chatStageName,
 			"phase": "routing",
@@ -172,7 +172,7 @@ func isExecuteLoopClosedMarker(msg *schema.Message) bool {
 // 3. 控制码解析超时或流异常结束 → fallback 到 plan。
 func streamAndDispatch(
 	ctx context.Context,
-	reader infrallm.StreamReader,
+	reader llmservice.StreamReader,
 	parser *newagentrouter.StreamRouteParser,
 	input ChatNodeInput,
 	emitter *newagentstream.ChunkEmitter,
@@ -292,7 +292,7 @@ func resolveEffectiveThinking(mode string, route newagentmodel.ChatRoute, decisi
 // 2. thinking=true：关闭路由流，发起第二次 thinking 流式调用。
 func handleDirectReplyStream(
 	ctx context.Context,
-	reader infrallm.StreamReader,
+	reader llmservice.StreamReader,
 	input ChatNodeInput,
 	emitter *newagentstream.ChunkEmitter,
 	conversationContext *newagentmodel.ConversationContext,
@@ -309,7 +309,7 @@ func handleDirectReplyStream(
 // handleThinkingReplyStream 处理需要思考的回复：关闭路由流 → 第二次 thinking 流式调用。
 func handleThinkingReplyStream(
 	ctx context.Context,
-	reader infrallm.StreamReader,
+	reader llmservice.StreamReader,
 	input ChatNodeInput,
 	emitter *newagentstream.ChunkEmitter,
 	conversationContext *newagentmodel.ConversationContext,
@@ -327,10 +327,10 @@ func handleThinkingReplyStream(
 		StatusBlockID:   chatStatusBlockID,
 	})
 	logNodeLLMContext(chatStageName, "direct_reply_thinking", flowState, deepMessages)
-	deepReader, err := input.Client.Stream(ctx, deepMessages, infrallm.GenerateOptions{
+	deepReader, err := input.Client.Stream(ctx, deepMessages, llmservice.GenerateOptions{
 		Temperature: 0.5,
 		MaxTokens:   2000,
-		Thinking:    infrallm.ThinkingModeEnabled,
+		Thinking:    llmservice.ThinkingModeEnabled,
 		Metadata: map[string]any{
 			"stage": chatStageName,
 			"phase": "direct_reply_thinking",
@@ -363,7 +363,7 @@ func handleThinkingReplyStream(
 // handleDirectReplyContinueStream 处理无思考的闲聊：同一流续传。
 func handleDirectReplyContinueStream(
 	ctx context.Context,
-	reader infrallm.StreamReader,
+	reader llmservice.StreamReader,
 	input ChatNodeInput,
 	emitter *newagentstream.ChunkEmitter,
 	conversationContext *newagentmodel.ConversationContext,
@@ -419,7 +419,7 @@ func handleDirectReplyContinueStream(
 // 2. 推送轻量状态通知；
 // 3. 设置流程状态，进入 Execute 或 RoughBuild。
 func handleRouteExecuteStream(
-	reader infrallm.StreamReader,
+	reader llmservice.StreamReader,
 	emitter *newagentstream.ChunkEmitter,
 	flowState *newagentmodel.CommonState,
 	decision *newagentmodel.ChatRoutingDecision,
@@ -674,7 +674,7 @@ func isExplicitNoRefineAfterRoughBuildRequest(userInput string) bool {
 // 4. 完整回复写入 history。
 func handleDeepAnswerStream(
 	ctx context.Context,
-	reader infrallm.StreamReader,
+	reader llmservice.StreamReader,
 	input ChatNodeInput,
 	emitter *newagentstream.ChunkEmitter,
 	conversationContext *newagentmodel.ConversationContext,
@@ -685,9 +685,9 @@ func handleDeepAnswerStream(
 	_ = reader.Close()
 
 	// 2. 第二次流式调用。
-	thinkingOpt := infrallm.ThinkingModeDisabled
+	thinkingOpt := llmservice.ThinkingModeDisabled
 	if effectiveThinking {
-		thinkingOpt = infrallm.ThinkingModeEnabled
+		thinkingOpt = llmservice.ThinkingModeEnabled
 	}
 	deepMessages := newagentprompt.BuildDeepAnswerMessages(flowState, conversationContext, input.UserInput)
 	deepMessages = compactUnifiedMessagesIfNeeded(ctx, deepMessages, UnifiedCompactInput{
@@ -699,7 +699,7 @@ func handleDeepAnswerStream(
 		StatusBlockID:   chatStatusBlockID,
 	})
 	logNodeLLMContext(chatStageName, "deep_answer", flowState, deepMessages)
-	deepReader, err := input.Client.Stream(ctx, deepMessages, infrallm.GenerateOptions{
+	deepReader, err := input.Client.Stream(ctx, deepMessages, llmservice.GenerateOptions{
 		Temperature: 0.5,
 		MaxTokens:   2000,
 		Thinking:    thinkingOpt,
@@ -741,7 +741,7 @@ func handleDeepAnswerStream(
 
 // handleRoutePlanStream 处理规划路由：推送状态确认 → 设 PhasePlanning。
 func handleRoutePlanStream(
-	reader infrallm.StreamReader,
+	reader llmservice.StreamReader,
 	emitter *newagentstream.ChunkEmitter,
 	flowState *newagentmodel.CommonState,
 	effectiveThinking bool,

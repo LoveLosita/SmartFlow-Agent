@@ -6,10 +6,10 @@ import (
 	"log"
 	"strings"
 
-	infrarag "github.com/LoveLosita/smartflow/backend/infra/rag"
 	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	memoryrepo "github.com/LoveLosita/smartflow/backend/memory/repo"
 	"github.com/LoveLosita/smartflow/backend/model"
+	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
 )
 
 // Syncer 负责 memory_items 与向量库之间的最小桥接。
@@ -19,7 +19,7 @@ import (
 // 2. 不负责决定哪些记忆该写、该删、该恢复，这些决策仍由上游 service/worker/cleanup 控制；
 // 3. 同步失败时只回写 vector_status 并打观测，不反向回滚业务事务，避免把在线链路拖成强依赖。
 type Syncer struct {
-	ragRuntime infrarag.Runtime
+	ragRuntime ragservice.Runtime
 	itemRepo   *memoryrepo.ItemRepo
 	observer   memoryobserve.Observer
 	metrics    memoryobserve.MetricsRecorder
@@ -27,7 +27,7 @@ type Syncer struct {
 }
 
 func NewSyncer(
-	ragRuntime infrarag.Runtime,
+	ragRuntime ragservice.Runtime,
 	itemRepo *memoryrepo.ItemRepo,
 	observer memoryobserve.Observer,
 	metrics memoryobserve.MetricsRecorder,
@@ -53,9 +53,9 @@ func (s *Syncer) Upsert(ctx context.Context, traceID string, items []model.Memor
 		return
 	}
 
-	requestItems := make([]infrarag.MemoryIngestItem, 0, len(items))
+	requestItems := make([]ragservice.MemoryIngestItem, 0, len(items))
 	for _, item := range items {
-		requestItems = append(requestItems, infrarag.MemoryIngestItem{
+		requestItems = append(requestItems, ragservice.MemoryIngestItem{
 			MemoryID:         item.ID,
 			UserID:           item.UserID,
 			ConversationID:   strValue(item.ConversationID),
@@ -76,7 +76,7 @@ func (s *Syncer) Upsert(ctx context.Context, traceID string, items []model.Memor
 
 	result, err := s.ragRuntime.IngestMemory(memoryobserve.WithFields(ctx, map[string]any{
 		"trace_id": traceID,
-	}), infrarag.MemoryIngestRequest{
+	}), ragservice.MemoryIngestRequest{
 		TraceID: traceID,
 		Action:  "add",
 		Items:   requestItems,

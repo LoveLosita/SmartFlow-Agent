@@ -3,8 +3,8 @@ package service
 import (
 	"github.com/LoveLosita/smartflow/backend/dao"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	"github.com/LoveLosita/smartflow/backend/inits"
 	"github.com/LoveLosita/smartflow/backend/service/agentsvc"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 )
 
 // AgentService 是 service 层对 agentsvc.AgentService 的兼容别名。
@@ -20,7 +20,7 @@ type AgentService = agentsvc.AgentService
 // 2) 主动调度 session DAO 也在这里显式透传，避免聊天入口再去回查全局单例；
 // 3) 真实构造逻辑已下沉到 service/agentsvc 包。
 func NewAgentService(
-	aiHub *inits.AIHub,
+	llmService *llmservice.Service,
 	repo *dao.AgentDAO,
 	taskRepo *dao.TaskDAO,
 	cacheDAO *dao.CacheDAO,
@@ -29,7 +29,7 @@ func NewAgentService(
 	activeSessionDAO *dao.ActiveScheduleSessionDAO,
 	eventPublisher outboxinfra.EventPublisher,
 ) *AgentService {
-	return agentsvc.NewAgentService(aiHub, repo, taskRepo, cacheDAO, agentRedis, activeScheduleDAO, activeSessionDAO, eventPublisher)
+	return agentsvc.NewAgentService(llmService, repo, taskRepo, cacheDAO, agentRedis, activeScheduleDAO, activeSessionDAO, eventPublisher)
 }
 
 // NewAgentServiceWithSchedule 在基础 AgentService 上注入排程依赖。
@@ -39,7 +39,7 @@ func NewAgentService(
 // 2) 排程依赖为可选：未注入时排程路由自动回退到普通聊天；
 // 3) 主动调度 session DAO 仍沿用统一构造注入，避免排程分支自己拼装仓储。
 func NewAgentServiceWithSchedule(
-	aiHub *inits.AIHub,
+	llmService *llmservice.Service,
 	repo *dao.AgentDAO,
 	taskRepo *dao.TaskDAO,
 	cacheDAO *dao.CacheDAO,
@@ -50,7 +50,7 @@ func NewAgentServiceWithSchedule(
 	scheduleSvc *ScheduleService,
 	taskSvc *TaskService,
 ) *AgentService {
-	svc := agentsvc.NewAgentService(aiHub, repo, taskRepo, cacheDAO, agentRedis, activeScheduleDAO, activeSessionDAO, eventPublisher)
+	svc := agentsvc.NewAgentService(llmService, repo, taskRepo, cacheDAO, agentRedis, activeScheduleDAO, activeSessionDAO, eventPublisher)
 
 	// 注入排程依赖：将 service 层方法包装为函数闭包，避免循环依赖。
 	if scheduleSvc != nil {

@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
-	infrarag "github.com/LoveLosita/smartflow/backend/infra/rag"
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
 	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	memoryrepo "github.com/LoveLosita/smartflow/backend/memory/repo"
 	memoryutils "github.com/LoveLosita/smartflow/backend/memory/utils"
 	"github.com/LoveLosita/smartflow/backend/model"
+	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
 )
 
 const (
@@ -30,7 +30,7 @@ const (
 type ReadService struct {
 	itemRepo     *memoryrepo.ItemRepo
 	settingsRepo *memoryrepo.SettingsRepo
-	ragRuntime   infrarag.Runtime
+	ragRuntime   ragservice.Runtime
 	cfg          memorymodel.Config
 	observer     memoryobserve.Observer
 	metrics      memoryobserve.MetricsRecorder
@@ -57,7 +57,7 @@ type semanticRetrieveTelemetry struct {
 func NewReadService(
 	itemRepo *memoryrepo.ItemRepo,
 	settingsRepo *memoryrepo.SettingsRepo,
-	ragRuntime infrarag.Runtime,
+	ragRuntime ragservice.Runtime,
 	cfg memorymodel.Config,
 	observer memoryobserve.Observer,
 	metrics memoryobserve.MetricsRecorder,
@@ -347,7 +347,7 @@ func collectMemoryIDs(items []model.MemoryItem) []int64 {
 	return ids
 }
 
-func buildMemoryDTOFromRetrieveHit(hit infrarag.RetrieveHit) (memorymodel.ItemDTO, int64) {
+func buildMemoryDTOFromRetrieveHit(hit ragservice.RetrieveHit) (memorymodel.ItemDTO, int64) {
 	memoryID := parseMemoryIDFromDocumentID(hit.DocumentID)
 	metadata := hit.Metadata
 	content := strings.TrimSpace(hit.Text)

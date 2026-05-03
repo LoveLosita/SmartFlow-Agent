@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -24,7 +24,7 @@ const compactMsg1SystemPrompt = `你是一个对话压缩助手。你的任务�
 // existingSummary 不为空时表示已有旧摘要，需要合并压缩。
 func CompactMsg1(
 	ctx context.Context,
-	client *infrallm.Client,
+	client *llmservice.Client,
 	historyText string,
 	existingSummary string,
 ) (string, error) {
@@ -49,7 +49,7 @@ func CompactMsg1(
 		schema.UserMessage(userContent),
 	}
 
-	result, err := client.GenerateText(ctx, messages, infrallm.GenerateOptions{
+	result, err := client.GenerateText(ctx, messages, llmservice.GenerateOptions{
 		MaxTokens: 4000,
 	})
 	if err != nil {

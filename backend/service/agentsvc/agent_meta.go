@@ -11,10 +11,8 @@ import (
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
-	"github.com/cloudwego/eino-ext/components/model/ark"
-	einoModel "github.com/cloudwego/eino/components/model"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	"github.com/cloudwego/eino/schema"
-	arkModel "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
 )
 
 const (
@@ -253,11 +251,11 @@ func (s *AgentService) generateConversationTitle(ctx context.Context, history []
 	}
 
 	// 2. 标题生成属于结构化短输出，关闭 thinking 并限制 tokens，降低延迟与发散。
-	resp, err := modelInst.Generate(ctx, messages,
-		ark.WithThinking(&arkModel.Thinking{Type: arkModel.ThinkingTypeDisabled}),
-		einoModel.WithTemperature(0.2),
-		einoModel.WithMaxTokens(40),
-	)
+	resp, err := modelInst.GenerateText(ctx, messages, llmservice.GenerateOptions{
+		Temperature: 0.2,
+		MaxTokens:   40,
+		Thinking:    llmservice.ThinkingModeDisabled,
+	})
 	if err != nil {
 		return "", 0, err
 	}
@@ -267,26 +265,26 @@ func (s *AgentService) generateConversationTitle(ctx context.Context, history []
 
 	// 2.1 标题链路的 token 从模型响应 usage 中提取；缺失则按 0 处理，不影响主流程。
 	titleTokens := 0
-	if resp.ResponseMeta != nil && resp.ResponseMeta.Usage != nil {
+	if resp.Usage != nil {
 		titleTokens = normalizeUsageTotal(
-			resp.ResponseMeta.Usage.TotalTokens,
-			resp.ResponseMeta.Usage.PromptTokens,
-			resp.ResponseMeta.Usage.CompletionTokens,
+			resp.Usage.TotalTokens,
+			resp.Usage.PromptTokens,
+			resp.Usage.CompletionTokens,
 		)
 	}
-	return normalizeConversationTitle(resp.Content), titleTokens, nil
+	return normalizeConversationTitle(resp.Text), titleTokens, nil
 }
 
 // pickTitleModel 选择用于标题生成的模型。
 // 优先 Lite（成本低、速度快）；Lite 不可用时回退 Pro。
-func (s *AgentService) pickTitleModel() *ark.ChatModel {
-	if s.AIHub == nil {
+func (s *AgentService) pickTitleModel() *llmservice.Client {
+	if s == nil || s.llmService == nil {
 		return nil
 	}
-	if s.AIHub.Lite != nil {
-		return s.AIHub.Lite
+	if client := s.llmService.LiteClient(); client != nil {
+		return client
 	}
-	return s.AIHub.Pro
+	return s.llmService.ProClient()
 }
 
 // buildConversationTitleUserPrompt 把消息历史拼成可读文本供模型总结。

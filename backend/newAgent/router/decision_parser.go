@@ -26,7 +26,7 @@ var (
 // StreamDecisionResult 描述解析器的最终输出状态。
 type StreamDecisionResult struct {
 	// DecisionJSON 是标签内提取的完整 JSON 字符串。
-	// 调用方应使用 infrallm.ParseJSONObject[T] 将其解析为具体决策类型。
+	// 调用方应使用 llmservice.ParseJSONObject[T] 将其解析为具体决策类型。
 	DecisionJSON string
 
 	// BeforeText 是 <SMARTFLOW_DECISION> 标签之前的自然语言前言。
@@ -179,7 +179,7 @@ func (p *StreamDecisionParser) Result() *StreamDecisionResult {
 }
 
 // extractJSONFromTag 从标签内文本中提取第一个完整 JSON 对象。
-// 复用括号计数逻辑，与 infrallm.ExtractJSONObject 一致。
+// 复用括号计数逻辑，与 llmservice.ExtractJSONObject 一致。
 func extractJSONFromTag(text string) string {
 	clean := strings.TrimSpace(text)
 	if clean == "" {

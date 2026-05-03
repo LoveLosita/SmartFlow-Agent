@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/infra/rag/core"
+	"github.com/LoveLosita/smartflow/backend/services/rag/core"
 )
 
 // MilvusConfig 描述 Milvus REST 存储配置。

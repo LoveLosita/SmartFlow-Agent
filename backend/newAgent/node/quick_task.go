@@ -8,13 +8,13 @@ import (
 	"strings"
 	"time"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	taskmodel "github.com/LoveLosita/smartflow/backend/model"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagentrouter "github.com/LoveLosita/smartflow/backend/newAgent/router"
 	newagentshared "github.com/LoveLosita/smartflow/backend/newAgent/shared"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -30,7 +30,7 @@ type QuickTaskNodeInput struct {
 	RuntimeState          *newagentmodel.AgentRuntimeState
 	ConversationContext   *newagentmodel.ConversationContext
 	UserInput             string
-	Client                *infrallm.Client
+	Client                *llmservice.Client
 	ChunkEmitter          *newagentstream.ChunkEmitter
 	QuickTaskDeps         newagentmodel.QuickTaskDeps
 	PersistVisibleMessage newagentmodel.PersistVisibleMessageFunc
@@ -77,7 +77,7 @@ func RunQuickTaskNode(ctx context.Context, input QuickTaskNodeInput) error {
 	messages := newagentprompt.BuildQuickTaskMessagesSimple(input.UserInput)
 
 	// 2. 真流式调用 LLM。
-	reader, err := input.Client.Stream(ctx, messages, infrallm.GenerateOptions{
+	reader, err := input.Client.Stream(ctx, messages, llmservice.GenerateOptions{
 		Temperature: 0.3,
 		MaxTokens:   512,
 	})
@@ -130,7 +130,7 @@ func RunQuickTaskNode(ctx context.Context, input QuickTaskNodeInput) error {
 		// 解析 JSON。
 		log.Printf("[DEBUG] quick_task: LLM 原始决策 JSON chat=%s json=%s", flowState.ConversationID, result.DecisionJSON)
 		var parseErr error
-		decision, parseErr = infrallm.ParseJSONObject[quickTaskDecision](result.DecisionJSON)
+		decision, parseErr = llmservice.ParseJSONObject[quickTaskDecision](result.DecisionJSON)
 		if parseErr != nil {
 			log.Printf("[DEBUG] quick_task: JSON 解析失败 chat=%s json=%s", flowState.ConversationID, result.DecisionJSON)
 			if result.RawBuffer != "" {

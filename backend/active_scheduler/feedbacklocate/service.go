@@ -11,7 +11,7 @@ import (
 
 	"github.com/LoveLosita/smartflow/backend/active_scheduler/ports"
 	"github.com/LoveLosita/smartflow/backend/active_scheduler/trigger"
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 )
 
 const locateMaxTokens = 800
@@ -24,7 +24,7 @@ const locateMaxTokens = 800
 // 3. 不创建新工具系统，也不直接产出 preview。
 type Service struct {
 	reader ports.ScheduleReader
-	client *infrallm.Client
+	client *llmservice.Client
 	clock  func() time.Time
 	logger *log.Logger
 }
@@ -34,7 +34,7 @@ type Service struct {
 // 说明：
 // 1. reader / client 允许为空，方便在模型不可用或读模型暂时不可用时直接回退 ask_user。
 // 2. 真正的定位能力只在 Resolve 内部按需启用。
-func NewService(reader ports.ScheduleReader, client *infrallm.Client) *Service {
+func NewService(reader ports.ScheduleReader, client *llmservice.Client) *Service {
 	return &Service{
 		reader: reader,
 		client: client,
@@ -101,15 +101,15 @@ func (s *Service) Resolve(ctx context.Context, req Request) (Result, error) {
 		return s.buildAskUserResult(req, "定位 prompt 构造失败"), nil
 	}
 
-	messages := infrallm.BuildSystemUserMessages(strings.TrimSpace(locateSystemPrompt), nil, userPrompt)
-	resp, rawResult, err := infrallm.GenerateJSON[llmResponse](
+	messages := llmservice.BuildSystemUserMessages(strings.TrimSpace(locateSystemPrompt), nil, userPrompt)
+	resp, rawResult, err := llmservice.GenerateJSON[llmResponse](
 		ctx,
 		s.client,
 		messages,
-		infrallm.GenerateOptions{
+		llmservice.GenerateOptions{
 			Temperature: 0.1,
 			MaxTokens:   locateMaxTokens,
-			Thinking:    infrallm.ThinkingModeDisabled,
+			Thinking:    llmservice.ThinkingModeDisabled,
 			Metadata: map[string]any{
 				"stage":           "active_scheduler_feedback_locate",
 				"candidate_count": len(candidates),
@@ -340,7 +340,7 @@ func cloneAndTrimStrings(values []string) []string {
 	return result
 }
 
-func truncateRaw(raw *infrallm.TextResult) string {
+func truncateRaw(raw *llmservice.TextResult) string {
 	if raw == nil {
 		return ""
 	}

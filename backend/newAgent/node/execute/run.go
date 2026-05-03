@@ -5,12 +5,12 @@ import (
 	"fmt"
 	newagentshared "github.com/LoveLosita/smartflow/backend/newAgent/shared"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 	"github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 )
 
 const (
@@ -29,7 +29,7 @@ type ExecuteNodeInput struct {
 	RuntimeState          *newagentmodel.AgentRuntimeState
 	ConversationContext   *newagentmodel.ConversationContext
 	UserInput             string
-	Client                *infrallm.Client
+	Client                *llmservice.Client
 	ChunkEmitter          *newagentstream.ChunkEmitter
 	ResumeNode            string
 	ToolRegistry          *newagenttools.ToolRegistry

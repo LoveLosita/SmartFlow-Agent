@@ -6,20 +6,18 @@ import (
 	"strings"
 	"time"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
-	"github.com/cloudwego/eino-ext/components/model/ark"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
-	arkModel "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
 )
 
 // streamChatFallback 是 graph 执行失败时的降级流式聊天。
 // 内联了旧 agentchat.StreamChat 的核心逻辑，不再依赖 agent/ 包。
 func (s *AgentService) streamChatFallback(
 	ctx context.Context,
-	llm *ark.ChatModel,
+	llm *llmservice.Client,
 	modelName string,
 	userInput string,
 	ifThinking bool,
@@ -36,13 +34,6 @@ func (s *AgentService) streamChatFallback(
 	}
 	messages = append(messages, schema.UserMessage(userInput))
 
-	var thinking *ark.Thinking
-	if ifThinking {
-		thinking = &arkModel.Thinking{Type: arkModel.ThinkingTypeEnabled}
-	} else {
-		thinking = &arkModel.Thinking{Type: arkModel.ThinkingTypeDisabled}
-	}
-
 	if strings.TrimSpace(modelName) == "" {
 		modelName = "smartflow-worker"
 	}
@@ -50,7 +41,11 @@ func (s *AgentService) streamChatFallback(
 	created := time.Now().Unix()
 	firstChunk := true
 	chunkEmitter := newagentstream.NewChunkEmitter(newagentstream.NewSSEPayloadEmitter(outChan), requestID, modelName, created)
-	chunkEmitter.SetReasoningSummaryFunc(s.makeReasoningSummaryFunc(infrallm.WrapArkClient(s.AIHub.Lite)))
+	reasoningSummaryClient := s.llmService.LiteClient()
+	if reasoningSummaryClient == nil {
+		reasoningSummaryClient = s.llmService.ProClient()
+	}
+	chunkEmitter.SetReasoningSummaryFunc(s.makeReasoningSummaryFunc(reasoningSummaryClient))
 	chunkEmitter.SetExtraEventHook(func(extra *newagentstream.OpenAIChunkExtra) {
 		s.persistNewAgentTimelineExtraEvent(context.Background(), userID, chatID, extra)
 	})
@@ -75,7 +70,14 @@ func (s *AgentService) streamChatFallback(
 	}
 	var reasoningEndAt *time.Time
 
-	reader, err := llm.Stream(ctx, messages, ark.WithThinking(thinking))
+	thinkingMode := llmservice.ThinkingModeDisabled
+	if ifThinking {
+		thinkingMode = llmservice.ThinkingModeEnabled
+	}
+
+	reader, err := llm.Stream(ctx, messages, llmservice.GenerateOptions{
+		Thinking: thinkingMode,
+	})
 	if err != nil {
 		return "", "", 0, nil, err
 	}

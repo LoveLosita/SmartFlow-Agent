@@ -9,10 +9,10 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 )
 
 const (
@@ -31,7 +31,7 @@ const (
 type DeliverNodeInput struct {
 	RuntimeState          *newagentmodel.AgentRuntimeState
 	ConversationContext   *newagentmodel.ConversationContext
-	Client                *infrallm.Client
+	Client                *llmservice.Client
 	ChunkEmitter          *newagentstream.ChunkEmitter
 	ThinkingEnabled       bool                          // 是否开启 thinking，由 config.yaml 的 agent.thinking.deliver 注入
 	CompactionStore       newagentmodel.CompactionStore // 上下文压缩持久化
@@ -128,7 +128,7 @@ func RunDeliverNode(ctx context.Context, input DeliverNodeInput) error {
 //   - streamed：true 表示文本已通过 EmitStreamAssistantText 真流式推送到前端，调用方无需再伪流式。
 func generateDeliverSummary(
 	ctx context.Context,
-	client *infrallm.Client,
+	client *llmservice.Client,
 	flowState *newagentmodel.CommonState,
 	conversationContext *newagentmodel.ConversationContext,
 	thinkingEnabled bool,
@@ -162,7 +162,7 @@ func generateDeliverSummary(
 	reader, err := client.Stream(
 		ctx,
 		messages,
-		infrallm.GenerateOptions{
+		llmservice.GenerateOptions{
 			Temperature: 0.5,
 			MaxTokens:   800,
 			Thinking:    resolveThinkingMode(thinkingEnabled),

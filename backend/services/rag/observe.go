@@ -3,7 +3,7 @@ package rag
 import (
 	"log"
 
-	"github.com/LoveLosita/smartflow/backend/infra/rag/core"
+	"github.com/LoveLosita/smartflow/backend/services/rag/core"
 )
 
 // ObserveLevel 对外暴露统一观测等级别名，避免启动层直接依赖 core 细节。

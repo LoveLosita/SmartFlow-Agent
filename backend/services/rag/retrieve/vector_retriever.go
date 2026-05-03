@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/LoveLosita/smartflow/backend/infra/rag/core"
+	"github.com/LoveLosita/smartflow/backend/services/rag/core"
 )
 
 // VectorRetriever 是通用检索器（embed + vector search）。

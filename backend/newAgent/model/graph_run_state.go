@@ -5,10 +5,10 @@ import (
 	"strings"
 	"time"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 	schedule "github.com/LoveLosita/smartflow/backend/newAgent/tools/schedule"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -71,10 +71,10 @@ type PersistVisibleMessageFunc func(ctx context.Context, state *CommonState, msg
 // 2. Chat/Plan/Execute/Deliver 允许分别挂不同 client，但也允许先复用同一个 client；
 // 3. ChunkEmitter 统一承接阶段提示、正文、工具事件、确认请求等 SSE 输出。
 type AgentGraphDeps struct {
-	ChatClient           *infrallm.Client
-	PlanClient           *infrallm.Client
-	ExecuteClient        *infrallm.Client
-	DeliverClient        *infrallm.Client
+	ChatClient           *llmservice.Client
+	PlanClient           *llmservice.Client
+	ExecuteClient        *llmservice.Client
+	DeliverClient        *llmservice.Client
 	ChunkEmitter         *newagentstream.ChunkEmitter
 	StateStore           AgentStateStore
 	ToolRegistry         *newagenttools.ToolRegistry
@@ -141,7 +141,7 @@ func (d *AgentGraphDeps) EnsureChunkEmitter() *newagentstream.ChunkEmitter {
 }
 
 // ResolveChatClient 返回 chat 阶段可用的模型客户端。
-func (d *AgentGraphDeps) ResolveChatClient() *infrallm.Client {
+func (d *AgentGraphDeps) ResolveChatClient() *llmservice.Client {
 	if d == nil {
 		return nil
 	}
@@ -154,7 +154,7 @@ func (d *AgentGraphDeps) ResolveChatClient() *infrallm.Client {
 // 1. 优先使用显式注入的 PlanClient；
 // 2. 若未单独注入，则回退到 ChatClient；
 // 3. 这样在骨架期可先用一套 client 跑通，再按需拆分 strategist / worker。
-func (d *AgentGraphDeps) ResolvePlanClient() *infrallm.Client {
+func (d *AgentGraphDeps) ResolvePlanClient() *llmservice.Client {
 	if d == nil {
 		return nil
 	}
@@ -165,7 +165,7 @@ func (d *AgentGraphDeps) ResolvePlanClient() *infrallm.Client {
 }
 
 // ResolveExecuteClient 返回 execute 阶段可用的模型客户端。
-func (d *AgentGraphDeps) ResolveExecuteClient() *infrallm.Client {
+func (d *AgentGraphDeps) ResolveExecuteClient() *llmservice.Client {
 	if d == nil {
 		return nil
 	}
@@ -179,7 +179,7 @@ func (d *AgentGraphDeps) ResolveExecuteClient() *infrallm.Client {
 }
 
 // ResolveDeliverClient 返回 deliver 阶段可用的模型客户端。
-func (d *AgentGraphDeps) ResolveDeliverClient() *infrallm.Client {
+func (d *AgentGraphDeps) ResolveDeliverClient() *llmservice.Client {
 	if d == nil {
 		return nil
 	}

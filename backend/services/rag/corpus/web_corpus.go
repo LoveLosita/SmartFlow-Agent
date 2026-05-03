@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/infra/rag/core"
+	"github.com/LoveLosita/smartflow/backend/services/rag/core"
 )
 
 const webCorpusName = "web"

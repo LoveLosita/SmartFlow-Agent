@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 )
 
 // PayloadEmitter 是真正向外层 SSE 管道写 chunk 的最小接口。
@@ -540,7 +540,7 @@ func (e *ChunkEmitter) EmitDone() error {
 // 3. 不负责打开/关闭 StreamReader，调用方负责生命周期管理。
 func (e *ChunkEmitter) EmitStreamAssistantText(
 	ctx context.Context,
-	reader infrallm.StreamReader,
+	reader llmservice.StreamReader,
 	blockID, stage string,
 ) (string, error) {
 	if e == nil || reader == nil {
@@ -598,7 +598,7 @@ func (e *ChunkEmitter) EmitStreamAssistantText(
 // 用于只需展示思考过程而无需展示正文的场景。
 func (e *ChunkEmitter) EmitStreamReasoningText(
 	ctx context.Context,
-	reader infrallm.StreamReader,
+	reader llmservice.StreamReader,
 	blockID, stage string,
 ) (string, error) {
 	if e == nil || reader == nil {

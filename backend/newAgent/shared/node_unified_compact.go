@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"log"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
 	"github.com/LoveLosita/smartflow/backend/pkg"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -22,7 +22,7 @@ import (
 // 3. StageName 和 StatusBlockID 用于区分日志来源与 SSE 状态推送目标。
 type UnifiedCompactInput struct {
 	// Client 用于调用 LLM 压缩 msg1/msg2。
-	Client *infrallm.Client
+	Client *llmservice.Client
 	// CompactionStore 用于持久化压缩摘要和 token 统计，为 nil 时跳过持久化。
 	CompactionStore newagentmodel.CompactionStore
 	// FlowState 提供 userID / conversationID / roundUsed 等定位信息。

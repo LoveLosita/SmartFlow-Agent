@@ -8,11 +8,11 @@ import (
 	"log"
 	"strings"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
 	newagentrouter "github.com/LoveLosita/smartflow/backend/newAgent/router"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 )
@@ -38,7 +38,7 @@ func collectExecuteDecisionFromLLM(
 	reader, err := input.Client.Stream(
 		ctx,
 		messages,
-		infrallm.GenerateOptions{
+		llmservice.GenerateOptions{
 			Temperature: 1.0,
 			MaxTokens:   131072,
 			Thinking:    newagentshared.ResolveThinkingMode(input.ThinkingEnabled),
@@ -123,7 +123,7 @@ func collectExecuteDecisionFromLLM(
 			return nil, nil
 		}
 
-		decision, parseErr := infrallm.ParseJSONObject[newagentmodel.ExecuteDecision](result.DecisionJSON)
+		decision, parseErr := llmservice.ParseJSONObject[newagentmodel.ExecuteDecision](result.DecisionJSON)
 		if parseErr != nil {
 			log.Printf(
 				"[DEBUG] execute LLM JSON 解析失败 chat=%s round=%d json=%s raw=%s",

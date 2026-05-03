@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 
-	infrarag "github.com/LoveLosita/smartflow/backend/infra/rag"
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
 	memoryrepo "github.com/LoveLosita/smartflow/backend/memory/repo"
 	memoryutils "github.com/LoveLosita/smartflow/backend/memory/utils"
 	"github.com/LoveLosita/smartflow/backend/model"
+	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
 	"gorm.io/gorm"
 )
 
@@ -192,7 +192,7 @@ func (r *Runner) recallCandidates(
 ) candidateRecallResult {
 	// 1. 优先使用 Milvus 向量语义召回。
 	if r.ragRuntime != nil {
-		retrieveResult, err := r.ragRuntime.RetrieveMemory(ctx, infrarag.MemoryRetrieveRequest{
+		retrieveResult, err := r.ragRuntime.RetrieveMemory(ctx, ragservice.MemoryRetrieveRequest{
 			Query:       fact.Content,
 			TopK:        r.cfg.DecisionCandidateTopK,
 			Threshold:   r.cfg.DecisionCandidateMinScore,
@@ -235,7 +235,7 @@ func (r *Runner) recallCandidates(
 // 1. 从 DocumentID（格式 memory:{id}）解析出 mysql_id；
 // 2. 从 metadata 提取 title 和 memory_type；
 // 3. 跳过无法解析 DocumentID 的结果。
-func (r *Runner) buildCandidatesFromRAG(hits []infrarag.RetrieveHit) []memorymodel.CandidateSnapshot {
+func (r *Runner) buildCandidatesFromRAG(hits []ragservice.RetrieveHit) []memorymodel.CandidateSnapshot {
 	candidates := make([]memorymodel.CandidateSnapshot, 0, len(hits))
 	for _, hit := range hits {
 		memoryID := parseMemoryID(hit.DocumentID)

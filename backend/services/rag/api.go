@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// Runtime 是 RAG Infra 对业务侧暴露的唯一稳定方法面。
+// Runtime 是 RAG service 对业务侧暴露的唯一稳定方法面。
 //
 // 职责边界：
 // 1. 负责承接 memory/web 两类语料的统一入库与检索入口；

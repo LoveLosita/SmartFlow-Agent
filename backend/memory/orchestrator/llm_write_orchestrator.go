@@ -7,9 +7,9 @@ import (
 	"log"
 	"strings"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
 	memoryutils "github.com/LoveLosita/smartflow/backend/memory/utils"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 )
 
 const (
@@ -24,13 +24,13 @@ const (
 // 2. 不负责落库，不负责任务状态机推进；
 // 3. 当 LLM 不可用或输出异常时，回退到保守的本地抽取，保证链路不完全断。
 type LLMWriteOrchestrator struct {
-	client *infrallm.Client
+	client *llmservice.Client
 	cfg    memorymodel.Config
 	logger *log.Logger
 }
 
 // NewLLMWriteOrchestrator 构造 LLM 版记忆写入编排器。
-func NewLLMWriteOrchestrator(client *infrallm.Client, cfg memorymodel.Config) *LLMWriteOrchestrator {
+func NewLLMWriteOrchestrator(client *llmservice.Client, cfg memorymodel.Config) *LLMWriteOrchestrator {
 	return &LLMWriteOrchestrator{
 		client: client,
 		cfg:    cfg,
@@ -54,17 +54,17 @@ func (o *LLMWriteOrchestrator) ExtractFacts(ctx context.Context, payload memorym
 		return fallbackNormalizedFacts(payload), nil
 	}
 
-	messages := infrallm.BuildSystemUserMessages(
+	messages := llmservice.BuildSystemUserMessages(
 		buildMemoryExtractSystemPrompt(o.cfg.ExtractPrompt),
 		nil,
 		buildMemoryExtractUserPrompt(payload),
 	)
 
-	resp, rawResult, err := infrallm.GenerateJSON[memoryExtractResponse](
+	resp, rawResult, err := llmservice.GenerateJSON[memoryExtractResponse](
 		ctx,
 		o.client,
 		messages,
-		infrallm.GenerateOptions{
+		llmservice.GenerateOptions{
 			Temperature: clampTemperature(o.cfg.LLMTemperature),
 			MaxTokens:   defaultMemoryExtractMaxTokens,
 			Thinking:    resolveMemoryThinkingMode(o.cfg.LLMThinking),
@@ -319,7 +319,7 @@ func isSkipIntent(intent string) bool {
 	}
 }
 
-func truncateForLog(raw *infrallm.TextResult) string {
+func truncateForLog(raw *llmservice.TextResult) string {
 	if raw == nil {
 		return ""
 	}

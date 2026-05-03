@@ -5,8 +5,6 @@ import (
 	"errors"
 	"log"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
-	infrarag "github.com/LoveLosita/smartflow/backend/infra/rag"
 	memorycleanup "github.com/LoveLosita/smartflow/backend/memory/cleanup"
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
 	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
@@ -16,6 +14,8 @@ import (
 	memoryvectorsync "github.com/LoveLosita/smartflow/backend/memory/vectorsync"
 	memoryworker "github.com/LoveLosita/smartflow/backend/memory/worker"
 	"github.com/LoveLosita/smartflow/backend/model"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
+	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
 	"gorm.io/gorm"
 )
 
@@ -28,8 +28,8 @@ import (
 type Module struct {
 	db         *gorm.DB
 	cfg        memorymodel.Config
-	llmClient  *infrallm.Client
-	ragRuntime infrarag.Runtime
+	llmClient  *llmservice.Client
+	ragRuntime ragservice.Runtime
 	observer   memoryobserve.Observer
 	metrics    memoryobserve.MetricsRecorder
 
@@ -64,15 +64,15 @@ func LoadConfigFromViper() memorymodel.Config {
 // 2. llmClient 允许为 nil，此时写入链路会自动回退到本地 fallback 抽取；
 // 3. ragRuntime 允许为 nil，此时读取/向量同步自动回退旧逻辑；
 // 4. 若后续接入统一 DI 容器，也应优先注册这个 Module，而不是把内部 repo/service 继续向外泄漏。
-func NewModule(db *gorm.DB, llmClient *infrallm.Client, ragRuntime infrarag.Runtime, cfg memorymodel.Config) *Module {
+func NewModule(db *gorm.DB, llmClient *llmservice.Client, ragRuntime ragservice.Runtime, cfg memorymodel.Config) *Module {
 	return NewModuleWithObserve(db, llmClient, ragRuntime, cfg, ObserveDeps{})
 }
 
 // NewModuleWithObserve 创建带观测依赖的 memory 模块门面。
 func NewModuleWithObserve(
 	db *gorm.DB,
-	llmClient *infrallm.Client,
-	ragRuntime infrarag.Runtime,
+	llmClient *llmservice.Client,
+	ragRuntime ragservice.Runtime,
 	cfg memorymodel.Config,
 	deps ObserveDeps,
 ) *Module {
@@ -228,8 +228,8 @@ func (m *Module) StartWorker(ctx context.Context) {
 
 func wireModule(
 	db *gorm.DB,
-	llmClient *infrallm.Client,
-	ragRuntime infrarag.Runtime,
+	llmClient *llmservice.Client,
+	ragRuntime ragservice.Runtime,
 	cfg memorymodel.Config,
 	deps ObserveDeps,
 ) *Module {

@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentconv "github.com/LoveLosita/smartflow/backend/newAgent/conv"
 	newagentgraph "github.com/LoveLosita/smartflow/backend/newAgent/graph"
 	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
@@ -57,6 +56,11 @@ func (s *AgentService) runNewAgentGraph(
 	errChan chan error,
 ) {
 	requestCtx, _ := withRequestTokenMeter(ctx)
+	if s == nil || s.llmService == nil {
+		// 0. newAgent 主链强依赖 llm-service；装配漏传时直接返回错误，避免 nil receiver panic。
+		pushErrNonBlocking(errChan, errors.New("agent llm service is not initialized"))
+		return
+	}
 
 	// 1. 规范会话 ID 和模型选择。
 	chatID = normalizeConversationID(chatID)
@@ -184,14 +188,15 @@ func (s *AgentService) runNewAgentGraph(
 	}
 	graphRequest.Normalize()
 
-	// 8. 适配 LLM clients（从 AIHub 的 ark.ChatModel 转换为 newAgent LLM Client）。
+	// 8. 适配 LLM clients（统一从 llm-service 取出 newAgent 图所需模型，不再直接碰 AIHub）。
 	// 8.1 Chat/Deliver 使用 Pro 模型：路由分流、闲聊、交付总结属于标准复杂度。
 	// 8.2 Plan/Execute 使用 Max 模型：规划和 ReAct 循环需要深度推理能力。
-	chatClient := infrallm.WrapArkClient(s.AIHub.Pro)
-	planClient := infrallm.WrapArkClient(s.AIHub.Max)
-	executeClient := infrallm.WrapArkClient(s.AIHub.Max)
-	deliverClient := infrallm.WrapArkClient(s.AIHub.Pro)
-	summaryClient := infrallm.WrapArkClient(s.AIHub.Lite)
+	llmClients := s.llmService.NewAgentModelClients()
+	chatClient := llmClients.Chat
+	planClient := llmClients.Plan
+	executeClient := llmClients.Execute
+	deliverClient := llmClients.Deliver
+	summaryClient := llmClients.Summary
 
 	// 9. 适配 SSE emitter。
 	sseEmitter := newagentstream.NewSSEPayloadEmitter(outChan)
@@ -244,8 +249,8 @@ func (s *AgentService) runNewAgentGraph(
 		log.Printf("[ERROR] newAgent graph 执行失败 trace=%s chat=%s: %v", traceID, chatID, graphErr)
 		pushErrNonBlocking(errChan, fmt.Errorf("graph 执行失败: %w", graphErr))
 
-		// Graph 出错时回退普通聊天，保证可用性。回退使用 Pro 模型。
-		s.runNormalChatFlow(requestCtx, s.AIHub.Pro, resolvedModelName, userMessage, true, "", nil, thinkingModeToBool(thinkingMode), userID, chatID, traceID, requestStart, outChan, errChan)
+		// Graph 出错时回退普通聊天，保证可用性。回退使用 llm-service 的 Pro 模型。
+		s.runNormalChatFlow(requestCtx, chatClient, resolvedModelName, userMessage, true, "", nil, thinkingModeToBool(thinkingMode), userID, chatID, traceID, requestStart, outChan, errChan)
 		return
 	}
 

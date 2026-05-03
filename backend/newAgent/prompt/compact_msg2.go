@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -23,7 +23,7 @@ const compactMsg2SystemPrompt = `你是一个执行记录压缩助手。你的�
 // recentText 是保留的近期记录原文，不参与压缩。
 func CompactMsg2(
 	ctx context.Context,
-	client *infrallm.Client,
+	client *llmservice.Client,
 	earlyLoopText string,
 ) (string, error) {
 	userContent := fmt.Sprintf(`早期的 ReAct 执行记录：
@@ -36,7 +36,7 @@ func CompactMsg2(
 		schema.UserMessage(userContent),
 	}
 
-	result, err := client.GenerateText(ctx, messages, infrallm.GenerateOptions{
+	result, err := client.GenerateText(ctx, messages, llmservice.GenerateOptions{
 		MaxTokens: 4000,
 	})
 	if err != nil {

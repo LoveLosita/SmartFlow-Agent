@@ -3,8 +3,8 @@ package service
 import (
 	"time"
 
-	infrarag "github.com/LoveLosita/smartflow/backend/infra/rag"
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
+	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
 )
 
 // buildReadScopedItemQuery 构造读侧统一使用的 MySQL 查询条件。
@@ -53,8 +53,8 @@ func buildReadScopedRAGRequest(
 	req memorymodel.RetrieveRequest,
 	topK int,
 	threshold float64,
-) infrarag.MemoryRetrieveRequest {
-	return infrarag.MemoryRetrieveRequest{
+) ragservice.MemoryRetrieveRequest {
+	return ragservice.MemoryRetrieveRequest{
 		Query:          req.Query,
 		TopK:           topK,
 		Threshold:      threshold,

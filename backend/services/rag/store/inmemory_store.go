@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/infra/rag/core"
+	"github.com/LoveLosita/smartflow/backend/services/rag/core"
 )
 
 // InMemoryVectorStore 是本地开发用向量存储实现。

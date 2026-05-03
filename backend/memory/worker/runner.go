@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	infrarag "github.com/LoveLosita/smartflow/backend/infra/rag"
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
 	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	memoryorchestrator "github.com/LoveLosita/smartflow/backend/memory/orchestrator"
@@ -17,6 +16,7 @@ import (
 	memoryutils "github.com/LoveLosita/smartflow/backend/memory/utils"
 	memoryvectorsync "github.com/LoveLosita/smartflow/backend/memory/vectorsync"
 	"github.com/LoveLosita/smartflow/backend/model"
+	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
 	"gorm.io/gorm"
 )
 
@@ -41,7 +41,7 @@ type Runner struct {
 	auditRepo    *memoryrepo.AuditRepo
 	settingsRepo *memoryrepo.SettingsRepo
 	extractor    Extractor
-	ragRuntime   infrarag.Runtime
+	ragRuntime   ragservice.Runtime
 	logger       *log.Logger
 	vectorSyncer *memoryvectorsync.Syncer
 	observer     memoryobserve.Observer
@@ -63,7 +63,7 @@ func NewRunner(
 	auditRepo *memoryrepo.AuditRepo,
 	settingsRepo *memoryrepo.SettingsRepo,
 	extractor Extractor,
-	ragRuntime infrarag.Runtime,
+	ragRuntime ragservice.Runtime,
 	cfg memorymodel.Config,
 	decisionOrchestrator *memoryorchestrator.LLMDecisionOrchestrator,
 	vectorSyncer *memoryvectorsync.Syncer,

@@ -7,12 +7,12 @@ import (
 	"os"
 	"strings"
 
-	ragchunk "github.com/LoveLosita/smartflow/backend/infra/rag/chunk"
-	ragconfig "github.com/LoveLosita/smartflow/backend/infra/rag/config"
-	"github.com/LoveLosita/smartflow/backend/infra/rag/core"
-	ragembed "github.com/LoveLosita/smartflow/backend/infra/rag/embed"
-	ragrerank "github.com/LoveLosita/smartflow/backend/infra/rag/rerank"
-	ragstore "github.com/LoveLosita/smartflow/backend/infra/rag/store"
+	ragchunk "github.com/LoveLosita/smartflow/backend/services/rag/chunk"
+	ragconfig "github.com/LoveLosita/smartflow/backend/services/rag/config"
+	"github.com/LoveLosita/smartflow/backend/services/rag/core"
+	ragembed "github.com/LoveLosita/smartflow/backend/services/rag/embed"
+	ragrerank "github.com/LoveLosita/smartflow/backend/services/rag/rerank"
+	ragstore "github.com/LoveLosita/smartflow/backend/services/rag/store"
 )
 
 // FactoryDeps 描述 Runtime 工厂所需的可选依赖。

@@ -6,8 +6,8 @@ import (
 	"log"
 	"strings"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 )
 
 const defaultDecisionCompareMaxTokens = 600
@@ -19,13 +19,13 @@ const defaultDecisionCompareMaxTokens = 600
 // 2. LLM 只输出 relation（关系类型），不输出 action，不输出 target ID；
 // 3. LLM 调用失败时返回 error，由上层决定是否视为 unrelated。
 type LLMDecisionOrchestrator struct {
-	client *infrallm.Client
+	client *llmservice.Client
 	cfg    memorymodel.Config
 	logger *log.Logger
 }
 
 // NewLLMDecisionOrchestrator 构造决策比对编排器。
-func NewLLMDecisionOrchestrator(client *infrallm.Client, cfg memorymodel.Config) *LLMDecisionOrchestrator {
+func NewLLMDecisionOrchestrator(client *llmservice.Client, cfg memorymodel.Config) *LLMDecisionOrchestrator {
 	return &LLMDecisionOrchestrator{
 		client: client,
 		cfg:    cfg,
@@ -52,14 +52,14 @@ func (o *LLMDecisionOrchestrator) Compare(
 	systemPrompt := buildDecisionCompareSystemPrompt()
 	userPrompt := buildDecisionCompareUserPrompt(fact, candidate)
 
-	messages := infrallm.BuildSystemUserMessages(systemPrompt, nil, userPrompt)
+	messages := llmservice.BuildSystemUserMessages(systemPrompt, nil, userPrompt)
 
 	// 2. 调用 LLM 做结构化输出，温度用低值保证判断稳定。
-	resp, _, err := infrallm.GenerateJSON[decisionCompareResponse](
+	resp, _, err := llmservice.GenerateJSON[decisionCompareResponse](
 		ctx,
 		o.client,
 		messages,
-		infrallm.GenerateOptions{
+		llmservice.GenerateOptions{
 			Temperature: 0.1,
 			MaxTokens:   defaultDecisionCompareMaxTokens,
 			Thinking:    resolveMemoryThinkingMode(o.cfg.LLMThinking),
@@ -127,9 +127,9 @@ func buildDecisionCompareUserPrompt(fact memorymodel.NormalizedFact, candidate m
 }
 
 // resolveMemoryThinkingMode 根据配置布尔值返回对应的 ThinkingMode。
-func resolveMemoryThinkingMode(enabled bool) infrallm.ThinkingMode {
+func resolveMemoryThinkingMode(enabled bool) llmservice.ThinkingMode {
 	if enabled {
-		return infrallm.ThinkingModeEnabled
+		return llmservice.ThinkingModeEnabled
 	}
-	return infrallm.ThinkingModeDisabled
+	return llmservice.ThinkingModeDisabled
 }

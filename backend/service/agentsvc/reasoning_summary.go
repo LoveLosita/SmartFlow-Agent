@@ -6,9 +6,9 @@ import (
 	"log"
 	"strings"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	newagentprompt "github.com/LoveLosita/smartflow/backend/newAgent/prompt"
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 )
 
 const reasoningSummaryMaxTokens = 700
@@ -24,7 +24,7 @@ type reasoningSummaryLLMResponse struct {
 // 1. service 层负责选择模型与 prompt，stream 层只负责调度和闸门；
 // 2. 这里不持久化摘要，持久化统一走 ChunkEmitter 的 extra hook；
 // 3. 摘要失败时返回 error，由 ReasoningDigestor 吞掉并等待下一次水位线/Flush 兜底。
-func (s *AgentService) makeReasoningSummaryFunc(client *infrallm.Client) newagentstream.ReasoningSummaryFunc {
+func (s *AgentService) makeReasoningSummaryFunc(client *llmservice.Client) newagentstream.ReasoningSummaryFunc {
 	if client == nil {
 		return nil
 	}
@@ -47,14 +47,14 @@ func (s *AgentService) makeReasoningSummaryFunc(client *infrallm.Client) newagen
 			DurationSeconds: input.DurationSeconds,
 		})
 
-		resp, rawResult, err := infrallm.GenerateJSON[reasoningSummaryLLMResponse](
+		resp, rawResult, err := llmservice.GenerateJSON[reasoningSummaryLLMResponse](
 			ctx,
 			client,
 			messages,
-			infrallm.GenerateOptions{
+			llmservice.GenerateOptions{
 				Temperature: 0.1,
 				MaxTokens:   reasoningSummaryMaxTokens,
-				Thinking:    infrallm.ThinkingModeDisabled,
+				Thinking:    llmservice.ThinkingModeDisabled,
 				Metadata: map[string]any{
 					"stage":         "reasoning_summary",
 					"candidate_seq": input.CandidateSeq,
@@ -99,7 +99,7 @@ func limitReasoningDetailSummary(text string, maxRunes int) string {
 	return string(runes[:maxRunes])
 }
 
-func truncateReasoningSummaryRaw(raw *infrallm.TextResult) string {
+func truncateReasoningSummaryRaw(raw *llmservice.TextResult) string {
 	if raw == nil {
 		return ""
 	}

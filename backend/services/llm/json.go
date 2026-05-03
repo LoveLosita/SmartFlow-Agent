@@ -7,12 +7,10 @@ import (
 	"strings"
 )
 
-// ParseJSONObject 解析模型返回中的 JSON 对象。
-//
-// 职责边界：
-// 1. 负责处理“模型输出前后夹杂解释文字 / markdown 代码块”的常见情况；
-// 2. 负责提取最外层 JSON object 并反序列化为目标结构；
-// 3. 不负责业务字段合法性校验，应由上层调用方自行校验。
+// ParseJSONObject 解析模型返回内容中的 JSON 对象。
+// 1. 先剥离常见的 markdown 代码块包装。
+// 2. 再从混合文本里提取最外层 JSON 对象。
+// 3. 这里只负责结构解析，不负责字段合法性校验。
 func ParseJSONObject[T any](raw string) (*T, error) {
 	clean := strings.TrimSpace(raw)
 	if clean == "" {
@@ -31,12 +29,7 @@ func ParseJSONObject[T any](raw string) (*T, error) {
 	return &out, nil
 }
 
-// ExtractJSONObject 从混合文本里提取第一个完整 JSON 对象。
-//
-// 设计说明：
-// 1. LLM 很容易输出“这里是结果：{...}”这种半结构化文本；
-// 2. 这里用括号计数而不是正则，避免嵌套对象一多就误截断；
-// 3. 目前只提取 object，不提取 array，因为当前契约基本都是对象。
+// ExtractJSONObject 从混合文本中提取第一个完整的 JSON 对象。
 func ExtractJSONObject(text string) string {
 	clean := trimMarkdownCodeFence(strings.TrimSpace(text))
 	if clean == "" {
@@ -94,9 +87,6 @@ func trimMarkdownCodeFence(text string) string {
 		return trimmed
 	}
 
-	// 1. 去掉首行 ```json / ```；
-	// 2. 若末行是 ```，一并去掉；
-	// 3. 中间正文保持原样，避免破坏 JSON 的换行结构。
 	body := lines[1:]
 	if len(body) > 0 && strings.TrimSpace(body[len(body)-1]) == "```" {
 		body = body[:len(body)-1]

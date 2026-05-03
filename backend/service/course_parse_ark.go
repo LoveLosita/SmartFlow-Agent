@@ -8,16 +8,20 @@ import (
 	"strings"
 	"time"
 
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	"github.com/LoveLosita/smartflow/backend/model"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 )
 
 // ParseCourseTableImage 使用 Ark SDK Responses 解析课程表图片。
 func (ss *CourseService) ParseCourseTableImage(ctx context.Context, req model.CourseImageParseRequest) (*model.CourseImageParseResponse, error) {
 	if ss == nil || ss.courseImageResponsesClient == nil {
+		modelName := ""
+		if ss != nil {
+			modelName = ss.courseImageModel
+		}
 		log.Printf(
 			"[COURSE_PARSE][SERVICE] parser unavailable model_name=%q filename=%q mime=%q bytes=%d",
-			ss.courseImageModel,
+			modelName,
 			req.Filename,
 			req.MIMEType,
 			len(req.ImageBytes),
@@ -57,7 +61,7 @@ func (ss *CourseService) ParseCourseTableImage(ctx context.Context, req model.Co
 		base64Chars,
 		promptChars,
 		base64Chars+promptChars+len(strings.TrimSpace(courseImageParseSystemPrompt)),
-		infrallm.ThinkingModeDisabled,
+		llmservice.ThinkingModeDisabled,
 		courseImageParseTemperature,
 		ss.courseImageConfig.MaxTokens,
 		"json_object",
@@ -66,10 +70,10 @@ func (ss *CourseService) ParseCourseTableImage(ctx context.Context, req model.Co
 	// 1. 课程表图片识别输出体量大，显式透传 max_output_tokens，避免被默认值截断。
 	// 2. text_format 固定为 json_object，降低输出混入解释文本导致解析失败的概率。
 	// 3. thinking 显式关闭，优先保证课程导入链路稳定性。
-	draft, rawResult, err := infrallm.GenerateArkResponsesJSON[model.CourseImageParseResponse](ctx, ss.courseImageResponsesClient, messages, infrallm.ArkResponsesOptions{
+	draft, rawResult, err := llmservice.GenerateArkResponsesJSON[model.CourseImageParseResponse](ctx, ss.courseImageResponsesClient, messages, llmservice.ArkResponsesOptions{
 		Temperature:     courseImageParseTemperature,
 		MaxOutputTokens: ss.courseImageConfig.MaxTokens,
-		Thinking:        infrallm.ThinkingModeDisabled,
+		Thinking:        llmservice.ThinkingModeDisabled,
 		TextFormat:      "json_object",
 	})
 	if err != nil {
@@ -188,12 +192,12 @@ func (ss *CourseService) ParseCourseTableImage(ctx context.Context, req model.Co
 	return normalizedDraft, nil
 }
 
-func buildCourseImageParseResponsesMessages(req *model.CourseImageParseRequest) ([]infrallm.ArkResponsesMessage, int, int) {
+func buildCourseImageParseResponsesMessages(req *model.CourseImageParseRequest) ([]llmservice.ArkResponsesMessage, int, int) {
 	userPrompt := fmt.Sprintf(courseImageParseUserPromptTemplate, req.Filename, req.MIMEType)
 	base64Data := base64.StdEncoding.EncodeToString(req.ImageBytes)
 	imageDataURL := fmt.Sprintf("data:%s;base64,%s", req.MIMEType, base64Data)
 
-	messages := []infrallm.ArkResponsesMessage{
+	messages := []llmservice.ArkResponsesMessage{
 		{
 			Role: "system",
 			Text: strings.TrimSpace(courseImageParseSystemPrompt),
@@ -208,7 +212,7 @@ func buildCourseImageParseResponsesMessages(req *model.CourseImageParseRequest) 
 	return messages, len(base64Data), len(strings.TrimSpace(userPrompt))
 }
 
-func isCourseImageOutputTruncated(rawResult *infrallm.ArkResponsesResult) bool {
+func isCourseImageOutputTruncated(rawResult *llmservice.ArkResponsesResult) bool {
 	if rawResult == nil {
 		return false
 	}

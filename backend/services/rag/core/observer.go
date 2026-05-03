@@ -21,7 +21,7 @@ const (
 // ObserveEvent 描述一次统一观测事件。
 //
 // 职责边界：
-// 1. 只承载 RAG Infra 的结构化运行信息；
+// 1. 只承载 RAG service 的结构化运行信息；
 // 2. 不绑定具体日志系统、指标系统或 tracing 实现；
 // 3. 字段内容应尽量稳定，便于后续统一接入全局观测平台。
 type ObserveEvent struct {
@@ -31,7 +31,7 @@ type ObserveEvent struct {
 	Fields    map[string]any
 }
 
-// Observer 是 RAG Infra 的最小观测接口。
+// Observer 是 RAG service 的最小观测接口。
 //
 // 职责边界：
 // 1. 负责消费结构化事件；

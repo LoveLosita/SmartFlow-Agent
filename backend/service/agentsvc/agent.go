@@ -3,6 +3,7 @@ package agentsvc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"strconv"
 	"strings"
@@ -11,7 +12,6 @@ import (
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	"github.com/LoveLosita/smartflow/backend/inits"
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
 	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	"github.com/LoveLosita/smartflow/backend/model"
@@ -20,13 +20,13 @@ import (
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
-	"github.com/cloudwego/eino-ext/components/model/ark"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 )
 
 type AgentService struct {
-	AIHub                    *inits.AIHub
+	llmService               *llmservice.Service
 	repo                     *dao.AgentDAO
 	taskRepo                 *dao.TaskDAO
 	cacheDAO                 *dao.CacheDAO
@@ -75,7 +75,7 @@ type AgentService struct {
 // 这里通过依赖注入把“模型、仓储、缓存、异步持久化通道”统一交给服务层管理，
 // 便于后续在单测中替换实现，或在启动流程中按环境切换配置。
 func NewAgentService(
-	aiHub *inits.AIHub,
+	llmService *llmservice.Service,
 	repo *dao.AgentDAO,
 	taskRepo *dao.TaskDAO,
 	cacheDAO *dao.CacheDAO,
@@ -90,7 +90,7 @@ func NewAgentService(
 	ensureTokenMeterCallbackRegistered()
 
 	return &AgentService{
-		AIHub:                    aiHub,
+		llmService:               llmService,
 		repo:                     repo,
 		taskRepo:                 taskRepo,
 		cacheDAO:                 cacheDAO,
@@ -123,8 +123,11 @@ func thinkingModeToBool(mode string) bool {
 // 当前约定：
 // - 旧链路已全面切到 newAgent graph，这里仅作为 runNormalChatFlow 回退时的模型选择入口；
 // - 统一返回 Pro 模型，旧 strategist 参数不再生效。
-func (s *AgentService) pickChatModel(requestModel string) (*ark.ChatModel, string) {
-	return s.AIHub.Pro, "pro"
+func (s *AgentService) pickChatModel(requestModel string) (*llmservice.Client, string) {
+	if s == nil || s.llmService == nil {
+		return nil, "pro"
+	}
+	return s.llmService.ProClient(), "pro"
 }
 
 // PersistChatHistory 是 Agent 聊天链路唯一的“消息持久化入口”。
@@ -304,7 +307,7 @@ func pushErrNonBlocking(errChan chan error, err error) {
 // 2) 开启随口记进度推送后，最终判定“非随口记”时回落到普通聊天。
 func (s *AgentService) runNormalChatFlow(
 	ctx context.Context,
-	selectedModel *ark.ChatModel,
+	selectedModel *llmservice.Client,
 	resolvedModelName string,
 	userMessage string,
 	userPersisted bool,
@@ -363,6 +366,12 @@ func (s *AgentService) runNormalChatFlow(
 			pushErrNonBlocking(errChan, err)
 			return
 		}
+	}
+
+	// 6.0. 没有可用模型时，直接中止普通聊天，避免写入半截用户消息后没有后续回复。
+	if selectedModel == nil {
+		pushErrNonBlocking(errChan, errors.New("llm client is not ready"))
+		return
 	}
 
 	// 6. 执行真正的流式聊天。

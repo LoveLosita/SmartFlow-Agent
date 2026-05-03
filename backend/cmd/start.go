@@ -23,10 +23,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/api"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	infrarag "github.com/LoveLosita/smartflow/backend/infra/rag"
-	ragconfig "github.com/LoveLosita/smartflow/backend/infra/rag/config"
 	"github.com/LoveLosita/smartflow/backend/inits"
 	"github.com/LoveLosita/smartflow/backend/memory"
 	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
@@ -44,6 +41,9 @@ import (
 	"github.com/LoveLosita/smartflow/backend/service"
 	agentsvcsvc "github.com/LoveLosita/smartflow/backend/service/agentsvc"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
+	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
+	ragconfig "github.com/LoveLosita/smartflow/backend/services/rag/config"
 	"github.com/go-redis/redis/v8"
 	"github.com/spf13/viper"
 	"gorm.io/gorm"
@@ -167,17 +167,25 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		return nil, fmt.Errorf("failed to initialize Eino: %w", err)
 	}
 
-	ragRuntime, err := buildRAGRuntime(ctx)
+	llmService := llmservice.New(llmservice.Options{
+		AIHub:             aiHub,
+		APIKey:            os.Getenv("ARK_API_KEY"),
+		BaseURL:           viper.GetString("agent.baseURL"),
+		CourseVisionModel: viper.GetString("courseImport.visionModel"),
+	})
+
+	ragService, err := buildRAGService(ctx)
 	if err != nil {
 		return nil, err
 	}
+	ragRuntime := ragService.Runtime()
 
 	memoryCfg := memory.LoadConfigFromViper()
 	memoryObserver := memoryobserve.NewLoggerObserver(log.Default())
 	memoryMetrics := memoryobserve.NewMetricsRegistry()
 	memoryModule := memory.NewModuleWithObserve(
 		db,
-		infrallm.WrapArkClient(aiHub.Pro),
+		llmService.ProClient(),
 		ragRuntime,
 		memoryCfg,
 		memory.ObserveDeps{
@@ -208,11 +216,11 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	userService := service.NewUserService(userRepo, cacheRepo)
 	taskSv := service.NewTaskService(taskRepo, cacheRepo, eventBus)
 	taskSv.SetActiveScheduleDAO(manager.ActiveSchedule)
-	courseService := buildCourseService(courseRepo, scheduleRepo)
+	courseService := buildCourseService(llmService, courseRepo, scheduleRepo)
 	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo, manager)
 	scheduleService := service.NewScheduleService(scheduleRepo, userRepo, taskClassRepo, manager, cacheRepo)
 	agentService := service.NewAgentServiceWithSchedule(
-		aiHub,
+		llmService,
 		agentRepo,
 		taskRepo,
 		cacheRepo,
@@ -251,7 +259,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	}
 	// 1. 主动调度选择器单独复用 Pro 模型，LLM 失败时由 selection 层显式回退到确定性候选；
 	// 2. dry-run 与 selection 通过 graph runner 串起来，避免 trigger_pipeline 再拼第二套候选逻辑。
-	activeScheduleLLMClient := infrallm.WrapArkClient(aiHub.Pro)
+	activeScheduleLLMClient := llmService.ProClient()
 	activeScheduleSelector := activesel.NewService(activeScheduleLLMClient)
 	activeScheduleFeedbackLocator := activefeedbacklocate.NewService(activeReaders, activeScheduleLLMClient)
 	activeScheduleGraphRunner, err := activegraph.NewRunner(activeScheduleDryRun.AsGraphDryRunFunc(), activeScheduleSelector)
@@ -323,26 +331,26 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	return runtime, nil
 }
 
-func buildRAGRuntime(ctx context.Context) (infrarag.Runtime, error) {
+func buildRAGService(ctx context.Context) (*ragservice.Service, error) {
 	ragCfg := ragconfig.LoadFromViper()
 	if !ragCfg.Enabled {
-		log.Println("RAG runtime is disabled")
-		return nil, nil
+		log.Println("RAG service is disabled")
+		return ragservice.New(ragservice.Options{}), nil
 	}
 
 	// 1. 当前项目尚未完成全局观测平台建设，这里先注入一层轻量 Observer；
 	// 2. RAG 内部只依赖 Observer 接口，后续若全项目统一日志/指标系统，只需替换这里；
 	// 3. 这样可以避免 RAG 单独自建一套割裂的日志基础设施。
 	ragLogger := log.Default()
-	ragRuntime, err := infrarag.NewRuntimeFromConfig(ctx, ragCfg, infrarag.FactoryDeps{
+	ragService, err := ragservice.NewFromConfig(ctx, ragCfg, ragservice.FactoryDeps{
 		Logger:   ragLogger,
-		Observer: infrarag.NewLoggerObserver(ragLogger),
+		Observer: ragservice.NewLoggerObserver(ragLogger),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize RAG runtime: %w", err)
+		return nil, fmt.Errorf("failed to initialize RAG service: %w", err)
 	}
-	log.Printf("RAG runtime initialized: store=%s embed=%s reranker=%s", ragCfg.Store, ragCfg.EmbedProvider, ragCfg.RerankerProvider)
-	return ragRuntime, nil
+	log.Printf("RAG service initialized: store=%s embed=%s reranker=%s", ragCfg.Store, ragCfg.EmbedProvider, ragCfg.RerankerProvider)
+	return ragService, nil
 }
 
 func buildEventBus(outboxRepo *outboxinfra.Repository) (eventsvc.OutboxBus, error) {
@@ -369,12 +377,8 @@ func buildEventBus(outboxRepo *outboxinfra.Repository) (eventsvc.OutboxBus, erro
 	return eventBus, nil
 }
 
-func buildCourseService(courseRepo *dao.CourseDAO, scheduleRepo *dao.ScheduleDAO) *service.CourseService {
-	courseImageResponsesClient := infrallm.NewArkResponsesClient(
-		os.Getenv("ARK_API_KEY"),
-		viper.GetString("agent.baseURL"),
-		viper.GetString("courseImport.visionModel"),
-	)
+func buildCourseService(llmService *llmservice.Service, courseRepo *dao.CourseDAO, scheduleRepo *dao.ScheduleDAO) *service.CourseService {
+	courseImageResponsesClient := llmService.CourseImageResponsesClient()
 	return service.NewCourseService(
 		courseRepo,
 		scheduleRepo,
@@ -650,7 +654,7 @@ func containsString(values []string, target string) bool {
 
 func configureAgentService(
 	agentService *service.AgentService,
-	ragRuntime infrarag.Runtime,
+	ragRuntime ragservice.Runtime,
 	agentRepo *dao.AgentDAO,
 	cacheRepo *dao.CacheDAO,
 	taskRepo *dao.TaskDAO,

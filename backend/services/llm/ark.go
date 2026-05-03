@@ -1,7 +1,3 @@
-// 过渡期统一 Ark 调用封装。
-//
-// 这里保留 CallArkText / CallArkJSON，方便暂时还直接持有 *ark.ChatModel 的调用点
-// 逐步迁移到统一 Client。后续 memory 也可以直接复用这套中立层。
 package llm
 
 import (
@@ -15,12 +11,7 @@ import (
 	arkModel "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
 )
 
-// ArkCallOptions 是基于 ark.ChatModel 的通用调用选项。
-//
-// 设计目的：
-// 1. 先把 Ark 调用样板抽成公共层；
-// 2. 再由 WrapArkClient 提供统一 Client；
-// 3. 让上层尽量只关注业务 prompt 和结构化结果。
+// ArkCallOptions 是直接调用 ark.ChatModel 时使用的通用入参。
 type ArkCallOptions struct {
 	Temperature float64
 	MaxTokens   int
@@ -28,12 +19,6 @@ type ArkCallOptions struct {
 }
 
 // CallArkText 调用 ark 模型并返回纯文本。
-//
-// 职责边界：
-// 1. 负责拼 system + user 两段消息；
-// 2. 负责统一配置 thinking / temperature / maxTokens；
-// 3. 负责拦截空响应；
-// 4. 不负责 JSON 解析，不负责业务字段校验。
 func CallArkText(ctx context.Context, chatModel *ark.ChatModel, systemPrompt, userPrompt string, options ArkCallOptions) (string, error) {
 	if chatModel == nil {
 		return "", errors.New("ark model is nil")
@@ -76,6 +61,7 @@ func buildArkOptions(options ArkCallOptions) []einoModel.Option {
 	if options.Thinking == ThinkingModeEnabled {
 		thinkingType = arkModel.ThinkingTypeEnabled
 	}
+
 	opts := []einoModel.Option{
 		ark.WithThinking(&arkModel.Thinking{Type: thinkingType}),
 		einoModel.WithTemperature(float32(options.Temperature)),

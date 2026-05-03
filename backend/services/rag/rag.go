@@ -1,11 +1,11 @@
 package rag
 
 import (
-	"github.com/LoveLosita/smartflow/backend/infra/rag/chunk"
-	"github.com/LoveLosita/smartflow/backend/infra/rag/core"
-	"github.com/LoveLosita/smartflow/backend/infra/rag/embed"
-	"github.com/LoveLosita/smartflow/backend/infra/rag/rerank"
-	"github.com/LoveLosita/smartflow/backend/infra/rag/store"
+	"github.com/LoveLosita/smartflow/backend/services/rag/chunk"
+	"github.com/LoveLosita/smartflow/backend/services/rag/core"
+	"github.com/LoveLosita/smartflow/backend/services/rag/embed"
+	"github.com/LoveLosita/smartflow/backend/services/rag/rerank"
+	"github.com/LoveLosita/smartflow/backend/services/rag/store"
 )
 
 // NewDefaultPipeline 构造默认可运行的 RAG Pipeline。

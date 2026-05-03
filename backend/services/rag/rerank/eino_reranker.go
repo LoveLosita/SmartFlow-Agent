@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/LoveLosita/smartflow/backend/infra/rag/core"
+	"github.com/LoveLosita/smartflow/backend/services/rag/core"
 )
 
 // EinoReranker 是 Eino 重排器占位实现。

@@ -6,16 +6,16 @@ import (
 
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
-	infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 )
 
 type CourseService struct {
 	// 伸出手：准备接住 DAO
 	courseDAO                  *dao.CourseDAO
 	scheduleDAO                *dao.ScheduleDAO
-	courseImageResponsesClient *infrallm.ArkResponsesClient
+	courseImageResponsesClient *llmservice.ArkResponsesClient
 	courseImageConfig          CourseImageParseConfig
 	courseImageModel           string
 }
@@ -24,7 +24,7 @@ type CourseService struct {
 func NewCourseService(
 	courseDAO *dao.CourseDAO,
 	scheduleDAO *dao.ScheduleDAO,
-	courseImageResponsesClient *infrallm.ArkResponsesClient,
+	courseImageResponsesClient *llmservice.ArkResponsesClient,
 	courseImageConfig CourseImageParseConfig,
 	courseImageModel string,
 ) *CourseService {

@@ -1,10 +1,10 @@
 package newagentshared
 
-import infrallm "github.com/LoveLosita/smartflow/backend/infra/llm"
+import llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 
-func ResolveThinkingMode(enabled bool) infrallm.ThinkingMode {
+func ResolveThinkingMode(enabled bool) llmservice.ThinkingMode {
 	if enabled {
-		return infrallm.ThinkingModeEnabled
+		return llmservice.ThinkingModeEnabled
 	}
-	return infrallm.ThinkingModeDisabled
+	return llmservice.ThinkingModeDisabled
 }

@@ -4,7 +4,7 @@ import (
 	"context"
 	"sort"
 
-	"github.com/LoveLosita/smartflow/backend/infra/rag/core"
+	"github.com/LoveLosita/smartflow/backend/services/rag/core"
 )
 
 // NoopReranker 是默认重排器（仅按原 score 排序）。
