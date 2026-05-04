@@ -28,8 +28,12 @@ const (
 )
 
 const (
+	// ForumImportStatusPending 表示导入记录已占位，正在创建 TaskClass 副本。
+	ForumImportStatusPending = "pending"
 	// ForumImportStatusImported 表示导入已成功创建当前用户自己的 TaskClass 副本。
 	ForumImportStatusImported = "imported"
+	// ForumImportStatusFailed 表示导入副本创建或最终确认失败，可由后续重试覆盖。
+	ForumImportStatusFailed = "failed"
 )
 
 // ForumPost 是计划广场帖子主体表。
@@ -40,11 +44,12 @@ const (
 // 3. 计数字段由服务事务内维护，避免列表页每次做聚合统计。
 type ForumPost struct {
 	ID                uint64     `gorm:"column:id;primaryKey;autoIncrement"`
-	AuthorUserID      uint64     `gorm:"column:author_user_id;not null;index:idx_forum_posts_author_status,priority:1;comment:作者用户ID"`
+	AuthorUserID      uint64     `gorm:"column:author_user_id;not null;index:idx_forum_posts_author_status,priority:1;uniqueIndex:uk_forum_posts_author_idem,priority:1;comment:作者用户ID"`
 	SourceTaskClassID uint64     `gorm:"column:source_task_class_id;not null;index:idx_forum_posts_source_task_class;comment:发布时选择的原始TaskClass ID，仅用于审计"`
 	Title             string     `gorm:"column:title;type:varchar(80);not null;comment:帖子标题"`
 	Summary           string     `gorm:"column:summary;type:text;comment:帖子简介"`
 	TagsJSON          string     `gorm:"column:tags_json;type:json;not null;comment:标签JSON数组"`
+	IdempotencyKey    *string    `gorm:"column:idempotency_key;type:varchar(128);uniqueIndex:uk_forum_posts_author_idem,priority:2;comment:发布请求幂等键"`
 	Status            string     `gorm:"column:status;type:varchar(32);not null;default:'published';index:idx_forum_posts_status_created,priority:1;index:idx_forum_posts_author_status,priority:2;comment:published/hidden/deleted/pending_review"`
 	LikeCount         int64      `gorm:"column:like_count;not null;default:0;index:idx_forum_posts_like_count;comment:点赞数冗余计数"`
 	CommentCount      int64      `gorm:"column:comment_count;not null;default:0;comment:评论数冗余计数"`
@@ -166,11 +171,12 @@ type ForumImport struct {
 	PostID         uint64    `gorm:"column:post_id;not null;uniqueIndex:uk_forum_imports_post_user,priority:1;index:idx_forum_imports_post;comment:帖子ID"`
 	UserID         uint64    `gorm:"column:user_id;not null;uniqueIndex:uk_forum_imports_post_user,priority:2;uniqueIndex:uk_forum_imports_user_idem,priority:1;index:idx_forum_imports_user;comment:导入用户ID"`
 	AuthorUserID   uint64    `gorm:"column:author_user_id;not null;index:idx_forum_imports_author;comment:帖子作者ID，便于奖励和审计"`
-	NewTaskClassID uint64    `gorm:"column:new_task_class_id;not null;comment:导入后创建的当前用户TaskClass ID"`
+	NewTaskClassID *uint64   `gorm:"column:new_task_class_id;comment:导入后创建的当前用户TaskClass ID，pending/failed 时为空"`
 	TargetTitle    string    `gorm:"column:target_title;type:varchar(80);comment:导入后的TaskClass标题"`
-	Status         string    `gorm:"column:status;type:varchar(32);not null;default:'imported';comment:imported"`
+	Status         string    `gorm:"column:status;type:varchar(32);not null;default:'pending';comment:pending/imported/failed"`
 	EventID        string    `gorm:"column:event_id;type:varchar(128);not null;uniqueIndex:uk_forum_imports_event;comment:导入事件ID"`
 	IdempotencyKey *string   `gorm:"column:idempotency_key;type:varchar(128);uniqueIndex:uk_forum_imports_user_idem,priority:2;comment:导入请求幂等键"`
+	LastError      *string   `gorm:"column:last_error;type:text;comment:最近一次导入失败原因"`
 	CreatedAt      time.Time `gorm:"column:created_at;autoCreateTime;comment:创建时间"`
 	UpdatedAt      time.Time `gorm:"column:updated_at;autoUpdateTime;comment:更新时间"`
 }

@@ -37,6 +37,14 @@ userauth:
       - "127.0.0.1:9081"
     timeout: 2s
 
+# 计划广场 zrpc 独立服务与网关客户端配置。
+taskclassforum:
+  rpc:
+    listenOn: "0.0.0.0:9082"
+    endpoints:
+      - "127.0.0.1:9082"
+    timeout: 2s
+
 # Kafka outbox 事件总线配置。
 kafka:
   enabled: true

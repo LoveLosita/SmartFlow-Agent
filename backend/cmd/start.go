@@ -24,6 +24,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/bootstrap"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	gatewayrouter "github.com/LoveLosita/smartflow/backend/gateway/router"
+	gatewaytaskclassforum "github.com/LoveLosita/smartflow/backend/gateway/taskclassforum"
 	gatewayuserauth "github.com/LoveLosita/smartflow/backend/gateway/userauth"
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
@@ -73,6 +74,7 @@ type appRuntime struct {
 	limiter               *pkg.RateLimiter
 	handlers              *api.ApiHandlers
 	userAuthClient        *gatewayuserauth.Client
+	taskClassForumClient  *gatewaytaskclassforum.Client
 }
 
 // loadConfig 锻炼?
@@ -215,6 +217,14 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize userauth zrpc client: %w", err)
 	}
+	taskClassForumClient, err := gatewaytaskclassforum.NewClient(gatewaytaskclassforum.ClientConfig{
+		Endpoints: viper.GetStringSlice("taskclassforum.rpc.endpoints"),
+		Target:    viper.GetString("taskclassforum.rpc.target"),
+		Timeout:   viper.GetDuration("taskclassforum.rpc.timeout"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize taskclassforum zrpc client: %w", err)
+	}
 	taskSv := service.NewTaskService(taskRepo, cacheRepo, eventBus)
 	taskSv.SetActiveScheduleDAO(manager.ActiveSchedule)
 	courseService := buildCourseService(llmService, courseRepo, scheduleRepo)
@@ -324,6 +334,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		limiter:               limiter,
 		handlers:              handlers,
 		userAuthClient:        userAuthClient,
+		taskClassForumClient:  taskClassForumClient,
 	}
 	if runtime.eventBus != nil {
 		if err := runtime.registerEventHandlers(); err != nil {
@@ -904,7 +915,7 @@ func (r *appRuntime) registerEventHandlers() error {
 }
 
 func (r *appRuntime) startHTTP(ctx context.Context) {
-	router := gatewayrouter.RegisterRouters(r.handlers, r.userAuthClient, r.cacheRepo, r.limiter)
+	router := gatewayrouter.RegisterRouters(r.handlers, r.userAuthClient, r.taskClassForumClient, r.cacheRepo, r.limiter)
 	gatewayrouter.StartEngine(ctx, router)
 }
 

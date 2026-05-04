@@ -128,8 +128,10 @@ type ImportForumPostRequest struct {
 
 // DeleteForumCommentResult 是删除评论后的状态回执。
 type DeleteForumCommentResult struct {
-	CommentID uint64 `json:"comment_id"`
-	Status    string `json:"status"`
+	CommentID uint64  `json:"comment_id"`
+	Status    string  `json:"status"`
+	Content   string  `json:"content"`
+	DeletedAt *string `json:"deleted_at"`
 }
 
 // ImportForumPostResult 是一键导入后的回执。

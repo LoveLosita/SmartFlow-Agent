@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/LoveLosita/smartflow/backend/respond"
-	forumsv "github.com/LoveLosita/smartflow/backend/services/taskclassforum/sv"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -28,9 +27,6 @@ func grpcErrorFromServiceError(err error) error {
 	var resp respond.Response
 	if errors.As(err, &resp) {
 		return grpcErrorFromResponse(resp)
-	}
-	if errors.Is(err, forumsv.ErrNotImplemented) {
-		return status.Error(codes.Unimplemented, err.Error())
 	}
 	log.Printf("taskclassforum rpc internal error: %v", err)
 	return status.Error(codes.Internal, "taskclassforum service internal error")

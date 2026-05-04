@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/dao"
@@ -39,7 +40,8 @@ func IdempotencyMiddleware(cache *dao.CacheDAO) gin.HandlerFunc {
 		}
 
 		userID := c.GetInt("user_id") // 假设 JWT 已存入
-		redisKey := fmt.Sprintf("idempotency:%d:%s", userID, ikey)
+		routeKey := idempotencyRouteKey(c)
+		redisKey := fmt.Sprintf("idempotency:%d:%s:%s:%s", userID, c.Request.Method, routeKey, ikey)
 
 		// 2. 查 Redis 缓存
 		cachedData, err := cache.GetRecord(c, redisKey)
@@ -93,4 +95,15 @@ func IdempotencyMiddleware(cache *dao.CacheDAO) gin.HandlerFunc {
 			}
 		}
 	}
+}
+
+func idempotencyRouteKey(c *gin.Context) string {
+	// 1. 优先使用 Gin 匹配后的路由模板，避免 /posts/1 和 /posts/2 被当成两个幂等域。
+	// 2. 若当前上下文还拿不到模板，则退回请求路径，保证异常情况下仍不会跨接口串响应。
+	// 3. 路由 key 统一替换冒号，避免 Redis key 中混入过多分隔符影响人工排查。
+	route := strings.TrimSpace(c.FullPath())
+	if route == "" && c.Request != nil && c.Request.URL != nil {
+		route = strings.TrimSpace(c.Request.URL.Path)
+	}
+	return strings.ReplaceAll(route, ":", "_")
 }
