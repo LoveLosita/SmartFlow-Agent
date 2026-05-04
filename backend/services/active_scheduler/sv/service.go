@@ -39,6 +39,7 @@ type Options struct {
 	JobScanEvery time.Duration
 	JobScanLimit int
 	KafkaConfig  kafkabus.Config
+	TaskRPC      activeadapters.TaskRPCConfig
 	ScheduleRPC  activeadapters.ScheduleRPCConfig
 }
 
@@ -69,12 +70,15 @@ func New(db *gorm.DB, llmService *llmservice.Service, opts Options) (*Service, e
 	}
 
 	activeDAO := rootdao.NewActiveScheduleDAO(db)
-	activeReaders := activeadapters.NewGormReaders(db)
+	taskRPCAdapter, err := activeadapters.NewTaskRPCAdapter(opts.TaskRPC)
+	if err != nil {
+		return nil, fmt.Errorf("initialize task rpc adapter failed: %w", err)
+	}
 	scheduleRPCAdapter, err := activeadapters.NewScheduleRPCAdapter(opts.ScheduleRPC)
 	if err != nil {
 		return nil, fmt.Errorf("initialize schedule rpc adapter failed: %w", err)
 	}
-	readers := activeadapters.ReadersWithScheduleRPC(activeReaders, scheduleRPCAdapter)
+	readers := activeadapters.ReadersWithScheduleRPC(taskRPCAdapter, scheduleRPCAdapter)
 	dryRun, err := activesvc.NewDryRunService(readers)
 	if err != nil {
 		return nil, err

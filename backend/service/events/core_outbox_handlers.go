@@ -138,13 +138,6 @@ func coreOutboxHandlerRoutes(
 			},
 		},
 		{
-			EventType: EventTypeTaskUrgencyPromoteRequested,
-			Service:   outboxHandlerServiceTask,
-			Register: func() error {
-				return RegisterTaskUrgencyPromoteHandler(eventBus, outboxRepo, repoManager)
-			},
-		},
-		{
 			EventType: EventTypeChatTokenUsageAdjustRequested,
 			Service:   outboxHandlerServiceAgent,
 			Register: func() error {

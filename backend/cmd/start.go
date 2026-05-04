@@ -17,6 +17,7 @@ import (
 	gatewayactivescheduler "github.com/LoveLosita/smartflow/backend/gateway/client/activescheduler"
 	gatewaynotification "github.com/LoveLosita/smartflow/backend/gateway/client/notification"
 	gatewayschedule "github.com/LoveLosita/smartflow/backend/gateway/client/schedule"
+	gatewaytask "github.com/LoveLosita/smartflow/backend/gateway/client/task"
 	gatewayuserauth "github.com/LoveLosita/smartflow/backend/gateway/client/userauth"
 	gatewayrouter "github.com/LoveLosita/smartflow/backend/gateway/router"
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
@@ -230,6 +231,14 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize schedule zrpc client: %w", err)
 	}
+	taskClient, err := gatewaytask.NewClient(gatewaytask.ClientConfig{
+		Endpoints: viper.GetStringSlice("task.rpc.endpoints"),
+		Target:    viper.GetString("task.rpc.target"),
+		Timeout:   viper.GetDuration("task.rpc.timeout"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize task zrpc client: %w", err)
+	}
 	activeSchedulerClient, err := gatewayactivescheduler.NewClient(gatewayactivescheduler.ClientConfig{
 		Endpoints: viper.GetStringSlice("activeScheduler.rpc.endpoints"),
 		Target:    viper.GetString("activeScheduler.rpc.target"),
@@ -238,7 +247,11 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize active-scheduler zrpc client: %w", err)
 	}
-	taskSv := service.NewTaskService(taskRepo, cacheRepo, eventBus)
+	if err := eventsvc.RegisterTaskUrgencyPromoteRoute(); err != nil {
+		return nil, fmt.Errorf("failed to register task outbox route: %w", err)
+	}
+	taskOutboxPublisher := buildTaskOutboxPublisher(outboxRepo)
+	taskSv := service.NewTaskService(taskRepo, cacheRepo, taskOutboxPublisher)
 	taskSv.SetActiveScheduleDAO(manager.ActiveSchedule)
 	courseService := buildCourseService(llmService, courseRepo, scheduleRepo)
 	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo, manager)
@@ -268,9 +281,16 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		memoryCfg,
 	)
 
-	// 1. 迁移期 task_pool 事实仍由单体 task 表读取，下一轮切 task 服务后替换为 task RPC；
+	// 1. task_pool facts 已统一走 task RPC，避免聊天 rerun 继续直连 tasks 表；
 	// 2. schedule facts / feedback / apply 已统一走 schedule RPC，避免聊天 rerun 继续直连 schedule 表。
-	activeTaskReader := activeadapters.NewGormReaders(db)
+	activeTaskAdapter, err := activeadapters.NewTaskRPCAdapter(activeadapters.TaskRPCConfig{
+		Endpoints: viper.GetStringSlice("task.rpc.endpoints"),
+		Target:    viper.GetString("task.rpc.target"),
+		Timeout:   viper.GetDuration("task.rpc.timeout"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize task rpc adapter for active-scheduler rerun: %w", err)
+	}
 	activeScheduleAdapter, err := activeadapters.NewScheduleRPCAdapter(activeadapters.ScheduleRPCConfig{
 		Endpoints: viper.GetStringSlice("schedule.rpc.endpoints"),
 		Target:    viper.GetString("schedule.rpc.target"),
@@ -279,7 +299,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize schedule rpc adapter for active-scheduler rerun: %w", err)
 	}
-	activeScheduleDryRun, err := activesvc.NewDryRunService(activeadapters.ReadersWithScheduleRPC(activeTaskReader, activeScheduleAdapter))
+	activeScheduleDryRun, err := activesvc.NewDryRunService(activeadapters.ReadersWithScheduleRPC(activeTaskAdapter, activeScheduleAdapter))
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +317,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		return nil, err
 	}
 	agentService.SetActiveScheduleSessionRerunFunc(buildActiveScheduleSessionRerunFunc(manager.ActiveSchedule, activeScheduleGraphRunner, activeSchedulePreviewConfirm, activeScheduleFeedbackLocator))
-	handlers := buildAPIHandlers(taskSv, taskClassService, courseService, scheduleClient, agentService, memoryModule, activeSchedulerClient, notificationClient)
+	handlers := buildAPIHandlers(taskClient, taskClassService, courseService, scheduleClient, agentService, memoryModule, activeSchedulerClient, notificationClient)
 
 	runtime := &appRuntime{
 		db:          db,
@@ -366,6 +386,68 @@ func buildEventBus(outboxRepo *outboxinfra.Repository) (eventsvc.OutboxBus, erro
 		log.Println("Outbox event bus is disabled")
 	}
 	return eventBus, nil
+}
+
+type repositoryOutboxPublisher struct {
+	repo     *outboxinfra.Repository
+	maxRetry int
+}
+
+// buildTaskOutboxPublisher 构造单体残留 task 查询链路的发布器。
+//
+// 职责边界：
+// 1. 只负责把 Agent 残留 TaskService 产生的 task 事件写入 task_outbox_messages；
+// 2. 不创建 task consumer / relay，消费边界仍归 cmd/task；
+// 3. kafka.enabled=false 时返回 nil，保持本地降级语义与旧 eventBus 一致。
+func buildTaskOutboxPublisher(outboxRepo *outboxinfra.Repository) outboxinfra.EventPublisher {
+	kafkaCfg := kafkabus.LoadConfig()
+	if !kafkaCfg.Enabled || outboxRepo == nil {
+		return nil
+	}
+	return &repositoryOutboxPublisher{
+		repo:     outboxRepo,
+		maxRetry: kafkaCfg.MaxRetry,
+	}
+}
+
+// Publish 以 publish-only 方式写入服务级 outbox。
+//
+// 说明：
+// 1. 这里不复用 outbox EventBus，是因为 EventBus 会创建并启动对应 service engine；
+// 2. 单体残留只允许发布 task 事件，不允许启动 task consumer，否则会和 cmd/task 抢同一 consumer group；
+// 3. payload 仍包装成统一 OutboxEventPayload，确保 cmd/task relay / consumer 能按标准协议解析。
+func (p *repositoryOutboxPublisher) Publish(ctx context.Context, req outboxinfra.PublishRequest) error {
+	if p == nil || p.repo == nil {
+		return fmt.Errorf("task outbox publisher is not initialized")
+	}
+
+	eventType := strings.TrimSpace(req.EventType)
+	if eventType == "" {
+		return fmt.Errorf("eventType is empty")
+	}
+	eventVersion := strings.TrimSpace(req.EventVersion)
+	if eventVersion == "" {
+		eventVersion = outboxinfra.DefaultEventVersion
+	}
+	messageKey := strings.TrimSpace(req.MessageKey)
+	aggregateID := strings.TrimSpace(req.AggregateID)
+	if aggregateID == "" {
+		aggregateID = messageKey
+	}
+
+	payloadJSON, err := json.Marshal(req.Payload)
+	if err != nil {
+		return err
+	}
+
+	_, err = p.repo.CreateMessage(ctx, eventType, messageKey, outboxinfra.OutboxEventPayload{
+		EventID:      strings.TrimSpace(req.EventID),
+		EventType:    eventType,
+		EventVersion: eventVersion,
+		AggregateID:  aggregateID,
+		Payload:      payloadJSON,
+	}, p.maxRetry)
+	return err
 }
 
 func buildCourseService(llmService *llmservice.Service, courseRepo *dao.CourseDAO, scheduleRepo *dao.ScheduleDAO) *service.CourseService {
@@ -823,7 +905,7 @@ func buildQuickTaskQueryFunc(agentService *service.AgentService) func(ctx contex
 }
 
 func buildAPIHandlers(
-	taskService *service.TaskService,
+	taskClient ports.TaskCommandClient,
 	taskClassService *service.TaskClassService,
 	courseService *service.CourseService,
 	scheduleClient ports.ScheduleCommandClient,
@@ -833,7 +915,7 @@ func buildAPIHandlers(
 	notificationClient ports.NotificationCommandClient,
 ) *api.ApiHandlers {
 	return &api.ApiHandlers{
-		TaskHandler:      api.NewTaskHandler(taskService),
+		TaskHandler:      api.NewTaskHandler(taskClient),
 		TaskClassHandler: api.NewTaskClassHandler(taskClassService),
 		CourseHandler:    api.NewCourseHandler(courseService),
 		ScheduleHandler:  api.NewScheduleAPI(scheduleClient),

@@ -67,6 +67,14 @@ schedule:
       - "127.0.0.1:9084"
     timeout: 6s
 
+# 任务服务配置。
+task:
+  rpc:
+    listenOn: "0.0.0.0:9085"
+    endpoints:
+      - "127.0.0.1:9085"
+    timeout: 6s
+
 # 主动调度服务配置。
 activeScheduler:
   rpc:

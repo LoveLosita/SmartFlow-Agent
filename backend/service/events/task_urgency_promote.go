@@ -24,6 +24,16 @@ const (
 	EventTypeTaskUrgencyPromoteRequested = "task.urgency.promote.requested"
 )
 
+// RegisterTaskUrgencyPromoteRoute 只登记 task 事件归属，不注册消费 handler。
+//
+// 职责边界：
+// 1. 供单体残留路径在迁移期继续把 task 事件写入 task_outbox_messages；
+// 2. 不创建 consumer，也不启动 handler，真正消费已迁到 cmd/task；
+// 3. 重复登记同一归属是幂等操作。
+func RegisterTaskUrgencyPromoteRoute() error {
+	return outboxinfra.RegisterEventService(EventTypeTaskUrgencyPromoteRequested, string(outboxHandlerServiceTask))
+}
+
 // RegisterTaskUrgencyPromoteHandler 注册“任务紧急性平移”消费者处理器。
 //
 // 职责边界：

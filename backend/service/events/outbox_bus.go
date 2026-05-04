@@ -167,7 +167,6 @@ func orderedOutboxServiceNames(buses map[string]OutboxBus) []string {
 func OutboxServiceNames() []string {
 	return []string{
 		string(outboxHandlerServiceAgent),
-		string(outboxHandlerServiceTask),
 		string(outboxHandlerServiceMemory),
 	}
 }

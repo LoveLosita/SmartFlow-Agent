@@ -46,6 +46,11 @@ func main() {
 		JobScanEvery: viper.GetDuration("activeScheduler.jobScanEvery"),
 		JobScanLimit: viper.GetInt("activeScheduler.jobScanLimit"),
 		KafkaConfig:  kafkabus.LoadConfig(),
+		TaskRPC: activeadapters.TaskRPCConfig{
+			Endpoints: viper.GetStringSlice("task.rpc.endpoints"),
+			Target:    viper.GetString("task.rpc.target"),
+			Timeout:   viper.GetDuration("task.rpc.timeout"),
+		},
 		ScheduleRPC: activeadapters.ScheduleRPCConfig{
 			Endpoints: viper.GetStringSlice("schedule.rpc.endpoints"),
 			Target:    viper.GetString("schedule.rpc.target"),

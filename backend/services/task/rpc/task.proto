@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package smartflow.task;
+
+option go_package = "github.com/LoveLosita/smartflow/backend/services/task/rpc/pb";
+
+service Task {
+  rpc Ping(StatusResponse) returns (StatusResponse);
+  rpc AddTask(JSONRequest) returns (JSONResponse);
+  rpc GetUserTasks(JSONRequest) returns (JSONResponse);
+  rpc BatchTaskStatus(JSONRequest) returns (JSONResponse);
+  rpc CompleteTask(JSONRequest) returns (JSONResponse);
+  rpc UndoCompleteTask(JSONRequest) returns (JSONResponse);
+  rpc UpdateTask(JSONRequest) returns (JSONResponse);
+  rpc DeleteTask(JSONRequest) returns (JSONResponse);
+  rpc GetTaskForActiveSchedule(JSONRequest) returns (JSONResponse);
+}
+
+message JSONRequest {
+  bytes payload_json = 1;
+}
+
+message JSONResponse {
+  bytes data_json = 1;
+}
+
+message StatusResponse {
+}
