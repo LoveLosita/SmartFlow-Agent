@@ -8,6 +8,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/memory"
 	"github.com/LoveLosita/smartflow/backend/notification"
 	sharedevents "github.com/LoveLosita/smartflow/backend/shared/events"
+	"github.com/LoveLosita/smartflow/backend/shared/ports"
 )
 
 // RegisterCoreOutboxHandlers 注册核心业务 outbox handler。
@@ -24,12 +25,13 @@ func RegisterCoreOutboxHandlers(
 	agentRepo *dao.AgentDAO,
 	cacheRepo *dao.CacheDAO,
 	memoryModule *memory.Module,
+	adjuster ports.TokenUsageAdjuster,
 ) error {
 	if err := validateCoreOutboxHandlerDeps(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo, memoryModule); err != nil {
 		return err
 	}
 
-	return registerOutboxHandlerRoutes(coreOutboxHandlerRoutes(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo, memoryModule))
+	return registerOutboxHandlerRoutes(coreOutboxHandlerRoutes(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo, memoryModule, adjuster))
 }
 
 // RegisterAllOutboxHandlers 注册当前阶段所有 outbox handler。
@@ -47,6 +49,7 @@ func RegisterAllOutboxHandlers(
 	memoryModule *memory.Module,
 	activeTriggerWorkflow ActiveScheduleTriggeredProcessor,
 	notificationService *notification.NotificationService,
+	adjuster ports.TokenUsageAdjuster,
 ) error {
 	if err := validateAllOutboxHandlerDeps(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo, memoryModule, activeTriggerWorkflow, notificationService); err != nil {
 		return err
@@ -61,6 +64,7 @@ func RegisterAllOutboxHandlers(
 		memoryModule,
 		activeTriggerWorkflow,
 		notificationService,
+		adjuster,
 	))
 }
 
@@ -129,13 +133,14 @@ func coreOutboxHandlerRoutes(
 	agentRepo *dao.AgentDAO,
 	cacheRepo *dao.CacheDAO,
 	memoryModule *memory.Module,
+	adjuster ports.TokenUsageAdjuster,
 ) []outboxHandlerRoute {
 	return []outboxHandlerRoute{
 		{
 			EventType: EventTypeChatHistoryPersistRequested,
 			Service:   outboxHandlerServiceAgent,
 			Register: func() error {
-				return RegisterChatHistoryPersistHandler(eventBus, outboxRepo, repoManager)
+				return RegisterChatHistoryPersistHandler(eventBus, outboxRepo, repoManager, adjuster)
 			},
 		},
 		{
@@ -149,7 +154,7 @@ func coreOutboxHandlerRoutes(
 			EventType: EventTypeChatTokenUsageAdjustRequested,
 			Service:   outboxHandlerServiceAgent,
 			Register: func() error {
-				return RegisterChatTokenUsageAdjustHandler(eventBus, outboxRepo, repoManager)
+				return RegisterChatTokenUsageAdjustHandler(eventBus, outboxRepo, repoManager, adjuster)
 			},
 		},
 		{
@@ -186,8 +191,9 @@ func allOutboxHandlerRoutes(
 	memoryModule *memory.Module,
 	activeTriggerWorkflow ActiveScheduleTriggeredProcessor,
 	notificationService *notification.NotificationService,
+	adjuster ports.TokenUsageAdjuster,
 ) []outboxHandlerRoute {
-	routes := coreOutboxHandlerRoutes(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo, memoryModule)
+	routes := coreOutboxHandlerRoutes(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo, memoryModule, adjuster)
 	routes = append(routes,
 		outboxHandlerRoute{
 			EventType: sharedevents.ActiveScheduleTriggeredEventType,

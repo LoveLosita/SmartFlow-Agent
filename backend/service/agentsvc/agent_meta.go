@@ -218,7 +218,7 @@ func (s *AgentService) ensureConversationTitleAsync(userID int, chatID string) {
 					log.Printf("异步标题 token 记账事件发布失败 chat=%s tokens=%d err=%v", chatID, titleTokens, publishErr)
 				}
 			} else {
-				if adjustErr := s.repo.AdjustTokenUsage(ctx, userID, chatID, titleTokens); adjustErr != nil {
+				if adjustErr := s.repo.AdjustTokenUsage(ctx, userID, chatID, titleTokens, ""); adjustErr != nil {
 					log.Printf("异步标题 token 同步记账失败 chat=%s tokens=%d err=%v", chatID, titleTokens, adjustErr)
 				}
 			}

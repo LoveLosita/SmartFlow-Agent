@@ -13,7 +13,6 @@ type RepoManager struct {
 	Task                  *TaskDAO
 	Course                *CourseDAO
 	TaskClass             *TaskClassDAO
-	User                  *UserDAO
 	Agent                 *AgentDAO
 	ActiveSchedule        *ActiveScheduleDAO
 	ActiveScheduleSession *ActiveScheduleSessionDAO
@@ -27,7 +26,6 @@ func NewManager(db *gorm.DB) *RepoManager {
 		Task:                  NewTaskDAO(db),
 		Course:                NewCourseDAO(db),
 		TaskClass:             NewTaskClassDAO(db),
-		User:                  NewUserDAO(db),
 		Agent:                 NewAgentDAO(db),
 		ActiveSchedule:        NewActiveScheduleDAO(db),
 		ActiveScheduleSession: NewActiveScheduleSessionDAO(db),
@@ -48,7 +46,6 @@ func (m *RepoManager) WithTx(tx *gorm.DB) *RepoManager {
 		Task:                  m.Task.WithTx(tx),
 		TaskClass:             m.TaskClass.WithTx(tx),
 		Course:                m.Course.WithTx(tx),
-		User:                  m.User.WithTx(tx),
 		Agent:                 m.Agent.WithTx(tx),
 		ActiveSchedule:        m.ActiveSchedule.WithTx(tx),
 		ActiveScheduleSession: m.ActiveScheduleSession.WithTx(tx),

@@ -150,6 +150,7 @@ func (s *AgentService) PersistChatHistory(ctx context.Context, payload model.Cha
 			payload.ReasoningContent,
 			payload.ReasoningDurationSeconds,
 			payload.TokensConsumed,
+			"",
 		)
 	}
 	// 2. 已启用异步总线时，只发布“持久化请求事件”，不在请求路径阻塞 Kafka。

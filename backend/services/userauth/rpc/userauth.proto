@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package smartflow.userauth;
+
+option go_package = "github.com/LoveLosita/smartflow/backend/services/userauth/rpc/pb";
+
+service UserAuth {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Login(LoginRequest) returns (TokensResponse);
+  rpc RefreshToken(RefreshTokenRequest) returns (TokensResponse);
+  rpc Logout(LogoutRequest) returns (StatusResponse);
+  rpc ValidateAccessToken(ValidateAccessTokenRequest) returns (ValidateAccessTokenResponse);
+  rpc CheckTokenQuota(CheckTokenQuotaRequest) returns (CheckTokenQuotaResponse);
+  rpc AdjustTokenUsage(AdjustTokenUsageRequest) returns (CheckTokenQuotaResponse);
+}
+
+message RegisterRequest {
+  string username = 1;
+  string password = 2;
+  string phone_number = 3;
+}
+
+message RegisterResponse {
+  uint64 id = 1;
+}
+
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message TokensResponse {
+  string access_token = 1;
+  string refresh_token = 2;
+}
+
+message RefreshTokenRequest {
+  string refresh_token = 1;
+}
+
+message LogoutRequest {
+  string access_token = 1;
+}
+
+message StatusResponse {
+}
+
+message ValidateAccessTokenRequest {
+  string access_token = 1;
+}
+
+message ValidateAccessTokenResponse {
+  bool valid = 1;
+  int64 user_id = 2;
+  string token_type = 3;
+  string jti = 4;
+  int64 expires_at_unix_nano = 5;
+}
+
+message CheckTokenQuotaRequest {
+  int64 user_id = 1;
+}
+
+message AdjustTokenUsageRequest {
+  string event_id = 1;
+  int64 user_id = 2;
+  int64 token_delta = 3;
+}
+
+message CheckTokenQuotaResponse {
+  bool allowed = 1;
+  int64 token_limit = 2;
+  int64 token_usage = 3;
+  int64 last_reset_at_unix_nano = 4;
+}

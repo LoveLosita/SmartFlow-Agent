@@ -570,7 +570,7 @@ func (s *AgentService) adjustNewAgentRequestTokenUsage(ctx context.Context, user
 		return
 	}
 
-	if err := s.repo.AdjustTokenUsage(ctx, userID, chatID, deltaTokens); err != nil {
+	if err := s.repo.AdjustTokenUsage(ctx, userID, chatID, deltaTokens, ""); err != nil {
 		log.Printf("同步写入 newAgent 请求级 token 调整失败 chat=%s tokens=%d err=%v", chatID, deltaTokens, err)
 	}
 }

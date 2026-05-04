@@ -10,6 +10,7 @@ import (
 
 	"github.com/LoveLosita/smartflow/backend/model"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type AgentDAO struct {
@@ -39,7 +40,7 @@ func (r *AgentDAO) WithTx(tx *gorm.DB) *AgentDAO {
 // 1. retry 机制已整体下线，本函数不再写入 retry_group_id / retry_index / retry_from_* 四列；
 // 2. 这些列在 GORM ChatHistory 模型上暂时保留，列本身可空，历史数据不受影响；
 // 3. Step B 会做 DROP COLUMN 的 migration。
-func (a *AgentDAO) saveChatHistoryCore(ctx context.Context, userID int, conversationID string, role, message, reasoningContent string, reasoningDurationSeconds int, tokensConsumed int) error {
+func (a *AgentDAO) saveChatHistoryCore(ctx context.Context, userID int, conversationID string, role, message, reasoningContent string, reasoningDurationSeconds int, tokensConsumed int, sourceEventID string) error {
 	// 0. token 入库前兜底：负数统一归零，避免异常值污染累计统计。
 	if tokensConsumed < 0 {
 		tokensConsumed = 0
@@ -48,6 +49,23 @@ func (a *AgentDAO) saveChatHistoryCore(ctx context.Context, userID int, conversa
 	if reasoningDurationSeconds < 0 {
 		reasoningDurationSeconds = 0
 	}
+	normalizedEventID := strings.TrimSpace(sourceEventID)
+	var normalizedEventIDPtr *string
+	if normalizedEventID != "" {
+		normalizedEventIDPtr = &normalizedEventID
+		var chat model.AgentChat
+		err := a.db.WithContext(ctx).
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("last_history_event_id").
+			Where("user_id = ? AND chat_id = ?", userID, conversationID).
+			First(&chat).Error
+		if err != nil {
+			return err
+		}
+		if chat.LastHistoryEventID != nil && strings.TrimSpace(*chat.LastHistoryEventID) == normalizedEventID {
+			return nil
+		}
+	}
 
 	// 1. 先写 chat_histories 原始消息。
 	var reasoningContentPtr *string
@@ -55,6 +73,7 @@ func (a *AgentDAO) saveChatHistoryCore(ctx context.Context, userID int, conversa
 		reasoningContentPtr = &reasoningContent
 	}
 	userChat := model.ChatHistory{
+		SourceEventID:            normalizedEventIDPtr,
 		UserID:                   userID,
 		MessageContent:           &message,
 		ReasoningContent:         reasoningContentPtr,
@@ -67,15 +86,15 @@ func (a *AgentDAO) saveChatHistoryCore(ctx context.Context, userID int, conversa
 		return err
 	}
 
-	// 2. 再更新会话统计：
-	// 2.1 message_count +1，保持和 chat_histories 行数口径一致；
-	// 2.2 tokens_total 累加本条消息 token；
-	// 2.3 last_message_at 刷新为当前时间，供会话排序使用。
+	// 2. 再更新会话统计，保证 message_count / tokens_total / last_message_at 同步推进。
 	now := time.Now()
 	updates := map[string]interface{}{
 		"message_count":   gorm.Expr("message_count + ?", 1),
 		"tokens_total":    gorm.Expr("tokens_total + ?", tokensConsumed),
 		"last_message_at": &now,
+	}
+	if normalizedEventIDPtr != nil {
+		updates["last_history_event_id"] = normalizedEventIDPtr
 	}
 	result := a.db.WithContext(ctx).Model(&model.AgentChat{}).
 		Where("user_id = ? AND chat_id = ?", userID, conversationID).
@@ -84,26 +103,9 @@ func (a *AgentDAO) saveChatHistoryCore(ctx context.Context, userID int, conversa
 		return result.Error
 	}
 	if result.RowsAffected == 0 {
-		// 会话不存在时直接失败，避免出现"孤儿历史消息"。
 		return fmt.Errorf("conversation not found when updating stats: user_id=%d chat_id=%s", userID, conversationID)
 	}
 
-	// 3. 最后更新 users.token_usage（同一事务内）：
-	// 3.1 只在 tokensConsumed>0 时执行，避免无意义写入；
-	// 3.2 和 chat_histories/agent_chats 放在同一事务里，保证统计口径原子一致；
-	// 3.3 若用户行不存在则返回错误，触发事务回滚，防止出现"会话统计成功但用户统计丢失"。
-	if tokensConsumed > 0 {
-		userUpdate := a.db.WithContext(ctx).
-			Model(&model.User{}).
-			Where("id = ?", userID).
-			Update("token_usage", gorm.Expr("token_usage + ?", tokensConsumed))
-		if userUpdate.Error != nil {
-			return userUpdate.Error
-		}
-		if userUpdate.RowsAffected == 0 {
-			return fmt.Errorf("user not found when updating token usage: user_id=%d", userID)
-		}
-	}
 	return nil
 }
 
@@ -112,8 +114,8 @@ func (a *AgentDAO) saveChatHistoryCore(ctx context.Context, userID int, conversa
 // 设计目的：
 // 1. 给服务层组合多个 DAO 操作时复用，避免嵌套事务；
 // 2. 让 outbox 消费处理器可以和业务写入共享同一个 tx。
-func (a *AgentDAO) SaveChatHistoryInTx(ctx context.Context, userID int, conversationID string, role, message, reasoningContent string, reasoningDurationSeconds int, tokensConsumed int) error {
-	return a.saveChatHistoryCore(ctx, userID, conversationID, role, message, reasoningContent, reasoningDurationSeconds, tokensConsumed)
+func (a *AgentDAO) SaveChatHistoryInTx(ctx context.Context, userID int, conversationID string, role, message, reasoningContent string, reasoningDurationSeconds int, tokensConsumed int, sourceEventID string) error {
+	return a.saveChatHistoryCore(ctx, userID, conversationID, role, message, reasoningContent, reasoningDurationSeconds, tokensConsumed, sourceEventID)
 }
 
 // SaveChatHistory 在同步直写路径下写入聊天历史。
@@ -121,28 +123,47 @@ func (a *AgentDAO) SaveChatHistoryInTx(ctx context.Context, userID int, conversa
 // 说明：
 // 1. 该方法会自行开启事务；
 // 2. 内部复用 saveChatHistoryCore，确保和 SaveChatHistoryInTx 的业务口径完全一致。
-func (a *AgentDAO) SaveChatHistory(ctx context.Context, userID int, conversationID string, role, message, reasoningContent string, reasoningDurationSeconds int, tokensConsumed int) error {
+func (a *AgentDAO) SaveChatHistory(ctx context.Context, userID int, conversationID string, role, message, reasoningContent string, reasoningDurationSeconds int, tokensConsumed int, sourceEventID string) error {
 	return a.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return a.WithTx(tx).saveChatHistoryCore(ctx, userID, conversationID, role, message, reasoningContent, reasoningDurationSeconds, tokensConsumed)
+		return a.WithTx(tx).saveChatHistoryCore(ctx, userID, conversationID, role, message, reasoningContent, reasoningDurationSeconds, tokensConsumed, sourceEventID)
 	})
 }
 
-// adjustTokenUsageCore 在同一事务语义下做"会话/用户"token 账本增量调整。
+// adjustTokenUsageCore 在同一事务语义下做"会话"token 账本增量调整。
 //
 // 职责边界：
-// 1. 只更新 agent_chats.tokens_total 与 users.token_usage；
+// 1. 只更新 agent_chats.tokens_total；
 // 2. 不写 chat_histories（消息落库由 SaveChatHistory* 路径负责）；
 // 3. deltaTokens<=0 时视为无操作，直接返回。
-func (a *AgentDAO) adjustTokenUsageCore(ctx context.Context, userID int, conversationID string, deltaTokens int) error {
+func (a *AgentDAO) adjustTokenUsageCore(ctx context.Context, userID int, conversationID string, deltaTokens int, eventID string) error {
 	if deltaTokens <= 0 {
 		return nil
 	}
+	normalizedEventID := strings.TrimSpace(eventID)
+	var normalizedEventIDPtr *string
+	if normalizedEventID != "" {
+		normalizedEventIDPtr = &normalizedEventID
+		var chat model.AgentChat
+		err := a.db.WithContext(ctx).
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("last_token_adjust_event_id").
+			Where("user_id = ? AND chat_id = ?", userID, conversationID).
+			First(&chat).Error
+		if err != nil {
+			return err
+		}
+		if chat.LastTokenAdjustEventID != nil && strings.TrimSpace(*chat.LastTokenAdjustEventID) == normalizedEventID {
+			return nil
+		}
+	}
 
-	// 1. 先更新会话累计 token。
 	chatUpdate := a.db.WithContext(ctx).
 		Model(&model.AgentChat{}).
 		Where("user_id = ? AND chat_id = ?", userID, conversationID).
-		Update("tokens_total", gorm.Expr("tokens_total + ?", deltaTokens))
+		Updates(map[string]interface{}{
+			"tokens_total":               gorm.Expr("tokens_total + ?", deltaTokens),
+			"last_token_adjust_event_id": normalizedEventIDPtr,
+		})
 	if chatUpdate.Error != nil {
 		return chatUpdate.Error
 	}
@@ -150,32 +171,20 @@ func (a *AgentDAO) adjustTokenUsageCore(ctx context.Context, userID int, convers
 		return fmt.Errorf("conversation not found when adjusting tokens: user_id=%d chat_id=%s", userID, conversationID)
 	}
 
-	// 2. 再更新用户累计 token。
-	userUpdate := a.db.WithContext(ctx).
-		Model(&model.User{}).
-		Where("id = ?", userID).
-		Update("token_usage", gorm.Expr("token_usage + ?", deltaTokens))
-	if userUpdate.Error != nil {
-		return userUpdate.Error
-	}
-	if userUpdate.RowsAffected == 0 {
-		return fmt.Errorf("user not found when adjusting token usage: user_id=%d", userID)
-	}
 	return nil
 }
 
 // AdjustTokenUsageInTx 在调用方已开启事务时执行 token 账本增量调整。
-func (a *AgentDAO) AdjustTokenUsageInTx(ctx context.Context, userID int, conversationID string, deltaTokens int) error {
-	return a.adjustTokenUsageCore(ctx, userID, conversationID, deltaTokens)
+func (a *AgentDAO) AdjustTokenUsageInTx(ctx context.Context, userID int, conversationID string, deltaTokens int, eventID string) error {
+	return a.adjustTokenUsageCore(ctx, userID, conversationID, deltaTokens, eventID)
 }
 
 // AdjustTokenUsage 在同步路径下执行 token 账本增量调整（内部自带事务）。
-func (a *AgentDAO) AdjustTokenUsage(ctx context.Context, userID int, conversationID string, deltaTokens int) error {
+func (a *AgentDAO) AdjustTokenUsage(ctx context.Context, userID int, conversationID string, deltaTokens int, eventID string) error {
 	return a.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return a.WithTx(tx).adjustTokenUsageCore(ctx, userID, conversationID, deltaTokens)
+		return a.WithTx(tx).adjustTokenUsageCore(ctx, userID, conversationID, deltaTokens, eventID)
 	})
 }
-
 func (a *AgentDAO) CreateNewChat(userID int, chatID string) (int64, error) {
 	chat := model.AgentChat{
 		ChatID:        chatID,

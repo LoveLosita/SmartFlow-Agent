@@ -21,7 +21,10 @@ import (
 	activesvc "github.com/LoveLosita/smartflow/backend/active_scheduler/service"
 	activeTrigger "github.com/LoveLosita/smartflow/backend/active_scheduler/trigger"
 	"github.com/LoveLosita/smartflow/backend/api"
+	"github.com/LoveLosita/smartflow/backend/bootstrap"
 	"github.com/LoveLosita/smartflow/backend/dao"
+	gatewayrouter "github.com/LoveLosita/smartflow/backend/gateway/router"
+	gatewayuserauth "github.com/LoveLosita/smartflow/backend/gateway/userauth"
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
 	"github.com/LoveLosita/smartflow/backend/inits"
@@ -37,7 +40,6 @@ import (
 	"github.com/LoveLosita/smartflow/backend/newAgent/tools/web"
 	"github.com/LoveLosita/smartflow/backend/notification"
 	"github.com/LoveLosita/smartflow/backend/pkg"
-	"github.com/LoveLosita/smartflow/backend/routers"
 	"github.com/LoveLosita/smartflow/backend/service"
 	agentsvcsvc "github.com/LoveLosita/smartflow/backend/service/agentsvc"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
@@ -59,7 +61,6 @@ type appRuntime struct {
 	db                    *gorm.DB
 	redisClient           *redis.Client
 	cacheRepo             *dao.CacheDAO
-	userRepo              *dao.UserDAO
 	agentRepo             *dao.AgentDAO
 	agentCache            *dao.AgentCache
 	manager               *dao.RepoManager
@@ -71,21 +72,12 @@ type appRuntime struct {
 	notificationService   *notification.NotificationService
 	limiter               *pkg.RateLimiter
 	handlers              *api.ApiHandlers
+	userAuthClient        *gatewayuserauth.Client
 }
 
-// loadConfig 加载应用配置。
+// loadConfig 锻炼?
 func loadConfig() error {
-	viper.SetConfigName("config")
-	viper.SetConfigType("yaml")
-	viper.AddConfigPath(".")
-	// 1. 兼容从仓库根目录执行 `go run ./backend/cmd/api` 的场景；
-	// 2. 从 backend 目录执行时仍优先命中当前目录，不改变现有默认行为。
-	viper.AddConfigPath("backend")
-	if err := viper.ReadInConfig(); err != nil {
-		return fmt.Errorf("failed to read config file: %w", err)
-	}
-	log.Println("Config loaded successfully")
-	return nil
+	return bootstrap.LoadConfig()
 }
 
 // Start 保留历史兼容入口，当前默认等价于 StartAll。
@@ -154,12 +146,15 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		return nil, err
 	}
 
-	db, err := inits.ConnectDB()
+	db, err := inits.ConnectCoreDB()
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	rdb := inits.InitRedis()
+	rdb, err := inits.InitCoreRedis()
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to redis: %w", err)
+	}
 	limiter := pkg.NewRateLimiter(rdb)
 
 	aiHub, err := inits.InitEino()
@@ -198,7 +193,6 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	cacheRepo := dao.NewCacheDAO(rdb)
 	agentCacheRepo := dao.NewAgentCache(rdb)
 	_ = db.Use(middleware.NewGormCachePlugin(cacheRepo))
-	userRepo := dao.NewUserDAO(db)
 	taskRepo := dao.NewTaskDAO(db)
 	courseRepo := dao.NewCourseDAO(db)
 	taskClassRepo := dao.NewTaskClassDAO(db)
@@ -213,12 +207,19 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	}
 
 	// Service 层初始化。
-	userService := service.NewUserService(userRepo, cacheRepo)
+	userAuthClient, err := gatewayuserauth.NewClient(gatewayuserauth.ClientConfig{
+		Endpoints: viper.GetStringSlice("userauth.rpc.endpoints"),
+		Target:    viper.GetString("userauth.rpc.target"),
+		Timeout:   viper.GetDuration("userauth.rpc.timeout"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize userauth zrpc client: %w", err)
+	}
 	taskSv := service.NewTaskService(taskRepo, cacheRepo, eventBus)
 	taskSv.SetActiveScheduleDAO(manager.ActiveSchedule)
 	courseService := buildCourseService(llmService, courseRepo, scheduleRepo)
 	taskClassService := service.NewTaskClassService(taskClassRepo, cacheRepo, scheduleRepo, manager)
-	scheduleService := service.NewScheduleService(scheduleRepo, userRepo, taskClassRepo, manager, cacheRepo)
+	scheduleService := service.NewScheduleService(scheduleRepo, taskClassRepo, manager, cacheRepo)
 	agentService := service.NewAgentServiceWithSchedule(
 		llmService,
 		agentRepo,
@@ -304,13 +305,13 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 			return nil, err
 		}
 	}
-	handlers := buildAPIHandlers(userService, taskSv, taskClassService, courseService, scheduleService, agentService, memoryModule, activeScheduleDryRun, activeSchedulePreviewConfirm, activeScheduleTrigger, notificationChannelService)
+	handlers := buildAPIHandlers(taskSv, taskClassService, courseService, scheduleService, agentService, memoryModule, activeScheduleDryRun, activeSchedulePreviewConfirm, activeScheduleTrigger, notificationChannelService)
 
 	runtime := &appRuntime{
-		db:                    db,
-		redisClient:           rdb,
-		cacheRepo:             cacheRepo,
-		userRepo:              userRepo,
+		db:          db,
+		redisClient: rdb,
+		cacheRepo:   cacheRepo,
+
 		agentRepo:             agentRepo,
 		agentCache:            agentCacheRepo,
 		manager:               manager,
@@ -322,6 +323,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		notificationService:   notificationService,
 		limiter:               limiter,
 		handlers:              handlers,
+		userAuthClient:        userAuthClient,
 	}
 	if runtime.eventBus != nil {
 		if err := runtime.registerEventHandlers(); err != nil {
@@ -835,7 +837,6 @@ func buildQuickTaskQueryFunc(agentService *service.AgentService) func(ctx contex
 }
 
 func buildAPIHandlers(
-	userService *service.UserService,
 	taskService *service.TaskService,
 	taskClassService *service.TaskClassService,
 	courseService *service.CourseService,
@@ -848,7 +849,6 @@ func buildAPIHandlers(
 	notificationChannelService *notification.ChannelService,
 ) *api.ApiHandlers {
 	return &api.ApiHandlers{
-		UserHandler:      api.NewUserHandler(userService),
 		TaskHandler:      api.NewTaskHandler(taskService),
 		TaskClassHandler: api.NewTaskClassHandler(taskClassService),
 		CourseHandler:    api.NewCourseHandler(courseService),
@@ -896,6 +896,7 @@ func (r *appRuntime) registerEventHandlers() error {
 		r.memoryModule,
 		r.activeTriggerWorkflow,
 		r.notificationService,
+		r.userAuthClient,
 	); err != nil {
 		return err
 	}
@@ -903,8 +904,8 @@ func (r *appRuntime) registerEventHandlers() error {
 }
 
 func (r *appRuntime) startHTTP(ctx context.Context) {
-	router := routers.RegisterRouters(r.handlers, r.cacheRepo, r.userRepo, r.limiter)
-	routers.StartEngine(ctx, router)
+	router := gatewayrouter.RegisterRouters(r.handlers, r.userAuthClient, r.cacheRepo, r.limiter)
+	gatewayrouter.StartEngine(ctx, router)
 }
 
 func (r *appRuntime) close() {

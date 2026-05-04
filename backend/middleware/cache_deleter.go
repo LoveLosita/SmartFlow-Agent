@@ -81,7 +81,6 @@ func (p *GormCachePlugin) dispatchCacheLogic(modelObj interface{}) {
 		// 3. 若 UserID 为 0（无 userID 参数的 repo 方法），invalidMemoryPrefetchCache 内部守卫会直接跳过。
 		p.invalidMemoryPrefetchCache(m.UserID)
 	case model.AgentOutboxMessage,
-		model.User,
 		model.ChatHistory,
 		model.AgentChat,
 		model.AgentTimelineEvent,

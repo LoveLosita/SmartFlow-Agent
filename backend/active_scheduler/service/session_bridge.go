@@ -84,7 +84,7 @@ func (s *TriggerWorkflowService) bootstrapActiveScheduleConversationInTx(
 	if baseSeq == 0 {
 		assistantText := resolveInitialActiveScheduleAssistantText(selectionResult, previewDetail)
 		if assistantText != "" {
-			if err := txAgentDAO.SaveChatHistoryInTx(ctx, triggerRow.UserID, conversationID, "assistant", assistantText, "", 0, 0); err != nil {
+			if err := txAgentDAO.SaveChatHistoryInTx(ctx, triggerRow.UserID, conversationID, "assistant", assistantText, "", 0, 0, ""); err != nil {
 				return err
 			}
 			if err := saveActiveScheduleTimelineEvent(ctx, txAgentDAO, triggerRow.UserID, conversationID, baseSeq+1, model.AgentTimelineKindAssistantText, "assistant", assistantText, nil); err != nil {

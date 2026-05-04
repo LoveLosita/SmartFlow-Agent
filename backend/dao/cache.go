@@ -18,17 +18,6 @@ type CacheDAO struct {
 	client *redis.Client
 }
 
-// UserTokenQuotaSnapshot 是“用户额度判断”的 Redis 快照结构。
-//
-// 设计说明：
-// 1. 只保留额度判断必要字段，避免把 users 全字段塞进缓存；
-// 2. 该结构仅用于“快速门禁判断”，权威账本仍以 MySQL 为准。
-type UserTokenQuotaSnapshot struct {
-	TokenLimit  int       `json:"token_limit"`
-	TokenUsage  int       `json:"token_usage"`
-	LastResetAt time.Time `json:"last_reset_at"`
-}
-
 func NewCacheDAO(client *redis.Client) *CacheDAO {
 	return &CacheDAO{client: client}
 }
@@ -43,22 +32,6 @@ func (d *CacheDAO) conversationTimelineKey(userID int, conversationID string) st
 
 func (d *CacheDAO) conversationTimelineSeqKey(userID int, conversationID string) string {
 	return fmt.Sprintf("smartflow:conversation_timeline_seq:u:%d:c:%s", userID, conversationID)
-}
-
-// SetBlacklist 把 Token 写入黑名单。
-func (d *CacheDAO) SetBlacklist(jti string, expiration time.Duration) error {
-	return d.client.Set(context.Background(), "blacklist:"+jti, "1", expiration).Err()
-}
-
-// IsBlacklisted 检查 Token 是否在黑名单中。
-func (d *CacheDAO) IsBlacklisted(jti string) (bool, error) {
-	result, err := d.client.Get(context.Background(), "blacklist:"+jti).Result()
-	if errors.Is(err, redis.Nil) {
-		return false, nil // 不在黑名单中
-	} else if err != nil {
-		return false, err // 其他错误
-	}
-	return result == "1", nil // 在黑名单中
 }
 
 func (d *CacheDAO) AddTaskClassList(ctx context.Context, userID int, list *model.UserGetTaskClassesResponse) error {
@@ -291,82 +264,6 @@ func (d *CacheDAO) SetUserOngoingScheduleToCache(ctx context.Context, userID int
 func (d *CacheDAO) DeleteUserOngoingScheduleFromCache(ctx context.Context, userID int) error {
 	key := fmt.Sprintf("smartflow:ongoing_schedule:%d", userID)
 	return d.client.Del(ctx, key).Err()
-}
-
-func userTokenQuotaSnapshotKey(userID int) string {
-	return fmt.Sprintf("smartflow:user_token_quota_snapshot:%d", userID)
-}
-
-func userTokenBlockedKey(userID int) string {
-	return fmt.Sprintf("smartflow:user_token_blocked:%d", userID)
-}
-
-// GetUserTokenQuotaSnapshot 读取用户 token 配额快照。
-//
-// 输入输出语义：
-// 1. 命中返回 (*UserTokenQuotaSnapshot, true, nil)；
-// 2. 未命中返回 (nil, false, nil)；
-// 3. Redis/反序列化错误返回 (nil, false, err)。
-func (d *CacheDAO) GetUserTokenQuotaSnapshot(ctx context.Context, userID int) (*UserTokenQuotaSnapshot, bool, error) {
-	key := userTokenQuotaSnapshotKey(userID)
-	val, err := d.client.Get(ctx, key).Result()
-	if errors.Is(err, redis.Nil) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, err
-	}
-
-	var snapshot UserTokenQuotaSnapshot
-	if err = json.Unmarshal([]byte(val), &snapshot); err != nil {
-		return nil, false, err
-	}
-	return &snapshot, true, nil
-}
-
-// SetUserTokenQuotaSnapshot 写入用户 token 配额快照。
-//
-// 职责边界：
-// 1. 只做缓存写入，不做额度判断；
-// 2. ttl 由上层策略控制，便于按场景调优“性能 vs 一致性”。
-func (d *CacheDAO) SetUserTokenQuotaSnapshot(ctx context.Context, userID int, snapshot UserTokenQuotaSnapshot, ttl time.Duration) error {
-	key := userTokenQuotaSnapshotKey(userID)
-	data, err := json.Marshal(snapshot)
-	if err != nil {
-		return err
-	}
-	return d.client.Set(ctx, key, data, ttl).Err()
-}
-
-// DeleteUserTokenQuotaSnapshot 删除用户 token 快照缓存。
-func (d *CacheDAO) DeleteUserTokenQuotaSnapshot(ctx context.Context, userID int) error {
-	return d.client.Del(ctx, userTokenQuotaSnapshotKey(userID)).Err()
-}
-
-// IsUserTokenBlocked 检查用户是否被“额度封禁键”命中。
-func (d *CacheDAO) IsUserTokenBlocked(ctx context.Context, userID int) (bool, error) {
-	result, err := d.client.Get(ctx, userTokenBlockedKey(userID)).Result()
-	if errors.Is(err, redis.Nil) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return result == "1", nil
-}
-
-// SetUserTokenBlocked 设置用户“额度封禁键”。
-//
-// 说明：
-// 1. 该键是快速拦截层，不是权威账本；
-// 2. ttl 建议设置到“下一次重置时间”，到期自动解封。
-func (d *CacheDAO) SetUserTokenBlocked(ctx context.Context, userID int, ttl time.Duration) error {
-	return d.client.Set(ctx, userTokenBlockedKey(userID), "1", ttl).Err()
-}
-
-// DeleteUserTokenBlocked 清理用户“额度封禁键”。
-func (d *CacheDAO) DeleteUserTokenBlocked(ctx context.Context, userID int) error {
-	return d.client.Del(ctx, userTokenBlockedKey(userID)).Err()
 }
 
 // SetSchedulePlanPreviewToCache 写入“排程预览”缓存。

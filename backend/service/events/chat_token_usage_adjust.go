@@ -5,34 +5,36 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/LoveLosita/smartflow/backend/dao"
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
 	"github.com/LoveLosita/smartflow/backend/model"
+	contracts "github.com/LoveLosita/smartflow/backend/shared/contracts/userauth"
+	"github.com/LoveLosita/smartflow/backend/shared/ports"
 	"gorm.io/gorm"
 )
 
 const (
-	// EventTypeChatTokenUsageAdjustRequested 是“会话 token 账本增量调整”事件类型。
-	//
+	// EventTypeChatTokenUsageAdjustRequested 是“会话 token 额度调整”事件类型。
 	// 命名约束：
-	// 1. 仅表达业务语义，不泄露 outbox/kafka 实现细节；
+	// 1. 只表达业务语义，不泄露 outbox/kafka 实现细节；
 	// 2. 作为稳定路由键长期保留，后续演进优先通过 event_version。
 	EventTypeChatTokenUsageAdjustRequested = "chat.token.usage.adjust.requested"
 )
 
-// RegisterChatTokenUsageAdjustHandler 注册“会话 token 账本增量调整”消费者。
-//
+// RegisterChatTokenUsageAdjustHandler 注册“会话 token 额度调整”消费者。
 // 职责边界：
 // 1. 只处理 token 调整事件，不处理聊天正文落库；
-// 2. 通过 outbox 统一消费事务入口，保证“业务成功 + consumed 推进”原子一致；
+// 2. 先写本地账本，再调用 userauth 侧做额度同步；
 // 3. 非法载荷直接标记 dead，避免无意义重试。
 func RegisterChatTokenUsageAdjustHandler(
 	bus OutboxBus,
 	outboxRepo *outboxinfra.Repository,
 	repoManager *dao.RepoManager,
+	adjuster ports.TokenUsageAdjuster,
 ) error {
 	if bus == nil {
 		return errors.New("event bus is nil")
@@ -43,6 +45,7 @@ func RegisterChatTokenUsageAdjustHandler(
 	if repoManager == nil {
 		return errors.New("repo manager is nil")
 	}
+
 	eventOutboxRepo, err := scopedOutboxRepoForEvent(outboxRepo, EventTypeChatTokenUsageAdjustRequested)
 	if err != nil {
 		return err
@@ -60,20 +63,38 @@ func RegisterChatTokenUsageAdjustHandler(
 			return nil
 		}
 
-		return eventOutboxRepo.ConsumeAndMarkConsumed(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
+		eventID := strings.TrimSpace(envelope.EventID)
+		if eventID == "" {
+			eventID = strconv.FormatInt(envelope.OutboxID, 10)
+		}
+
+		if err := eventOutboxRepo.ConsumeInTx(ctx, envelope.OutboxID, func(tx *gorm.DB) error {
 			txM := repoManager.WithTx(tx)
-			return txM.Agent.AdjustTokenUsageInTx(ctx, payload.UserID, payload.ConversationID, payload.TokensDelta)
-		})
+			return txM.Agent.AdjustTokenUsageInTx(ctx, payload.UserID, payload.ConversationID, payload.TokensDelta, eventID)
+		}); err != nil {
+			return err
+		}
+
+		if adjuster == nil {
+			return errors.New("userauth token adjuster is nil")
+		}
+		if _, err := adjuster.AdjustTokenUsage(ctx, contracts.AdjustTokenUsageRequest{
+			EventID:    eventID,
+			UserID:     payload.UserID,
+			TokenDelta: payload.TokensDelta,
+		}); err != nil {
+			return err
+		}
+
+		return eventOutboxRepo.MarkConsumed(ctx, envelope.OutboxID)
 	}
 
 	return bus.RegisterEventHandler(EventTypeChatTokenUsageAdjustRequested, handler)
 }
 
-// PublishChatTokenUsageAdjustRequested 发布“会话 token 账本增量调整”事件。
-//
-// 说明：
-// 1. 只保证“写入 outbox 成功”，不等待消费完成；
-// 2. 业务层只传 DTO，不关心 outbox/kafka 协议细节。
+// PublishChatTokenUsageAdjustRequested 发布“会话 token 额度调整”事件。
+// 1. 这里只保证 outbox 写入成功，不等待消费结果；
+// 2. 业务层只关心 DTO，不关心 outbox/Kafka 细节。
 func PublishChatTokenUsageAdjustRequested(
 	ctx context.Context,
 	publisher outboxinfra.EventPublisher,

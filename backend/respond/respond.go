@@ -5,6 +5,7 @@ package respond
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -22,6 +23,26 @@ type FinalResponse struct { //最终响应结构体
 
 func (r Response) Error() string { // 实现 error 接口
 	return r.Info
+}
+
+// HTTPStatus 负责把项目内部响应码映射到 HTTP 状态码。
+//
+// 职责边界：
+// 1. 只根据当前响应码判断该返回 200/400/401/500 里的哪一类；
+// 2. 不负责写响应体，也不负责区分具体业务来源；
+// 3. 业务侧可以继续透传 Status/Info，HTTP 层只需要调用这个方法。
+func (r Response) HTTPStatus() int {
+	switch r.Status {
+	case MissingToken.Status, InvalidToken.Status, InvalidClaims.Status, InvalidRefreshToken.Status,
+		WrongTokenType.Status, UserLoggedOut.Status, ErrUnauthorized.Status:
+		return http.StatusUnauthorized
+	case UserTasksEmpty.Status, NoOngoingOrUpcomingSchedule.Status, TaskAlreadyDeleted.Status:
+		return http.StatusOK
+	}
+	if strings.HasPrefix(strings.TrimSpace(r.Status), "5") {
+		return http.StatusInternalServerError
+	}
+	return http.StatusBadRequest
 }
 
 func RespWithData(response Response, data interface{}) FinalResponse { //传入一个响应结构体和数据，返回一个最终响应结构体
@@ -42,7 +63,7 @@ func DealWithError(c *gin.Context, err error) { //处理错误，返回对应的
 		return
 	}
 	if errors.As(err, &resp) {
-		c.JSON(http.StatusBadRequest, resp)
+		c.JSON(resp.HTTPStatus(), resp)
 		return
 	}
 	c.JSON(http.StatusInternalServerError, InternalError(err))

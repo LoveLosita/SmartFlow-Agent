@@ -11,9 +11,14 @@ import (
 	"gorm.io/gorm"
 )
 
-func autoMigrateModels(db *gorm.DB) error {
+// autoMigrateCoreModels 只迁移仍留在当前单体进程内的业务表。
+//
+// 职责边界：
+// 1. 负责 agent / task / schedule / memory / notification 等尚未独立拆出的表；
+// 2. 不负责 users、JWT、黑名单、token 额度等 user/auth 领域表；
+// 3. user/auth 表由 cmd/userauth 进程在自己的 DAO 初始化阶段迁移，避免 all 启动时跨服务碰核心用户表。
+func autoMigrateCoreModels(db *gorm.DB) error {
 	models := []any{
-		&model.User{},
 		&model.AgentChat{},
 		&model.ChatHistory{},
 		&model.AgentTimelineEvent{},
@@ -92,7 +97,13 @@ func backfillAutoMigrateData(db *gorm.DB) error {
 	return nil
 }
 
-func ConnectDB() (*gorm.DB, error) {
+// OpenDBFromConfig 只按配置创建 MySQL 连接，不执行任何自动迁移。
+//
+// 职责边界：
+// 1. 负责把 viper 中的 database 配置转换成 *gorm.DB；
+// 2. 不负责选择要迁移哪些模型，迁移入口必须由具体服务显式调用；
+// 3. 调用方负责决定这是单体残留域、user/auth 还是后续新服务的连接。
+func OpenDBFromConfig() (*gorm.DB, error) {
 	host := viper.GetString("database.host")
 	port := viper.GetString("database.port")
 	user := viper.GetString("database.user")
@@ -108,12 +119,44 @@ func ConnectDB() (*gorm.DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	return db, nil
+}
 
-	if err = autoMigrateModels(db); err != nil {
+// AutoMigrateCoreStorage 执行当前单体残留域拥有的 schema 初始化。
+//
+// 职责边界：
+// 1. 只迁移当前 all/api/worker 仍直接拥有的表和这些域的 outbox 表；
+// 2. 不迁移 userauth.User，避免 gateway/all 在阶段 2 之后继续直接管理用户核心表；
+// 3. 回填逻辑仍保留在当前域内，因为 schedule_events 仍属于单体残留域。
+func AutoMigrateCoreStorage(db *gorm.DB) error {
+	if err := autoMigrateCoreModels(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ConnectCoreDB 创建当前单体残留域的 MySQL 连接，并执行该域自己的迁移。
+//
+// 迁移期约束：
+// 1. all/api/worker 仍需要这条入口来承载尚未拆出的业务域；
+// 2. 已拆出的 user/auth 不再通过这里迁移；
+// 3. 后续每拆出一个服务，就从 autoMigrateCoreModels 中移走对应模型。
+func ConnectCoreDB() (*gorm.DB, error) {
+	db, err := OpenDBFromConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	if err = AutoMigrateCoreStorage(db); err != nil {
 		return nil, err
 	}
 
 	log.Println("Database connected successfully")
 	log.Println("Database auto migration completed")
 	return db, nil
+}
+
+// ConnectDB 保留历史兼容入口，新的装配代码应优先调用 ConnectCoreDB。
+func ConnectDB() (*gorm.DB, error) {
+	return ConnectCoreDB()
 }

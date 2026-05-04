@@ -18,16 +18,14 @@ import (
 
 type ScheduleService struct {
 	scheduleDAO  *dao.ScheduleDAO
-	userDAO      *dao.UserDAO
 	taskClassDAO *dao.TaskClassDAO
 	repoManager  *dao.RepoManager // 统一管理多个 DAO 的事务
 	cacheDAO     *dao.CacheDAO    // 需要在 ScheduleService 中使用缓存
 }
 
-func NewScheduleService(scheduleDAO *dao.ScheduleDAO, userDAO *dao.UserDAO, taskClassDAO *dao.TaskClassDAO, repoManager *dao.RepoManager, cacheDAO *dao.CacheDAO) *ScheduleService {
+func NewScheduleService(scheduleDAO *dao.ScheduleDAO, taskClassDAO *dao.TaskClassDAO, repoManager *dao.RepoManager, cacheDAO *dao.CacheDAO) *ScheduleService {
 	return &ScheduleService{
 		scheduleDAO:  scheduleDAO,
-		userDAO:      userDAO,
 		taskClassDAO: taskClassDAO,
 		repoManager:  repoManager,
 		cacheDAO:     cacheDAO,
@@ -35,14 +33,6 @@ func NewScheduleService(scheduleDAO *dao.ScheduleDAO, userDAO *dao.UserDAO, task
 }
 
 func (ss *ScheduleService) GetUserTodaySchedule(ctx context.Context, userID int) ([]model.UserTodaySchedule, error) {
-	//1.先检查用户id是否存在(考虑移除)
-	/*_, err := ss.userDAO.GetUserByID(userID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, respond.WrongUserID
-		}
-		return nil, err
-	}*/
 	//1.先尝试从缓存获取数据
 	cachedResp, err := ss.cacheDAO.GetUserTodayScheduleFromCache(ctx, userID)
 	if err == nil {
