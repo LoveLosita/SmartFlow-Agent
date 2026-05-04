@@ -75,7 +75,7 @@ type runtimeDependencyTable struct {
 //
 // 职责边界：
 // 1. 只检查表是否存在，不 AutoMigrate、不补列、不修改任何跨域表；
-// 2. 把 active-scheduler 运行时仍然需要的 task / schedule / agent / notification outbox 边界显式化；
+// 2. 把 active-scheduler 运行时仍然需要的 task / agent / notification outbox 边界显式化；
 // 3. 若部署顺序、库权限或表结构归属不满足，启动阶段直接 fail fast，避免第一次 trigger 才反复重试。
 func ensureRuntimeDependencyTables(db *gorm.DB) error {
 	if db == nil {
@@ -110,7 +110,7 @@ func ensureTableExists(db *gorm.DB, table runtimeDependencyTable) error {
 // 说明：
 // 1. active-scheduler 自有表在 OpenDBFromConfig 内迁移，这里只放跨域依赖；
 // 2. notification outbox 表名来自 service catalog，避免和 outbox 多表路由配置漂移；
-// 3. 后续切到 task/schedule/agent/notification RPC 或 read model 后，应从这里移除对应表依赖。
+// 3. schedule 读写已切到 schedule RPC；后续切到 task/agent/notification RPC 或 read model 后，应继续移除对应表依赖。
 func activeSchedulerRuntimeDependencyTables() []runtimeDependencyTable {
 	notificationOutboxTable := "notification_outbox_messages"
 	if cfg, ok := outboxinfra.ResolveServiceConfig(outboxinfra.ServiceNotification); ok && cfg.TableName != "" {
@@ -118,11 +118,7 @@ func activeSchedulerRuntimeDependencyTables() []runtimeDependencyTable {
 	}
 
 	return []runtimeDependencyTable{
-		{Name: "tasks", Reason: "dry-run 读取 task_pool 事实，confirm 时锁定 task_pool 目标"},
-		{Name: "schedule_events", Reason: "dry-run 读取日程事实，confirm 时写入正式日程事件"},
-		{Name: "schedules", Reason: "dry-run 读取节次占用，confirm 时写入正式节次"},
-		{Name: "task_classes", Reason: "confirm create_makeup 时校验 task_item 归属"},
-		{Name: "task_items", Reason: "confirm create_makeup 时锁定 task_item 目标"},
+		{Name: "tasks", Reason: "迁移期 dry-run / due job scanner 仍读取 task_pool 事实，下一轮切 task RPC 后移除"},
 		{Name: "agent_chats", Reason: "trigger 生成 preview 后预建主动调度会话"},
 		{Name: "chat_histories", Reason: "trigger 生成 preview 后写入会话首屏消息"},
 		{Name: "agent_timeline_events", Reason: "trigger 生成 preview 后写入主动调度时间线卡片"},

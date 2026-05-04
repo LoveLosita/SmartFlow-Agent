@@ -24,11 +24,15 @@ type PreviewConfirmService struct {
 	dryRun       *DryRunService
 	preview      *activepreview.Service
 	activeDAO    *dao.ActiveScheduleDAO
-	applyAdapter *applyadapter.GormApplyAdapter
+	applyAdapter scheduleApplyAdapter
 	clock        func() time.Time
 }
 
-func NewPreviewConfirmService(dryRun *DryRunService, previewService *activepreview.Service, activeDAO *dao.ActiveScheduleDAO, applyAdapter *applyadapter.GormApplyAdapter) (*PreviewConfirmService, error) {
+type scheduleApplyAdapter interface {
+	ApplyActiveScheduleChanges(ctx context.Context, req applyadapter.ApplyActiveScheduleRequest) (applyadapter.ApplyActiveScheduleResult, error)
+}
+
+func NewPreviewConfirmService(dryRun *DryRunService, previewService *activepreview.Service, activeDAO *dao.ActiveScheduleDAO, applyAdapter scheduleApplyAdapter) (*PreviewConfirmService, error) {
 	if dryRun == nil {
 		return nil, errors.New("dry-run service 不能为空")
 	}

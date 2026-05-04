@@ -16,6 +16,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/gateway/api"
 	gatewayactivescheduler "github.com/LoveLosita/smartflow/backend/gateway/client/activescheduler"
 	gatewaynotification "github.com/LoveLosita/smartflow/backend/gateway/client/notification"
+	gatewayschedule "github.com/LoveLosita/smartflow/backend/gateway/client/schedule"
 	gatewayuserauth "github.com/LoveLosita/smartflow/backend/gateway/client/userauth"
 	gatewayrouter "github.com/LoveLosita/smartflow/backend/gateway/router"
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
@@ -36,7 +37,7 @@ import (
 	agentsvcsvc "github.com/LoveLosita/smartflow/backend/service/agentsvc"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 	activeadapters "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/adapters"
-	"github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/applyadapter"
+	activeapplyadapter "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/applyadapter"
 	activefeedbacklocate "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/feedbacklocate"
 	activegraph "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/graph"
 	activepreview "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/preview"
@@ -221,6 +222,14 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize notification zrpc client: %w", err)
 	}
+	scheduleClient, err := gatewayschedule.NewClient(gatewayschedule.ClientConfig{
+		Endpoints: viper.GetStringSlice("schedule.rpc.endpoints"),
+		Target:    viper.GetString("schedule.rpc.target"),
+		Timeout:   viper.GetDuration("schedule.rpc.timeout"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize schedule zrpc client: %w", err)
+	}
 	activeSchedulerClient, err := gatewayactivescheduler.NewClient(gatewayactivescheduler.ClientConfig{
 		Endpoints: viper.GetStringSlice("activeScheduler.rpc.endpoints"),
 		Target:    viper.GetString("activeScheduler.rpc.target"),
@@ -259,12 +268,22 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		memoryCfg,
 	)
 
-	activeReaders := activeadapters.NewGormReaders(db)
-	activeScheduleDryRun, err := activesvc.NewDryRunService(activeadapters.ReadersFromGorm(activeReaders))
+	// 1. 迁移期 task_pool 事实仍由单体 task 表读取，下一轮切 task 服务后替换为 task RPC；
+	// 2. schedule facts / feedback / apply 已统一走 schedule RPC，避免聊天 rerun 继续直连 schedule 表。
+	activeTaskReader := activeadapters.NewGormReaders(db)
+	activeScheduleAdapter, err := activeadapters.NewScheduleRPCAdapter(activeadapters.ScheduleRPCConfig{
+		Endpoints: viper.GetStringSlice("schedule.rpc.endpoints"),
+		Target:    viper.GetString("schedule.rpc.target"),
+		Timeout:   viper.GetDuration("schedule.rpc.timeout"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize schedule rpc adapter for active-scheduler rerun: %w", err)
+	}
+	activeScheduleDryRun, err := activesvc.NewDryRunService(activeadapters.ReadersWithScheduleRPC(activeTaskReader, activeScheduleAdapter))
 	if err != nil {
 		return nil, err
 	}
-	activeSchedulePreviewConfirm, err := buildActiveSchedulePreviewConfirmService(db, manager.ActiveSchedule, activeScheduleDryRun)
+	activeSchedulePreviewConfirm, err := buildActiveSchedulePreviewConfirmService(manager.ActiveSchedule, activeScheduleDryRun, activeScheduleAdapter)
 	if err != nil {
 		return nil, err
 	}
@@ -272,13 +291,13 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	// 2. dry-run 与 selection 通过 graph runner 串起来，避免 trigger_pipeline 再拼第二套候选逻辑。
 	activeScheduleLLMClient := llmService.ProClient()
 	activeScheduleSelector := activesel.NewService(activeScheduleLLMClient)
-	activeScheduleFeedbackLocator := activefeedbacklocate.NewService(activeReaders, activeScheduleLLMClient)
+	activeScheduleFeedbackLocator := activefeedbacklocate.NewService(activeScheduleAdapter, activeScheduleLLMClient)
 	activeScheduleGraphRunner, err := activegraph.NewRunner(activeScheduleDryRun.AsGraphDryRunFunc(), activeScheduleSelector)
 	if err != nil {
 		return nil, err
 	}
 	agentService.SetActiveScheduleSessionRerunFunc(buildActiveScheduleSessionRerunFunc(manager.ActiveSchedule, activeScheduleGraphRunner, activeSchedulePreviewConfirm, activeScheduleFeedbackLocator))
-	handlers := buildAPIHandlers(taskSv, taskClassService, courseService, scheduleService, agentService, memoryModule, activeSchedulerClient, notificationClient)
+	handlers := buildAPIHandlers(taskSv, taskClassService, courseService, scheduleClient, agentService, memoryModule, activeSchedulerClient, notificationClient)
 
 	runtime := &appRuntime{
 		db:          db,
@@ -363,17 +382,14 @@ func buildCourseService(llmService *llmservice.Service, courseRepo *dao.CourseDA
 	)
 }
 
-func buildActiveScheduleDryRunService(db *gorm.DB) (*activesvc.DryRunService, error) {
-	readers := activeadapters.NewGormReaders(db)
-	return activesvc.NewDryRunService(activeadapters.ReadersFromGorm(readers))
-}
-
-func buildActiveSchedulePreviewConfirmService(db *gorm.DB, activeDAO *dao.ActiveScheduleDAO, dryRun *activesvc.DryRunService) (*activesvc.PreviewConfirmService, error) {
+func buildActiveSchedulePreviewConfirmService(activeDAO *dao.ActiveScheduleDAO, dryRun *activesvc.DryRunService, scheduleApplyAdapter interface {
+	ApplyActiveScheduleChanges(context.Context, activeapplyadapter.ApplyActiveScheduleRequest) (activeapplyadapter.ApplyActiveScheduleResult, error)
+}) (*activesvc.PreviewConfirmService, error) {
 	previewService, err := activepreview.NewService(activeDAO)
 	if err != nil {
 		return nil, err
 	}
-	return activesvc.NewPreviewConfirmService(dryRun, previewService, activeDAO, applyadapter.NewGormApplyAdapter(db))
+	return activesvc.NewPreviewConfirmService(dryRun, previewService, activeDAO, scheduleApplyAdapter)
 }
 
 // buildActiveScheduleSessionRerunFunc 把主动调度定位器 / graph / preview 能力装成聊天入口可调用的 rerun 闭包。
@@ -810,7 +826,7 @@ func buildAPIHandlers(
 	taskService *service.TaskService,
 	taskClassService *service.TaskClassService,
 	courseService *service.CourseService,
-	scheduleService *service.ScheduleService,
+	scheduleClient ports.ScheduleCommandClient,
 	agentService *service.AgentService,
 	memoryModule *memory.Module,
 	activeSchedulerClient ports.ActiveSchedulerCommandClient,
@@ -820,7 +836,7 @@ func buildAPIHandlers(
 		TaskHandler:      api.NewTaskHandler(taskService),
 		TaskClassHandler: api.NewTaskClassHandler(taskClassService),
 		CourseHandler:    api.NewCourseHandler(courseService),
-		ScheduleHandler:  api.NewScheduleAPI(scheduleService),
+		ScheduleHandler:  api.NewScheduleAPI(scheduleClient),
 		AgentHandler:     api.NewAgentHandler(agentService),
 		MemoryHandler:    api.NewMemoryHandler(memoryModule),
 		ActiveSchedule:   api.NewActiveScheduleAPI(activeSchedulerClient),

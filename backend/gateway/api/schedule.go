@@ -6,19 +6,21 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
-	"github.com/LoveLosita/smartflow/backend/service"
+	schedulecontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/schedule"
+	"github.com/LoveLosita/smartflow/backend/shared/ports"
 	"github.com/gin-gonic/gin"
 )
 
+const scheduleRequestTimeout = 6 * time.Second
+
 type ScheduleAPI struct {
-	scheduleService *service.ScheduleService
+	scheduleClient ports.ScheduleCommandClient
 }
 
-func NewScheduleAPI(scheduleService *service.ScheduleService) *ScheduleAPI {
+func NewScheduleAPI(scheduleClient ports.ScheduleCommandClient) *ScheduleAPI {
 	return &ScheduleAPI{
-		scheduleService: scheduleService,
+		scheduleClient: scheduleClient,
 	}
 }
 
@@ -26,9 +28,9 @@ func (s *ScheduleAPI) GetUserTodaySchedule(c *gin.Context) {
 	// 1. 从请求上下文中获取用户ID
 	userID := c.GetInt("user_id")
 	//2.调用服务层方法获取用户当天的日程安排
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), scheduleRequestTimeout)
 	defer cancel() // 记得释放资源
-	todaySchedules, err := s.scheduleService.GetUserTodaySchedule(ctx, userID)
+	todaySchedules, err := s.scheduleClient.GetUserTodaySchedule(ctx, userID)
 	if err != nil {
 		respond.DealWithError(c, err)
 		return
@@ -47,9 +49,9 @@ func (s *ScheduleAPI) GetUserWeeklySchedule(c *gin.Context) {
 		return
 	}
 	//3.调用服务层方法获取用户当周的日程安排
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), scheduleRequestTimeout)
 	defer cancel() // 记得释放资源
-	weeklySchedules, err := s.scheduleService.GetUserWeeklySchedule(ctx, userID, week)
+	weeklySchedules, err := s.scheduleClient.GetUserWeeklySchedule(ctx, userID, week)
 	if err != nil {
 		respond.DealWithError(c, err)
 		return
@@ -62,15 +64,18 @@ func (s *ScheduleAPI) DeleteScheduleEvent(c *gin.Context) {
 	// 1. 从请求上下文中获取用户ID
 	userID := c.GetInt("user_id")
 	// 2. 从请求体中获取要删除的日程事件信息
-	var req []model.UserDeleteScheduleEvent
+	var req []schedulecontracts.UserDeleteScheduleEvent
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
 		return
 	}
 	//3.调用服务层方法删除指定的日程事件
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), scheduleRequestTimeout)
 	defer cancel() // 记得释放资源
-	err := s.scheduleService.DeleteScheduleEvent(ctx, req, userID)
+	err := s.scheduleClient.DeleteScheduleEvent(ctx, schedulecontracts.DeleteScheduleEventsRequest{
+		UserID: userID,
+		Events: req,
+	})
 	if err != nil {
 		respond.DealWithError(c, err)
 		return
@@ -95,9 +100,13 @@ func (s *ScheduleAPI) GetUserRecentCompletedSchedules(c *gin.Context) {
 		return
 	}
 	//2.调用服务层方法获取用户最近完成的日程事件
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), scheduleRequestTimeout)
 	defer cancel() // 记得释放资源
-	completedSchedules, err := s.scheduleService.GetUserRecentCompletedSchedules(ctx, userID, intIndex, intLimit)
+	completedSchedules, err := s.scheduleClient.GetUserRecentCompletedSchedules(ctx, schedulecontracts.RecentCompletedRequest{
+		UserID: userID,
+		Index:  intIndex,
+		Limit:  intLimit,
+	})
 	if err != nil {
 		respond.DealWithError(c, err)
 		return
@@ -110,9 +119,9 @@ func (s *ScheduleAPI) GetUserOngoingSchedule(c *gin.Context) {
 	// 1. 从请求上下文中获取用户ID
 	userID := c.GetInt("user_id")
 	//2.调用服务层方法获取用户正在进行的日程事件
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), scheduleRequestTimeout)
 	defer cancel() // 记得释放资源
-	ongoingSchedule, err := s.scheduleService.GetUserOngoingSchedule(ctx, userID)
+	ongoingSchedule, err := s.scheduleClient.GetUserOngoingSchedule(ctx, userID)
 	if err != nil {
 		respond.DealWithError(c, err)
 		return
@@ -132,7 +141,12 @@ func (s *ScheduleAPI) UserRevocateTaskItemFromSchedule(c *gin.Context) {
 		return
 	}
 	//3.调用服务层方法撤销任务块的安排
-	err = s.scheduleService.RevocateUserTaskClassItem(context.Background(), userID, intEventID)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), scheduleRequestTimeout)
+	defer cancel()
+	err = s.scheduleClient.RevokeTaskItemFromSchedule(ctx, schedulecontracts.RevokeTaskItemRequest{
+		UserID:  userID,
+		EventID: intEventID,
+	})
 	if err != nil {
 		respond.DealWithError(c, err)
 		return
@@ -152,9 +166,12 @@ func (s *ScheduleAPI) SmartPlanning(c *gin.Context) {
 		return
 	}
 	//3.调用服务层方法进行智能规划
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), scheduleRequestTimeout)
 	defer cancel() // 记得释放资源
-	res, err := s.scheduleService.SmartPlanning(ctx, userID, intTaskClassID)
+	res, err := s.scheduleClient.SmartPlanning(ctx, schedulecontracts.SmartPlanningRequest{
+		UserID:      userID,
+		TaskClassID: intTaskClassID,
+	})
 	if err != nil {
 		respond.DealWithError(c, err)
 		return
@@ -174,16 +191,21 @@ func (s *ScheduleAPI) SmartPlanningMulti(c *gin.Context) {
 	userID := c.GetInt("user_id")
 
 	// 2. 绑定多任务类请求体。
-	var req model.UserSmartPlanningMultiRequest
+	var req struct {
+		TaskClassIDs []int `json:"task_class_ids" binding:"required,min=1,dive,min=1"`
+	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
 		return
 	}
 
 	// 3. 调用服务层执行多任务类粗排。
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), scheduleRequestTimeout)
 	defer cancel()
-	res, err := s.scheduleService.SmartPlanningMulti(ctx, userID, req.TaskClassIDs)
+	res, err := s.scheduleClient.SmartPlanningMulti(ctx, schedulecontracts.SmartPlanningMultiRequest{
+		UserID:       userID,
+		TaskClassIDs: req.TaskClassIDs,
+	})
 	if err != nil {
 		respond.DealWithError(c, err)
 		return

@@ -14,7 +14,7 @@ import (
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 	activeadapters "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/adapters"
 	activeapply "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/apply"
-	"github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/applyadapter"
+	activeapplyadapter "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/applyadapter"
 	activegraph "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/graph"
 	activejob "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/job"
 	activepreview "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/preview"
@@ -39,6 +39,7 @@ type Options struct {
 	JobScanEvery time.Duration
 	JobScanLimit int
 	KafkaConfig  kafkabus.Config
+	ScheduleRPC  activeadapters.ScheduleRPCConfig
 }
 
 // Service 是 active-scheduler 独立进程内的服务门面。
@@ -69,12 +70,16 @@ func New(db *gorm.DB, llmService *llmservice.Service, opts Options) (*Service, e
 
 	activeDAO := rootdao.NewActiveScheduleDAO(db)
 	activeReaders := activeadapters.NewGormReaders(db)
-	readers := activeadapters.ReadersFromGorm(activeReaders)
+	scheduleRPCAdapter, err := activeadapters.NewScheduleRPCAdapter(opts.ScheduleRPC)
+	if err != nil {
+		return nil, fmt.Errorf("initialize schedule rpc adapter failed: %w", err)
+	}
+	readers := activeadapters.ReadersWithScheduleRPC(activeReaders, scheduleRPCAdapter)
 	dryRun, err := activesvc.NewDryRunService(readers)
 	if err != nil {
 		return nil, err
 	}
-	previewConfirm, err := buildPreviewConfirmService(db, activeDAO, dryRun)
+	previewConfirm, err := buildPreviewConfirmService(activeDAO, dryRun, scheduleRPCAdapter)
 	if err != nil {
 		return nil, err
 	}
@@ -259,12 +264,14 @@ func (s *Service) ConfirmPreview(ctx context.Context, req contracts.ConfirmPrevi
 	return marshalResponseJSON(result)
 }
 
-func buildPreviewConfirmService(db *gorm.DB, activeDAO *rootdao.ActiveScheduleDAO, dryRun *activesvc.DryRunService) (*activesvc.PreviewConfirmService, error) {
+func buildPreviewConfirmService(activeDAO *rootdao.ActiveScheduleDAO, dryRun *activesvc.DryRunService, scheduleApplyAdapter interface {
+	ApplyActiveScheduleChanges(context.Context, activeapplyadapter.ApplyActiveScheduleRequest) (activeapplyadapter.ApplyActiveScheduleResult, error)
+}) (*activesvc.PreviewConfirmService, error) {
 	previewService, err := activepreview.NewService(activeDAO)
 	if err != nil {
 		return nil, err
 	}
-	return activesvc.NewPreviewConfirmService(dryRun, previewService, activeDAO, applyadapter.NewGormApplyAdapter(db))
+	return activesvc.NewPreviewConfirmService(dryRun, previewService, activeDAO, scheduleApplyAdapter)
 }
 
 func buildGraphRunner(dryRun *activesvc.DryRunService, llmService *llmservice.Service) (*activegraph.Runner, error) {

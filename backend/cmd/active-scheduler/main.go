@@ -10,6 +10,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/bootstrap"
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
 	"github.com/LoveLosita/smartflow/backend/inits"
+	activeadapters "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/adapters"
 	activeschedulerdao "github.com/LoveLosita/smartflow/backend/services/active_scheduler/dao"
 	activeschedulerrpc "github.com/LoveLosita/smartflow/backend/services/active_scheduler/rpc"
 	activeschedulersv "github.com/LoveLosita/smartflow/backend/services/active_scheduler/sv"
@@ -45,6 +46,11 @@ func main() {
 		JobScanEvery: viper.GetDuration("activeScheduler.jobScanEvery"),
 		JobScanLimit: viper.GetInt("activeScheduler.jobScanLimit"),
 		KafkaConfig:  kafkabus.LoadConfig(),
+		ScheduleRPC: activeadapters.ScheduleRPCConfig{
+			Endpoints: viper.GetStringSlice("schedule.rpc.endpoints"),
+			Target:    viper.GetString("schedule.rpc.target"),
+			Timeout:   viper.GetDuration("schedule.rpc.timeout"),
+		},
 	})
 	if err != nil {
 		log.Fatalf("failed to initialize active-scheduler service: %v", err)

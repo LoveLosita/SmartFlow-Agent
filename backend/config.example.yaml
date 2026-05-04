@@ -59,6 +59,14 @@ notification:
   retryScanEvery: 1m
   retryBatchSize: 50
 
+# 日程服务配置。
+schedule:
+  rpc:
+    listenOn: "0.0.0.0:9084"
+    endpoints:
+      - "127.0.0.1:9084"
+    timeout: 6s
+
 # 主动调度服务配置。
 activeScheduler:
   rpc:
