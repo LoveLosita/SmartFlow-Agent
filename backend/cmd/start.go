@@ -25,6 +25,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/dao"
 	gatewayrouter "github.com/LoveLosita/smartflow/backend/gateway/router"
 	gatewaytaskclassforum "github.com/LoveLosita/smartflow/backend/gateway/taskclassforum"
+	gatewaytokenstore "github.com/LoveLosita/smartflow/backend/gateway/tokenstore"
 	gatewayuserauth "github.com/LoveLosita/smartflow/backend/gateway/userauth"
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
@@ -75,9 +76,11 @@ type appRuntime struct {
 	handlers              *api.ApiHandlers
 	userAuthClient        *gatewayuserauth.Client
 	taskClassForumClient  *gatewaytaskclassforum.Client
+	tokenStoreClient      *gatewaytokenstore.Client
 }
 
-// loadConfig 锻炼?
+// loadConfig 负责装载全局配置。
+// 职责边界：只封装配置读取入口，不做服务装配和运行时初始化。
 func loadConfig() error {
 	return bootstrap.LoadConfig()
 }
@@ -225,6 +228,14 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize taskclassforum zrpc client: %w", err)
 	}
+	tokenStoreClient, err := gatewaytokenstore.NewClient(gatewaytokenstore.ClientConfig{
+		Endpoints: viper.GetStringSlice("tokenstore.rpc.endpoints"),
+		Target:    viper.GetString("tokenstore.rpc.target"),
+		Timeout:   viper.GetDuration("tokenstore.rpc.timeout"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize tokenstore zrpc client: %w", err)
+	}
 	taskSv := service.NewTaskService(taskRepo, cacheRepo, eventBus)
 	taskSv.SetActiveScheduleDAO(manager.ActiveSchedule)
 	courseService := buildCourseService(llmService, courseRepo, scheduleRepo)
@@ -335,6 +346,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		handlers:              handlers,
 		userAuthClient:        userAuthClient,
 		taskClassForumClient:  taskClassForumClient,
+		tokenStoreClient:      tokenStoreClient,
 	}
 	if runtime.eventBus != nil {
 		if err := runtime.registerEventHandlers(); err != nil {
@@ -915,7 +927,7 @@ func (r *appRuntime) registerEventHandlers() error {
 }
 
 func (r *appRuntime) startHTTP(ctx context.Context) {
-	router := gatewayrouter.RegisterRouters(r.handlers, r.userAuthClient, r.taskClassForumClient, r.cacheRepo, r.limiter)
+	router := gatewayrouter.RegisterRouters(r.handlers, r.userAuthClient, r.taskClassForumClient, r.tokenStoreClient, r.cacheRepo, r.limiter)
 	gatewayrouter.StartEngine(ctx, router)
 }
 

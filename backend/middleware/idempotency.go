@@ -40,7 +40,7 @@ func IdempotencyMiddleware(cache *dao.CacheDAO) gin.HandlerFunc {
 		}
 
 		userID := c.GetInt("user_id") // 假设 JWT 已存入
-		routeKey := idempotencyRouteKey(c)
+		routeKey := idempotencyScopeKey(c)
 		redisKey := fmt.Sprintf("idempotency:%d:%s:%s:%s", userID, c.Request.Method, routeKey, ikey)
 
 		// 2. 查 Redis 缓存
@@ -97,13 +97,17 @@ func IdempotencyMiddleware(cache *dao.CacheDAO) gin.HandlerFunc {
 	}
 }
 
-func idempotencyRouteKey(c *gin.Context) string {
-	// 1. 优先使用 Gin 匹配后的路由模板，避免 /posts/1 和 /posts/2 被当成两个幂等域。
-	// 2. 若当前上下文还拿不到模板，则退回请求路径，保证异常情况下仍不会跨接口串响应。
-	// 3. 路由 key 统一替换冒号，避免 Redis key 中混入过多分隔符影响人工排查。
+func idempotencyScopeKey(c *gin.Context) string {
+	// 1. 路由模板用于区分接口语义，避免同一路径被不同 handler 复用时串缓存。
+	// 2. 实际路径用于区分资源实例，避免 /orders/1/mock-paid 和 /orders/2/mock-paid 复用同一个幂等响应。
+	// 3. 若异常情况下拿不到模板，则退回实际路径，保证至少不会跨资源串响应。
 	route := strings.TrimSpace(c.FullPath())
-	if route == "" && c.Request != nil && c.Request.URL != nil {
-		route = strings.TrimSpace(c.Request.URL.Path)
+	actualPath := ""
+	if c.Request != nil && c.Request.URL != nil {
+		actualPath = strings.TrimSpace(c.Request.URL.Path)
 	}
-	return strings.ReplaceAll(route, ":", "_")
+	if route == "" {
+		route = actualPath
+	}
+	return strings.ReplaceAll(route+"|"+actualPath, ":", "_")
 }

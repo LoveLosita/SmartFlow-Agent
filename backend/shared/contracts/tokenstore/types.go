@@ -51,18 +51,21 @@ type TokenGrantView struct {
 
 // TokenOrderView 是订单展示结构。
 type TokenOrderView struct {
-	OrderID     uint64          `json:"order_id"`
-	OrderNo     string          `json:"order_no"`
-	Status      string          `json:"status"`
-	TokenAmount int64           `json:"token_amount"`
-	AmountCent  int64           `json:"amount_cent"`
-	PriceText   string          `json:"price_text"`
-	Currency    string          `json:"currency"`
-	PaymentMode string          `json:"payment_mode"`
-	Grant       *TokenGrantView `json:"grant"`
-	CreatedAt   string          `json:"created_at"`
-	PaidAt      *string         `json:"paid_at"`
-	GrantedAt   *string         `json:"granted_at"`
+	OrderID         uint64          `json:"order_id"`
+	OrderNo         string          `json:"order_no"`
+	Status          string          `json:"status"`
+	ProductSnapshot string          `json:"product_snapshot"`
+	ProductName     string          `json:"product_name"`
+	Quantity        int             `json:"quantity"`
+	TokenAmount     int64           `json:"token_amount"`
+	AmountCent      int64           `json:"amount_cent"`
+	PriceText       string          `json:"price_text"`
+	Currency        string          `json:"currency"`
+	PaymentMode     string          `json:"payment_mode"`
+	Grant           *TokenGrantView `json:"grant"`
+	CreatedAt       string          `json:"created_at"`
+	PaidAt          *string         `json:"paid_at"`
+	GrantedAt       *string         `json:"granted_at"`
 }
 
 // CreateTokenOrderRequest 是创建订单请求契约。

@@ -45,6 +45,14 @@ taskclassforum:
       - "127.0.0.1:9082"
     timeout: 2s
 
+# Token 商店 zrpc 独立服务与网关客户端配置。
+tokenstore:
+  rpc:
+    listenOn: "0.0.0.0:9083"
+    endpoints:
+      - "127.0.0.1:9083"
+    timeout: 2s
+
 # Kafka outbox 事件总线配置。
 kafka:
   enabled: true

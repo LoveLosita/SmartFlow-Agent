@@ -253,18 +253,21 @@ func tokenOrderToPB(order *tokencontracts.TokenOrderView) *pb.TokenOrderView {
 		return nil
 	}
 	return &pb.TokenOrderView{
-		OrderId:     order.OrderID,
-		OrderNo:     order.OrderNo,
-		Status:      order.Status,
-		TokenAmount: order.TokenAmount,
-		AmountCent:  order.AmountCent,
-		PriceText:   order.PriceText,
-		Currency:    order.Currency,
-		PaymentMode: order.PaymentMode,
-		Grant:       tokenGrantToPB(order.Grant),
-		CreatedAt:   order.CreatedAt,
-		PaidAt:      tokenStringFromPtr(order.PaidAt),
-		GrantedAt:   tokenStringFromPtr(order.GrantedAt),
+		OrderId:         order.OrderID,
+		OrderNo:         order.OrderNo,
+		Status:          order.Status,
+		TokenAmount:     order.TokenAmount,
+		AmountCent:      order.AmountCent,
+		PriceText:       order.PriceText,
+		Currency:        order.Currency,
+		PaymentMode:     order.PaymentMode,
+		Grant:           tokenGrantToPB(order.Grant),
+		CreatedAt:       order.CreatedAt,
+		PaidAt:          tokenStringFromPtr(order.PaidAt),
+		GrantedAt:       tokenStringFromPtr(order.GrantedAt),
+		ProductSnapshot: order.ProductSnapshot,
+		ProductName:     order.ProductName,
+		Quantity:        int32(order.Quantity),
 	}
 }
 

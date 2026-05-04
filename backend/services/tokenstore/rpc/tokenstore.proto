@@ -67,6 +67,9 @@ message TokenOrderView {
   string created_at = 10;
   string paid_at = 11;
   string granted_at = 12;
+  string product_snapshot = 13;
+  string product_name = 14;
+  int32 quantity = 15;
 }
 
 message GetTokenSummaryRequest {

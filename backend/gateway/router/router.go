@@ -12,6 +12,8 @@ import (
 	"github.com/LoveLosita/smartflow/backend/gateway/forumapi"
 	gatewaymiddleware "github.com/LoveLosita/smartflow/backend/gateway/middleware"
 	gatewaytaskclassforum "github.com/LoveLosita/smartflow/backend/gateway/taskclassforum"
+	gatewaytokenstore "github.com/LoveLosita/smartflow/backend/gateway/tokenstore"
+	"github.com/LoveLosita/smartflow/backend/gateway/tokenstoreapi"
 	"github.com/LoveLosita/smartflow/backend/gateway/userapi"
 	rootmiddleware "github.com/LoveLosita/smartflow/backend/middleware"
 	"github.com/LoveLosita/smartflow/backend/pkg"
@@ -57,7 +59,7 @@ func StartEngine(ctx context.Context, r *gin.Engine) {
 	}
 }
 
-func RegisterRouters(handlers *api.ApiHandlers, authClient ports.UserAuthClient, forumClient *gatewaytaskclassforum.Client, cache *dao.CacheDAO, limiter *pkg.RateLimiter) *gin.Engine {
+func RegisterRouters(handlers *api.ApiHandlers, authClient ports.UserAuthClient, forumClient *gatewaytaskclassforum.Client, tokenStoreClient *gatewaytokenstore.Client, cache *dao.CacheDAO, limiter *pkg.RateLimiter) *gin.Engine {
 	r := gin.Default()
 	apiGroup := r.Group("/api/v1")
 	{
@@ -70,6 +72,7 @@ func RegisterRouters(handlers *api.ApiHandlers, authClient ports.UserAuthClient,
 
 		userapi.RegisterRoutes(apiGroup, userapi.NewUserHandler(authClient), authClient, limiter)
 		forumapi.RegisterRoutes(apiGroup, forumapi.NewHandler(forumClient), authClient, cache, limiter)
+		tokenstoreapi.RegisterRoutes(apiGroup, tokenstoreapi.NewHandler(tokenStoreClient), authClient, cache, limiter)
 
 		taskGroup := apiGroup.Group("/task")
 		{

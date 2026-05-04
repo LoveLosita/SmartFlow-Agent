@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	tokenstoredao "github.com/LoveLosita/smartflow/backend/services/tokenstore/dao"
 	tokencontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/tokenstore"
 	"gorm.io/gorm"
 )
@@ -35,12 +36,14 @@ type Options struct {
 // 3. 不负责真实第三方支付回调，P0 只处理 mock paid。
 type Service struct {
 	db          *gorm.DB
+	tokenDAO    *tokenstoredao.TokenStoreDAO
 	grantOutlet TokenGrantOutlet
 }
 
 func New(opts Options) *Service {
 	return &Service{
 		db:          opts.DB,
+		tokenDAO:    tokenstoredao.NewTokenStoreDAO(opts.DB),
 		grantOutlet: opts.GrantOutlet,
 	}
 }
@@ -54,54 +57,4 @@ func (s *Service) Ready() error {
 		return errors.New("tokenstore db is nil")
 	}
 	return nil
-}
-
-// ListProducts 是商品列表用例占位，第四步实现真实查询。
-func (s *Service) ListProducts(ctx context.Context, actorUserID uint64) ([]tokencontracts.TokenProductView, error) {
-	_ = ctx
-	_ = actorUserID
-	return nil, ErrNotImplemented
-}
-
-// GetSummary 是 Token 概览用例占位，第四步实现 grant 账本聚合。
-func (s *Service) GetSummary(ctx context.Context, actorUserID uint64) (*tokencontracts.TokenSummary, error) {
-	_ = ctx
-	_ = actorUserID
-	return nil, ErrNotImplemented
-}
-
-// CreateOrder 是创建订单用例占位，第四步实现商品读取、订单幂等和金额快照。
-func (s *Service) CreateOrder(ctx context.Context, req tokencontracts.CreateTokenOrderRequest) (*tokencontracts.TokenOrderView, error) {
-	_ = ctx
-	_ = req
-	return nil, ErrNotImplemented
-}
-
-// ListOrders 是订单列表用例占位，第四步实现用户维度分页查询。
-func (s *Service) ListOrders(ctx context.Context, req tokencontracts.ListTokenOrdersRequest) ([]tokencontracts.TokenOrderView, tokencontracts.PageResult, error) {
-	_ = ctx
-	_ = req
-	return nil, tokencontracts.PageResult{}, ErrNotImplemented
-}
-
-// GetOrder 是订单详情用例占位，第四步实现订单归属校验。
-func (s *Service) GetOrder(ctx context.Context, actorUserID uint64, orderID uint64) (*tokencontracts.TokenOrderView, error) {
-	_ = ctx
-	_ = actorUserID
-	_ = orderID
-	return nil, ErrNotImplemented
-}
-
-// MockPaidOrder 是 P0 mock paid 用例占位，第四步实现支付态流转和 grant 账本。
-func (s *Service) MockPaidOrder(ctx context.Context, req tokencontracts.MockPaidOrderRequest) (*tokencontracts.TokenOrderView, error) {
-	_ = ctx
-	_ = req
-	return nil, ErrNotImplemented
-}
-
-// ListGrants 是 Token 获取记录用例占位，第四步实现账本分页查询。
-func (s *Service) ListGrants(ctx context.Context, req tokencontracts.ListTokenGrantsRequest) ([]tokencontracts.TokenGrantView, tokencontracts.PageResult, error) {
-	_ = ctx
-	_ = req
-	return nil, tokencontracts.PageResult{}, ErrNotImplemented
 }

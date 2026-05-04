@@ -63,18 +63,21 @@ func (m *TokenGrantView) String() string { return proto.CompactTextString(m) }
 func (*TokenGrantView) ProtoMessage()    {}
 
 type TokenOrderView struct {
-	OrderId     uint64          `protobuf:"varint,1,opt,name=order_id,json=orderId,proto3" json:"order_id,omitempty"`
-	OrderNo     string          `protobuf:"bytes,2,opt,name=order_no,json=orderNo,proto3" json:"order_no,omitempty"`
-	Status      string          `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
-	TokenAmount int64           `protobuf:"varint,4,opt,name=token_amount,json=tokenAmount,proto3" json:"token_amount,omitempty"`
-	AmountCent  int64           `protobuf:"varint,5,opt,name=amount_cent,json=amountCent,proto3" json:"amount_cent,omitempty"`
-	PriceText   string          `protobuf:"bytes,6,opt,name=price_text,json=priceText,proto3" json:"price_text,omitempty"`
-	Currency    string          `protobuf:"bytes,7,opt,name=currency,proto3" json:"currency,omitempty"`
-	PaymentMode string          `protobuf:"bytes,8,opt,name=payment_mode,json=paymentMode,proto3" json:"payment_mode,omitempty"`
-	Grant       *TokenGrantView `protobuf:"bytes,9,opt,name=grant,proto3" json:"grant,omitempty"`
-	CreatedAt   string          `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	PaidAt      string          `protobuf:"bytes,11,opt,name=paid_at,json=paidAt,proto3" json:"paid_at,omitempty"`
-	GrantedAt   string          `protobuf:"bytes,12,opt,name=granted_at,json=grantedAt,proto3" json:"granted_at,omitempty"`
+	OrderId         uint64          `protobuf:"varint,1,opt,name=order_id,json=orderId,proto3" json:"order_id,omitempty"`
+	OrderNo         string          `protobuf:"bytes,2,opt,name=order_no,json=orderNo,proto3" json:"order_no,omitempty"`
+	Status          string          `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
+	TokenAmount     int64           `protobuf:"varint,4,opt,name=token_amount,json=tokenAmount,proto3" json:"token_amount,omitempty"`
+	AmountCent      int64           `protobuf:"varint,5,opt,name=amount_cent,json=amountCent,proto3" json:"amount_cent,omitempty"`
+	PriceText       string          `protobuf:"bytes,6,opt,name=price_text,json=priceText,proto3" json:"price_text,omitempty"`
+	Currency        string          `protobuf:"bytes,7,opt,name=currency,proto3" json:"currency,omitempty"`
+	PaymentMode     string          `protobuf:"bytes,8,opt,name=payment_mode,json=paymentMode,proto3" json:"payment_mode,omitempty"`
+	Grant           *TokenGrantView `protobuf:"bytes,9,opt,name=grant,proto3" json:"grant,omitempty"`
+	CreatedAt       string          `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	PaidAt          string          `protobuf:"bytes,11,opt,name=paid_at,json=paidAt,proto3" json:"paid_at,omitempty"`
+	GrantedAt       string          `protobuf:"bytes,12,opt,name=granted_at,json=grantedAt,proto3" json:"granted_at,omitempty"`
+	ProductSnapshot string          `protobuf:"bytes,13,opt,name=product_snapshot,json=productSnapshot,proto3" json:"product_snapshot,omitempty"`
+	ProductName     string          `protobuf:"bytes,14,opt,name=product_name,json=productName,proto3" json:"product_name,omitempty"`
+	Quantity        int32           `protobuf:"varint,15,opt,name=quantity,proto3" json:"quantity,omitempty"`
 }
 
 func (m *TokenOrderView) Reset()         { *m = TokenOrderView{} }
