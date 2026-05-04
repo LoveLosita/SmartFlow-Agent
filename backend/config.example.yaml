@@ -59,6 +59,16 @@ notification:
   retryScanEvery: 1m
   retryBatchSize: 50
 
+# 主动调度服务配置。
+activeScheduler:
+  rpc:
+    listenOn: "0.0.0.0:9083"
+    endpoints:
+      - "127.0.0.1:9083"
+    timeout: 8s
+  jobScanEvery: 1m
+  jobScanLimit: 50
+
 # 时间与学期边界配置。
 time:
   zone: "Asia/Shanghai"

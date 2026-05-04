@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package smartflow.active_scheduler;
+
+option go_package = "github.com/LoveLosita/smartflow/backend/services/active_scheduler/rpc/pb";
+
+service ActiveScheduler {
+  rpc DryRun(ActiveScheduleRequest) returns (JSONResponse);
+  rpc Trigger(ActiveScheduleRequest) returns (TriggerResponse);
+  rpc CreatePreview(ActiveScheduleRequest) returns (JSONResponse);
+  rpc GetPreview(GetPreviewRequest) returns (JSONResponse);
+  rpc ConfirmPreview(ConfirmPreviewRequest) returns (JSONResponse);
+}
+
+message ActiveScheduleRequest {
+  int64 user_id = 1;
+  string trigger_type = 2;
+  string target_type = 3;
+  int64 target_id = 4;
+  string feedback_id = 5;
+  string idempotency_key = 6;
+  int64 mock_now_unix_nano = 7;
+  bytes payload_json = 8;
+}
+
+message GetPreviewRequest {
+  int64 user_id = 1;
+  string preview_id = 2;
+}
+
+message ConfirmPreviewRequest {
+  int64 user_id = 1;
+  string preview_id = 2;
+  string candidate_id = 3;
+  string action = 4;
+  bytes edited_changes_json = 5;
+  string idempotency_key = 6;
+  int64 requested_at_unix_nano = 7;
+  string trace_id = 8;
+}
+
+message JSONResponse {
+  bytes data_json = 1;
+}
+
+message TriggerResponse {
+  string trigger_id = 1;
+  string status = 2;
+  string preview_id = 3;
+  bool has_preview_id = 4;
+  bool dedupe_hit = 5;
+  string trace_id = 6;
+}

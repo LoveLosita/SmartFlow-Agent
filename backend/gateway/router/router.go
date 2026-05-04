@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/api"
 	"github.com/LoveLosita/smartflow/backend/dao"
+	"github.com/LoveLosita/smartflow/backend/gateway/api"
+	userauthapi "github.com/LoveLosita/smartflow/backend/gateway/api/userauth"
 	gatewaymiddleware "github.com/LoveLosita/smartflow/backend/gateway/middleware"
-	"github.com/LoveLosita/smartflow/backend/gateway/userapi"
 	rootmiddleware "github.com/LoveLosita/smartflow/backend/middleware"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/LoveLosita/smartflow/backend/shared/ports"
@@ -66,7 +66,7 @@ func RegisterRouters(handlers *api.ApiHandlers, authClient ports.UserAuthClient,
 			})
 		})
 
-		userapi.RegisterRoutes(apiGroup, userapi.NewUserHandler(authClient), authClient, limiter)
+		userauthapi.RegisterRoutes(apiGroup, userauthapi.NewUserHandler(authClient), authClient, limiter)
 
 		taskGroup := apiGroup.Group("/task")
 		{

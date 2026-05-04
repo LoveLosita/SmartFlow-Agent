@@ -11,21 +11,13 @@ import (
 	"syscall"
 	"time"
 
-	activeadapters "github.com/LoveLosita/smartflow/backend/active_scheduler/adapters"
-	"github.com/LoveLosita/smartflow/backend/active_scheduler/applyadapter"
-	activefeedbacklocate "github.com/LoveLosita/smartflow/backend/active_scheduler/feedbacklocate"
-	activegraph "github.com/LoveLosita/smartflow/backend/active_scheduler/graph"
-	activejob "github.com/LoveLosita/smartflow/backend/active_scheduler/job"
-	activepreview "github.com/LoveLosita/smartflow/backend/active_scheduler/preview"
-	activesel "github.com/LoveLosita/smartflow/backend/active_scheduler/selection"
-	activesvc "github.com/LoveLosita/smartflow/backend/active_scheduler/service"
-	activeTrigger "github.com/LoveLosita/smartflow/backend/active_scheduler/trigger"
-	"github.com/LoveLosita/smartflow/backend/api"
 	"github.com/LoveLosita/smartflow/backend/bootstrap"
 	"github.com/LoveLosita/smartflow/backend/dao"
-	gatewaynotification "github.com/LoveLosita/smartflow/backend/gateway/notification"
+	"github.com/LoveLosita/smartflow/backend/gateway/api"
+	gatewayactivescheduler "github.com/LoveLosita/smartflow/backend/gateway/client/activescheduler"
+	gatewaynotification "github.com/LoveLosita/smartflow/backend/gateway/client/notification"
+	gatewayuserauth "github.com/LoveLosita/smartflow/backend/gateway/client/userauth"
 	gatewayrouter "github.com/LoveLosita/smartflow/backend/gateway/router"
-	gatewayuserauth "github.com/LoveLosita/smartflow/backend/gateway/userauth"
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
 	"github.com/LoveLosita/smartflow/backend/inits"
@@ -43,6 +35,14 @@ import (
 	"github.com/LoveLosita/smartflow/backend/service"
 	agentsvcsvc "github.com/LoveLosita/smartflow/backend/service/agentsvc"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
+	activeadapters "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/adapters"
+	"github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/applyadapter"
+	activefeedbacklocate "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/feedbacklocate"
+	activegraph "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/graph"
+	activepreview "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/preview"
+	activesel "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/selection"
+	activesvc "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/service"
+	activeTrigger "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/trigger"
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
 	ragconfig "github.com/LoveLosita/smartflow/backend/services/rag/config"
@@ -59,20 +59,18 @@ import (
 // 2. 不承载业务逻辑，业务仍然由 service / newAgent / memory 等领域模块负责；
 // 3. 不决定进程角色，api / worker / all 由 StartAPI、StartWorker、StartAll 选择启动哪些生命周期。
 type appRuntime struct {
-	db                    *gorm.DB
-	redisClient           *redis.Client
-	cacheRepo             *dao.CacheDAO
-	agentRepo             *dao.AgentDAO
-	agentCache            *dao.AgentCache
-	manager               *dao.RepoManager
-	outboxRepo            *outboxinfra.Repository
-	eventBus              eventsvc.OutboxBus
-	memoryModule          *memory.Module
-	activeJobScanner      *activejob.Scanner
-	activeTriggerWorkflow *activesvc.TriggerWorkflowService
-	limiter               *pkg.RateLimiter
-	handlers              *api.ApiHandlers
-	userAuthClient        *gatewayuserauth.Client
+	db             *gorm.DB
+	redisClient    *redis.Client
+	cacheRepo      *dao.CacheDAO
+	agentRepo      *dao.AgentDAO
+	agentCache     *dao.AgentCache
+	manager        *dao.RepoManager
+	outboxRepo     *outboxinfra.Repository
+	eventBus       eventsvc.OutboxBus
+	memoryModule   *memory.Module
+	limiter        *pkg.RateLimiter
+	handlers       *api.ApiHandlers
+	userAuthClient *gatewayuserauth.Client
 }
 
 // loadConfig 锻炼?
@@ -112,7 +110,7 @@ func StartAPI() {
 }
 
 // StartWorker 只启动后台异步能力，不注册 Gin 路由。
-// 当前包含 outbox relay / Kafka consumer / memory worker / 主动调度扫描。
+// 当前包含单体残留域 outbox relay / Kafka consumer / memory worker；主动调度扫描已迁到 cmd/active-scheduler。
 func StartWorker() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -223,6 +221,14 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize notification zrpc client: %w", err)
 	}
+	activeSchedulerClient, err := gatewayactivescheduler.NewClient(gatewayactivescheduler.ClientConfig{
+		Endpoints: viper.GetStringSlice("activeScheduler.rpc.endpoints"),
+		Target:    viper.GetString("activeScheduler.rpc.target"),
+		Timeout:   viper.GetDuration("activeScheduler.rpc.timeout"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize active-scheduler zrpc client: %w", err)
+	}
 	taskSv := service.NewTaskService(taskRepo, cacheRepo, eventBus)
 	taskSv.SetActiveScheduleDAO(manager.ActiveSchedule)
 	courseService := buildCourseService(llmService, courseRepo, scheduleRepo)
@@ -258,10 +264,6 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
-	activeScheduleTrigger, err := activesvc.NewTriggerService(manager.ActiveSchedule, eventBus)
-	if err != nil {
-		return nil, err
-	}
 	activeSchedulePreviewConfirm, err := buildActiveSchedulePreviewConfirmService(db, manager.ActiveSchedule, activeScheduleDryRun)
 	if err != nil {
 		return nil, err
@@ -276,45 +278,22 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		return nil, err
 	}
 	agentService.SetActiveScheduleSessionRerunFunc(buildActiveScheduleSessionRerunFunc(manager.ActiveSchedule, activeScheduleGraphRunner, activeSchedulePreviewConfirm, activeScheduleFeedbackLocator))
-	var activeTriggerWorkflow *activesvc.TriggerWorkflowService
-	var activeJobScanner *activejob.Scanner
-	if eventBus != nil {
-		activeTriggerWorkflow, err = activesvc.NewTriggerWorkflowServiceWithOptions(
-			manager.ActiveSchedule,
-			activeScheduleGraphRunner,
-			outboxRepo,
-			kafkabus.LoadConfig(),
-			activesvc.WithActiveScheduleSessionBridge(manager.Agent, manager.ActiveScheduleSession),
-		)
-		if err != nil {
-			return nil, err
-		}
-		activeJobScanner, err = activejob.NewScanner(manager.ActiveSchedule, activeadapters.ReadersFromGorm(activeReaders), activeScheduleTrigger, activejob.ScannerOptions{
-			ScanEvery: viper.GetDuration("activeScheduler.jobScanEvery"),
-			Limit:     viper.GetInt("activeScheduler.jobScanLimit"),
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-	handlers := buildAPIHandlers(taskSv, taskClassService, courseService, scheduleService, agentService, memoryModule, activeScheduleDryRun, activeSchedulePreviewConfirm, activeScheduleTrigger, notificationClient)
+	handlers := buildAPIHandlers(taskSv, taskClassService, courseService, scheduleService, agentService, memoryModule, activeSchedulerClient, notificationClient)
 
 	runtime := &appRuntime{
 		db:          db,
 		redisClient: rdb,
 		cacheRepo:   cacheRepo,
 
-		agentRepo:             agentRepo,
-		agentCache:            agentCacheRepo,
-		manager:               manager,
-		outboxRepo:            outboxRepo,
-		eventBus:              eventBus,
-		memoryModule:          memoryModule,
-		activeJobScanner:      activeJobScanner,
-		activeTriggerWorkflow: activeTriggerWorkflow,
-		limiter:               limiter,
-		handlers:              handlers,
-		userAuthClient:        userAuthClient,
+		agentRepo:      agentRepo,
+		agentCache:     agentCacheRepo,
+		manager:        manager,
+		outboxRepo:     outboxRepo,
+		eventBus:       eventBus,
+		memoryModule:   memoryModule,
+		limiter:        limiter,
+		handlers:       handlers,
+		userAuthClient: userAuthClient,
 	}
 	if runtime.eventBus != nil {
 		if err := runtime.registerEventHandlers(); err != nil {
@@ -834,9 +813,7 @@ func buildAPIHandlers(
 	scheduleService *service.ScheduleService,
 	agentService *service.AgentService,
 	memoryModule *memory.Module,
-	activeScheduleDryRun *activesvc.DryRunService,
-	activeSchedulePreviewConfirm *activesvc.PreviewConfirmService,
-	activeScheduleTrigger *activesvc.TriggerService,
+	activeSchedulerClient ports.ActiveSchedulerCommandClient,
 	notificationClient ports.NotificationCommandClient,
 ) *api.ApiHandlers {
 	return &api.ApiHandlers{
@@ -846,7 +823,7 @@ func buildAPIHandlers(
 		ScheduleHandler:  api.NewScheduleAPI(scheduleService),
 		AgentHandler:     api.NewAgentHandler(agentService),
 		MemoryHandler:    api.NewMemoryHandler(memoryModule),
-		ActiveSchedule:   api.NewActiveScheduleAPI(activeScheduleDryRun, activeSchedulePreviewConfirm, activeScheduleTrigger),
+		ActiveSchedule:   api.NewActiveScheduleAPI(activeSchedulerClient),
 		Notification:     api.NewNotificationAPI(notificationClient),
 	}
 }
@@ -866,22 +843,17 @@ func (r *appRuntime) startWorkers(ctx context.Context) {
 	if r.memoryModule != nil {
 		r.memoryModule.StartWorker(ctx)
 	}
-	if r.activeJobScanner != nil {
-		r.activeJobScanner.Start(ctx)
-		log.Println("Active schedule due job scanner started")
-	}
 }
 
 func (r *appRuntime) registerEventHandlers() error {
-	// 调用目的：在运行时启动前一次性完成“事件类型 -> 服务归属 -> handler”的显式接线，避免 API 模式发布事件时拿不到路由表。
-	if err := eventsvc.RegisterAllOutboxHandlers(
+	// 调用目的：只注册仍留在单体残留域内的 outbox handler；active-scheduler / notification 已由各自独立进程管理消费边界。
+	if err := eventsvc.RegisterCoreOutboxHandlers(
 		r.eventBus,
 		r.outboxRepo,
 		r.manager,
 		r.agentRepo,
 		r.cacheRepo,
 		r.memoryModule,
-		r.activeTriggerWorkflow,
 		r.userAuthClient,
 	); err != nil {
 		return err
