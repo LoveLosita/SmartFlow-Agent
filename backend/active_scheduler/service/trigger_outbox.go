@@ -13,8 +13,6 @@ import (
 	sharedevents "github.com/LoveLosita/smartflow/backend/shared/events"
 )
 
-const requestedNotificationDedupeWindow = 30 * time.Minute
-
 // EnqueueActiveScheduleTriggeredInTx 在事务内写入 active_schedule.triggered outbox 消息。
 //
 // 职责边界：
@@ -53,6 +51,9 @@ func EnqueueNotificationFeishuRequestedInTx(
 	maxRetry int,
 	payload sharedevents.FeishuNotificationRequestedPayload,
 ) error {
+	if err := ensureNotificationFeishuOutboxRoute(); err != nil {
+		return err
+	}
 	return enqueueContractEventInTx(
 		ctx,
 		outboxRepo,
@@ -73,6 +74,16 @@ func EnqueueNotificationFeishuRequestedInTx(
 // 1. 只做 model -> contract DTO 映射；
 // 2. 不校验 trigger 是否应该被处理，业务真值判断由 scanner / worker 完成；
 // 3. 若 payload_json 不是合法 JSON，返回 error，让调用方回滚本次触发。
+// ensureNotificationFeishuOutboxRoute 确保 publisher 侧能把飞书通知事件写入 notification outbox。
+//
+// 职责边界：
+// 1. 这里只登记 event_type -> notification 服务归属，不注册 handler，也不启动单体旧消费者；
+// 2. RegisterEventService 本身幂等，重复调用用于覆盖 API/worker 不同启动路径；
+// 3. 若路由登记失败，直接返回给事务调用方，让 trigger 与 notification 入队一起回滚。
+func ensureNotificationFeishuOutboxRoute() error {
+	return outboxinfra.RegisterEventService(sharedevents.NotificationFeishuRequestedEventType, outboxinfra.ServiceNotification)
+}
+
 func BuildTriggeredPayloadFromModel(row model.ActiveScheduleTrigger) (sharedevents.ActiveScheduleTriggeredPayload, error) {
 	var rawPayload json.RawMessage
 	if row.PayloadJSON != nil && strings.TrimSpace(*row.PayloadJSON) != "" {
@@ -144,12 +155,7 @@ func BuildNotificationDedupeKey(userID int, triggerType string, requestedAt time
 	if requestedAt.IsZero() {
 		requestedAt = time.Now()
 	}
-	windowStart := requestedAt.Truncate(requestedNotificationDedupeWindow)
-	return fmt.Sprintf("%d:%s:%s",
-		userID,
-		strings.TrimSpace(triggerType),
-		windowStart.Format(time.RFC3339),
-	)
+	return sharedevents.BuildFeishuNotificationDedupeKey(userID, triggerType, requestedAt, sharedevents.DefaultFeishuNotificationDedupeWindow)
 }
 
 func enqueueContractEventInTx(

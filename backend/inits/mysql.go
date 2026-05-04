@@ -14,9 +14,9 @@ import (
 // autoMigrateCoreModels 只迁移仍留在当前单体进程内的业务表。
 //
 // 职责边界：
-// 1. 负责 agent / task / schedule / memory / notification 等尚未独立拆出的表；
-// 2. 不负责 users、JWT、黑名单、token 额度等 user/auth 领域表；
-// 3. user/auth 表由 cmd/userauth 进程在自己的 DAO 初始化阶段迁移，避免 all 启动时跨服务碰核心用户表。
+// 1. 负责 agent / task / schedule / memory 等尚未独立拆出的表；
+// 2. 不负责 users、notification_records、JWT、黑名单、token 额度等已拆服务表；
+// 3. user/auth 与 notification 表由各自独立进程在自己的 DAO 初始化阶段迁移，避免 all 启动时跨服务碰核心表。
 func autoMigrateCoreModels(db *gorm.DB) error {
 	models := []any{
 		&model.AgentChat{},
@@ -30,8 +30,6 @@ func autoMigrateCoreModels(db *gorm.DB) error {
 		&model.ActiveScheduleJob{},
 		&model.ActiveScheduleTrigger{},
 		&model.ActiveSchedulePreview{},
-		&model.NotificationRecord{},
-		&model.UserNotificationChannel{},
 		&model.AgentScheduleState{},
 		&model.ActiveScheduleSession{},
 		&model.AgentStateSnapshotRecord{},

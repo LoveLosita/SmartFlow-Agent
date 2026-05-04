@@ -1,4 +1,4 @@
-package notification
+package sv
 
 import (
 	"context"
@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
+	notificationfeishu "github.com/LoveLosita/smartflow/backend/services/notification/internal/feishu"
+	notificationmodel "github.com/LoveLosita/smartflow/backend/services/notification/model"
 	sharedevents "github.com/LoveLosita/smartflow/backend/shared/events"
-
-	"github.com/LoveLosita/smartflow/backend/model"
 	"gorm.io/gorm"
 )
 
@@ -18,24 +18,52 @@ const (
 	defaultMaxAttempts      = 5
 	defaultRetryBaseDelay   = 5 * time.Minute
 	defaultRetryMaxDelay    = 30 * time.Minute
+	defaultSendingLease     = 10 * time.Minute
 	defaultSummaryMaxRunes  = 180
 	defaultRetryScanBatch   = 100
+	sendingLeaseExpiredCode = "sending_lease_expired"
 	defaultFallbackTemplate = "我为你生成了一份日程调整建议，请回到系统确认是否应用。"
 )
 
-// NotificationRecordStore 抽象出 notification 模块真正依赖的持久化能力。
+// RecordStore 抽象出 notification_records 真正依赖的持久化能力。
 //
 // 职责边界：
 // 1. 只描述 notification_records 读写所需的最小接口；
-// 2. 允许生产环境直接复用 ActiveScheduleDAO，也允许测试时替换成内存 fake；
+// 2. 允许生产环境直接复用 notification DAO，也允许测试时替换成内存 fake；
 // 3. 不把 provider、事件总线和业务状态机耦合进存储接口。
-type NotificationRecordStore interface {
-	CreateNotificationRecord(ctx context.Context, record *model.NotificationRecord) error
+type RecordStore interface {
+	CreateNotificationRecord(ctx context.Context, record *notificationmodel.NotificationRecord) error
 	UpdateNotificationRecordFields(ctx context.Context, notificationID int64, updates map[string]any) error
-	GetNotificationRecordByID(ctx context.Context, notificationID int64) (*model.NotificationRecord, error)
-	FindNotificationRecordByDedupeKey(ctx context.Context, channel string, dedupeKey string) (*model.NotificationRecord, error)
-	ListRetryableNotificationRecords(ctx context.Context, now time.Time, limit int) ([]model.NotificationRecord, error)
+	GetNotificationRecordByID(ctx context.Context, notificationID int64) (*notificationmodel.NotificationRecord, error)
+	FindNotificationRecordByDedupeKey(ctx context.Context, channel string, dedupeKey string) (*notificationmodel.NotificationRecord, error)
+	ListRetryableNotificationRecords(ctx context.Context, now time.Time, sendingStaleBefore time.Time, limit int) ([]notificationmodel.NotificationRecord, error)
+	ClaimRetryableNotificationRecord(ctx context.Context, notificationID int64, now time.Time, sendingStaleBefore time.Time) (bool, error)
 }
+
+// ChannelStore 抽象出用户通知通道配置所需的最小持久化能力。
+type ChannelStore interface {
+	GetUserNotificationChannel(ctx context.Context, userID int, channel string) (*notificationmodel.UserNotificationChannel, error)
+	UpsertUserNotificationChannel(ctx context.Context, channel *notificationmodel.UserNotificationChannel) error
+	DeleteUserNotificationChannel(ctx context.Context, userID int, channel string) error
+	UpdateUserNotificationChannelTestResult(ctx context.Context, userID int, channel string, status string, testErr string, testedAt time.Time) error
+}
+
+// Service 负责 notification_records 状态机、通道配置和 provider 调用编排。
+//
+// 职责边界：
+// 1. 负责飞书 webhook 通道配置、测试、消息投递、重试和 outbox 消费；
+// 2. 不负责 active_schedule 的 dry-run / preview / trigger 状态机；
+// 3. 不负责 gateway 的响应适配、路由聚合和 JWT 鉴权。
+type Service struct {
+	recordStore  RecordStore
+	channelStore ChannelStore
+	provider     notificationfeishu.Provider
+	options      ServiceOptions
+	locks        *keyedLocker
+}
+
+// NotificationService 是阶段四对外暴露的语义化别名。
+type NotificationService = Service
 
 // ServiceOptions 定义通知服务的可调参数。
 type ServiceOptions struct {
@@ -43,6 +71,7 @@ type ServiceOptions struct {
 	MaxAttempts     int
 	RetryBaseDelay  time.Duration
 	RetryMaxDelay   time.Duration
+	SendingLease    time.Duration
 	SummaryMaxRunes int
 	RetryScanBatch  int
 }
@@ -70,41 +99,24 @@ type RetryResult struct {
 	Errors  int
 }
 
-// Service 负责 notification_records 状态机与 provider 调用编排。
-//
-// 职责边界：
-// 1. 消费 `notification.feishu.requested` payload，做去重、落库、状态流转与 provider 调用；
-// 2. 只写 notification_records，不写 preview / trigger / 正式 schedule；
-// 3. provider 可重试失败由本服务自己管理，outbox 只保证“通知请求被接收一次”。
-type Service struct {
-	store    NotificationRecordStore
-	provider FeishuProvider
-	options  ServiceOptions
-	locks    *keyedLocker
-}
-
-// NotificationService 是阶段四对外暴露的语义化别名。
-//
-// 说明：
-// 1. 当前包里已有 runner 等代码引用 `Service`；
-// 2. 任务描述里又直接使用 “NotificationService” 这个业务名词；
-// 3. 这里保留别名，既不打断已有代码，也让后续调用方可以按业务语义引用。
-type NotificationService = Service
-
 // NewNotificationService 创建通知服务。
-func NewNotificationService(store NotificationRecordStore, provider FeishuProvider, opts ServiceOptions) (*Service, error) {
-	if store == nil {
+func NewNotificationService(recordStore RecordStore, channelStore ChannelStore, provider notificationfeishu.Provider, opts ServiceOptions) (*Service, error) {
+	if recordStore == nil {
 		return nil, errors.New("notification record store is nil")
+	}
+	if channelStore == nil {
+		return nil, errors.New("notification channel store is nil")
 	}
 	if provider == nil {
 		return nil, errors.New("feishu provider is nil")
 	}
 	opts = normalizeServiceOptions(opts)
 	return &Service{
-		store:    store,
-		provider: provider,
-		options:  opts,
-		locks:    newKeyedLocker(),
+		recordStore:  recordStore,
+		channelStore: channelStore,
+		provider:     provider,
+		options:      opts,
+		locks:        newKeyedLocker(),
 	}, nil
 }
 
@@ -119,7 +131,7 @@ func (s *Service) HandleFeishuRequested(ctx context.Context, payload sharedevent
 		return HandleResult{}, err
 	}
 
-	lockKey := buildNotificationLockKey(ChannelFeishu, payload.DedupeKey)
+	lockKey := buildNotificationLockKey(notificationfeishu.Channel, payload.DedupeKey)
 	unlock := s.locks.Lock(lockKey)
 	defer unlock()
 
@@ -150,7 +162,7 @@ func (s *Service) RetryFeishuNotifications(ctx context.Context, now time.Time, l
 		limit = s.options.RetryScanBatch
 	}
 
-	records, err := s.store.ListRetryableNotificationRecords(ctx, now, limit)
+	records, err := s.recordStore.ListRetryableNotificationRecords(ctx, now, s.sendingStaleBefore(now), limit)
 	if err != nil {
 		return RetryResult{}, err
 	}
@@ -159,7 +171,7 @@ func (s *Service) RetryFeishuNotifications(ctx context.Context, now time.Time, l
 	var firstErr error
 
 	for _, record := range records {
-		if record.Channel != ChannelFeishu {
+		if record.Channel != notificationfeishu.Channel {
 			result.Skipped++
 			continue
 		}
@@ -177,15 +189,15 @@ func (s *Service) RetryFeishuNotifications(ctx context.Context, now time.Time, l
 			result.Retried++
 		}
 		switch handleResult.Status {
-		case model.NotificationRecordStatusSent:
+		case notificationmodel.RecordStatusSent:
 			if handleResult.Delivered {
 				result.Sent++
 			} else {
 				result.Skipped++
 			}
-		case model.NotificationRecordStatusFailed:
+		case notificationmodel.RecordStatusFailed:
 			result.Failed++
-		case model.NotificationRecordStatusDead:
+		case notificationmodel.RecordStatusDead:
 			result.Dead++
 		default:
 			result.Skipped++
@@ -204,7 +216,7 @@ func (s *Service) RetryDue(ctx context.Context, now time.Time, limit int) (int, 
 }
 
 func (s *Service) retryOneRecord(ctx context.Context, notificationID int64) (HandleResult, error) {
-	record, err := s.store.GetNotificationRecordByID(ctx, notificationID)
+	record, err := s.recordStore.GetNotificationRecordByID(ctx, notificationID)
 	if err != nil {
 		return HandleResult{}, err
 	}
@@ -213,19 +225,37 @@ func (s *Service) retryOneRecord(ctx context.Context, notificationID int64) (Han
 	unlock := s.locks.Lock(lockKey)
 	defer unlock()
 
-	current, err := s.store.GetNotificationRecordByID(ctx, notificationID)
+	// 1. retry scanner 可能在滚动发布或多实例场景下并行运行，进程内锁只能保护当前进程。
+	// 2. 这里先用条件 UPDATE 把 failed 且到期的记录 claim 成 sending；只有抢到 claim 的实例才能调用 provider。
+	// 3. 未抢到说明记录已被其它实例处理或状态已变化，直接回读当前状态用于统计，不再重复发送。
+	now := s.options.Now()
+	claimed, err := s.recordStore.ClaimRetryableNotificationRecord(ctx, notificationID, now, s.sendingStaleBefore(now))
 	if err != nil {
 		return HandleResult{}, err
 	}
-	return s.deliverRecord(ctx, current)
+
+	current, err := s.recordStore.GetNotificationRecordByID(ctx, notificationID)
+	if err != nil {
+		return HandleResult{}, err
+	}
+	if !claimed {
+		return HandleResult{
+			RecordID:     current.ID,
+			Status:       current.Status,
+			FallbackUsed: current.FallbackUsed,
+			AttemptCount: current.AttemptCount,
+			NextRetryAt:  current.NextRetryAt,
+		}, nil
+	}
+	return s.sendRecordNow(ctx, current)
 }
 
-func (s *Service) findOrCreateRecordForPayload(ctx context.Context, payload sharedevents.FeishuNotificationRequestedPayload) (*model.NotificationRecord, bool, error) {
+func (s *Service) findOrCreateRecordForPayload(ctx context.Context, payload sharedevents.FeishuNotificationRequestedPayload) (*notificationmodel.NotificationRecord, bool, error) {
 	// 1. 若 payload 已携带 notification_id，先尝试命中现有记录，便于后续扩展“指定 record 重放”场景。
 	// 2. 若 id 未命中或字段不一致，再退回到 channel + dedupe_key 这一版稳定幂等口径。
 	if payload.NotificationID > 0 {
-		record, err := s.store.GetNotificationRecordByID(ctx, payload.NotificationID)
-		if err == nil && record != nil && record.Channel == ChannelFeishu && record.DedupeKey == strings.TrimSpace(payload.DedupeKey) {
+		record, err := s.recordStore.GetNotificationRecordByID(ctx, payload.NotificationID)
+		if err == nil && record != nil && record.Channel == notificationfeishu.Channel && record.DedupeKey == strings.TrimSpace(payload.DedupeKey) {
 			return record, true, nil
 		}
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -233,7 +263,7 @@ func (s *Service) findOrCreateRecordForPayload(ctx context.Context, payload shar
 		}
 	}
 
-	record, err := s.store.FindNotificationRecordByDedupeKey(ctx, ChannelFeishu, strings.TrimSpace(payload.DedupeKey))
+	record, err := s.recordStore.FindNotificationRecordByDedupeKey(ctx, notificationfeishu.Channel, strings.TrimSpace(payload.DedupeKey))
 	if err == nil {
 		return record, true, nil
 	}
@@ -242,8 +272,8 @@ func (s *Service) findOrCreateRecordForPayload(ctx context.Context, payload shar
 	}
 
 	summaryText, fallbackText, fallbackUsed := s.normalizeMessageTemplate(payload.SummaryText, payload.FallbackText)
-	record = &model.NotificationRecord{
-		Channel:      ChannelFeishu,
+	record = &notificationmodel.NotificationRecord{
+		Channel:      notificationfeishu.Channel,
 		UserID:       payload.UserID,
 		TriggerID:    strings.TrimSpace(payload.TriggerID),
 		PreviewID:    strings.TrimSpace(payload.PreviewID),
@@ -255,15 +285,15 @@ func (s *Service) findOrCreateRecordForPayload(ctx context.Context, payload shar
 		SummaryText:  summaryText,
 		FallbackText: fallbackText,
 		FallbackUsed: fallbackUsed,
-		Status:       model.NotificationRecordStatusPending,
+		Status:       notificationmodel.RecordStatusPending,
 		MaxAttempts:  s.options.MaxAttempts,
 		TraceID:      strings.TrimSpace(payload.TraceID),
 	}
 
-	if err = s.store.CreateNotificationRecord(ctx, record); err != nil {
+	if err = s.recordStore.CreateNotificationRecord(ctx, record); err != nil {
 		// 1. 并发场景下若唯一索引已被别的协程抢先创建，这里回查 dedupe 记录即可；
 		// 2. 若回查仍失败，说明不是幂等竞争而是真正落库异常，应交给上层重试。
-		existing, findErr := s.store.FindNotificationRecordByDedupeKey(ctx, ChannelFeishu, record.DedupeKey)
+		existing, findErr := s.recordStore.FindNotificationRecordByDedupeKey(ctx, notificationfeishu.Channel, record.DedupeKey)
 		if findErr == nil {
 			return existing, true, nil
 		}
@@ -272,16 +302,22 @@ func (s *Service) findOrCreateRecordForPayload(ctx context.Context, payload shar
 	return record, false, nil
 }
 
-func (s *Service) deliverRecord(ctx context.Context, record *model.NotificationRecord) (HandleResult, error) {
+func (s *Service) deliverRecord(ctx context.Context, record *notificationmodel.NotificationRecord) (HandleResult, error) {
 	if record == nil {
 		return HandleResult{}, errors.New("notification record is nil")
 	}
 
 	switch record.Status {
-	case model.NotificationRecordStatusSending,
-		model.NotificationRecordStatusSent,
-		model.NotificationRecordStatusDead,
-		model.NotificationRecordStatusSkipped:
+	case notificationmodel.RecordStatusSending:
+		if !s.isSendingLeaseExpired(record) {
+			return HandleResult{}, errors.New("notification record 正在发送中，等待租约过期后再重试")
+		}
+		if err := s.claimStaleSendingRecord(ctx, record); err != nil {
+			return HandleResult{}, err
+		}
+	case notificationmodel.RecordStatusSent,
+		notificationmodel.RecordStatusDead,
+		notificationmodel.RecordStatusSkipped:
 		return HandleResult{
 			RecordID:     record.ID,
 			Status:       record.Status,
@@ -289,7 +325,7 @@ func (s *Service) deliverRecord(ctx context.Context, record *model.NotificationR
 			AttemptCount: record.AttemptCount,
 			NextRetryAt:  record.NextRetryAt,
 		}, nil
-	case model.NotificationRecordStatusPending, model.NotificationRecordStatusFailed:
+	case notificationmodel.RecordStatusPending, notificationmodel.RecordStatusFailed:
 		// 继续向下走真正投递流程。
 	default:
 		// 1. 未识别状态先保守短路，避免把未知脏数据继续推进到 provider。
@@ -303,6 +339,10 @@ func (s *Service) deliverRecord(ctx context.Context, record *model.NotificationR
 		}, nil
 	}
 
+	return s.sendRecordNow(ctx, record)
+}
+
+func (s *Service) sendRecordNow(ctx context.Context, record *notificationmodel.NotificationRecord) (HandleResult, error) {
 	requestPayload := s.buildSendRequest(record)
 	requestJSON, err := marshalJSONPointer(requestPayload)
 	if err != nil {
@@ -311,7 +351,7 @@ func (s *Service) deliverRecord(ctx context.Context, record *model.NotificationR
 
 	nextAttemptCount := record.AttemptCount + 1
 	updates := map[string]any{
-		"status":                model.NotificationRecordStatusSending,
+		"status":                notificationmodel.RecordStatusSending,
 		"attempt_count":         nextAttemptCount,
 		"next_retry_at":         nil,
 		"last_error_code":       nil,
@@ -322,27 +362,27 @@ func (s *Service) deliverRecord(ctx context.Context, record *model.NotificationR
 		updates["max_attempts"] = s.options.MaxAttempts
 		record.MaxAttempts = s.options.MaxAttempts
 	}
-	if err = s.store.UpdateNotificationRecordFields(ctx, record.ID, updates); err != nil {
+	if err = s.recordStore.UpdateNotificationRecordFields(ctx, record.ID, updates); err != nil {
 		return HandleResult{}, err
 	}
 
-	record.Status = model.NotificationRecordStatusSending
+	record.Status = notificationmodel.RecordStatusSending
 	record.AttemptCount = nextAttemptCount
 	record.NextRetryAt = nil
 	record.ProviderRequestJSON = requestJSON
 
 	sendResult, sendErr := s.provider.Send(ctx, requestPayload)
 	if sendErr != nil && sendResult.Outcome == "" {
-		sendResult = FeishuSendResult{
-			Outcome:      FeishuSendOutcomeTemporaryFail,
-			ErrorCode:    FeishuErrorCodeNetworkError,
+		sendResult = notificationfeishu.SendResult{
+			Outcome:      notificationfeishu.SendOutcomeTemporaryFail,
+			ErrorCode:    notificationfeishu.ErrorCodeNetworkError,
 			ErrorMessage: sendErr.Error(),
 		}
 	}
 	if sendResult.Outcome == "" {
-		sendResult.Outcome = FeishuSendOutcomeTemporaryFail
+		sendResult.Outcome = notificationfeishu.SendOutcomeTemporaryFail
 		if sendResult.ErrorCode == "" {
-			sendResult.ErrorCode = FeishuErrorCodeNetworkError
+			sendResult.ErrorCode = notificationfeishu.ErrorCodeNetworkError
 		}
 		if sendResult.ErrorMessage == "" && sendErr != nil {
 			sendResult.ErrorMessage = sendErr.Error()
@@ -352,7 +392,47 @@ func (s *Service) deliverRecord(ctx context.Context, record *model.NotificationR
 	return s.applySendResult(ctx, record, sendResult)
 }
 
-func (s *Service) applySendResult(ctx context.Context, record *model.NotificationRecord, sendResult FeishuSendResult) (HandleResult, error) {
+func (s *Service) claimStaleSendingRecord(ctx context.Context, record *notificationmodel.NotificationRecord) error {
+	now := s.options.Now()
+	// 1. sending 只在超过租约后回收，避免多实例把仍在执行的 provider 调用重复发送。
+	// 2. claim 使用条件 UPDATE，抢不到说明状态已被其它实例推进，本次交给 outbox/retry 下轮重试。
+	// 3. 抢到后复用 sendRecordNow 重新进入统一投递状态机，不额外分叉 provider 调用路径。
+	claimed, err := s.recordStore.ClaimRetryableNotificationRecord(ctx, record.ID, now, s.sendingStaleBefore(now))
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return errors.New("notification record sending 租约已被其它实例处理")
+	}
+	record.Status = notificationmodel.RecordStatusFailed
+	record.NextRetryAt = &now
+	record.LastErrorCode = stringPtrOrNil(sendingLeaseExpiredCode)
+	record.LastError = stringPtrOrNil("上一次发送停留在 sending，租约过期后自动恢复重试")
+	return nil
+}
+
+func (s *Service) isSendingLeaseExpired(record *notificationmodel.NotificationRecord) bool {
+	if record == nil || record.Status != notificationmodel.RecordStatusSending {
+		return false
+	}
+	if record.UpdatedAt.IsZero() {
+		return true
+	}
+	return !record.UpdatedAt.After(s.sendingStaleBefore(s.options.Now()))
+}
+
+func (s *Service) sendingStaleBefore(now time.Time) time.Time {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	lease := s.options.SendingLease
+	if lease <= 0 {
+		lease = defaultSendingLease
+	}
+	return now.Add(-lease)
+}
+
+func (s *Service) applySendResult(ctx context.Context, record *notificationmodel.NotificationRecord, sendResult notificationfeishu.SendResult) (HandleResult, error) {
 	now := s.options.Now()
 	responseJSON, err := marshalJSONPointer(sendResult.ResponsePayload)
 	if err != nil {
@@ -371,10 +451,10 @@ func (s *Service) applySendResult(ctx context.Context, record *model.Notificatio
 	providerMessageID := stringPtrOrNil(sendResult.ProviderMessageID)
 
 	switch sendResult.Outcome {
-	case FeishuSendOutcomeSuccess:
+	case notificationfeishu.SendOutcomeSuccess:
 		sentAt := now
 		updates := map[string]any{
-			"status":                 model.NotificationRecordStatusSent,
+			"status":                 notificationmodel.RecordStatusSent,
 			"provider_message_id":    providerMessageID,
 			"provider_request_json":  requestJSON,
 			"provider_response_json": responseJSON,
@@ -383,19 +463,19 @@ func (s *Service) applySendResult(ctx context.Context, record *model.Notificatio
 			"next_retry_at":          nil,
 			"sent_at":                &sentAt,
 		}
-		if err = s.store.UpdateNotificationRecordFields(ctx, record.ID, updates); err != nil {
+		if err = s.recordStore.UpdateNotificationRecordFields(ctx, record.ID, updates); err != nil {
 			return HandleResult{}, err
 		}
 		return HandleResult{
 			RecordID:     record.ID,
-			Status:       model.NotificationRecordStatusSent,
+			Status:       notificationmodel.RecordStatusSent,
 			Delivered:    true,
 			FallbackUsed: record.FallbackUsed,
 			AttemptCount: record.AttemptCount,
 		}, nil
-	case FeishuSendOutcomeSkipped:
+	case notificationfeishu.SendOutcomeSkipped:
 		updates := map[string]any{
-			"status":                 model.NotificationRecordStatusSkipped,
+			"status":                 notificationmodel.RecordStatusSkipped,
 			"provider_message_id":    providerMessageID,
 			"provider_request_json":  requestJSON,
 			"provider_response_json": responseJSON,
@@ -403,20 +483,20 @@ func (s *Service) applySendResult(ctx context.Context, record *model.Notificatio
 			"last_error":             errorMessage,
 			"next_retry_at":          nil,
 		}
-		if err = s.store.UpdateNotificationRecordFields(ctx, record.ID, updates); err != nil {
+		if err = s.recordStore.UpdateNotificationRecordFields(ctx, record.ID, updates); err != nil {
 			return HandleResult{}, err
 		}
 		return HandleResult{
 			RecordID:      record.ID,
-			Status:        model.NotificationRecordStatusSkipped,
+			Status:        notificationmodel.RecordStatusSkipped,
 			Delivered:     true,
 			FallbackUsed:  record.FallbackUsed,
 			AttemptCount:  record.AttemptCount,
 			ProviderError: strings.TrimSpace(sendResult.ErrorCode),
 		}, nil
-	case FeishuSendOutcomePermanentFail:
+	case notificationfeishu.SendOutcomePermanentFail:
 		updates := map[string]any{
-			"status":                 model.NotificationRecordStatusDead,
+			"status":                 notificationmodel.RecordStatusDead,
 			"provider_message_id":    providerMessageID,
 			"provider_request_json":  requestJSON,
 			"provider_response_json": responseJSON,
@@ -424,12 +504,12 @@ func (s *Service) applySendResult(ctx context.Context, record *model.Notificatio
 			"last_error":             errorMessage,
 			"next_retry_at":          nil,
 		}
-		if err = s.store.UpdateNotificationRecordFields(ctx, record.ID, updates); err != nil {
+		if err = s.recordStore.UpdateNotificationRecordFields(ctx, record.ID, updates); err != nil {
 			return HandleResult{}, err
 		}
 		return HandleResult{
 			RecordID:      record.ID,
-			Status:        model.NotificationRecordStatusDead,
+			Status:        notificationmodel.RecordStatusDead,
 			Delivered:     true,
 			FallbackUsed:  record.FallbackUsed,
 			AttemptCount:  record.AttemptCount,
@@ -438,7 +518,7 @@ func (s *Service) applySendResult(ctx context.Context, record *model.Notificatio
 	default:
 		if record.AttemptCount >= s.effectiveMaxAttempts(record) {
 			updates := map[string]any{
-				"status":                 model.NotificationRecordStatusDead,
+				"status":                 notificationmodel.RecordStatusDead,
 				"provider_message_id":    providerMessageID,
 				"provider_request_json":  requestJSON,
 				"provider_response_json": responseJSON,
@@ -446,12 +526,12 @@ func (s *Service) applySendResult(ctx context.Context, record *model.Notificatio
 				"last_error":             errorMessage,
 				"next_retry_at":          nil,
 			}
-			if err = s.store.UpdateNotificationRecordFields(ctx, record.ID, updates); err != nil {
+			if err = s.recordStore.UpdateNotificationRecordFields(ctx, record.ID, updates); err != nil {
 				return HandleResult{}, err
 			}
 			return HandleResult{
 				RecordID:      record.ID,
-				Status:        model.NotificationRecordStatusDead,
+				Status:        notificationmodel.RecordStatusDead,
 				Delivered:     true,
 				FallbackUsed:  record.FallbackUsed,
 				AttemptCount:  record.AttemptCount,
@@ -461,7 +541,7 @@ func (s *Service) applySendResult(ctx context.Context, record *model.Notificatio
 
 		nextRetryAt := s.calcNextRetryAt(now, record.AttemptCount)
 		updates := map[string]any{
-			"status":                 model.NotificationRecordStatusFailed,
+			"status":                 notificationmodel.RecordStatusFailed,
 			"provider_message_id":    providerMessageID,
 			"provider_request_json":  requestJSON,
 			"provider_response_json": responseJSON,
@@ -469,12 +549,12 @@ func (s *Service) applySendResult(ctx context.Context, record *model.Notificatio
 			"last_error":             errorMessage,
 			"next_retry_at":          &nextRetryAt,
 		}
-		if err = s.store.UpdateNotificationRecordFields(ctx, record.ID, updates); err != nil {
+		if err = s.recordStore.UpdateNotificationRecordFields(ctx, record.ID, updates); err != nil {
 			return HandleResult{}, err
 		}
 		return HandleResult{
 			RecordID:      record.ID,
-			Status:        model.NotificationRecordStatusFailed,
+			Status:        notificationmodel.RecordStatusFailed,
 			Delivered:     true,
 			FallbackUsed:  record.FallbackUsed,
 			AttemptCount:  record.AttemptCount,
@@ -484,7 +564,7 @@ func (s *Service) applySendResult(ctx context.Context, record *model.Notificatio
 	}
 }
 
-func (s *Service) buildSendRequest(record *model.NotificationRecord) FeishuSendRequest {
+func (s *Service) buildSendRequest(record *notificationmodel.NotificationRecord) notificationfeishu.SendRequest {
 	messageText := strings.TrimSpace(record.SummaryText)
 	if record.FallbackUsed || messageText == "" {
 		messageText = strings.TrimSpace(record.FallbackText)
@@ -496,7 +576,7 @@ func (s *Service) buildSendRequest(record *model.NotificationRecord) FeishuSendR
 		messageText = strings.TrimSpace(messageText) + "\n" + strings.TrimSpace(record.TargetURL)
 	}
 
-	return FeishuSendRequest{
+	return notificationfeishu.SendRequest{
 		NotificationID: record.ID,
 		UserID:         record.UserID,
 		TriggerID:      record.TriggerID,
@@ -552,7 +632,7 @@ func (s *Service) calcNextRetryAt(now time.Time, attemptCount int) time.Time {
 	return now.Add(delay)
 }
 
-func (s *Service) effectiveMaxAttempts(record *model.NotificationRecord) int {
+func (s *Service) effectiveMaxAttempts(record *notificationmodel.NotificationRecord) int {
 	if record != nil && record.MaxAttempts > 0 {
 		return record.MaxAttempts
 	}
@@ -574,6 +654,9 @@ func normalizeServiceOptions(opts ServiceOptions) ServiceOptions {
 	}
 	if opts.RetryMaxDelay < opts.RetryBaseDelay {
 		opts.RetryMaxDelay = opts.RetryBaseDelay
+	}
+	if opts.SendingLease <= 0 {
+		opts.SendingLease = defaultSendingLease
 	}
 	if opts.SummaryMaxRunes <= 0 {
 		opts.SummaryMaxRunes = defaultSummaryMaxRunes

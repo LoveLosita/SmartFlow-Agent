@@ -170,7 +170,6 @@ func OutboxServiceNames() []string {
 		string(outboxHandlerServiceTask),
 		string(outboxHandlerServiceMemory),
 		string(outboxHandlerServiceActiveScheduler),
-		string(outboxHandlerServiceNotification),
 	}
 }
 

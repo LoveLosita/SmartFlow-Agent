@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package smartflow.notification;
+
+option go_package = "github.com/LoveLosita/smartflow/backend/services/notification/rpc/pb";
+
+service Notification {
+  rpc GetFeishuWebhook(GetFeishuWebhookRequest) returns (ChannelResponse);
+  rpc SaveFeishuWebhook(SaveFeishuWebhookRequest) returns (ChannelResponse);
+  rpc DeleteFeishuWebhook(DeleteFeishuWebhookRequest) returns (StatusResponse);
+  rpc TestFeishuWebhook(TestFeishuWebhookRequest) returns (TestResult);
+}
+
+message GetFeishuWebhookRequest {
+  int64 user_id = 1;
+}
+
+message SaveFeishuWebhookRequest {
+  int64 user_id = 1;
+  bool enabled = 2;
+  string webhook_url = 3;
+  string auth_type = 4;
+  string bearer_token = 5;
+}
+
+message DeleteFeishuWebhookRequest {
+  int64 user_id = 1;
+}
+
+message TestFeishuWebhookRequest {
+  int64 user_id = 1;
+}
+
+message StatusResponse {
+}
+
+message ChannelResponse {
+  string channel = 1;
+  bool enabled = 2;
+  bool configured = 3;
+  string webhook_url_mask = 4;
+  string auth_type = 5;
+  bool has_bearer_token = 6;
+  string last_test_status = 7;
+  string last_test_error = 8;
+  int64 last_test_at_unix_nano = 9;
+}
+
+message TestResult {
+  ChannelResponse channel = 1;
+  string status = 2;
+  string outcome = 3;
+  string message = 4;
+  string trace_id = 5;
+  int64 sent_at_unix_nano = 6;
+  bool skipped = 7;
+  string provider = 8;
+}

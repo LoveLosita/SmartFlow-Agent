@@ -6,7 +6,6 @@ import (
 	"github.com/LoveLosita/smartflow/backend/dao"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
 	"github.com/LoveLosita/smartflow/backend/memory"
-	"github.com/LoveLosita/smartflow/backend/notification"
 	sharedevents "github.com/LoveLosita/smartflow/backend/shared/events"
 	"github.com/LoveLosita/smartflow/backend/shared/ports"
 )
@@ -37,9 +36,10 @@ func RegisterCoreOutboxHandlers(
 // RegisterAllOutboxHandlers 注册当前阶段所有 outbox handler。
 //
 // 职责边界：
-// 1. 只负责把 core / active_scheduler / notification 三类路由一次性接线；
+// 1. 只负责把当前单体残留域的 core / active_scheduler 路由一次性接线；
 // 2. 不负责创建依赖，也不负责启动事件总线；
-// 3. 供当前启动流程在“总线启动前”统一完成显式路由注册。
+// 3. notification 已独立到 cmd/notification，自有 outbox consumer 不再由单体注册；
+// 4. 供当前启动流程在“总线启动前”统一完成显式路由注册。
 func RegisterAllOutboxHandlers(
 	eventBus OutboxBus,
 	outboxRepo *outboxinfra.Repository,
@@ -48,10 +48,9 @@ func RegisterAllOutboxHandlers(
 	cacheRepo *dao.CacheDAO,
 	memoryModule *memory.Module,
 	activeTriggerWorkflow ActiveScheduleTriggeredProcessor,
-	notificationService *notification.NotificationService,
 	adjuster ports.TokenUsageAdjuster,
 ) error {
-	if err := validateAllOutboxHandlerDeps(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo, memoryModule, activeTriggerWorkflow, notificationService); err != nil {
+	if err := validateAllOutboxHandlerDeps(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo, memoryModule, activeTriggerWorkflow); err != nil {
 		return err
 	}
 
@@ -63,7 +62,6 @@ func RegisterAllOutboxHandlers(
 		cacheRepo,
 		memoryModule,
 		activeTriggerWorkflow,
-		notificationService,
 		adjuster,
 	))
 }
@@ -102,7 +100,7 @@ func validateCoreOutboxHandlerDeps(
 	return nil
 }
 
-// validateAllOutboxHandlerDeps 在核心依赖基础上，额外校验 active_scheduler 和 notification 相关依赖。
+// validateAllOutboxHandlerDeps 在核心依赖基础上，额外校验 active_scheduler 相关依赖。
 func validateAllOutboxHandlerDeps(
 	eventBus OutboxBus,
 	outboxRepo *outboxinfra.Repository,
@@ -111,16 +109,12 @@ func validateAllOutboxHandlerDeps(
 	cacheRepo *dao.CacheDAO,
 	memoryModule *memory.Module,
 	activeTriggerWorkflow ActiveScheduleTriggeredProcessor,
-	notificationService *notification.NotificationService,
 ) error {
 	if err := validateCoreOutboxHandlerDeps(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo, memoryModule); err != nil {
 		return err
 	}
 	if activeTriggerWorkflow == nil {
 		return errors.New("active schedule triggered processor is nil")
-	}
-	if notificationService == nil {
-		return errors.New("notification service is nil")
 	}
 	return nil
 }
@@ -190,7 +184,6 @@ func allOutboxHandlerRoutes(
 	cacheRepo *dao.CacheDAO,
 	memoryModule *memory.Module,
 	activeTriggerWorkflow ActiveScheduleTriggeredProcessor,
-	notificationService *notification.NotificationService,
 	adjuster ports.TokenUsageAdjuster,
 ) []outboxHandlerRoute {
 	routes := coreOutboxHandlerRoutes(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo, memoryModule, adjuster)
@@ -200,13 +193,6 @@ func allOutboxHandlerRoutes(
 			Service:   outboxHandlerServiceActiveScheduler,
 			Register: func() error {
 				return RegisterActiveScheduleTriggeredHandler(eventBus, outboxRepo, activeTriggerWorkflow)
-			},
-		},
-		outboxHandlerRoute{
-			EventType: sharedevents.NotificationFeishuRequestedEventType,
-			Service:   outboxHandlerServiceNotification,
-			Register: func() error {
-				return RegisterFeishuNotificationHandler(eventBus, outboxRepo, notificationService)
 			},
 		},
 	)

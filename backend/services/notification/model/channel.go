@@ -1,27 +1,25 @@
 package model
 
-import (
-	"time"
+import "time"
+
+const (
+	// ChannelFeishuWebhook 表示用户配置的是飞书 Webhook 触发器。
+	ChannelFeishuWebhook = "feishu_webhook"
 )
 
 const (
-	// NotificationChannelFeishuWebhook 表示用户配置的是飞书 Webhook 触发器。
-	NotificationChannelFeishuWebhook = "feishu_webhook"
-)
-
-const (
-	// NotificationAuthTypeNone 表示 webhook 不需要额外鉴权头。
-	NotificationAuthTypeNone = "none"
-	// NotificationAuthTypeBearer 表示 webhook 需要 Authorization: Bearer token。
-	NotificationAuthTypeBearer = "bearer"
+	// AuthTypeNone 表示 webhook 不需要额外鉴权头。
+	AuthTypeNone = "none"
+	// AuthTypeBearer 表示 webhook 需要 Authorization: Bearer token。
+	AuthTypeBearer = "bearer"
 )
 
 // UserNotificationChannel 保存单个用户的外部通知通道配置。
 //
 // 职责边界：
 // 1. 只记录 user_id 到具体通知 provider 配置的映射；
-// 2. 不记录 notification_records 投递状态，投递状态仍属于 NotificationRecord；
-// 3. 当前 webhook_url / bearer_token 暂以明文字段承载，接口和日志必须脱敏；后续接入统一密钥加密能力后再替换存储实现。
+// 2. 不记录 notification_records 投递状态，投递状态属于 NotificationRecord；
+// 3. 当前 webhook_url / bearer_token 暂以明文字段承载，接口和日志必须脱敏。
 type UserNotificationChannel struct {
 	ID int64 `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
 

@@ -58,6 +58,11 @@ func probeTopic(ctx context.Context, brokers []string, topic string) error {
 			continue
 		}
 
+		// 1. segmentio/kafka-go 的 ReadPartitions 不直接接收 context。
+		// 2. 这里必须给底层连接设置 I/O deadline，避免 broker 已接受连接但 metadata 响应卡住时，
+		//    上层 WaitTopicReady 永远阻塞，导致 outbox dispatch / consume 循环无法启动。
+		// 3. deadline 命中后本轮探测失败，外层 ticker 会继续重试直到总 timeout 到期。
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 		partitions, readErr := conn.ReadPartitions(topic)
 		_ = conn.Close()
 		if readErr != nil {

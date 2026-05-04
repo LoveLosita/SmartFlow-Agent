@@ -1,4 +1,4 @@
-package notification
+package feishu
 
 import (
 	"context"
@@ -7,42 +7,40 @@ import (
 	"time"
 )
 
-// MockFeishuMode 描述 mock provider 下一次返回哪类结果。
-type MockFeishuMode string
+// MockMode 描述 mock provider 下一次返回哪类结果。
+type MockMode string
 
 const (
-	MockFeishuModeSuccess       MockFeishuMode = "success"
-	MockFeishuModeTemporaryFail MockFeishuMode = "temporary_fail"
-	MockFeishuModePermanentFail MockFeishuMode = "permanent_fail"
+	MockModeSuccess       MockMode = "success"
+	MockModeTemporaryFail MockMode = "temporary_fail"
+	MockModePermanentFail MockMode = "permanent_fail"
 )
 
-// MockFeishuProvider 是进程内 mock provider。
+// MockProvider 是进程内 mock provider。
 //
 // 职责边界：
 // 1. 只用于本地联调、单元测试和阶段性验收；
 // 2. 不做真实 HTTP 调用，直接根据预设 mode 返回 success / temporary_fail / permanent_fail；
 // 3. 保留调用历史，方便测试断言“有没有重复发飞书”。
-type MockFeishuProvider struct {
+type MockProvider struct {
 	mu          sync.Mutex
-	defaultMode MockFeishuMode
-	queuedModes []MockFeishuMode
-	calls       []FeishuSendRequest
+	defaultMode MockMode
+	queuedModes []MockMode
+	calls       []SendRequest
 }
 
-// NewMockFeishuProvider 创建一个进程内 mock provider。
-func NewMockFeishuProvider(defaultMode MockFeishuMode) *MockFeishuProvider {
+func NewMockProvider(defaultMode MockMode) *MockProvider {
 	if defaultMode == "" {
-		defaultMode = MockFeishuModeSuccess
+		defaultMode = MockModeSuccess
 	}
-	return &MockFeishuProvider{defaultMode: defaultMode}
+	return &MockProvider{defaultMode: defaultMode}
 }
 
-// SetDefaultMode 设置默认返回模式。
-func (p *MockFeishuProvider) SetDefaultMode(mode MockFeishuMode) {
+func (p *MockProvider) SetDefaultMode(mode MockMode) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if mode == "" {
-		mode = MockFeishuModeSuccess
+		mode = MockModeSuccess
 	}
 	p.defaultMode = mode
 }
@@ -53,7 +51,7 @@ func (p *MockFeishuProvider) SetDefaultMode(mode MockFeishuMode) {
 // 1. 先进先出消费，便于测试“先失败再成功”的重试路径；
 // 2. 队列用尽后回退到 defaultMode；
 // 3. 空模式会被自动忽略，避免测试代码误塞脏数据。
-func (p *MockFeishuProvider) PushModes(modes ...MockFeishuMode) {
+func (p *MockProvider) PushModes(modes ...MockMode) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, mode := range modes {
@@ -64,11 +62,10 @@ func (p *MockFeishuProvider) PushModes(modes ...MockFeishuMode) {
 	}
 }
 
-// Calls 返回当前 provider 已记录的调用快照。
-func (p *MockFeishuProvider) Calls() []FeishuSendRequest {
+func (p *MockProvider) Calls() []SendRequest {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	copied := make([]FeishuSendRequest, len(p.calls))
+	copied := make([]SendRequest, len(p.calls))
 	copy(copied, p.calls)
 	return copied
 }
@@ -79,7 +76,7 @@ func (p *MockFeishuProvider) Calls() []FeishuSendRequest {
 // 1. 先记录本次请求，方便测试校验是否发生重复投递；
 // 2. 再按 queuedModes -> defaultMode 的顺序决定 outcome；
 // 3. 最后返回可落库审计的 request/response 摘要。
-func (p *MockFeishuProvider) Send(_ context.Context, req FeishuSendRequest) (FeishuSendResult, error) {
+func (p *MockProvider) Send(_ context.Context, req SendRequest) (SendResult, error) {
 	p.mu.Lock()
 	p.calls = append(p.calls, req)
 
@@ -91,10 +88,10 @@ func (p *MockFeishuProvider) Send(_ context.Context, req FeishuSendRequest) (Fei
 	p.mu.Unlock()
 
 	switch mode {
-	case MockFeishuModeTemporaryFail:
-		return FeishuSendResult{
-			Outcome:      FeishuSendOutcomeTemporaryFail,
-			ErrorCode:    FeishuErrorCodeProviderTimeout,
+	case MockModeTemporaryFail:
+		return SendResult{
+			Outcome:      SendOutcomeTemporaryFail,
+			ErrorCode:    ErrorCodeProviderTimeout,
 			ErrorMessage: "mock feishu provider temporary failure",
 			RequestPayload: map[string]any{
 				"notification_id": req.NotificationID,
@@ -107,10 +104,10 @@ func (p *MockFeishuProvider) Send(_ context.Context, req FeishuSendRequest) (Fei
 				"reason": "mock temporary failure",
 			},
 		}, nil
-	case MockFeishuModePermanentFail:
-		return FeishuSendResult{
-			Outcome:      FeishuSendOutcomePermanentFail,
-			ErrorCode:    FeishuErrorCodePayloadInvalid,
+	case MockModePermanentFail:
+		return SendResult{
+			Outcome:      SendOutcomePermanentFail,
+			ErrorCode:    ErrorCodePayloadInvalid,
 			ErrorMessage: "mock feishu provider permanent failure",
 			RequestPayload: map[string]any{
 				"notification_id": req.NotificationID,
@@ -124,8 +121,8 @@ func (p *MockFeishuProvider) Send(_ context.Context, req FeishuSendRequest) (Fei
 			},
 		}, nil
 	default:
-		return FeishuSendResult{
-			Outcome:           FeishuSendOutcomeSuccess,
+		return SendResult{
+			Outcome:           SendOutcomeSuccess,
 			ProviderMessageID: fmt.Sprintf("mock_feishu_%d", time.Now().UnixNano()),
 			RequestPayload: map[string]any{
 				"notification_id": req.NotificationID,
@@ -134,7 +131,7 @@ func (p *MockFeishuProvider) Send(_ context.Context, req FeishuSendRequest) (Fei
 				"target_url":      req.TargetURL,
 			},
 			ResponsePayload: map[string]any{
-				"mode":   string(MockFeishuModeSuccess),
+				"mode":   string(MockModeSuccess),
 				"status": "ok",
 			},
 		}, nil

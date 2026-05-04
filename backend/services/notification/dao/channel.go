@@ -5,30 +5,30 @@ import (
 	"errors"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
+	notificationmodel "github.com/LoveLosita/smartflow/backend/services/notification/model"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-// NotificationChannelDAO 管理用户外部通知通道配置。
+// ChannelDAO 管理用户外部通知通道配置。
 //
 // 职责边界：
 // 1. 只负责 user_notification_channels 的基础读写；
 // 2. 不负责 webhook 请求发送、notification_records 状态机或 outbox 消费；
-// 3. webhook_url / bearer_token 的脱敏由 API/service 层处理，DAO 保持真实持久化值。
-type NotificationChannelDAO struct {
+// 3. webhook_url / bearer_token 的脱敏由 service 层处理，DAO 保持真实持久化值。
+type ChannelDAO struct {
 	db *gorm.DB
 }
 
-func NewNotificationChannelDAO(db *gorm.DB) *NotificationChannelDAO {
-	return &NotificationChannelDAO{db: db}
+func NewChannelDAO(db *gorm.DB) *ChannelDAO {
+	return &ChannelDAO{db: db}
 }
 
-func (d *NotificationChannelDAO) WithTx(tx *gorm.DB) *NotificationChannelDAO {
-	return &NotificationChannelDAO{db: tx}
+func (d *ChannelDAO) WithTx(tx *gorm.DB) *ChannelDAO {
+	return &ChannelDAO{db: tx}
 }
 
-func (d *NotificationChannelDAO) ensureDB() error {
+func (d *ChannelDAO) ensureDB() error {
 	if d == nil || d.db == nil {
 		return errors.New("notification channel dao 未初始化")
 	}
@@ -41,7 +41,7 @@ func (d *NotificationChannelDAO) ensureDB() error {
 // 1. 只覆盖开关、webhook、鉴权配置和 updated_at；
 // 2. 不清空 last_test_*，避免用户保存配置后丢掉最近一次测试结果；
 // 3. channel.ID 由数据库自增，调用方不应依赖传入 ID。
-func (d *NotificationChannelDAO) UpsertUserNotificationChannel(ctx context.Context, channel *model.UserNotificationChannel) error {
+func (d *ChannelDAO) UpsertUserNotificationChannel(ctx context.Context, channel *notificationmodel.UserNotificationChannel) error {
 	if err := d.ensureDB(); err != nil {
 		return err
 	}
@@ -60,7 +60,7 @@ func (d *NotificationChannelDAO) UpsertUserNotificationChannel(ctx context.Conte
 		"updated_at":   now,
 	}
 	return d.db.WithContext(ctx).
-		Model(&model.UserNotificationChannel{}).
+		Model(&notificationmodel.UserNotificationChannel{}).
 		Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "user_id"}, {Name: "channel"}},
 			DoUpdates: clause.Assignments(map[string]any{
@@ -75,14 +75,14 @@ func (d *NotificationChannelDAO) UpsertUserNotificationChannel(ctx context.Conte
 }
 
 // GetUserNotificationChannel 查询用户指定通知通道配置。
-func (d *NotificationChannelDAO) GetUserNotificationChannel(ctx context.Context, userID int, channel string) (*model.UserNotificationChannel, error) {
+func (d *ChannelDAO) GetUserNotificationChannel(ctx context.Context, userID int, channel string) (*notificationmodel.UserNotificationChannel, error) {
 	if err := d.ensureDB(); err != nil {
 		return nil, err
 	}
 	if userID <= 0 || channel == "" {
 		return nil, gorm.ErrRecordNotFound
 	}
-	var row model.UserNotificationChannel
+	var row notificationmodel.UserNotificationChannel
 	err := d.db.WithContext(ctx).
 		Where("user_id = ? AND channel = ?", userID, channel).
 		First(&row).Error
@@ -95,7 +95,7 @@ func (d *NotificationChannelDAO) GetUserNotificationChannel(ctx context.Context,
 // DeleteUserNotificationChannel 删除用户指定通知通道配置。
 //
 // 说明：当前表不保留软删除列；删除后再次保存会重新创建配置。
-func (d *NotificationChannelDAO) DeleteUserNotificationChannel(ctx context.Context, userID int, channel string) error {
+func (d *ChannelDAO) DeleteUserNotificationChannel(ctx context.Context, userID int, channel string) error {
 	if err := d.ensureDB(); err != nil {
 		return err
 	}
@@ -104,11 +104,11 @@ func (d *NotificationChannelDAO) DeleteUserNotificationChannel(ctx context.Conte
 	}
 	return d.db.WithContext(ctx).
 		Where("user_id = ? AND channel = ?", userID, channel).
-		Delete(&model.UserNotificationChannel{}).Error
+		Delete(&notificationmodel.UserNotificationChannel{}).Error
 }
 
 // UpdateUserNotificationChannelTestResult 回写用户 webhook 测试结果。
-func (d *NotificationChannelDAO) UpdateUserNotificationChannelTestResult(ctx context.Context, userID int, channel string, status string, testErr string, testedAt time.Time) error {
+func (d *ChannelDAO) UpdateUserNotificationChannelTestResult(ctx context.Context, userID int, channel string, status string, testErr string, testedAt time.Time) error {
 	if err := d.ensureDB(); err != nil {
 		return err
 	}
@@ -121,7 +121,7 @@ func (d *NotificationChannelDAO) UpdateUserNotificationChannelTestResult(ctx con
 		"last_test_at":     &testedAt,
 	}
 	return d.db.WithContext(ctx).
-		Model(&model.UserNotificationChannel{}).
+		Model(&notificationmodel.UserNotificationChannel{}).
 		Where("user_id = ? AND channel = ?", userID, channel).
 		Updates(updates).Error
 }

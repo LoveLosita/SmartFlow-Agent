@@ -1,4 +1,4 @@
-package notification
+package sv
 
 import (
 	"context"
@@ -9,10 +9,10 @@ import (
 // StartRetryLoop 启动 notification_records 重试扫描器。
 //
 // 说明：
-// 1. 只在 worker/all 模式启动，api 模式不启动；
+// 1. 只在 worker/all 或独立 notification 进程启动；API / RPC 入口不主动扫重试；
 // 2. provider 失败后的重试由本循环负责，避免通用 outbox 被外部服务慢失败拖住；
 // 3. 每轮失败只写日志，下一轮继续扫描。
-func (s *NotificationService) StartRetryLoop(ctx context.Context, every time.Duration, limit int) {
+func (s *Service) StartRetryLoop(ctx context.Context, every time.Duration, limit int) {
 	if s == nil {
 		return
 	}

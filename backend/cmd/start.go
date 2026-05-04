@@ -23,6 +23,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/api"
 	"github.com/LoveLosita/smartflow/backend/bootstrap"
 	"github.com/LoveLosita/smartflow/backend/dao"
+	gatewaynotification "github.com/LoveLosita/smartflow/backend/gateway/notification"
 	gatewayrouter "github.com/LoveLosita/smartflow/backend/gateway/router"
 	gatewayuserauth "github.com/LoveLosita/smartflow/backend/gateway/userauth"
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
@@ -38,7 +39,6 @@ import (
 	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
 	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
 	"github.com/LoveLosita/smartflow/backend/newAgent/tools/web"
-	"github.com/LoveLosita/smartflow/backend/notification"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/LoveLosita/smartflow/backend/service"
 	agentsvcsvc "github.com/LoveLosita/smartflow/backend/service/agentsvc"
@@ -46,6 +46,7 @@ import (
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
 	ragconfig "github.com/LoveLosita/smartflow/backend/services/rag/config"
+	"github.com/LoveLosita/smartflow/backend/shared/ports"
 	"github.com/go-redis/redis/v8"
 	"github.com/spf13/viper"
 	"gorm.io/gorm"
@@ -69,7 +70,6 @@ type appRuntime struct {
 	memoryModule          *memory.Module
 	activeJobScanner      *activejob.Scanner
 	activeTriggerWorkflow *activesvc.TriggerWorkflowService
-	notificationService   *notification.NotificationService
 	limiter               *pkg.RateLimiter
 	handlers              *api.ApiHandlers
 	userAuthClient        *gatewayuserauth.Client
@@ -112,7 +112,7 @@ func StartAPI() {
 }
 
 // StartWorker 只启动后台异步能力，不注册 Gin 路由。
-// 当前包含 outbox relay / Kafka consumer / memory worker / 主动调度扫描 / 通知重试。
+// 当前包含 outbox relay / Kafka consumer / memory worker / 主动调度扫描。
 func StartWorker() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -215,6 +215,14 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize userauth zrpc client: %w", err)
 	}
+	notificationClient, err := gatewaynotification.NewClient(gatewaynotification.ClientConfig{
+		Endpoints: viper.GetStringSlice("notification.rpc.endpoints"),
+		Target:    viper.GetString("notification.rpc.target"),
+		Timeout:   viper.GetDuration("notification.rpc.timeout"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize notification zrpc client: %w", err)
+	}
 	taskSv := service.NewTaskService(taskRepo, cacheRepo, eventBus)
 	taskSv.SetActiveScheduleDAO(manager.ActiveSchedule)
 	courseService := buildCourseService(llmService, courseRepo, scheduleRepo)
@@ -268,22 +276,6 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		return nil, err
 	}
 	agentService.SetActiveScheduleSessionRerunFunc(buildActiveScheduleSessionRerunFunc(manager.ActiveSchedule, activeScheduleGraphRunner, activeSchedulePreviewConfirm, activeScheduleFeedbackLocator))
-	// 1. 生产投递先切到用户级飞书 Webhook provider，mock provider 文件继续保留给后续单测和本地隔离验证。
-	// 2. provider 与配置测试接口共用同一个实例，保证“测试成功”和“正式投递”走同一套 URL 校验、JSON 拼装和 HTTP 结果分类。
-	feishuProvider, err := notification.NewWebhookFeishuProvider(manager.Notification, notification.WebhookFeishuProviderOptions{
-		FrontendBaseURL: viper.GetString("notification.frontendBaseURL"),
-	})
-	if err != nil {
-		return nil, err
-	}
-	notificationService, err := notification.NewNotificationService(manager.ActiveSchedule, feishuProvider, notification.ServiceOptions{})
-	if err != nil {
-		return nil, err
-	}
-	notificationChannelService, err := notification.NewChannelService(manager.Notification, feishuProvider, notification.ChannelServiceOptions{})
-	if err != nil {
-		return nil, err
-	}
 	var activeTriggerWorkflow *activesvc.TriggerWorkflowService
 	var activeJobScanner *activejob.Scanner
 	if eventBus != nil {
@@ -305,7 +297,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 			return nil, err
 		}
 	}
-	handlers := buildAPIHandlers(taskSv, taskClassService, courseService, scheduleService, agentService, memoryModule, activeScheduleDryRun, activeSchedulePreviewConfirm, activeScheduleTrigger, notificationChannelService)
+	handlers := buildAPIHandlers(taskSv, taskClassService, courseService, scheduleService, agentService, memoryModule, activeScheduleDryRun, activeSchedulePreviewConfirm, activeScheduleTrigger, notificationClient)
 
 	runtime := &appRuntime{
 		db:          db,
@@ -320,7 +312,6 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		memoryModule:          memoryModule,
 		activeJobScanner:      activeJobScanner,
 		activeTriggerWorkflow: activeTriggerWorkflow,
-		notificationService:   notificationService,
 		limiter:               limiter,
 		handlers:              handlers,
 		userAuthClient:        userAuthClient,
@@ -846,7 +837,7 @@ func buildAPIHandlers(
 	activeScheduleDryRun *activesvc.DryRunService,
 	activeSchedulePreviewConfirm *activesvc.PreviewConfirmService,
 	activeScheduleTrigger *activesvc.TriggerService,
-	notificationChannelService *notification.ChannelService,
+	notificationClient ports.NotificationCommandClient,
 ) *api.ApiHandlers {
 	return &api.ApiHandlers{
 		TaskHandler:      api.NewTaskHandler(taskService),
@@ -856,7 +847,7 @@ func buildAPIHandlers(
 		AgentHandler:     api.NewAgentHandler(agentService),
 		MemoryHandler:    api.NewMemoryHandler(memoryModule),
 		ActiveSchedule:   api.NewActiveScheduleAPI(activeScheduleDryRun, activeSchedulePreviewConfirm, activeScheduleTrigger),
-		Notification:     api.NewNotificationAPI(notificationChannelService),
+		Notification:     api.NewNotificationAPI(notificationClient),
 	}
 }
 
@@ -879,10 +870,6 @@ func (r *appRuntime) startWorkers(ctx context.Context) {
 		r.activeJobScanner.Start(ctx)
 		log.Println("Active schedule due job scanner started")
 	}
-	if r.notificationService != nil {
-		r.notificationService.StartRetryLoop(ctx, viper.GetDuration("notification.retryScanEvery"), viper.GetInt("notification.retryBatchSize"))
-		log.Println("Notification retry scanner started")
-	}
 }
 
 func (r *appRuntime) registerEventHandlers() error {
@@ -895,7 +882,6 @@ func (r *appRuntime) registerEventHandlers() error {
 		r.cacheRepo,
 		r.memoryModule,
 		r.activeTriggerWorkflow,
-		r.notificationService,
 		r.userAuthClient,
 	); err != nil {
 		return err

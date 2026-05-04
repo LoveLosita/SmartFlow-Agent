@@ -13,7 +13,7 @@ import (
 // ActiveScheduleDAO 管理主动调度阶段 1 的自有表。
 //
 // 职责边界：
-// 1. 只负责 active_schedule_jobs / triggers / previews / notification_records 的基础读写；
+// 1. 只负责 active_schedule_jobs / triggers / previews 的基础读写；
 // 2. 不负责构造候选、调用 LLM、投递 provider 或写正式日程；
 // 3. 幂等查询只按持久化键读取事实，是否复用结果由上层状态机判断。
 type ActiveScheduleDAO struct {
@@ -307,89 +307,4 @@ func (d *ActiveScheduleDAO) FindPreviewByApplyIdempotencyKey(ctx context.Context
 		return nil, err
 	}
 	return &preview, nil
-}
-
-func (d *ActiveScheduleDAO) CreateNotificationRecord(ctx context.Context, record *model.NotificationRecord) error {
-	if err := d.ensureDB(); err != nil {
-		return err
-	}
-	if record == nil {
-		return errors.New("notification record 不能为空")
-	}
-	return d.db.WithContext(ctx).Create(record).Error
-}
-
-func (d *ActiveScheduleDAO) UpdateNotificationRecordFields(ctx context.Context, notificationID int64, updates map[string]any) error {
-	if err := d.ensureDB(); err != nil {
-		return err
-	}
-	if notificationID <= 0 {
-		return errors.New("notification record id 不能为空")
-	}
-	if len(updates) == 0 {
-		return nil
-	}
-	return d.db.WithContext(ctx).
-		Model(&model.NotificationRecord{}).
-		Where("id = ?", notificationID).
-		Updates(updates).Error
-}
-
-func (d *ActiveScheduleDAO) GetNotificationRecordByID(ctx context.Context, notificationID int64) (*model.NotificationRecord, error) {
-	if err := d.ensureDB(); err != nil {
-		return nil, err
-	}
-	if notificationID <= 0 {
-		return nil, gorm.ErrRecordNotFound
-	}
-	var record model.NotificationRecord
-	err := d.db.WithContext(ctx).Where("id = ?", notificationID).First(&record).Error
-	if err != nil {
-		return nil, err
-	}
-	return &record, nil
-}
-
-// FindNotificationRecordByDedupeKey 查询通知去重记录。
-//
-// 说明：
-// 1. notification 第一版按 channel + dedupe_key 聚合去重；
-// 2. 若返回 pending/sending/sent，上层应避免重复投递；
-// 3. 若返回 failed，上层可以复用同一条记录进入 provider retry。
-func (d *ActiveScheduleDAO) FindNotificationRecordByDedupeKey(ctx context.Context, channel string, dedupeKey string) (*model.NotificationRecord, error) {
-	if err := d.ensureDB(); err != nil {
-		return nil, err
-	}
-	if channel == "" || dedupeKey == "" {
-		return nil, gorm.ErrRecordNotFound
-	}
-	var record model.NotificationRecord
-	err := d.db.WithContext(ctx).
-		Where("channel = ? AND dedupe_key = ?", channel, dedupeKey).
-		Order("created_at DESC, id DESC").
-		First(&record).Error
-	if err != nil {
-		return nil, err
-	}
-	return &record, nil
-}
-
-// ListRetryableNotificationRecords 查询到达重试时间的通知记录。
-func (d *ActiveScheduleDAO) ListRetryableNotificationRecords(ctx context.Context, now time.Time, limit int) ([]model.NotificationRecord, error) {
-	if err := d.ensureDB(); err != nil {
-		return nil, err
-	}
-	if limit <= 0 || now.IsZero() {
-		return []model.NotificationRecord{}, nil
-	}
-	var records []model.NotificationRecord
-	err := d.db.WithContext(ctx).
-		Where("status = ? AND next_retry_at IS NOT NULL AND next_retry_at <= ?", model.NotificationRecordStatusFailed, now).
-		Order("next_retry_at ASC, id ASC").
-		Limit(limit).
-		Find(&records).Error
-	if err != nil {
-		return nil, err
-	}
-	return records, nil
 }

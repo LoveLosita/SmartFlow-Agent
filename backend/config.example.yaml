@@ -50,6 +50,11 @@ kafka:
 
 # 通知投递配置。
 notification:
+  rpc:
+    listenOn: "0.0.0.0:9082"
+    endpoints:
+      - "127.0.0.1:9082"
+    timeout: 6s
   frontendBaseURL: "http://localhost:5173"
   retryScanEvery: 1m
   retryBatchSize: 50
