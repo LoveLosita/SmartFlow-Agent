@@ -1,0 +1,222 @@
+syntax = "proto3";
+
+package smartflow.taskclassforum;
+
+option go_package = "github.com/LoveLosita/smartflow/backend/services/taskclassforum/rpc/pb";
+
+service TaskClassForumService {
+  rpc ListPosts(ListForumPostsRequest) returns (ListForumPostsResponse);
+  rpc ListTags(ListForumTagsRequest) returns (ListForumTagsResponse);
+  rpc CreatePost(CreateForumPostRequest) returns (CreateForumPostResponse);
+  rpc GetPost(GetForumPostRequest) returns (GetForumPostResponse);
+  rpc LikePost(LikeForumPostRequest) returns (LikeForumPostResponse);
+  rpc UnlikePost(UnlikeForumPostRequest) returns (UnlikeForumPostResponse);
+  rpc ListComments(ListForumCommentsRequest) returns (ListForumCommentsResponse);
+  rpc CreateComment(CreateForumCommentRequest) returns (CreateForumCommentResponse);
+  rpc DeleteComment(DeleteForumCommentRequest) returns (DeleteForumCommentResponse);
+  rpc ImportPost(ImportForumPostRequest) returns (ImportForumPostResponse);
+}
+
+message PageRequest {
+  int32 page = 1;
+  int32 page_size = 2;
+}
+
+message PageResponse {
+  int32 page = 1;
+  int32 page_size = 2;
+  int32 total = 3;
+  bool has_more = 4;
+}
+
+message UserBrief {
+  uint64 user_id = 1;
+  string nickname = 2;
+  string avatar_url = 3;
+}
+
+message TemplateSummary {
+  int32 task_count = 1;
+  string mode = 2;
+  string start_date = 3;
+  string end_date = 4;
+  repeated string strategy_labels = 5;
+}
+
+message ForumPostCounters {
+  int64 like_count = 1;
+  int64 comment_count = 2;
+  int64 import_count = 3;
+}
+
+message ForumPostViewerState {
+  bool liked = 1;
+  bool imported_once = 2;
+}
+
+message ForumPostBrief {
+  uint64 post_id = 1;
+  string title = 2;
+  string summary = 3;
+  repeated string tags = 4;
+  UserBrief author = 5;
+  TemplateSummary template_summary = 6;
+  ForumPostCounters counters = 7;
+  ForumPostViewerState viewer_state = 8;
+  string status = 9;
+  string created_at = 10;
+}
+
+message TemplateItemPreview {
+  uint64 item_id = 1;
+  int32 order = 2;
+  string content = 3;
+}
+
+message TemplateDetail {
+  string mode = 1;
+  string start_date = 2;
+  string end_date = 3;
+  repeated string strategy_labels = 4;
+  int32 task_count = 5;
+  repeated TemplateItemPreview items_preview = 6;
+}
+
+message ForumPostDetail {
+  ForumPostBrief post = 1;
+  TemplateDetail template = 2;
+}
+
+message ForumCommentNode {
+  uint64 comment_id = 1;
+  uint64 post_id = 2;
+  uint64 parent_comment_id = 3;
+  string content = 4;
+  string status = 5;
+  UserBrief author = 6;
+  bool can_delete = 7;
+  string created_at = 8;
+  string deleted_at = 9;
+  repeated ForumCommentNode children = 10;
+}
+
+message ListForumPostsRequest {
+  uint64 actor_user_id = 1;
+  int32 page = 2;
+  int32 page_size = 3;
+  string sort = 4;
+  string keyword = 5;
+  string tag = 6;
+}
+
+message ListForumPostsResponse {
+  repeated ForumPostBrief items = 1;
+  PageResponse page = 2;
+}
+
+message ListForumTagsRequest {
+  uint64 actor_user_id = 1;
+  int32 limit = 2;
+}
+
+message ForumTagItem {
+  string tag = 1;
+  int32 post_count = 2;
+}
+
+message ListForumTagsResponse {
+  repeated ForumTagItem items = 1;
+}
+
+message CreateForumPostRequest {
+  uint64 actor_user_id = 1;
+  uint64 task_class_id = 2;
+  string title = 3;
+  string summary = 4;
+  repeated string tags = 5;
+  string idempotency_key = 6;
+}
+
+message CreateForumPostResponse {
+  ForumPostBrief post = 1;
+}
+
+message GetForumPostRequest {
+  uint64 actor_user_id = 1;
+  uint64 post_id = 2;
+}
+
+message GetForumPostResponse {
+  ForumPostDetail data = 1;
+}
+
+message LikeForumPostRequest {
+  uint64 actor_user_id = 1;
+  uint64 post_id = 2;
+}
+
+message LikeForumPostResponse {
+  ForumPostCounters counters = 1;
+  ForumPostViewerState viewer_state = 2;
+}
+
+message UnlikeForumPostRequest {
+  uint64 actor_user_id = 1;
+  uint64 post_id = 2;
+}
+
+message UnlikeForumPostResponse {
+  ForumPostCounters counters = 1;
+  ForumPostViewerState viewer_state = 2;
+}
+
+message ListForumCommentsRequest {
+  uint64 actor_user_id = 1;
+  uint64 post_id = 2;
+  int32 page = 3;
+  int32 page_size = 4;
+  string sort = 5;
+}
+
+message ListForumCommentsResponse {
+  repeated ForumCommentNode items = 1;
+  PageResponse page = 2;
+}
+
+message CreateForumCommentRequest {
+  uint64 actor_user_id = 1;
+  uint64 post_id = 2;
+  string content = 3;
+  uint64 parent_comment_id = 4;
+  string idempotency_key = 5;
+}
+
+message CreateForumCommentResponse {
+  ForumCommentNode comment = 1;
+}
+
+message DeleteForumCommentRequest {
+  uint64 actor_user_id = 1;
+  uint64 comment_id = 2;
+}
+
+message DeleteForumCommentResponse {
+  uint64 comment_id = 1;
+  string status = 2;
+}
+
+message ImportForumPostRequest {
+  uint64 actor_user_id = 1;
+  uint64 post_id = 2;
+  string target_title = 3;
+  string idempotency_key = 4;
+}
+
+message ImportForumPostResponse {
+  uint64 import_id = 1;
+  uint64 post_id = 2;
+  uint64 new_task_class_id = 3;
+  string task_class_title = 4;
+  int64 import_count = 5;
+  string created_at = 6;
+}
