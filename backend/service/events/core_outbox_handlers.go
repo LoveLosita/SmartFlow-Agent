@@ -49,9 +49,10 @@ func RegisterAllOutboxHandlers(
 	memoryModule *memory.Module,
 	activeTriggerWorkflow ActiveScheduleTriggeredProcessor,
 	notificationService *notification.NotificationService,
+	forumRewardRecorder ForumRewardGrantRecorder,
 	adjuster ports.TokenUsageAdjuster,
 ) error {
-	if err := validateAllOutboxHandlerDeps(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo, memoryModule, activeTriggerWorkflow, notificationService); err != nil {
+	if err := validateAllOutboxHandlerDeps(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo, memoryModule, activeTriggerWorkflow, notificationService, forumRewardRecorder); err != nil {
 		return err
 	}
 
@@ -64,6 +65,7 @@ func RegisterAllOutboxHandlers(
 		memoryModule,
 		activeTriggerWorkflow,
 		notificationService,
+		forumRewardRecorder,
 		adjuster,
 	))
 }
@@ -112,6 +114,7 @@ func validateAllOutboxHandlerDeps(
 	memoryModule *memory.Module,
 	activeTriggerWorkflow ActiveScheduleTriggeredProcessor,
 	notificationService *notification.NotificationService,
+	forumRewardRecorder ForumRewardGrantRecorder,
 ) error {
 	if err := validateCoreOutboxHandlerDeps(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo, memoryModule); err != nil {
 		return err
@@ -121,6 +124,9 @@ func validateAllOutboxHandlerDeps(
 	}
 	if notificationService == nil {
 		return errors.New("notification service is nil")
+	}
+	if forumRewardRecorder == nil {
+		return errors.New("forum reward grant recorder is nil")
 	}
 	return nil
 }
@@ -191,10 +197,25 @@ func allOutboxHandlerRoutes(
 	memoryModule *memory.Module,
 	activeTriggerWorkflow ActiveScheduleTriggeredProcessor,
 	notificationService *notification.NotificationService,
+	forumRewardRecorder ForumRewardGrantRecorder,
 	adjuster ports.TokenUsageAdjuster,
 ) []outboxHandlerRoute {
 	routes := coreOutboxHandlerRoutes(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo, memoryModule, adjuster)
 	routes = append(routes,
+		outboxHandlerRoute{
+			EventType: sharedevents.ForumPostLikedEventType,
+			Service:   outboxHandlerServiceTokenStore,
+			Register: func() error {
+				return RegisterForumPostLikedRewardHandler(eventBus, outboxRepo, forumRewardRecorder)
+			},
+		},
+		outboxHandlerRoute{
+			EventType: sharedevents.ForumPostImportedEventType,
+			Service:   outboxHandlerServiceTokenStore,
+			Register: func() error {
+				return RegisterForumPostImportedRewardHandler(eventBus, outboxRepo, forumRewardRecorder)
+			},
+		},
 		outboxHandlerRoute{
 			EventType: sharedevents.ActiveScheduleTriggeredEventType,
 			Service:   outboxHandlerServiceActiveScheduler,

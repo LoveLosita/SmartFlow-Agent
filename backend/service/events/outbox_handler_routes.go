@@ -18,6 +18,8 @@ const (
 	outboxHandlerServiceMemory          outboxHandlerService = "memory"
 	outboxHandlerServiceActiveScheduler outboxHandlerService = "active-scheduler"
 	outboxHandlerServiceNotification    outboxHandlerService = "notification"
+	outboxHandlerServiceTaskClassForum  outboxHandlerService = "taskclass-forum"
+	outboxHandlerServiceTokenStore      outboxHandlerService = "token-store"
 )
 
 // outboxHandlerRoute 显式描述“事件类型 -> 服务归属 -> handler 注册动作”。

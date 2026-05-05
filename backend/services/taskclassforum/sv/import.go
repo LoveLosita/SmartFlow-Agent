@@ -10,6 +10,7 @@ import (
 	forumdao "github.com/LoveLosita/smartflow/backend/services/taskclassforum/dao"
 	forummodel "github.com/LoveLosita/smartflow/backend/services/taskclassforum/model"
 	forumcontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/taskclassforum"
+	sharedevents "github.com/LoveLosita/smartflow/backend/shared/events"
 )
 
 // ImportPost 从论坛模板导入当前用户自己的 TaskClass 副本。
@@ -41,7 +42,7 @@ func (s *Service) ImportPost(ctx context.Context, req forumcontracts.ImportForum
 			return nil, err
 		}
 		if existing != nil && existing.Status == forummodel.ForumImportStatusImported {
-			return importResultFromModel(*existing), nil
+			return s.importResultWithCurrentImportCount(ctx, *existing), nil
 		}
 	}
 	existing, err := s.forumDAO.FindImport(ctx, req.PostID, req.ActorUserID)
@@ -49,7 +50,7 @@ func (s *Service) ImportPost(ctx context.Context, req forumcontracts.ImportForum
 		return nil, err
 	}
 	if existing != nil && existing.Status == forummodel.ForumImportStatusImported {
-		return importResultFromModel(*existing), nil
+		return s.importResultWithCurrentImportCount(ctx, *existing), nil
 	}
 	if existing != nil && existing.Status == forummodel.ForumImportStatusFailed && existing.NewTaskClassID != nil {
 		return s.recoverCreatedImport(ctx, req, *existing)
@@ -73,9 +74,7 @@ func (s *Service) ImportPost(ctx context.Context, req forumcontracts.ImportForum
 		return nil, err
 	}
 	if pending.Status == forummodel.ForumImportStatusImported {
-		result := importResultFromModel(*pending)
-		result.ImportCount = post.ImportCount
-		return result, nil
+		return s.importResultWithCurrentImportCount(ctx, *pending), nil
 	}
 
 	created, err := s.taskClassPort.CreateTaskClassFromSnapshot(ctx, req.ActorUserID, snapshot, targetTitle)
@@ -90,6 +89,7 @@ func (s *Service) ImportPost(ctx context.Context, req forumcontracts.ImportForum
 	}
 
 	var imported forummodel.ForumImport
+	var rewardPayload *sharedevents.ForumPostRewardPayload
 	if err := s.forumDAO.Transaction(ctx, func(txDAO *forumdao.ForumDAO) error {
 		if _, err := txDAO.LockPublishedPost(ctx, req.PostID); err != nil {
 			return normalizeRecordNotFound(err, respond.UserTaskClassNotFound)
@@ -105,7 +105,8 @@ func (s *Service) ImportPost(ctx context.Context, req forumcontracts.ImportForum
 			imported = *again
 			return nil
 		}
-		if err := txDAO.FinalizeImport(ctx, pending.ID, created.TaskClassID, created.Title, time.Now()); err != nil {
+		finalizedAt := time.Now()
+		if err := txDAO.FinalizeImport(ctx, pending.ID, created.TaskClassID, created.Title, finalizedAt); err != nil {
 			return err
 		}
 		imported = *again
@@ -113,12 +114,27 @@ func (s *Service) ImportPost(ctx context.Context, req forumcontracts.ImportForum
 		imported.TargetTitle = created.Title
 		imported.Status = forummodel.ForumImportStatusImported
 		if again.Status != forummodel.ForumImportStatusImported {
+			payload := sharedevents.NewForumPostImportedPayload(req.PostID, again.ID, again.AuthorUserID, req.ActorUserID, finalizedAt)
+			if again.EventID != "" {
+				payload.EventID = again.EventID
+			}
+			// 调用目的：导入成功和作者奖励事件必须同事务提交，避免只创建副本却永久漏发奖励。
+			handled, publishErr := s.publishForumRewardEventInTx(ctx, txDAO.GormDB(), payload)
+			if publishErr != nil {
+				return publishErr
+			}
+			if !handled {
+				rewardPayload = &payload
+			}
 			return txDAO.AddPostCounter(ctx, req.PostID, "import_count", 1)
 		}
 		return nil
 	}); err != nil {
 		_ = s.forumDAO.MarkImportFailedAfterTaskClassCreated(ctx, pending.ID, created.TaskClassID, created.Title, err.Error(), time.Now())
 		return nil, err
+	}
+	if rewardPayload != nil {
+		s.publishForumRewardEventBestEffort(*rewardPayload)
 	}
 	result := importResultFromModel(imported)
 	if postAfter, err := s.forumDAO.FindPublishedPost(ctx, req.PostID); err == nil {
@@ -183,6 +199,7 @@ func (s *Service) recoverCreatedImport(ctx context.Context, req forumcontracts.I
 		return nil, respond.RequestIsProcessing
 	}
 	imported := existing
+	var rewardPayload *sharedevents.ForumPostRewardPayload
 	if err := s.forumDAO.Transaction(ctx, func(txDAO *forumdao.ForumDAO) error {
 		if _, err := txDAO.LockPublishedPost(ctx, req.PostID); err != nil {
 			return normalizeRecordNotFound(err, respond.UserTaskClassNotFound)
@@ -201,14 +218,30 @@ func (s *Service) recoverCreatedImport(ctx context.Context, req forumcontracts.I
 		if again.Status != forummodel.ForumImportStatusFailed || again.NewTaskClassID == nil {
 			return respond.RequestIsProcessing
 		}
-		if err := txDAO.FinalizeImport(ctx, again.ID, *again.NewTaskClassID, again.TargetTitle, time.Now()); err != nil {
+		finalizedAt := time.Now()
+		if err := txDAO.FinalizeImport(ctx, again.ID, *again.NewTaskClassID, again.TargetTitle, finalizedAt); err != nil {
 			return err
 		}
 		imported = *again
 		imported.Status = forummodel.ForumImportStatusImported
+		payload := sharedevents.NewForumPostImportedPayload(req.PostID, again.ID, again.AuthorUserID, req.ActorUserID, finalizedAt)
+		if again.EventID != "" {
+			payload.EventID = again.EventID
+		}
+		// 调用目的：恢复已创建副本的导入记录时，同步补齐奖励 outbox，保证恢复路径和首次成功路径一致。
+		handled, publishErr := s.publishForumRewardEventInTx(ctx, txDAO.GormDB(), payload)
+		if publishErr != nil {
+			return publishErr
+		}
+		if !handled {
+			rewardPayload = &payload
+		}
 		return txDAO.AddPostCounter(ctx, req.PostID, "import_count", 1)
 	}); err != nil {
 		return nil, err
+	}
+	if rewardPayload != nil {
+		s.publishForumRewardEventBestEffort(*rewardPayload)
 	}
 	result := importResultFromModel(imported)
 	if postAfter, err := s.forumDAO.FindPublishedPost(ctx, req.PostID); err == nil {
@@ -231,6 +264,20 @@ func importResultFromModel(item forummodel.ForumImport) *forumcontracts.ImportFo
 	}
 }
 
+// importResultWithCurrentImportCount 复用已有导入记录时补齐帖子当前导入计数。
+//
+// 职责边界：
+// 1. 只补齐响应展示用的 import_count，不改变 forum_imports 状态；
+// 2. 查询帖子失败时保留基础导入回执，避免幂等重放因为展示字段失败而误报导入失败；
+// 3. 新导入路径仍以事务内 AddPostCounter 为准，这里只处理已导入短路路径。
+func (s *Service) importResultWithCurrentImportCount(ctx context.Context, item forummodel.ForumImport) *forumcontracts.ImportForumPostResult {
+	result := importResultFromModel(item)
+	if post, err := s.forumDAO.FindPublishedPost(ctx, item.PostID); err == nil {
+		result.ImportCount = post.ImportCount
+	}
+	return result
+}
+
 func forumImportEventID(postID uint64, userID uint64) string {
-	return fmt.Sprintf("forum.post.imported:%d:%d", postID, userID)
+	return sharedevents.ForumRewardEventID(sharedevents.ForumPostImportedEventType, postID, userID)
 }

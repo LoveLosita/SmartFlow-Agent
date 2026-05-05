@@ -9,13 +9,14 @@ import (
 )
 
 const (
-	TokenStoreService_GetSummary_FullMethodName    = "/smartflow.tokenstore.TokenStoreService/GetSummary"
-	TokenStoreService_ListProducts_FullMethodName  = "/smartflow.tokenstore.TokenStoreService/ListProducts"
-	TokenStoreService_CreateOrder_FullMethodName   = "/smartflow.tokenstore.TokenStoreService/CreateOrder"
-	TokenStoreService_ListOrders_FullMethodName    = "/smartflow.tokenstore.TokenStoreService/ListOrders"
-	TokenStoreService_GetOrder_FullMethodName      = "/smartflow.tokenstore.TokenStoreService/GetOrder"
-	TokenStoreService_MockPaidOrder_FullMethodName = "/smartflow.tokenstore.TokenStoreService/MockPaidOrder"
-	TokenStoreService_ListGrants_FullMethodName    = "/smartflow.tokenstore.TokenStoreService/ListGrants"
+	TokenStoreService_GetSummary_FullMethodName             = "/smartflow.tokenstore.TokenStoreService/GetSummary"
+	TokenStoreService_ListProducts_FullMethodName           = "/smartflow.tokenstore.TokenStoreService/ListProducts"
+	TokenStoreService_CreateOrder_FullMethodName            = "/smartflow.tokenstore.TokenStoreService/CreateOrder"
+	TokenStoreService_ListOrders_FullMethodName             = "/smartflow.tokenstore.TokenStoreService/ListOrders"
+	TokenStoreService_GetOrder_FullMethodName               = "/smartflow.tokenstore.TokenStoreService/GetOrder"
+	TokenStoreService_MockPaidOrder_FullMethodName          = "/smartflow.tokenstore.TokenStoreService/MockPaidOrder"
+	TokenStoreService_ListGrants_FullMethodName             = "/smartflow.tokenstore.TokenStoreService/ListGrants"
+	TokenStoreService_RecordForumRewardGrant_FullMethodName = "/smartflow.tokenstore.TokenStoreService/RecordForumRewardGrant"
 )
 
 type TokenStoreServiceClient interface {
@@ -26,6 +27,7 @@ type TokenStoreServiceClient interface {
 	GetOrder(ctx context.Context, in *GetTokenOrderRequest, opts ...grpc.CallOption) (*GetTokenOrderResponse, error)
 	MockPaidOrder(ctx context.Context, in *MockPaidOrderRequest, opts ...grpc.CallOption) (*MockPaidOrderResponse, error)
 	ListGrants(ctx context.Context, in *ListTokenGrantsRequest, opts ...grpc.CallOption) (*ListTokenGrantsResponse, error)
+	RecordForumRewardGrant(ctx context.Context, in *RecordForumRewardGrantRequest, opts ...grpc.CallOption) (*RecordForumRewardGrantResponse, error)
 }
 
 type tokenStoreServiceClient struct {
@@ -64,6 +66,10 @@ func (c *tokenStoreServiceClient) ListGrants(ctx context.Context, in *ListTokenG
 	return invokeTokenStore[ListTokenGrantsResponse](ctx, c.cc, TokenStoreService_ListGrants_FullMethodName, in, opts...)
 }
 
+func (c *tokenStoreServiceClient) RecordForumRewardGrant(ctx context.Context, in *RecordForumRewardGrantRequest, opts ...grpc.CallOption) (*RecordForumRewardGrantResponse, error) {
+	return invokeTokenStore[RecordForumRewardGrantResponse](ctx, c.cc, TokenStoreService_RecordForumRewardGrant_FullMethodName, in, opts...)
+}
+
 func invokeTokenStore[Resp any](ctx context.Context, cc grpc.ClientConnInterface, fullMethod string, in interface{}, opts ...grpc.CallOption) (*Resp, error) {
 	out := new(Resp)
 	err := cc.Invoke(ctx, fullMethod, in, out, opts...)
@@ -81,6 +87,7 @@ type TokenStoreServiceServer interface {
 	GetOrder(context.Context, *GetTokenOrderRequest) (*GetTokenOrderResponse, error)
 	MockPaidOrder(context.Context, *MockPaidOrderRequest) (*MockPaidOrderResponse, error)
 	ListGrants(context.Context, *ListTokenGrantsRequest) (*ListTokenGrantsResponse, error)
+	RecordForumRewardGrant(context.Context, *RecordForumRewardGrantRequest) (*RecordForumRewardGrantResponse, error)
 }
 
 type UnimplementedTokenStoreServiceServer struct{}
@@ -111,6 +118,10 @@ func (UnimplementedTokenStoreServiceServer) MockPaidOrder(context.Context, *Mock
 
 func (UnimplementedTokenStoreServiceServer) ListGrants(context.Context, *ListTokenGrantsRequest) (*ListTokenGrantsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListGrants not implemented")
+}
+
+func (UnimplementedTokenStoreServiceServer) RecordForumRewardGrant(context.Context, *RecordForumRewardGrantRequest) (*RecordForumRewardGrantResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RecordForumRewardGrant not implemented")
 }
 
 func RegisterTokenStoreServiceServer(s grpc.ServiceRegistrar, srv TokenStoreServiceServer) {
@@ -164,6 +175,9 @@ var TokenStoreService_ServiceDesc = grpc.ServiceDesc{
 		}),
 		tokenStoreUnaryHandler[ListTokenGrantsRequest]("ListGrants", TokenStoreService_ListGrants_FullMethodName, func(s TokenStoreServiceServer, ctx context.Context, req *ListTokenGrantsRequest) (interface{}, error) {
 			return s.ListGrants(ctx, req)
+		}),
+		tokenStoreUnaryHandler[RecordForumRewardGrantRequest]("RecordForumRewardGrant", TokenStoreService_RecordForumRewardGrant_FullMethodName, func(s TokenStoreServiceServer, ctx context.Context, req *RecordForumRewardGrantRequest) (interface{}, error) {
+			return s.RecordForumRewardGrant(ctx, req)
 		}),
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -14,7 +14,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const requestTimeout = 2 * time.Second
+const (
+	requestTimeout          = 2 * time.Second
+	forumLikeRewardAmount   = int64(1)
+	forumImportRewardAmount = int64(5)
+	rewardHintStatusActive  = "rule_active"
+)
 
 type ForumClient interface {
 	ListPosts(ctx context.Context, actorUserID uint64, page int, pageSize int, sort string, keyword string, tag string) ([]contracts.ForumPostBrief, contracts.PageResult, error)
@@ -220,8 +225,8 @@ func (h *Handler) LikePost(c *gin.Context) {
 		LikeCount: counters.LikeCount,
 		RewardHint: &rewardHint{
 			Receiver: "author",
-			Status:   "recorded",
-			Amount:   1,
+			Status:   rewardHintStatusActive,
+			Amount:   forumLikeRewardAmount,
 		},
 	}))
 }
@@ -369,8 +374,8 @@ func (h *Handler) ImportPost(c *gin.Context) {
 		ImportCount:    result.ImportCount,
 		RewardHint: rewardHint{
 			Receiver: "author",
-			Status:   "recorded",
-			Amount:   2,
+			Status:   rewardHintStatusActive,
+			Amount:   forumImportRewardAmount,
 		},
 		NextAction: nextAction{
 			Type:        "open_task_class",

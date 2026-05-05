@@ -100,6 +100,19 @@ type ListTokenGrantsRequest struct {
 	Source      string `json:"source"`
 }
 
+// RecordForumRewardGrantRequest 是论坛奖励入账的内部 RPC 契约。
+//
+// 职责边界：
+// 1. 只描述一条待记录到 token_grants 的论坛奖励事实；
+// 2. 不携带最终奖励金额，金额由 token-store 按 source 和配置解析；
+// 3. source_ref_id 使用字符串承接 post_id / import_id，服务层再按当前库表结构落成整数。
+type RecordForumRewardGrantRequest struct {
+	EventID        string `json:"event_id"`
+	ReceiverUserID uint64 `json:"receiver_user_id"`
+	Source         string `json:"source"`
+	SourceRefID    string `json:"source_ref_id"`
+}
+
 // TokenGrantRecord 是 token-store 内部发放出口使用的获取事实。
 type TokenGrantRecord struct {
 	EventID     string `json:"event_id"`

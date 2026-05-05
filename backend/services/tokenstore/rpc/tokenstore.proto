@@ -12,6 +12,7 @@ service TokenStoreService {
   rpc GetOrder(GetTokenOrderRequest) returns (GetTokenOrderResponse);
   rpc MockPaidOrder(MockPaidOrderRequest) returns (MockPaidOrderResponse);
   rpc ListGrants(ListTokenGrantsRequest) returns (ListTokenGrantsResponse);
+  rpc RecordForumRewardGrant(RecordForumRewardGrantRequest) returns (RecordForumRewardGrantResponse);
 }
 
 message PageResponse {
@@ -141,4 +142,15 @@ message ListTokenGrantsRequest {
 message ListTokenGrantsResponse {
   repeated TokenGrantView items = 1;
   PageResponse page = 2;
+}
+
+message RecordForumRewardGrantRequest {
+  string event_id = 1;
+  uint64 receiver_user_id = 2;
+  string source = 3;
+  string source_ref_id = 4;
+}
+
+message RecordForumRewardGrantResponse {
+  TokenGrantView grant = 1;
 }

@@ -47,6 +47,9 @@ taskclassforum:
 
 # Token 商店 zrpc 独立服务与网关客户端配置。
 tokenstore:
+  reward:
+    forumLikeAmount: 1
+    forumImportAmount: 5
   rpc:
     listenOn: "0.0.0.0:9083"
     endpoints:
@@ -63,6 +66,18 @@ kafka:
   retryScanInterval: 1s
   retryBatchSize: 100
   maxRetry: 20
+
+# 服务级 outbox 目录配置；未显式覆盖时会使用代码内置默认值。
+outbox:
+  services:
+    taskclass-forum:
+      topic: "smartflow.taskclass-forum.outbox"
+      groupID: "smartflow-taskclass-forum-outbox-consumer"
+      table: "taskclass_forum_outbox_messages"
+    token-store:
+      topic: "smartflow.token-store.outbox"
+      groupID: "smartflow-token-store-outbox-consumer"
+      table: "token_store_outbox_messages"
 
 # 通知投递配置。
 notification:

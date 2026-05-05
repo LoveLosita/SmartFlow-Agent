@@ -15,6 +15,8 @@ const (
 	ServiceMemory          = "memory"
 	ServiceActiveScheduler = "active-scheduler"
 	ServiceNotification    = "notification"
+	ServiceTaskClassForum  = "taskclass-forum"
+	ServiceTokenStore      = "token-store"
 )
 
 // ServiceConfig 描述一个服务级 outbox 的固定归属。
@@ -82,6 +84,18 @@ func LoadServiceConfigs() map[string]ServiceConfig {
 			Topic:     "smartflow.notification.outbox",
 			GroupID:   "smartflow-notification-outbox-consumer",
 			TableName: "notification_outbox_messages",
+		},
+		ServiceTaskClassForum: {
+			Name:      ServiceTaskClassForum,
+			Topic:     "smartflow.taskclass-forum.outbox",
+			GroupID:   "smartflow-taskclass-forum-outbox-consumer",
+			TableName: "taskclass_forum_outbox_messages",
+		},
+		ServiceTokenStore: {
+			Name:      ServiceTokenStore,
+			Topic:     "smartflow.token-store.outbox",
+			GroupID:   "smartflow-token-store-outbox-consumer",
+			TableName: "token_store_outbox_messages",
 		},
 	}
 

@@ -29,6 +29,19 @@ func (dao *ForumDAO) WithTx(tx *gorm.DB) *ForumDAO {
 	return &ForumDAO{db: tx}
 }
 
+// GormDB 返回当前 DAO 绑定的 GORM 句柄。
+//
+// 职责边界：
+// 1. 只提供给需要和 forum 业务事务同提交的基础设施使用，例如 outbox 入队；
+// 2. 不鼓励业务层绕过 DAO 任意读写 forum_* 表；
+// 3. 若当前 DAO 来自 WithTx，返回值就是同一个事务句柄。
+func (dao *ForumDAO) GormDB() *gorm.DB {
+	if dao == nil {
+		return nil
+	}
+	return dao.db
+}
+
 // Transaction 在一个数据库事务内执行计划广场写操作。
 func (dao *ForumDAO) Transaction(ctx context.Context, fn func(txDAO *ForumDAO) error) error {
 	return dao.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

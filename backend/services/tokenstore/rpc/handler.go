@@ -171,6 +171,28 @@ func (h *Handler) ListGrants(ctx context.Context, req *pb.ListTokenGrantsRequest
 	}, nil
 }
 
+// RecordForumRewardGrant 负责把论坛 outbox 奖励事件转成 token-store 内部账本写入调用。
+func (h *Handler) RecordForumRewardGrant(ctx context.Context, req *pb.RecordForumRewardGrantRequest) (*pb.RecordForumRewardGrantResponse, error) {
+	svc, err := h.service()
+	if err != nil {
+		return nil, grpcErrorFromServiceError(err)
+	}
+	if req == nil {
+		return nil, grpcErrorFromServiceError(respond.MissingParam)
+	}
+
+	grant, err := svc.RecordForumRewardGrant(ctx, tokencontracts.RecordForumRewardGrantRequest{
+		EventID:        req.EventId,
+		ReceiverUserID: req.ReceiverUserId,
+		Source:         req.Source,
+		SourceRefID:    req.SourceRefId,
+	})
+	if err != nil {
+		return nil, grpcErrorFromServiceError(err)
+	}
+	return &pb.RecordForumRewardGrantResponse{Grant: tokenGrantToPB(grant)}, nil
+}
+
 func tokenPageToPB(page tokencontracts.PageResult) *pb.PageResponse {
 	return &pb.PageResponse{
 		Page:     int32(page.Page),

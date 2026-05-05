@@ -919,6 +919,7 @@ func (r *appRuntime) registerEventHandlers() error {
 		r.memoryModule,
 		r.activeTriggerWorkflow,
 		r.notificationService,
+		r.tokenStoreClient,
 		r.userAuthClient,
 	); err != nil {
 		return err

@@ -3,6 +3,7 @@ package dao
 import (
 	"fmt"
 
+	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
 	tokenmodel "github.com/LoveLosita/smartflow/backend/services/tokenstore/model"
 	"github.com/spf13/viper"
 	"gorm.io/driver/mysql"
@@ -13,7 +14,7 @@ import (
 // OpenDBFromConfig 创建 token-store 服务自己的数据库句柄，并迁移本服务私有表。
 //
 // 职责边界：
-// 1. 只迁移 token_* 表，不迁移 users，避免和 user/auth 服务边界冲突；
+// 1. 只迁移 token_* 表和 token-store outbox 表，不迁移 users，避免和 user/auth 服务边界冲突；
 // 2. 自动迁移后执行 P0 seed，确保前端商品页有可展示商品；
 // 3. 返回 *gorm.DB 供本服务 DAO 复用，调用方负责进程生命周期。
 func OpenDBFromConfig() (*gorm.DB, error) {
@@ -45,8 +46,9 @@ func OpenDBFromConfig() (*gorm.DB, error) {
 //
 // 步骤说明：
 // 1. 先创建商品、订单、获取账本和奖励规则表；
-// 2. 通过唯一约束保证 order_no、event_id 和幂等键不会重复写入；
-// 3. 失败时直接返回错误，避免服务在 schema 不完整时继续启动。
+// 2. 再按 service catalog 创建 token-store outbox 表，保证论坛奖励事件有稳定落表目录；
+// 3. 通过唯一约束保证 order_no、event_id 和幂等键不会重复写入；
+// 4. 失败时直接返回错误，避免服务在 schema 不完整时继续启动。
 func AutoMigrate(db *gorm.DB) error {
 	if db == nil {
 		return fmt.Errorf("tokenstore auto migrate failed: db is nil")
@@ -58,6 +60,9 @@ func AutoMigrate(db *gorm.DB) error {
 		&tokenmodel.TokenRewardRule{},
 	); err != nil {
 		return fmt.Errorf("auto migrate tokenstore tables failed: %w", err)
+	}
+	if err := outboxinfra.AutoMigrateServiceTable(db, outboxinfra.ServiceTokenStore); err != nil {
+		return err
 	}
 	return nil
 }
@@ -172,7 +177,7 @@ func defaultTokenRewardRules() []tokenmodel.TokenRewardRule {
 		{
 			Source: tokenmodel.TokenGrantSourceForumImport,
 			Name:   "计划被导入奖励",
-			Amount: 2,
+			Amount: 5,
 			Status: tokenmodel.TokenRewardRuleStatusActive,
 		},
 	}

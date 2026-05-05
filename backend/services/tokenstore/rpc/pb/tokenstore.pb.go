@@ -210,3 +210,22 @@ type ListTokenGrantsResponse struct {
 func (m *ListTokenGrantsResponse) Reset()         { *m = ListTokenGrantsResponse{} }
 func (m *ListTokenGrantsResponse) String() string { return proto.CompactTextString(m) }
 func (*ListTokenGrantsResponse) ProtoMessage()    {}
+
+type RecordForumRewardGrantRequest struct {
+	EventId        string `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	ReceiverUserId uint64 `protobuf:"varint,2,opt,name=receiver_user_id,json=receiverUserId,proto3" json:"receiver_user_id,omitempty"`
+	Source         string `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`
+	SourceRefId    string `protobuf:"bytes,4,opt,name=source_ref_id,json=sourceRefId,proto3" json:"source_ref_id,omitempty"`
+}
+
+func (m *RecordForumRewardGrantRequest) Reset()         { *m = RecordForumRewardGrantRequest{} }
+func (m *RecordForumRewardGrantRequest) String() string { return proto.CompactTextString(m) }
+func (*RecordForumRewardGrantRequest) ProtoMessage()    {}
+
+type RecordForumRewardGrantResponse struct {
+	Grant *TokenGrantView `protobuf:"bytes,1,opt,name=grant,proto3" json:"grant,omitempty"`
+}
+
+func (m *RecordForumRewardGrantResponse) Reset()         { *m = RecordForumRewardGrantResponse{} }
+func (m *RecordForumRewardGrantResponse) String() string { return proto.CompactTextString(m) }
+func (*RecordForumRewardGrantResponse) ProtoMessage()    {}

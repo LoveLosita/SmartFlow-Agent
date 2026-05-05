@@ -65,12 +65,8 @@ func autoMigrateOutboxTables(db *gorm.DB) error {
 	// 1. 这里必须按服务目录读取最终生效的 table 名，而不能只看默认内置映射。
 	// 2. 这样即使后续通过配置覆盖 outbox.services.*.table，启动建表也会和运行时写入保持一致。
 	for _, serviceName := range outboxinfra.ServiceNames() {
-		cfg, ok := outboxinfra.ResolveServiceConfig(serviceName)
-		if !ok {
-			return fmt.Errorf("resolve outbox config failed for service %s", serviceName)
-		}
-		if err := db.Table(cfg.TableName).AutoMigrate(&model.AgentOutboxMessage{}); err != nil {
-			return fmt.Errorf("auto migrate outbox table failed for %s (%s): %w", cfg.Name, cfg.TableName, err)
+		if err := outboxinfra.AutoMigrateServiceTable(db, serviceName); err != nil {
+			return err
 		}
 	}
 	return nil

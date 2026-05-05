@@ -64,6 +64,31 @@ func (dao *TokenStoreDAO) ListActiveProducts(ctx context.Context) ([]tokenmodel.
 	return products, err
 }
 
+// FindRewardRuleBySource 按来源读取社区奖励规则。
+//
+// 职责边界：
+// 1. 只读取 token_reward_rules，不计算最终发放金额，也不判断停用语义；
+// 2. 未找到规则时返回 nil，由服务层决定配置或默认值兜底；
+// 3. source 在 DAO 层做一次规范化，避免大小写和空格造成规则漏命中。
+func (dao *TokenStoreDAO) FindRewardRuleBySource(ctx context.Context, source string) (*tokenmodel.TokenRewardRule, error) {
+	source = strings.ToLower(strings.TrimSpace(source))
+	if source == "" {
+		return nil, nil
+	}
+
+	var rule tokenmodel.TokenRewardRule
+	err := dao.db.WithContext(ctx).
+		Where("source = ?", source).
+		First(&rule).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &rule, nil
+}
+
 func (dao *TokenStoreDAO) FindActiveProductByID(ctx context.Context, productID uint64) (*tokenmodel.TokenProduct, error) {
 	var product tokenmodel.TokenProduct
 	err := dao.db.WithContext(ctx).

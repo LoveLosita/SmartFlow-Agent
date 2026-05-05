@@ -217,6 +217,25 @@ func (c *Client) ListGrants(ctx context.Context, req tokencontracts.ListTokenGra
 	return tokenGrantsFromPB(resp.Items), pageFromPB(resp.Page), nil
 }
 
+func (c *Client) RecordForumRewardGrant(ctx context.Context, req tokencontracts.RecordForumRewardGrantRequest) (*tokencontracts.TokenGrantView, error) {
+	if err := c.ensureReady(); err != nil {
+		return nil, err
+	}
+	resp, err := c.rpc.RecordForumRewardGrant(ctx, &pb.RecordForumRewardGrantRequest{
+		EventId:        req.EventID,
+		ReceiverUserId: req.ReceiverUserID,
+		Source:         req.Source,
+		SourceRefId:    req.SourceRefID,
+	})
+	if err != nil {
+		return nil, responseFromRPCError(err)
+	}
+	if resp == nil {
+		return nil, errors.New("tokenstore zrpc service returned empty record forum reward grant response")
+	}
+	return tokenGrantFromPB(resp.Grant), nil
+}
+
 func (c *Client) ensureReady() error {
 	if c == nil || c.rpc == nil {
 		return errors.New("tokenstore zrpc client is not initialized")

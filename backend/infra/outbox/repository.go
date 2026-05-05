@@ -127,6 +127,35 @@ func (d *Repository) ListDueMessages(ctx context.Context, serviceName string, li
 	return messages, nil
 }
 
+// ListStalePublishedMessages 拉取已经投递到 Kafka 但长时间没有完成业务消费的消息。
+//
+// 职责边界：
+// 1. 只扫描 published 状态，不修改消息，避免和正常 Kafka consumer 抢状态机；
+// 2. before 由调用方决定，仓储层不关心具体兜底窗口；
+// 3. 返回结果交给上层幂等 handler 处理，重复消费风险由业务 event_id 兜底。
+func (d *Repository) ListStalePublishedMessages(ctx context.Context, serviceName string, before time.Time, limit int) ([]model.AgentOutboxMessage, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if before.IsZero() {
+		before = time.Now()
+	}
+
+	var messages []model.AgentOutboxMessage
+	query := d.scopedDB(ctx).
+		Where("status = ? AND published_at IS NOT NULL AND published_at <= ?", model.OutboxStatusPublished, before).
+		Order("published_at ASC, id ASC").
+		Limit(limit)
+	serviceName = strings.TrimSpace(serviceName)
+	if serviceName != "" {
+		query = query.Where("service_name = ?", serviceName)
+	}
+	if err := query.Find(&messages).Error; err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
 // MarkPublished 标记消息已经成功投递到 Kafka。
 func (d *Repository) MarkPublished(ctx context.Context, id int64) error {
 	now := time.Now()
