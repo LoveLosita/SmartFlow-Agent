@@ -3,8 +3,8 @@ package agentconv
 import (
 	"sort"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	schedule "github.com/LoveLosita/smartflow/backend/services/agent/tools/schedule"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 )
 
 // WindowDay 表示排课窗口中的一天（相对周 + 周几）。

@@ -5,8 +5,8 @@ import (
 	"log"
 	"strings"
 
-	"github.com/LoveLosita/smartflow/backend/respond"
 	"github.com/LoveLosita/smartflow/backend/services/schedule/core/applyadapter"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

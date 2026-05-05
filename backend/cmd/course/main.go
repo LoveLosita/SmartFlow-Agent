@@ -7,12 +7,12 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/LoveLosita/smartflow/backend/bootstrap"
-	rootdao "github.com/LoveLosita/smartflow/backend/dao"
 	coursedao "github.com/LoveLosita/smartflow/backend/services/course/dao"
 	courserpc "github.com/LoveLosita/smartflow/backend/services/course/rpc"
 	coursesv "github.com/LoveLosita/smartflow/backend/services/course/sv"
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
+	rootdao "github.com/LoveLosita/smartflow/backend/services/runtime/dao"
+	"github.com/LoveLosita/smartflow/backend/shared/infra/bootstrap"
 	"github.com/spf13/viper"
 )
 

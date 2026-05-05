@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/respond"
+	"github.com/LoveLosita/smartflow/backend/gateway/shared/respond"
 	memorycontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/memory"
 	"github.com/LoveLosita/smartflow/backend/shared/ports"
 	"github.com/gin-gonic/gin"

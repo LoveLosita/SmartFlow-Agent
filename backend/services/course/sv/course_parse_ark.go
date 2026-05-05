@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 )
 
 // ParseCourseTableImage 使用 Ark SDK Responses 解析课程表图片。

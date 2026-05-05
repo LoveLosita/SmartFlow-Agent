@@ -3,9 +3,9 @@ package service
 import (
 	"strings"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	memoryutils "github.com/LoveLosita/smartflow/backend/services/memory/internal/utils"
 	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 )
 
 func toItemDTO(item model.MemoryItem) memorymodel.ItemDTO {

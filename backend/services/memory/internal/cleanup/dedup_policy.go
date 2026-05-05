@@ -4,7 +4,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 )
 
 const dedupRecentTieWindow = 24 * time.Hour

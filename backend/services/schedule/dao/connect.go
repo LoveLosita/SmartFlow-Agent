@@ -1,13 +1,12 @@
 package dao
 
 import (
-	"context"
 	"fmt"
 
-	"github.com/LoveLosita/smartflow/backend/model"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
+	mysqlinfra "github.com/LoveLosita/smartflow/backend/shared/infra/mysql"
+	redisinfra "github.com/LoveLosita/smartflow/backend/shared/infra/redis"
 	"github.com/go-redis/redis/v8"
-	"github.com/spf13/viper"
-	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
@@ -18,18 +17,7 @@ import (
 // 2. 不迁移 task、task-class、course 或 active-scheduler 的表，避免 schedule 服务越权管理其它领域；
 // 3. 迁移期仍检查 task/task-class 依赖表是否存在，方便启动阶段暴露部署顺序问题。
 func OpenDBFromConfig() (*gorm.DB, error) {
-	host := viper.GetString("database.host")
-	port := viper.GetString("database.port")
-	user := viper.GetString("database.user")
-	password := viper.GetString("database.password")
-	dbname := viper.GetString("database.dbname")
-
-	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
-		user, password, host, port, dbname,
-	)
-
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	db, err := mysqlinfra.OpenDBFromConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -49,15 +37,7 @@ func OpenDBFromConfig() (*gorm.DB, error) {
 // 2. 不创建、不清理任何业务 key；
 // 3. Ping 失败直接返回错误，避免读缓存链路静默降级成难排查的启动问题。
 func OpenRedisFromConfig() (*redis.Client, error) {
-	client := redis.NewClient(&redis.Options{
-		Addr:     viper.GetString("redis.host") + ":" + viper.GetString("redis.port"),
-		Password: viper.GetString("redis.password"),
-		DB:       0,
-	})
-	if _, err := client.Ping(context.Background()).Result(); err != nil {
-		return nil, err
-	}
-	return client, nil
+	return redisinfra.OpenRedisFromConfig()
 }
 
 // ensureRuntimeDependencyTables 显式检查迁移期仍需读取或锁定的外部表。

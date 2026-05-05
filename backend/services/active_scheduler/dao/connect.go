@@ -3,10 +3,9 @@ package dao
 import (
 	"fmt"
 
-	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	coremodel "github.com/LoveLosita/smartflow/backend/model"
-	"github.com/spf13/viper"
-	"gorm.io/driver/mysql"
+	coremodel "github.com/LoveLosita/smartflow/backend/services/runtime/model"
+	mysqlinfra "github.com/LoveLosita/smartflow/backend/shared/infra/mysql"
+	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
 	"gorm.io/gorm"
 )
 
@@ -17,18 +16,7 @@ import (
 // 2. 不迁移 task、schedule、agent、notification 或 user/auth 表，避免独立进程越权管理其它服务模型；
 // 3. 返回的 *gorm.DB 供服务内主链路、due job scanner 和 outbox consumer 复用。
 func OpenDBFromConfig() (*gorm.DB, error) {
-	host := viper.GetString("database.host")
-	port := viper.GetString("database.port")
-	user := viper.GetString("database.user")
-	password := viper.GetString("database.password")
-	dbname := viper.GetString("database.dbname")
-
-	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
-		user, password, host, port, dbname,
-	)
-
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	db, err := mysqlinfra.OpenDBFromConfig()
 	if err != nil {
 		return nil, err
 	}

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 )
 
 // TaskClassUpsertInput 描述任务类写库工具的标准化入参。

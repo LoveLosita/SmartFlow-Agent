@@ -9,18 +9,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/conv"
-	"github.com/LoveLosita/smartflow/backend/dao"
-	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	"github.com/LoveLosita/smartflow/backend/model"
-	"github.com/LoveLosita/smartflow/backend/pkg"
-	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 	agentmodel "github.com/LoveLosita/smartflow/backend/services/agent/model"
 	agentprompt "github.com/LoveLosita/smartflow/backend/services/agent/prompt"
+	agentshared "github.com/LoveLosita/smartflow/backend/services/agent/shared"
 	agenttools "github.com/LoveLosita/smartflow/backend/services/agent/tools"
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
 	memoryobserve "github.com/LoveLosita/smartflow/backend/services/memory/observe"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/conv"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/dao"
+	eventsvc "github.com/LoveLosita/smartflow/backend/services/runtime/eventsvc"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
+	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 )
@@ -333,7 +333,7 @@ func (s *AgentService) runNormalChatFlow(
 	if chatHistory == nil {
 		// 2. 缓存未命中时回源 DB，并转换为 Eino message 格式。
 		cacheMiss = true
-		histories, hisErr := s.repo.GetUserChatHistories(ctx, userID, pkg.HistoryFetchLimitByModel(resolvedModelName), chatID)
+		histories, hisErr := s.repo.GetUserChatHistories(ctx, userID, agentshared.HistoryFetchLimitByModel(resolvedModelName), chatID)
 		if hisErr != nil {
 			pushErrNonBlocking(errChan, hisErr)
 			return
@@ -343,12 +343,12 @@ func (s *AgentService) runNormalChatFlow(
 
 	// 3. 计算本次请求可用的历史 token 预算，并执行历史裁剪。
 	//    这样可以在上下文增长时稳定控制模型窗口，避免超长上下文引发报错或高延迟。
-	historyBudget := pkg.HistoryTokenBudgetByModel(resolvedModelName, agentprompt.SystemPrompt, userMessage)
-	trimmedHistory, totalHistoryTokens, keptHistoryTokens, droppedCount := pkg.TrimHistoryByTokenBudget(chatHistory, historyBudget)
+	historyBudget := agentshared.HistoryTokenBudgetByModel(resolvedModelName, agentprompt.SystemPrompt, userMessage)
+	trimmedHistory, totalHistoryTokens, keptHistoryTokens, droppedCount := agentshared.TrimHistoryByTokenBudget(chatHistory, historyBudget)
 	chatHistory = trimmedHistory
 
 	// 4. 根据裁剪后历史长度更新 Redis 会话窗口配置，并主动执行窗口收敛。
-	targetWindow := pkg.CalcSessionWindowSize(len(chatHistory))
+	targetWindow := agentshared.CalcSessionWindowSize(len(chatHistory))
 	if err = s.agentCache.SetSessionWindowSize(ctx, chatID, targetWindow); err != nil {
 		log.Printf("设置历史窗口失败 chat=%s: %v", chatID, err)
 	}

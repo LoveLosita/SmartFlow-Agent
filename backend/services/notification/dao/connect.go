@@ -3,11 +3,10 @@ package dao
 import (
 	"fmt"
 
-	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	coremodel "github.com/LoveLosita/smartflow/backend/model"
 	notificationmodel "github.com/LoveLosita/smartflow/backend/services/notification/model"
-	"github.com/spf13/viper"
-	"gorm.io/driver/mysql"
+	coremodel "github.com/LoveLosita/smartflow/backend/services/runtime/model"
+	mysqlinfra "github.com/LoveLosita/smartflow/backend/shared/infra/mysql"
+	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
 	"gorm.io/gorm"
 )
 
@@ -18,18 +17,7 @@ import (
 // 2. 不迁移主动调度、agent、userauth 或其它服务表；
 // 3. 返回的 *gorm.DB 供 notification 服务内 DAO 和 outbox consumer 复用。
 func OpenDBFromConfig() (*gorm.DB, error) {
-	host := viper.GetString("database.host")
-	port := viper.GetString("database.port")
-	user := viper.GetString("database.user")
-	password := viper.GetString("database.password")
-	dbname := viper.GetString("database.dbname")
-
-	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
-		user, password, host, port, dbname,
-	)
-
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	db, err := mysqlinfra.OpenDBFromConfig()
 	if err != nil {
 		return nil, err
 	}

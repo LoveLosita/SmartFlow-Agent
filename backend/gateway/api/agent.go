@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	gatewayagent "github.com/LoveLosita/smartflow/backend/gateway/client/agent"
-	"github.com/LoveLosita/smartflow/backend/model"
-	"github.com/LoveLosita/smartflow/backend/respond"
+	agentclient "github.com/LoveLosita/smartflow/backend/client/agent"
+	"github.com/LoveLosita/smartflow/backend/gateway/shared/respond"
 	agentsv "github.com/LoveLosita/smartflow/backend/services/agent/sv"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	agentcontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/agent"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -30,7 +30,7 @@ const (
 
 type AgentHandler struct {
 	svc         *agentsv.AgentService
-	rpcClient   *gatewayagent.Client
+	rpcClient   *agentclient.Client
 	rpcClientMu sync.Mutex
 }
 
@@ -48,7 +48,7 @@ func NewAgentHandler(svc *agentsv.AgentService) *AgentHandler {
 // 2. agent RPC 作为 chat stream 与非 chat /agent/* 查询/命令的服务间通道；
 // 3. svc 只用于 RPC 开关关闭时的迁移期 fallback，当前默认可为 nil；
 // 4. rpcClient 为空时允许按配置懒加载，避免测试和旧装配必须提前构造 client。
-func NewAgentHandlerWithRPC(svc *agentsv.AgentService, rpcClient *gatewayagent.Client) *AgentHandler {
+func NewAgentHandlerWithRPC(svc *agentsv.AgentService, rpcClient *agentclient.Client) *AgentHandler {
 	return &AgentHandler{
 		svc:       svc,
 		rpcClient: rpcClient,
@@ -302,7 +302,7 @@ func writeAgentSSEError(w io.Writer, err error) {
 	_ = writeSSEData(w, "[DONE]")
 }
 
-func (api *AgentHandler) getAgentRPCClient() (*gatewayagent.Client, error) {
+func (api *AgentHandler) getAgentRPCClient() (*agentclient.Client, error) {
 	if api == nil {
 		return nil, errors.New("agent handler is not initialized")
 	}
@@ -314,7 +314,7 @@ func (api *AgentHandler) getAgentRPCClient() (*gatewayagent.Client, error) {
 		return api.rpcClient, nil
 	}
 
-	client, err := gatewayagent.NewClient(gatewayagent.ClientConfig{
+	client, err := agentclient.NewClient(agentclient.ClientConfig{
 		Endpoints: viper.GetStringSlice("agent.rpc.endpoints"),
 		Target:    viper.GetString("agent.rpc.target"),
 		Timeout:   viper.GetDuration("agent.rpc.timeout"),

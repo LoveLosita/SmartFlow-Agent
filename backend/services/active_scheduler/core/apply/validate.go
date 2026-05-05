@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 )
 
 // IsPreviewExpired 判断 preview 是否已经超过确认有效期。

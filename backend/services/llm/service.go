@@ -3,7 +3,7 @@ package llm
 import (
 	"strings"
 
-	"github.com/LoveLosita/smartflow/backend/inits"
+	einoinfra "github.com/LoveLosita/smartflow/backend/shared/infra/eino"
 )
 
 // Service 只负责统一暴露已经构造好的模型客户端，不负责 prompt 和业务编排。
@@ -19,7 +19,7 @@ type Service struct {
 // 2. CourseImageResponsesClient 允许外部预先注入，便于测试或特殊启动路径复用。
 // 3. 某个字段为空时不报错，直接保留 nil，交给上层继续走兼容降级。
 type Options struct {
-	AIHub                      *inits.AIHub
+	AIHub                      *einoinfra.AIHub
 	APIKey                     string
 	BaseURL                    string
 	CourseVisionModel          string

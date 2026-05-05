@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/LoveLosita/smartflow/backend/pkg"
 	agentmodel "github.com/LoveLosita/smartflow/backend/services/agent/model"
 	agentprompt "github.com/LoveLosita/smartflow/backend/services/agent/prompt"
+	agentshared "github.com/LoveLosita/smartflow/backend/services/agent/shared"
 	agentstream "github.com/LoveLosita/smartflow/backend/services/agent/stream"
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	"github.com/cloudwego/eino/schema"
@@ -78,7 +78,7 @@ func compactUnifiedMessagesIfNeeded(
 	msg3 := messages[3].Content
 
 	// 3. Token 预算检查。
-	breakdown, overBudget, needCompactMsg1, needCompactMsg2 := pkg.CheckStageTokenBudget(msg0, msg1, msg2, msg3)
+	breakdown, overBudget, needCompactMsg1, needCompactMsg2 := agentshared.CheckStageTokenBudget(msg0, msg1, msg2, msg3)
 
 	log.Printf(
 		"[COMPACT:%s] token budget check: total=%d budget=%d over=%v compactMsg1=%v compactMsg2=%v (msg0=%d msg1=%d msg2=%d msg3=%d)",
@@ -97,14 +97,14 @@ func compactUnifiedMessagesIfNeeded(
 		msg1 = compactUnifiedMsg1(ctx, input, msg1)
 		messages[1].Content = msg1
 		// 压缩 msg1 后重算预算。
-		breakdown = pkg.EstimateStageMessagesTokens(msg0, msg1, msg2, msg3)
+		breakdown = agentshared.EstimateStageMessagesTokens(msg0, msg1, msg2, msg3)
 	}
 
 	// 6. msg2 压缩（阶段工作区 → LLM 摘要）。
-	if needCompactMsg2 || breakdown.Total > pkg.StageTokenBudget {
+	if needCompactMsg2 || breakdown.Total > agentshared.StageTokenBudget {
 		msg2 = compactUnifiedMsg2(ctx, input, msg2)
 		messages[2].Content = msg2
-		breakdown = pkg.EstimateStageMessagesTokens(msg0, msg1, msg2, msg3)
+		breakdown = agentshared.EstimateStageMessagesTokens(msg0, msg1, msg2, msg3)
 	}
 
 	// 7. 记录最终 token 分布。
@@ -124,8 +124,8 @@ func compactUnifiedMessagesIfNeeded(
 // 1. 先按消息类型汇总 token，保证总量准确；
 // 2. 再把最后一个 user 消息尽量视作 msg3，保留阶段指令语义；
 // 3. 其他历史内容归入 msg1 / msg2，确保上下文统计不会因为结构不标准而断更。
-func estimateFallbackStageTokenBreakdown(messages []*schema.Message) pkg.StageTokenBreakdown {
-	breakdown := pkg.StageTokenBreakdown{Budget: pkg.StageTokenBudget}
+func estimateFallbackStageTokenBreakdown(messages []*schema.Message) agentshared.StageTokenBreakdown {
+	breakdown := agentshared.StageTokenBreakdown{Budget: agentshared.StageTokenBudget}
 	if len(messages) == 0 {
 		return breakdown
 	}
@@ -146,7 +146,7 @@ func estimateFallbackStageTokenBreakdown(messages []*schema.Message) pkg.StageTo
 		if msg == nil {
 			continue
 		}
-		tokens := pkg.EstimateMessageTokens(msg)
+		tokens := agentshared.EstimateMessageTokens(msg)
 		breakdown.Total += tokens
 
 		switch msg.Role {
@@ -199,7 +199,7 @@ func compactUnifiedMsg1(
 	}
 
 	// 3. SSE: 压缩开始。
-	tokenBefore := pkg.EstimateTextTokens(msg1)
+	tokenBefore := agentshared.EstimateTextTokens(msg1)
 	_ = input.Emitter.EmitStatus(
 		input.StatusBlockID, input.StageName, "context_compact_start",
 		fmt.Sprintf("正在压缩对话历史（%d tokens）...", tokenBefore),
@@ -219,7 +219,7 @@ func compactUnifiedMsg1(
 	}
 
 	// 5. SSE: 压缩完成。
-	tokenAfter := pkg.EstimateTextTokens(newSummary)
+	tokenAfter := agentshared.EstimateTextTokens(newSummary)
 	_ = input.Emitter.EmitStatus(
 		input.StatusBlockID, input.StageName, "context_compact_done",
 		fmt.Sprintf("对话历史已压缩：%d → %d tokens", tokenBefore, tokenAfter),
@@ -246,7 +246,7 @@ func compactUnifiedMsg2(
 	msg2 string,
 ) string {
 	// 1. SSE: 压缩开始。
-	tokenBefore := pkg.EstimateTextTokens(msg2)
+	tokenBefore := agentshared.EstimateTextTokens(msg2)
 	_ = input.Emitter.EmitStatus(
 		input.StatusBlockID, input.StageName, "context_compact_start",
 		fmt.Sprintf("正在压缩执行记录（%d tokens）...", tokenBefore),
@@ -266,7 +266,7 @@ func compactUnifiedMsg2(
 	}
 
 	// 3. SSE: 压缩完成。
-	tokenAfter := pkg.EstimateTextTokens(compressed)
+	tokenAfter := agentshared.EstimateTextTokens(compressed)
 	_ = input.Emitter.EmitStatus(
 		input.StatusBlockID, input.StageName, "context_compact_done",
 		fmt.Sprintf("执行记录已压缩：%d → %d tokens", tokenBefore, tokenAfter),
@@ -285,7 +285,7 @@ func compactUnifiedMsg2(
 func saveUnifiedTokenStats(
 	ctx context.Context,
 	input UnifiedCompactInput,
-	breakdown pkg.StageTokenBreakdown,
+	breakdown agentshared.StageTokenBreakdown,
 ) {
 	if input.CompactionStore == nil || input.FlowState == nil {
 		return

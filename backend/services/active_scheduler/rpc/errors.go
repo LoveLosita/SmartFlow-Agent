@@ -5,9 +5,9 @@ import (
 	"log"
 	"strings"
 
-	"github.com/LoveLosita/smartflow/backend/respond"
 	activeapply "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/apply"
 	contracts "github.com/LoveLosita/smartflow/backend/shared/contracts/activescheduler"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

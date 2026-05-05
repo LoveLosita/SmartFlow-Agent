@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/LoveLosita/smartflow/backend/respond"
 	"github.com/LoveLosita/smartflow/backend/services/memory/rpc/pb"
 	memorysv "github.com/LoveLosita/smartflow/backend/services/memory/sv"
 	memorycontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/memory"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 )
 
 type Handler struct {

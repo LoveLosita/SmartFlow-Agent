@@ -7,14 +7,14 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/LoveLosita/smartflow/backend/bootstrap"
-	rootdao "github.com/LoveLosita/smartflow/backend/dao"
-	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
-	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	rootmiddleware "github.com/LoveLosita/smartflow/backend/middleware"
+	rootdao "github.com/LoveLosita/smartflow/backend/services/runtime/dao"
 	taskdao "github.com/LoveLosita/smartflow/backend/services/task/dao"
 	taskrpc "github.com/LoveLosita/smartflow/backend/services/task/rpc"
 	tasksv "github.com/LoveLosita/smartflow/backend/services/task/sv"
+	"github.com/LoveLosita/smartflow/backend/shared/infra/bootstrap"
+	gormcache "github.com/LoveLosita/smartflow/backend/shared/infra/gormcache"
+	kafkabus "github.com/LoveLosita/smartflow/backend/shared/infra/kafka"
+	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
 	"github.com/spf13/viper"
 )
 
@@ -37,7 +37,7 @@ func main() {
 	defer redisClient.Close()
 
 	cacheRepo := rootdao.NewCacheDAO(redisClient)
-	if err := db.Use(rootmiddleware.NewGormCachePlugin(cacheRepo)); err != nil {
+	if err := db.Use(gormcache.NewGormCachePlugin(cacheRepo)); err != nil {
 		log.Fatalf("failed to initialize task cache deleter: %v", err)
 	}
 

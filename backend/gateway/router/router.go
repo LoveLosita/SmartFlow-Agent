@@ -7,12 +7,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/gateway/api"
 	userauthapi "github.com/LoveLosita/smartflow/backend/gateway/api/userauth"
 	gatewaymiddleware "github.com/LoveLosita/smartflow/backend/gateway/middleware"
-	rootmiddleware "github.com/LoveLosita/smartflow/backend/middleware"
-	"github.com/LoveLosita/smartflow/backend/pkg"
+	rootmiddleware "github.com/LoveLosita/smartflow/backend/gateway/middleware"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/dao"
+	ratelimit "github.com/LoveLosita/smartflow/backend/shared/infra/ratelimit"
 	"github.com/LoveLosita/smartflow/backend/shared/ports"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
@@ -55,7 +55,7 @@ func StartEngine(ctx context.Context, r *gin.Engine) {
 	}
 }
 
-func RegisterRouters(handlers *api.ApiHandlers, authClient ports.UserAuthClient, cache *dao.CacheDAO, limiter *pkg.RateLimiter) *gin.Engine {
+func RegisterRouters(handlers *api.ApiHandlers, authClient ports.UserAuthClient, cache *dao.CacheDAO, limiter *ratelimit.RateLimiter) *gin.Engine {
 	r := gin.Default()
 	apiGroup := r.Group("/api/v1")
 	{

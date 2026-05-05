@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	memoryutils "github.com/LoveLosita/smartflow/backend/services/memory/internal/utils"
 	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 )
 
 // HybridRetrieve 统一承接读取侧 RAG-first 召回链路。

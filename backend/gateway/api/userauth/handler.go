@@ -7,7 +7,7 @@ import (
 	"time"
 
 	gatewaymiddleware "github.com/LoveLosita/smartflow/backend/gateway/middleware"
-	"github.com/LoveLosita/smartflow/backend/respond"
+	"github.com/LoveLosita/smartflow/backend/gateway/shared/respond"
 	contracts "github.com/LoveLosita/smartflow/backend/shared/contracts/userauth"
 	"github.com/LoveLosita/smartflow/backend/shared/ports"
 	"github.com/gin-gonic/gin"

@@ -8,10 +8,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/LoveLosita/smartflow/backend/bootstrap"
-	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
-	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	"github.com/LoveLosita/smartflow/backend/inits"
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	memorymodule "github.com/LoveLosita/smartflow/backend/services/memory"
 	memorydao "github.com/LoveLosita/smartflow/backend/services/memory/dao"
@@ -20,6 +16,10 @@ import (
 	memorysv "github.com/LoveLosita/smartflow/backend/services/memory/sv"
 	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
 	ragconfig "github.com/LoveLosita/smartflow/backend/services/rag/config"
+	"github.com/LoveLosita/smartflow/backend/shared/infra/bootstrap"
+	einoinfra "github.com/LoveLosita/smartflow/backend/shared/infra/eino"
+	kafkabus "github.com/LoveLosita/smartflow/backend/shared/infra/kafka"
+	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
 	"github.com/spf13/viper"
 )
 
@@ -99,7 +99,7 @@ func main() {
 // 2. 当前启动入口与 cmd/start.go / cmd/active-scheduler 都需要 Eino 初始化，后续若出现第三处重复装配，应抽公共 bootstrap；
 // 3. 返回 ProClient 是因为现有 memory.Module 只需要 llmservice.Client，不需要完整 Service。
 func buildMemoryLLMClient() (*llmservice.Client, error) {
-	aiHub, err := inits.InitEino()
+	aiHub, err := einoinfra.InitEino()
 	if err != nil {
 		return nil, err
 	}

@@ -3,8 +3,7 @@ package dao
 import (
 	"fmt"
 
-	"github.com/spf13/viper"
-	"gorm.io/driver/mysql"
+	mysqlinfra "github.com/LoveLosita/smartflow/backend/shared/infra/mysql"
 	"gorm.io/gorm"
 )
 
@@ -15,18 +14,7 @@ import (
 // 2. 本函数不 AutoMigrate schedule 表，避免 course 进程越权管理 schedule schema；
 // 3. 启动期只检查运行时依赖表是否存在，缺表时尽早失败。
 func OpenDBFromConfig() (*gorm.DB, error) {
-	host := viper.GetString("database.host")
-	port := viper.GetString("database.port")
-	user := viper.GetString("database.user")
-	password := viper.GetString("database.password")
-	dbname := viper.GetString("database.dbname")
-
-	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
-		user, password, host, port, dbname,
-	)
-
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	db, err := mysqlinfra.OpenDBFromConfig()
 	if err != nil {
 		return nil, err
 	}

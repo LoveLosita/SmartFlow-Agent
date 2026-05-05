@@ -4,7 +4,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/LoveLosita/smartflow/backend/respond"
+	"github.com/LoveLosita/smartflow/backend/gateway/shared/respond"
 	"github.com/gin-gonic/gin"
 )
 

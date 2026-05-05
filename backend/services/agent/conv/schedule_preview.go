@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	schedule "github.com/LoveLosita/smartflow/backend/services/agent/tools/schedule"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 )
 
 // ScheduleStateToPreview 将 agent 的 ScheduleState 转换为前端预览缓存格式。

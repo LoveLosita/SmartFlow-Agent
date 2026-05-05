@@ -7,13 +7,13 @@ import (
 	"log"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/conv"
-	rootdao "github.com/LoveLosita/smartflow/backend/dao"
-	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	"github.com/LoveLosita/smartflow/backend/model"
-	"github.com/LoveLosita/smartflow/backend/respond"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/conv"
+	rootdao "github.com/LoveLosita/smartflow/backend/services/runtime/dao"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	taskdao "github.com/LoveLosita/smartflow/backend/services/task/dao"
 	taskcontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/task"
+	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 	"github.com/go-redis/redis/v8"
 	"gorm.io/gorm"
 )

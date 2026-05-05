@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/LoveLosita/smartflow/backend/model"
-	"github.com/LoveLosita/smartflow/backend/respond"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 	"gorm.io/gorm"
 )
 

@@ -5,10 +5,10 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/LoveLosita/smartflow/backend/respond"
 	notificationfeishu "github.com/LoveLosita/smartflow/backend/services/notification/internal/feishu"
 	notificationmodel "github.com/LoveLosita/smartflow/backend/services/notification/model"
 	contracts "github.com/LoveLosita/smartflow/backend/shared/contracts/notification"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 	"gorm.io/gorm"
 )
 

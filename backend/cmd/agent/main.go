@@ -7,8 +7,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/LoveLosita/smartflow/backend/bootstrap"
 	agentrpc "github.com/LoveLosita/smartflow/backend/services/agent/rpc"
+	"github.com/LoveLosita/smartflow/backend/shared/infra/bootstrap"
 	"github.com/spf13/viper"
 )
 

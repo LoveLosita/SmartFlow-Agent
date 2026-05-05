@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/LoveLosita/smartflow/backend/respond"
 	"github.com/LoveLosita/smartflow/backend/services/schedule/rpc/pb"
 	schedulesv "github.com/LoveLosita/smartflow/backend/services/schedule/sv"
 	schedulecontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/schedule"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 )
 
 type Handler struct {

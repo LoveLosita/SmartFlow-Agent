@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 
-	rootmodel "github.com/LoveLosita/smartflow/backend/model"
-	"github.com/LoveLosita/smartflow/backend/respond"
+	rootmodel "github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	"github.com/LoveLosita/smartflow/backend/services/schedule/core/applyadapter"
 	schedulecontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/schedule"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 )
 
 // DeleteScheduleEventByContract 把跨进程删除契约转换为既有 schedule 核心逻辑入参。

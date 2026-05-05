@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/respond"
+	"github.com/LoveLosita/smartflow/backend/gateway/shared/respond"
 	schedulecontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/schedule"
 	"github.com/LoveLosita/smartflow/backend/shared/ports"
 	"github.com/gin-gonic/gin"

@@ -17,12 +17,12 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/spf13/viper"
 
-	"github.com/LoveLosita/smartflow/backend/conv"
-	"github.com/LoveLosita/smartflow/backend/model"
-	"github.com/LoveLosita/smartflow/backend/pkg"
-	"github.com/LoveLosita/smartflow/backend/respond"
-	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 	agentprompt "github.com/LoveLosita/smartflow/backend/services/agent/prompt"
+	agentshared "github.com/LoveLosita/smartflow/backend/services/agent/shared"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/conv"
+	eventsvc "github.com/LoveLosita/smartflow/backend/services/runtime/eventsvc"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 )
 
 const (
@@ -410,7 +410,7 @@ func (s *AgentService) loadConversationContext(ctx context.Context, chatID, user
 
 	// 缓存未命中时回源 DB。
 	if history == nil {
-		histories, hisErr := s.repo.GetUserChatHistories(ctx, 0, pkg.HistoryFetchLimitByModel("worker"), chatID)
+		histories, hisErr := s.repo.GetUserChatHistories(ctx, 0, agentshared.HistoryFetchLimitByModel("worker"), chatID)
 		if hisErr != nil {
 			log.Printf("从 DB 加载历史失败 chat=%s: %v", chatID, hisErr)
 		} else {

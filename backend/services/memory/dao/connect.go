@@ -1,14 +1,13 @@
 package dao
 
 import (
-	"context"
 	"fmt"
 
-	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	coremodel "github.com/LoveLosita/smartflow/backend/model"
+	coremodel "github.com/LoveLosita/smartflow/backend/services/runtime/model"
+	mysqlinfra "github.com/LoveLosita/smartflow/backend/shared/infra/mysql"
+	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
+	redisinfra "github.com/LoveLosita/smartflow/backend/shared/infra/redis"
 	"github.com/go-redis/redis/v8"
-	"github.com/spf13/viper"
-	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
 
@@ -19,19 +18,8 @@ import (
 // 2. 不迁移 agent、task、schedule、active-scheduler、notification 等跨域表，避免独立进程越权管理别的领域；
 // 3. 返回的 *gorm.DB 供 memory 服务内部 repo、worker 和 outbox consumer 复用。
 func OpenDBFromConfig() (*gorm.DB, error) {
-	host := viper.GetString("database.host")
-	port := viper.GetString("database.port")
-	user := viper.GetString("database.user")
-	password := viper.GetString("database.password")
-	dbname := viper.GetString("database.dbname")
-
-	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
-		user, password, host, port, dbname,
-	)
-
 	// 1. 先按统一配置建立 MySQL 连接；若连接失败，独立 memory 进程直接 fail fast。
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	db, err := mysqlinfra.OpenDBFromConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -60,15 +48,7 @@ func OpenDBFromConfig() (*gorm.DB, error) {
 // 2. 不创建、不预热、不清理任何 memory 业务 key；
 // 3. Ping 失败直接返回 error，让入口在缓存、锁或幂等依赖异常时尽早暴露问题。
 func OpenRedisFromConfig() (*redis.Client, error) {
-	client := redis.NewClient(&redis.Options{
-		Addr:     viper.GetString("redis.host") + ":" + viper.GetString("redis.port"),
-		Password: viper.GetString("redis.password"),
-		DB:       0,
-	})
-	if _, err := client.Ping(context.Background()).Result(); err != nil {
-		return nil, err
-	}
-	return client, nil
+	return redisinfra.OpenRedisFromConfig()
 }
 
 // autoMigrateMemoryOutboxTable 只迁移 memory 服务自己的 outbox 物理表。

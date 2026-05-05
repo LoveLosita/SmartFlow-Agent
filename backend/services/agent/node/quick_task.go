@@ -8,13 +8,13 @@ import (
 	"strings"
 	"time"
 
-	taskmodel "github.com/LoveLosita/smartflow/backend/model"
 	agentmodel "github.com/LoveLosita/smartflow/backend/services/agent/model"
 	agentprompt "github.com/LoveLosita/smartflow/backend/services/agent/prompt"
 	agentrouter "github.com/LoveLosita/smartflow/backend/services/agent/router"
 	agentshared "github.com/LoveLosita/smartflow/backend/services/agent/shared"
 	agentstream "github.com/LoveLosita/smartflow/backend/services/agent/stream"
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
+	taskmodel "github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	"github.com/cloudwego/eino/schema"
 )
 

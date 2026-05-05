@@ -1,6 +1,6 @@
 package agentshared
 
-import "github.com/LoveLosita/smartflow/backend/model"
+import "github.com/LoveLosita/smartflow/backend/services/runtime/model"
 
 func CloneWeekSchedules(src []model.UserWeekSchedule) []model.UserWeekSchedule {
 	if len(src) == 0 {

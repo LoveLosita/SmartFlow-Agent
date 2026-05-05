@@ -8,10 +8,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/LoveLosita/smartflow/backend/model"
-	"github.com/LoveLosita/smartflow/backend/respond"
-	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
+	eventsvc "github.com/LoveLosita/smartflow/backend/services/runtime/eventsvc"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 	"github.com/cloudwego/eino/schema"
 )
 

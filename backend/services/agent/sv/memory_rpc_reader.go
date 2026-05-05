@@ -13,7 +13,7 @@ import (
 //
 // 职责边界：
 // 1. 只读取候选记忆，不暴露管理写接口；
-// 2. 不要求调用方知道 gateway/client/memory 的具体实现；
+// 2. 不要求调用方知道 backend/client/memory 的具体实现；
 // 3. 错误原样返回给预取链路，由 agent 侧负责软降级和观测记录。
 type MemoryRPCReaderClient interface {
 	Retrieve(ctx context.Context, req memorycontracts.RetrieveRequest) ([]memorycontracts.ItemDTO, error)

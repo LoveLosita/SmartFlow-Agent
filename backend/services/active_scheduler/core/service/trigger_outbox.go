@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	"github.com/LoveLosita/smartflow/backend/model"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	sharedevents "github.com/LoveLosita/smartflow/backend/shared/events"
+	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
 )
 
 // EnqueueActiveScheduleTriggeredInTx 在事务内写入 active_schedule.triggered outbox 消息。

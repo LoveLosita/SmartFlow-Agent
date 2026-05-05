@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/LoveLosita/smartflow/backend/model"
-	"github.com/LoveLosita/smartflow/backend/respond"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	"github.com/LoveLosita/smartflow/backend/services/task_class/rpc/pb"
 	taskclasssv "github.com/LoveLosita/smartflow/backend/services/task_class/sv"
 	taskclasscontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/taskclass"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 )
 
 const (

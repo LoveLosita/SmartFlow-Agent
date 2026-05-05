@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/candidate"
 	schedulercontext "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/context"
 	"github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/observe"
 	"github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/ports"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 )
 
 func candidateDTO(item candidate.Candidate) CandidateDTO {

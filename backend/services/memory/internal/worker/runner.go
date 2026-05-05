@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	memoryorchestrator "github.com/LoveLosita/smartflow/backend/services/memory/internal/orchestrator"
 	memoryrepo "github.com/LoveLosita/smartflow/backend/services/memory/internal/repo"
 	memoryutils "github.com/LoveLosita/smartflow/backend/services/memory/internal/utils"
@@ -17,6 +16,7 @@ import (
 	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
 	memoryobserve "github.com/LoveLosita/smartflow/backend/services/memory/observe"
 	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	"gorm.io/gorm"
 )
 

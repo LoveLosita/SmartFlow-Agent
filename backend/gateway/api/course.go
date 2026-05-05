@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/respond"
+	"github.com/LoveLosita/smartflow/backend/gateway/shared/respond"
 	coursecontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/course"
 	"github.com/LoveLosita/smartflow/backend/shared/ports"
 	"github.com/gin-gonic/gin"

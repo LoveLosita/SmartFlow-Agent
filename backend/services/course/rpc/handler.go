@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/LoveLosita/smartflow/backend/model"
-	"github.com/LoveLosita/smartflow/backend/respond"
 	"github.com/LoveLosita/smartflow/backend/services/course/rpc/pb"
 	coursesv "github.com/LoveLosita/smartflow/backend/services/course/sv"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	coursecontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/course"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 )
 
 type Handler struct {

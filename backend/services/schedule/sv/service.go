@@ -8,13 +8,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/conv"
-	rootdao "github.com/LoveLosita/smartflow/backend/dao"
-	"github.com/LoveLosita/smartflow/backend/logic"
-	"github.com/LoveLosita/smartflow/backend/model"
-	"github.com/LoveLosita/smartflow/backend/respond"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/conv"
+	rootdao "github.com/LoveLosita/smartflow/backend/services/runtime/dao"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	"github.com/LoveLosita/smartflow/backend/services/schedule/core/applyadapter"
+	"github.com/LoveLosita/smartflow/backend/services/schedule/core/planning"
 	scheduledao "github.com/LoveLosita/smartflow/backend/services/schedule/dao"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 	"github.com/go-redis/redis/v8"
 )
 
@@ -407,7 +407,7 @@ func (ss *ScheduleService) SmartPlanning(ctx context.Context, userID, taskClassI
 		return nil, err
 	}
 	//4.将多个周的信息传入智能排课算法，获取推荐的时间安排（周+周内的天+节次）
-	result, err := logic.SmartPlanningMainLogic(schedules, taskClass)
+	result, err := planning.SmartPlanningMainLogic(schedules, taskClass)
 	if err != nil {
 		return nil, err
 	}
@@ -441,7 +441,7 @@ func (ss *ScheduleService) SmartPlanningRaw(ctx context.Context, userID, taskCla
 	}
 
 	// 3. 执行粗排算法，拿到已分配的 items（EmbeddedTime 已回填）。
-	allocatedItems, err := logic.SmartPlanningRawItems(schedules, taskClass)
+	allocatedItems, err := planning.SmartPlanningRawItems(schedules, taskClass)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -502,7 +502,7 @@ func (ss *ScheduleService) SmartPlanningMultiRaw(ctx context.Context, userID int
 	}
 
 	// 5. 执行多任务类粗排（共享资源池 + 增量占位）。
-	allocatedItems, err := logic.SmartPlanningRawItemsMulti(schedules, orderedTaskClasses)
+	allocatedItems, err := planning.SmartPlanningRawItemsMulti(schedules, orderedTaskClasses)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -692,7 +692,7 @@ func (ss *ScheduleService) HybridScheduleWithPlan(
 	}
 
 	// 3. 执行粗排。
-	allocatedItems, err := logic.SmartPlanningRawItems(schedules, taskClass)
+	allocatedItems, err := planning.SmartPlanningRawItems(schedules, taskClass)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -736,7 +736,7 @@ func (ss *ScheduleService) HybridScheduleWithPlanMulti(
 	}
 
 	// 4. 多任务类粗排。
-	allocatedItems, err := logic.SmartPlanningRawItemsMulti(schedules, orderedTaskClasses)
+	allocatedItems, err := planning.SmartPlanningRawItemsMulti(schedules, orderedTaskClasses)
 	if err != nil {
 		return nil, nil, err
 	}

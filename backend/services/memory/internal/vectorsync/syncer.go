@@ -6,10 +6,10 @@ import (
 	"log"
 	"strings"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	memoryrepo "github.com/LoveLosita/smartflow/backend/services/memory/internal/repo"
 	memoryobserve "github.com/LoveLosita/smartflow/backend/services/memory/observe"
 	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 )
 
 // Syncer 负责 memory_items 与向量库之间的最小桥接。

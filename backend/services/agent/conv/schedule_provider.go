@@ -6,10 +6,10 @@ import (
 	"sort"
 	"time"
 
-	baseconv "github.com/LoveLosita/smartflow/backend/conv"
-	"github.com/LoveLosita/smartflow/backend/dao"
-	"github.com/LoveLosita/smartflow/backend/model"
 	schedule "github.com/LoveLosita/smartflow/backend/services/agent/tools/schedule"
+	baseconv "github.com/LoveLosita/smartflow/backend/services/runtime/conv"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/dao"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 )
 
 // ScheduleProvider 实现 model.ScheduleStateProvider 接口。

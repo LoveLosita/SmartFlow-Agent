@@ -8,10 +8,6 @@ import (
 	"strings"
 	"time"
 
-	rootdao "github.com/LoveLosita/smartflow/backend/dao"
-	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
-	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 	activeadapters "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/adapters"
 	activeapply "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/apply"
 	activeapplyadapter "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/applyadapter"
@@ -22,8 +18,12 @@ import (
 	activesvc "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/service"
 	"github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/trigger"
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
+	rootdao "github.com/LoveLosita/smartflow/backend/services/runtime/dao"
+	eventsvc "github.com/LoveLosita/smartflow/backend/services/runtime/eventsvc"
 	contracts "github.com/LoveLosita/smartflow/backend/shared/contracts/activescheduler"
 	sharedevents "github.com/LoveLosita/smartflow/backend/shared/events"
+	kafkabus "github.com/LoveLosita/smartflow/backend/shared/infra/kafka"
+	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
 	"gorm.io/gorm"
 )
 

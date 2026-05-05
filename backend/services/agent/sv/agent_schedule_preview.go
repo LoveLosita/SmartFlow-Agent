@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
-	"github.com/LoveLosita/smartflow/backend/respond"
 	agentshared "github.com/LoveLosita/smartflow/backend/services/agent/shared"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 )
 
 // GetSchedulePlanPreview 按 conversation_id 读取结构化排程预览。

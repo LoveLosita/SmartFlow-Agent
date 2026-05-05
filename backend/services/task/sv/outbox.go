@@ -8,10 +8,10 @@ import (
 	"strconv"
 	"time"
 
-	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
-	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	"github.com/LoveLosita/smartflow/backend/model"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	taskdao "github.com/LoveLosita/smartflow/backend/services/task/dao"
+	kafkabus "github.com/LoveLosita/smartflow/backend/shared/infra/kafka"
+	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
 	"gorm.io/gorm"
 )
 

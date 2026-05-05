@@ -8,19 +8,11 @@ import (
 	"os"
 	"strings"
 
-	rootdao "github.com/LoveLosita/smartflow/backend/dao"
-	gatewaymemory "github.com/LoveLosita/smartflow/backend/gateway/client/memory"
-	gatewayschedule "github.com/LoveLosita/smartflow/backend/gateway/client/schedule"
-	gatewaytask "github.com/LoveLosita/smartflow/backend/gateway/client/task"
-	gatewaytaskclass "github.com/LoveLosita/smartflow/backend/gateway/client/taskclass"
-	gatewayuserauth "github.com/LoveLosita/smartflow/backend/gateway/client/userauth"
-	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
-	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	"github.com/LoveLosita/smartflow/backend/inits"
-	rootmiddleware "github.com/LoveLosita/smartflow/backend/middleware"
-	"github.com/LoveLosita/smartflow/backend/model"
-	rootsvc "github.com/LoveLosita/smartflow/backend/service"
-	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
+	memoryclient "github.com/LoveLosita/smartflow/backend/client/memory"
+	scheduleclient "github.com/LoveLosita/smartflow/backend/client/schedule"
+	taskclient "github.com/LoveLosita/smartflow/backend/client/task"
+	taskclassclient "github.com/LoveLosita/smartflow/backend/client/taskclass"
+	userauthclient "github.com/LoveLosita/smartflow/backend/client/userauth"
 	activeadapters "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/adapters"
 	activefeedbacklocate "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/feedbacklocate"
 	activegraph "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/graph"
@@ -35,6 +27,19 @@ import (
 	memoryobserve "github.com/LoveLosita/smartflow/backend/services/memory/observe"
 	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
 	ragconfig "github.com/LoveLosita/smartflow/backend/services/rag/config"
+	rootdao "github.com/LoveLosita/smartflow/backend/services/runtime/dao"
+	eventsvc "github.com/LoveLosita/smartflow/backend/services/runtime/eventsvc"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
+	scheduledao "github.com/LoveLosita/smartflow/backend/services/schedule/dao"
+	schedulesv "github.com/LoveLosita/smartflow/backend/services/schedule/sv"
+	taskdao "github.com/LoveLosita/smartflow/backend/services/task/dao"
+	tasksv "github.com/LoveLosita/smartflow/backend/services/task/sv"
+	einoinfra "github.com/LoveLosita/smartflow/backend/shared/infra/eino"
+	gormcache "github.com/LoveLosita/smartflow/backend/shared/infra/gormcache"
+	kafkabus "github.com/LoveLosita/smartflow/backend/shared/infra/kafka"
+	mysqlinfra "github.com/LoveLosita/smartflow/backend/shared/infra/mysql"
+	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
+	redisinfra "github.com/LoveLosita/smartflow/backend/shared/infra/redis"
 	"github.com/LoveLosita/smartflow/backend/shared/ports"
 	"github.com/go-redis/redis/v8"
 	"github.com/spf13/viper"
@@ -48,7 +53,7 @@ type agentRuntime struct {
 	repoManager    *rootdao.RepoManager
 	agentRepo      *rootdao.AgentDAO
 	cacheRepo      *rootdao.CacheDAO
-	userAuthClient *gatewayuserauth.Client
+	userAuthClient *userauthclient.Client
 	service        *agentsv.AgentService
 	workersStarted bool
 }
@@ -59,7 +64,7 @@ func buildAgentRuntime(ctx context.Context) (*agentRuntime, error) {
 		return nil, fmt.Errorf("connect agent database failed: %w", err)
 	}
 
-	redisClient, err := inits.OpenRedisFromConfig()
+	redisClient, err := redisinfra.OpenRedisFromConfig()
 	if err != nil {
 		return nil, fmt.Errorf("connect agent redis failed: %w", err)
 	}
@@ -69,7 +74,7 @@ func buildAgentRuntime(ctx context.Context) (*agentRuntime, error) {
 	}
 
 	cacheRepo := rootdao.NewCacheDAO(redisClient)
-	if err = db.Use(rootmiddleware.NewGormCachePlugin(cacheRepo)); err != nil {
+	if err = db.Use(gormcache.NewGormCachePlugin(cacheRepo)); err != nil {
 		return fail(fmt.Errorf("initialize agent cache deleter failed: %w", err))
 	}
 
@@ -94,8 +99,9 @@ func buildAgentRuntime(ctx context.Context) (*agentRuntime, error) {
 	manager := rootdao.NewManager(db)
 	agentRepo := rootdao.NewAgentDAO(db)
 	taskRepo := rootdao.NewTaskDAO(db)
+	taskServiceRepo := taskdao.NewTaskDAO(db)
 	taskClassRepo := rootdao.NewTaskClassDAO(db)
-	scheduleRepo := rootdao.NewScheduleDAO(db)
+	scheduleServiceRepo := scheduledao.NewScheduleDAO(db)
 	agentCacheRepo := rootdao.NewAgentCache(redisClient)
 	outboxRepo := outboxinfra.NewRepository(db)
 
@@ -110,9 +116,9 @@ func buildAgentRuntime(ctx context.Context) (*agentRuntime, error) {
 	eventPublisher := buildAgentOutboxPublisher(outboxRepo)
 	taskOutboxPublisher := buildTaskOutboxPublisher(outboxRepo)
 
-	var userAuthClient *gatewayuserauth.Client
+	var userAuthClient *userauthclient.Client
 	if eventBus != nil {
-		userAuthClient, err = gatewayuserauth.NewClient(gatewayuserauth.ClientConfig{
+		userAuthClient, err = userauthclient.NewClient(userauthclient.ClientConfig{
 			Endpoints: viper.GetStringSlice("userauth.rpc.endpoints"),
 			Target:    viper.GetString("userauth.rpc.target"),
 			Timeout:   viper.GetDuration("userauth.rpc.timeout"),
@@ -122,7 +128,7 @@ func buildAgentRuntime(ctx context.Context) (*agentRuntime, error) {
 		}
 	}
 
-	taskClient, err := gatewaytask.NewClient(gatewaytask.ClientConfig{
+	taskClient, err := taskclient.NewClient(taskclient.ClientConfig{
 		Endpoints: viper.GetStringSlice("task.rpc.endpoints"),
 		Target:    viper.GetString("task.rpc.target"),
 		Timeout:   viper.GetDuration("task.rpc.timeout"),
@@ -130,7 +136,7 @@ func buildAgentRuntime(ctx context.Context) (*agentRuntime, error) {
 	if err != nil {
 		return fail(fmt.Errorf("initialize task zrpc client failed: %w", err))
 	}
-	taskClassClient, err := gatewaytaskclass.NewClient(gatewaytaskclass.ClientConfig{
+	taskClassClient, err := taskclassclient.NewClient(taskclassclient.ClientConfig{
 		Endpoints: viper.GetStringSlice("taskClass.rpc.endpoints"),
 		Target:    viper.GetString("taskClass.rpc.target"),
 		Timeout:   viper.GetDuration("taskClass.rpc.timeout"),
@@ -138,7 +144,7 @@ func buildAgentRuntime(ctx context.Context) (*agentRuntime, error) {
 	if err != nil {
 		return fail(fmt.Errorf("initialize task-class zrpc client failed: %w", err))
 	}
-	scheduleClient, err := gatewayschedule.NewClient(gatewayschedule.ClientConfig{
+	scheduleClient, err := scheduleclient.NewClient(scheduleclient.ClientConfig{
 		Endpoints: viper.GetStringSlice("schedule.rpc.endpoints"),
 		Target:    viper.GetString("schedule.rpc.target"),
 		Timeout:   viper.GetDuration("schedule.rpc.timeout"),
@@ -146,7 +152,7 @@ func buildAgentRuntime(ctx context.Context) (*agentRuntime, error) {
 	if err != nil {
 		return fail(fmt.Errorf("initialize schedule zrpc client failed: %w", err))
 	}
-	memoryClient, err := gatewaymemory.NewClient(gatewaymemory.ClientConfig{
+	memoryClient, err := memoryclient.NewClient(memoryclient.ClientConfig{
 		Endpoints: viper.GetStringSlice("memory.rpc.endpoints"),
 		Target:    viper.GetString("memory.rpc.target"),
 		Timeout:   viper.GetDuration("memory.rpc.timeout"),
@@ -155,9 +161,9 @@ func buildAgentRuntime(ctx context.Context) (*agentRuntime, error) {
 		return fail(fmt.Errorf("initialize memory zrpc client failed: %w", err))
 	}
 
-	taskService := rootsvc.NewTaskService(taskRepo, cacheRepo, taskOutboxPublisher)
+	taskService := tasksv.NewTaskService(taskServiceRepo, cacheRepo, taskOutboxPublisher)
 	taskService.SetActiveScheduleDAO(manager.ActiveSchedule)
-	scheduleService := rootsvc.NewScheduleService(scheduleRepo, taskClassRepo, manager, cacheRepo)
+	scheduleService := schedulesv.NewScheduleService(scheduleServiceRepo, taskClassRepo, manager, cacheRepo)
 	agentService := agentsv.NewAgentService(
 		llmService,
 		agentRepo,
@@ -286,7 +292,7 @@ func (r *agentRuntime) close() {
 }
 
 func openAgentDBFromConfig() (*gorm.DB, error) {
-	db, err := inits.OpenDBFromConfig()
+	db, err := mysqlinfra.OpenDBFromConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -364,7 +370,7 @@ func ensureAgentRuntimeDependencyTables(db *gorm.DB) error {
 }
 
 func buildAgentLLMService() (*llmservice.Service, error) {
-	aiHub, err := inits.InitEino()
+	aiHub, err := einoinfra.InitEino()
 	if err != nil {
 		return nil, err
 	}

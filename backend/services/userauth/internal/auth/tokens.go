@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/respond"
 	contracts "github.com/LoveLosita/smartflow/backend/shared/contracts/userauth"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/google/uuid"
 	"github.com/spf13/viper"

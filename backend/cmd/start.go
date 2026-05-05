@@ -11,27 +11,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/bootstrap"
-	"github.com/LoveLosita/smartflow/backend/dao"
+	activeschedulerclient "github.com/LoveLosita/smartflow/backend/client/activescheduler"
+	agentclient "github.com/LoveLosita/smartflow/backend/client/agent"
+	courseclient "github.com/LoveLosita/smartflow/backend/client/course"
+	memoryclient "github.com/LoveLosita/smartflow/backend/client/memory"
+	notificationclient "github.com/LoveLosita/smartflow/backend/client/notification"
+	scheduleclient "github.com/LoveLosita/smartflow/backend/client/schedule"
+	taskclient "github.com/LoveLosita/smartflow/backend/client/task"
+	taskclassclient "github.com/LoveLosita/smartflow/backend/client/taskclass"
+	userauthclient "github.com/LoveLosita/smartflow/backend/client/userauth"
+	coreinit "github.com/LoveLosita/smartflow/backend/cmd/internal/coreinit"
 	"github.com/LoveLosita/smartflow/backend/gateway/api"
-	gatewayactivescheduler "github.com/LoveLosita/smartflow/backend/gateway/client/activescheduler"
-	gatewayagent "github.com/LoveLosita/smartflow/backend/gateway/client/agent"
-	gatewaycourse "github.com/LoveLosita/smartflow/backend/gateway/client/course"
-	gatewaymemory "github.com/LoveLosita/smartflow/backend/gateway/client/memory"
-	gatewaynotification "github.com/LoveLosita/smartflow/backend/gateway/client/notification"
-	gatewayschedule "github.com/LoveLosita/smartflow/backend/gateway/client/schedule"
-	gatewaytask "github.com/LoveLosita/smartflow/backend/gateway/client/task"
-	gatewaytaskclass "github.com/LoveLosita/smartflow/backend/gateway/client/taskclass"
-	gatewayuserauth "github.com/LoveLosita/smartflow/backend/gateway/client/userauth"
 	gatewayrouter "github.com/LoveLosita/smartflow/backend/gateway/router"
-	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
-	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	"github.com/LoveLosita/smartflow/backend/inits"
-	"github.com/LoveLosita/smartflow/backend/middleware"
-	"github.com/LoveLosita/smartflow/backend/model"
-	"github.com/LoveLosita/smartflow/backend/pkg"
-	"github.com/LoveLosita/smartflow/backend/service"
-	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 	activeadapters "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/adapters"
 	activeapplyadapter "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/applyadapter"
 	activefeedbacklocate "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/feedbacklocate"
@@ -44,12 +35,27 @@ import (
 	agentsv "github.com/LoveLosita/smartflow/backend/services/agent/sv"
 	agenttools "github.com/LoveLosita/smartflow/backend/services/agent/tools"
 	"github.com/LoveLosita/smartflow/backend/services/agent/tools/web"
+	coursedao "github.com/LoveLosita/smartflow/backend/services/course/dao"
+	coursesv "github.com/LoveLosita/smartflow/backend/services/course/sv"
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	"github.com/LoveLosita/smartflow/backend/services/memory"
 	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
 	memoryobserve "github.com/LoveLosita/smartflow/backend/services/memory/observe"
 	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
 	ragconfig "github.com/LoveLosita/smartflow/backend/services/rag/config"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/dao"
+	eventsvc "github.com/LoveLosita/smartflow/backend/services/runtime/eventsvc"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
+	scheduledao "github.com/LoveLosita/smartflow/backend/services/schedule/dao"
+	schedulesv "github.com/LoveLosita/smartflow/backend/services/schedule/sv"
+	taskdao "github.com/LoveLosita/smartflow/backend/services/task/dao"
+	tasksv "github.com/LoveLosita/smartflow/backend/services/task/sv"
+	"github.com/LoveLosita/smartflow/backend/shared/infra/bootstrap"
+	einoinfra "github.com/LoveLosita/smartflow/backend/shared/infra/eino"
+	gormcache "github.com/LoveLosita/smartflow/backend/shared/infra/gormcache"
+	kafkabus "github.com/LoveLosita/smartflow/backend/shared/infra/kafka"
+	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
+	ratelimit "github.com/LoveLosita/smartflow/backend/shared/infra/ratelimit"
 	"github.com/LoveLosita/smartflow/backend/shared/ports"
 	"github.com/go-redis/redis/v8"
 	"github.com/spf13/viper"
@@ -75,9 +81,9 @@ type appRuntime struct {
 	agentCache     *dao.AgentCache
 	manager        *dao.RepoManager
 	outboxRepo     *outboxinfra.Repository
-	limiter        *pkg.RateLimiter
+	limiter        *ratelimit.RateLimiter
 	handlers       *api.ApiHandlers
-	userAuthClient *gatewayuserauth.Client
+	userAuthClient *userauthclient.Client
 }
 
 // loadConfig 锻炼?
@@ -154,23 +160,23 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		return nil, err
 	}
 
-	db, err := inits.ConnectCoreDB()
+	db, err := coreinit.ConnectCoreDB()
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	rdb, err := inits.InitCoreRedis()
+	rdb, err := coreinit.InitCoreRedis()
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to redis: %w", err)
 	}
-	limiter := pkg.NewRateLimiter(rdb)
+	limiter := ratelimit.NewRateLimiter(rdb)
 
 	// DAO 层初始化。
 	cacheRepo := dao.NewCacheDAO(rdb)
-	_ = db.Use(middleware.NewGormCachePlugin(cacheRepo))
+	_ = db.Use(gormcache.NewGormCachePlugin(cacheRepo))
 
 	// Service 层初始化。
-	userAuthClient, err := gatewayuserauth.NewClient(gatewayuserauth.ClientConfig{
+	userAuthClient, err := userauthclient.NewClient(userauthclient.ClientConfig{
 		Endpoints: viper.GetStringSlice("userauth.rpc.endpoints"),
 		Target:    viper.GetString("userauth.rpc.target"),
 		Timeout:   viper.GetDuration("userauth.rpc.timeout"),
@@ -178,7 +184,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize userauth zrpc client: %w", err)
 	}
-	notificationClient, err := gatewaynotification.NewClient(gatewaynotification.ClientConfig{
+	notificationClient, err := notificationclient.NewClient(notificationclient.ClientConfig{
 		Endpoints: viper.GetStringSlice("notification.rpc.endpoints"),
 		Target:    viper.GetString("notification.rpc.target"),
 		Timeout:   viper.GetDuration("notification.rpc.timeout"),
@@ -186,7 +192,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize notification zrpc client: %w", err)
 	}
-	scheduleClient, err := gatewayschedule.NewClient(gatewayschedule.ClientConfig{
+	scheduleClient, err := scheduleclient.NewClient(scheduleclient.ClientConfig{
 		Endpoints: viper.GetStringSlice("schedule.rpc.endpoints"),
 		Target:    viper.GetString("schedule.rpc.target"),
 		Timeout:   viper.GetDuration("schedule.rpc.timeout"),
@@ -194,7 +200,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize schedule zrpc client: %w", err)
 	}
-	taskClient, err := gatewaytask.NewClient(gatewaytask.ClientConfig{
+	taskClient, err := taskclient.NewClient(taskclient.ClientConfig{
 		Endpoints: viper.GetStringSlice("task.rpc.endpoints"),
 		Target:    viper.GetString("task.rpc.target"),
 		Timeout:   viper.GetDuration("task.rpc.timeout"),
@@ -202,7 +208,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize task zrpc client: %w", err)
 	}
-	taskClassClient, err := gatewaytaskclass.NewClient(gatewaytaskclass.ClientConfig{
+	taskClassClient, err := taskclassclient.NewClient(taskclassclient.ClientConfig{
 		Endpoints: viper.GetStringSlice("taskClass.rpc.endpoints"),
 		Target:    viper.GetString("taskClass.rpc.target"),
 		Timeout:   viper.GetDuration("taskClass.rpc.timeout"),
@@ -210,7 +216,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize task-class zrpc client: %w", err)
 	}
-	courseClient, err := gatewaycourse.NewClient(gatewaycourse.ClientConfig{
+	courseClient, err := courseclient.NewClient(courseclient.ClientConfig{
 		Endpoints:     viper.GetStringSlice("course.rpc.endpoints"),
 		Target:        viper.GetString("course.rpc.target"),
 		Timeout:       viper.GetDuration("course.rpc.timeout"),
@@ -219,7 +225,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize course zrpc client: %w", err)
 	}
-	memoryClient, err := gatewaymemory.NewClient(gatewaymemory.ClientConfig{
+	memoryClient, err := memoryclient.NewClient(memoryclient.ClientConfig{
 		Endpoints: viper.GetStringSlice("memory.rpc.endpoints"),
 		Target:    viper.GetString("memory.rpc.target"),
 		Timeout:   viper.GetDuration("memory.rpc.timeout"),
@@ -227,7 +233,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize memory zrpc client: %w", err)
 	}
-	agentRPCClient, err := gatewayagent.NewClient(gatewayagent.ClientConfig{
+	agentRPCClient, err := agentclient.NewClient(agentclient.ClientConfig{
 		Endpoints: viper.GetStringSlice("agent.rpc.endpoints"),
 		Target:    viper.GetString("agent.rpc.target"),
 		Timeout:   viper.GetDuration("agent.rpc.timeout"),
@@ -235,7 +241,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize agent zrpc client: %w", err)
 	}
-	activeSchedulerClient, err := gatewayactivescheduler.NewClient(gatewayactivescheduler.ClientConfig{
+	activeSchedulerClient, err := activeschedulerclient.NewClient(activeschedulerclient.ClientConfig{
 		Endpoints: viper.GetStringSlice("activeScheduler.rpc.endpoints"),
 		Target:    viper.GetString("activeScheduler.rpc.target"),
 		Timeout:   viper.GetDuration("activeScheduler.rpc.timeout"),
@@ -251,7 +257,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if shouldBuildGatewayAgentFallback() {
 		log.Println("Gateway agent RPC fallback is enabled; building local AgentService compatibility path")
 
-		aiHub, err := inits.InitEino()
+		aiHub, err := einoinfra.InitEino()
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize Eino: %w", err)
 		}
@@ -273,8 +279,9 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 
 		agentCacheRepo = dao.NewAgentCache(rdb)
 		taskRepo := dao.NewTaskDAO(db)
+		taskServiceRepo := taskdao.NewTaskDAO(db)
 		taskClassRepo := dao.NewTaskClassDAO(db)
-		scheduleRepo := dao.NewScheduleDAO(db)
+		scheduleServiceRepo := scheduledao.NewScheduleDAO(db)
 		manager = dao.NewManager(db)
 		agentRepo = dao.NewAgentDAO(db)
 		outboxRepo = outboxinfra.NewRepository(db)
@@ -286,9 +293,9 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 			return nil, fmt.Errorf("failed to register task outbox route: %w", err)
 		}
 		taskOutboxPublisher := buildTaskOutboxPublisher(outboxRepo)
-		taskSv := service.NewTaskService(taskRepo, cacheRepo, taskOutboxPublisher)
+		taskSv := tasksv.NewTaskService(taskServiceRepo, cacheRepo, taskOutboxPublisher)
 		taskSv.SetActiveScheduleDAO(manager.ActiveSchedule)
-		scheduleService := service.NewScheduleService(scheduleRepo, taskClassRepo, manager, cacheRepo)
+		scheduleService := schedulesv.NewScheduleService(scheduleServiceRepo, taskClassRepo, manager, cacheRepo)
 		agentService = agentsv.NewAgentService(
 			llmService,
 			agentRepo,
@@ -488,13 +495,13 @@ func (p *repositoryOutboxPublisher) Publish(ctx context.Context, req outboxinfra
 	return err
 }
 
-func buildCourseService(llmService *llmservice.Service, courseRepo *dao.CourseDAO, scheduleRepo *dao.ScheduleDAO) *service.CourseService {
+func buildCourseService(llmService *llmservice.Service, courseRepo *coursedao.CourseDAO, scheduleRepo *dao.ScheduleDAO) *coursesv.CourseService {
 	courseImageResponsesClient := llmService.CourseImageResponsesClient()
-	return service.NewCourseService(
+	return coursesv.NewCourseService(
 		courseRepo,
 		scheduleRepo,
 		courseImageResponsesClient,
-		service.NewCourseImageParseConfig(
+		coursesv.NewCourseImageParseConfig(
 			viper.GetInt64("courseImport.maxImageBytes"),
 			viper.GetInt("courseImport.maxTokens"),
 		),
@@ -827,7 +834,7 @@ func buildAPIHandlers(
 	courseClient ports.CourseCommandClient,
 	scheduleClient ports.ScheduleCommandClient,
 	agentService *agentsv.AgentService,
-	agentRPCClient *gatewayagent.Client,
+	agentRPCClient *agentclient.Client,
 	memoryClient ports.MemoryCommandClient,
 	activeSchedulerClient ports.ActiveSchedulerCommandClient,
 	notificationClient ports.NotificationCommandClient,

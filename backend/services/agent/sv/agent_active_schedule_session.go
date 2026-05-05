@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	agentstream "github.com/LoveLosita/smartflow/backend/services/agent/stream"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	"github.com/cloudwego/eino/schema"
 )
 

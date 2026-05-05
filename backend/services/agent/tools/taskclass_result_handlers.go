@@ -3,9 +3,9 @@ package agenttools
 import (
 	"strings"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/services/agent/tools/schedule"
 	taskclassresult "github.com/LoveLosita/smartflow/backend/services/agent/tools/taskclass_result"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 )
 
 type taskClassUpsertExecutionInput struct {

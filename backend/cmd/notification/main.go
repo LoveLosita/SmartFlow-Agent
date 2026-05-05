@@ -7,12 +7,12 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/LoveLosita/smartflow/backend/bootstrap"
-	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
-	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
 	notificationdao "github.com/LoveLosita/smartflow/backend/services/notification/dao"
 	notificationrpc "github.com/LoveLosita/smartflow/backend/services/notification/rpc"
 	notificationsv "github.com/LoveLosita/smartflow/backend/services/notification/sv"
+	"github.com/LoveLosita/smartflow/backend/shared/infra/bootstrap"
+	kafkabus "github.com/LoveLosita/smartflow/backend/shared/infra/kafka"
+	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
 	"github.com/spf13/viper"
 )
 

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	agentconv "github.com/LoveLosita/smartflow/backend/services/agent/conv"
 	scheduletool "github.com/LoveLosita/smartflow/backend/services/agent/tools/schedule"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	schedulecontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/schedule"
 	taskclasscontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/taskclass"
 )

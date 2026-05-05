@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/conv"
-	"github.com/LoveLosita/smartflow/backend/model"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/conv"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	schedulecontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/schedule"
 	"gorm.io/gorm"
 )

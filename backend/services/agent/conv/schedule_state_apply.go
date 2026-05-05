@@ -1,9 +1,9 @@
 package agentconv
 
 import (
-	"github.com/LoveLosita/smartflow/backend/model"
-	"github.com/LoveLosita/smartflow/backend/respond"
 	schedule "github.com/LoveLosita/smartflow/backend/services/agent/tools/schedule"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 )
 
 // ApplyPlacedItems 将前端提交的绝对时间放置项应用到 ScheduleState。

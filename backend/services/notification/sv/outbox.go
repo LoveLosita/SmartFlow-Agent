@@ -7,9 +7,9 @@ import (
 	"log"
 	"strings"
 
-	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
-	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
 	sharedevents "github.com/LoveLosita/smartflow/backend/shared/events"
+	kafkabus "github.com/LoveLosita/smartflow/backend/shared/infra/kafka"
+	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
 )
 
 // OutboxBus 是 notification 服务注册消费 handler 需要的最小总线接口。

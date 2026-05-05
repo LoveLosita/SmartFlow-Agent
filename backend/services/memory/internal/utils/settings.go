@@ -1,8 +1,8 @@
 package utils
 
 import (
-	"github.com/LoveLosita/smartflow/backend/model"
 	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 )
 
 // EffectiveUserSetting 返回用户记忆设置的生效值。

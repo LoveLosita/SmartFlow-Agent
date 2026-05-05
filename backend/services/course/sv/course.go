@@ -4,12 +4,12 @@ import (
 	"context"
 	"strings"
 
-	"github.com/LoveLosita/smartflow/backend/conv"
-	rootdao "github.com/LoveLosita/smartflow/backend/dao"
-	"github.com/LoveLosita/smartflow/backend/model"
-	"github.com/LoveLosita/smartflow/backend/respond"
 	coursedao "github.com/LoveLosita/smartflow/backend/services/course/dao"
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/conv"
+	rootdao "github.com/LoveLosita/smartflow/backend/services/runtime/dao"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 )
 
 type CourseService struct {

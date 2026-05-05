@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
-	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 	agentstream "github.com/LoveLosita/smartflow/backend/services/agent/stream"
+	eventsvc "github.com/LoveLosita/smartflow/backend/services/runtime/eventsvc"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	"gorm.io/gorm"
 )
 

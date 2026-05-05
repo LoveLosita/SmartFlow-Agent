@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	memoryrepo "github.com/LoveLosita/smartflow/backend/services/memory/internal/repo"
 	memoryutils "github.com/LoveLosita/smartflow/backend/services/memory/internal/utils"
 	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
 	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	"gorm.io/gorm"
 )
 

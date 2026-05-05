@@ -6,12 +6,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/respond"
 	userauthdao "github.com/LoveLosita/smartflow/backend/services/userauth/dao"
 	userauthauth "github.com/LoveLosita/smartflow/backend/services/userauth/internal/auth"
 	userauthmodel "github.com/LoveLosita/smartflow/backend/services/userauth/model"
 	contracts "github.com/LoveLosita/smartflow/backend/shared/contracts/userauth"
-	"github.com/LoveLosita/smartflow/backend/utils"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 	"gorm.io/gorm"
 )
 
@@ -74,7 +73,7 @@ func (s *Service) Register(ctx context.Context, req contracts.RegisterRequest) (
 		return nil, respond.InvalidName
 	}
 
-	hashedPwd, err := utils.HashPassword(req.Password)
+	hashedPwd, err := userauthauth.HashPassword(req.Password)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +93,7 @@ func (s *Service) Login(ctx context.Context, req contracts.LoginRequest) (*contr
 		return nil, err
 	}
 
-	matched, err := utils.CompareHashPwdAndPwd(hashedPwd, req.Password)
+	matched, err := userauthauth.CompareHashPwdAndPwd(hashedPwd, req.Password)
 	if err != nil {
 		return nil, err
 	}

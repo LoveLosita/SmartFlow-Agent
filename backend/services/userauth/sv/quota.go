@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/respond"
 	userauthdao "github.com/LoveLosita/smartflow/backend/services/userauth/dao"
 	userauthmodel "github.com/LoveLosita/smartflow/backend/services/userauth/model"
 	contracts "github.com/LoveLosita/smartflow/backend/shared/contracts/userauth"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 )
 
 const (

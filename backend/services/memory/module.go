@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	memorycleanup "github.com/LoveLosita/smartflow/backend/services/memory/internal/cleanup"
 	memoryorchestrator "github.com/LoveLosita/smartflow/backend/services/memory/internal/orchestrator"
@@ -16,6 +15,7 @@ import (
 	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
 	memoryobserve "github.com/LoveLosita/smartflow/backend/services/memory/observe"
 	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	"gorm.io/gorm"
 )
 

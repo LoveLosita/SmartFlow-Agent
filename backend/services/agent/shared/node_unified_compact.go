@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/LoveLosita/smartflow/backend/pkg"
 	agentmodel "github.com/LoveLosita/smartflow/backend/services/agent/model"
 	agentprompt "github.com/LoveLosita/smartflow/backend/services/agent/prompt"
 	agentstream "github.com/LoveLosita/smartflow/backend/services/agent/stream"
@@ -77,7 +76,7 @@ func CompactUnifiedMessagesIfNeeded(
 	msg3 := messages[3].Content
 
 	// 3. 执行 token 预算检查，判断是否需要压缩历史对话或阶段工作区。
-	breakdown, overBudget, needCompactMsg1, needCompactMsg2 := pkg.CheckStageTokenBudget(msg0, msg1, msg2, msg3)
+	breakdown, overBudget, needCompactMsg1, needCompactMsg2 := CheckStageTokenBudget(msg0, msg1, msg2, msg3)
 
 	log.Printf(
 		"[COMPACT:%s] token budget check: total=%d budget=%d over=%v compactMsg1=%v compactMsg2=%v (msg0=%d msg1=%d msg2=%d msg3=%d)",
@@ -95,14 +94,14 @@ func CompactUnifiedMessagesIfNeeded(
 	if needCompactMsg1 {
 		msg1 = compactUnifiedMsg1(ctx, input, msg1)
 		messages[1].Content = msg1
-		breakdown = pkg.EstimateStageMessagesTokens(msg0, msg1, msg2, msg3)
+		breakdown = EstimateStageMessagesTokens(msg0, msg1, msg2, msg3)
 	}
 
 	// 6. 若 msg1 压缩后仍超限，再压缩 msg2（阶段工作区 / ReAct 记录）。
-	if needCompactMsg2 || breakdown.Total > pkg.StageTokenBudget {
+	if needCompactMsg2 || breakdown.Total > StageTokenBudget {
 		msg2 = compactUnifiedMsg2(ctx, input, msg2)
 		messages[2].Content = msg2
-		breakdown = pkg.EstimateStageMessagesTokens(msg0, msg1, msg2, msg3)
+		breakdown = EstimateStageMessagesTokens(msg0, msg1, msg2, msg3)
 	}
 
 	// 7. 记录最终 token 分布，供后续调试与监控使用。
@@ -122,8 +121,8 @@ func CompactUnifiedMessagesIfNeeded(
 // 1. 先按消息类型汇总 token，保证总量准确；
 // 2. 再把最后一个 user 消息尽量视作 msg3，保留阶段指令语义；
 // 3. 其他历史内容归入 msg1 / msg2，确保上下文统计不会因为结构不标准而断更。
-func estimateFallbackStageTokenBreakdown(messages []*schema.Message) pkg.StageTokenBreakdown {
-	breakdown := pkg.StageTokenBreakdown{Budget: pkg.StageTokenBudget}
+func estimateFallbackStageTokenBreakdown(messages []*schema.Message) StageTokenBreakdown {
+	breakdown := StageTokenBreakdown{Budget: StageTokenBudget}
 	if len(messages) == 0 {
 		return breakdown
 	}
@@ -144,7 +143,7 @@ func estimateFallbackStageTokenBreakdown(messages []*schema.Message) pkg.StageTo
 		if msg == nil {
 			continue
 		}
-		tokens := pkg.EstimateMessageTokens(msg)
+		tokens := EstimateMessageTokens(msg)
 		breakdown.Total += tokens
 
 		switch msg.Role {
@@ -194,7 +193,7 @@ func compactUnifiedMsg1(
 		log.Printf("[COMPACT:%s] load existing compaction failed: %v, proceed without cache", input.StageName, err)
 	}
 
-	tokenBefore := pkg.EstimateTextTokens(msg1)
+	tokenBefore := EstimateTextTokens(msg1)
 	_ = input.Emitter.EmitStatus(
 		input.StatusBlockID, input.StageName, "context_compact_start",
 		fmt.Sprintf("正在压缩对话历史（%d tokens）...", tokenBefore),
@@ -212,7 +211,7 @@ func compactUnifiedMsg1(
 		return msg1
 	}
 
-	tokenAfter := pkg.EstimateTextTokens(newSummary)
+	tokenAfter := EstimateTextTokens(newSummary)
 	_ = input.Emitter.EmitStatus(
 		input.StatusBlockID, input.StageName, "context_compact_done",
 		fmt.Sprintf("对话历史已压缩：%d → %d tokens", tokenBefore, tokenAfter),
@@ -237,7 +236,7 @@ func compactUnifiedMsg2(
 	input UnifiedCompactInput,
 	msg2 string,
 ) string {
-	tokenBefore := pkg.EstimateTextTokens(msg2)
+	tokenBefore := EstimateTextTokens(msg2)
 	_ = input.Emitter.EmitStatus(
 		input.StatusBlockID, input.StageName, "context_compact_start",
 		fmt.Sprintf("正在压缩执行记录（%d tokens）...", tokenBefore),
@@ -255,7 +254,7 @@ func compactUnifiedMsg2(
 		return msg2
 	}
 
-	tokenAfter := pkg.EstimateTextTokens(compressed)
+	tokenAfter := EstimateTextTokens(compressed)
 	_ = input.Emitter.EmitStatus(
 		input.StatusBlockID, input.StageName, "context_compact_done",
 		fmt.Sprintf("执行记录已压缩：%d → %d tokens", tokenBefore, tokenAfter),
@@ -274,7 +273,7 @@ func compactUnifiedMsg2(
 func saveUnifiedTokenStats(
 	ctx context.Context,
 	input UnifiedCompactInput,
-	breakdown pkg.StageTokenBreakdown,
+	breakdown StageTokenBreakdown,
 ) {
 	if input.CompactionStore == nil || input.FlowState == nil {
 		return

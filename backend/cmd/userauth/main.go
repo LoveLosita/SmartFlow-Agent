@@ -3,10 +3,10 @@ package main
 import (
 	"log"
 
-	"github.com/LoveLosita/smartflow/backend/bootstrap"
 	userauthdao "github.com/LoveLosita/smartflow/backend/services/userauth/dao"
 	userauthrpc "github.com/LoveLosita/smartflow/backend/services/userauth/rpc"
 	userauthsv "github.com/LoveLosita/smartflow/backend/services/userauth/sv"
+	"github.com/LoveLosita/smartflow/backend/shared/infra/bootstrap"
 	"github.com/spf13/viper"
 )
 

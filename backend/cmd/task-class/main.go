@@ -7,12 +7,12 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/LoveLosita/smartflow/backend/bootstrap"
-	rootdao "github.com/LoveLosita/smartflow/backend/dao"
-	rootmiddleware "github.com/LoveLosita/smartflow/backend/middleware"
+	rootdao "github.com/LoveLosita/smartflow/backend/services/runtime/dao"
 	taskclassdao "github.com/LoveLosita/smartflow/backend/services/task_class/dao"
 	taskclassrpc "github.com/LoveLosita/smartflow/backend/services/task_class/rpc"
 	taskclasssv "github.com/LoveLosita/smartflow/backend/services/task_class/sv"
+	"github.com/LoveLosita/smartflow/backend/shared/infra/bootstrap"
+	gormcache "github.com/LoveLosita/smartflow/backend/shared/infra/gormcache"
 	"github.com/spf13/viper"
 )
 
@@ -35,7 +35,7 @@ func main() {
 	defer redisClient.Close()
 
 	cacheRepo := rootdao.NewCacheDAO(redisClient)
-	if err := db.Use(rootmiddleware.NewGormCachePlugin(cacheRepo)); err != nil {
+	if err := db.Use(gormcache.NewGormCachePlugin(cacheRepo)); err != nil {
 		log.Fatalf("failed to initialize task-class cache deleter: %v", err)
 	}
 

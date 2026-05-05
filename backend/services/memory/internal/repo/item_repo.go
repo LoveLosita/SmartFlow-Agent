@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	"gorm.io/gorm"
 )
 

@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
-	"github.com/LoveLosita/smartflow/backend/respond"
 	agentmodel "github.com/LoveLosita/smartflow/backend/services/agent/model"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	taskcontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/task"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 )
 
 const quickTaskCreateRPCTimeout = 3 * time.Second

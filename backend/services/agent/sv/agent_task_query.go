@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
-	"github.com/LoveLosita/smartflow/backend/respond"
 	agentmodel "github.com/LoveLosita/smartflow/backend/services/agent/model"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 )
 
 func (s *AgentService) QueryTasksForTool(ctx context.Context, req agentmodel.TaskQueryRequest) ([]agentmodel.TaskQueryTaskRecord, error) {

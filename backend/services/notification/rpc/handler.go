@@ -5,10 +5,10 @@ import (
 	"errors"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/respond"
 	"github.com/LoveLosita/smartflow/backend/services/notification/rpc/pb"
 	notificationsv "github.com/LoveLosita/smartflow/backend/services/notification/sv"
 	contracts "github.com/LoveLosita/smartflow/backend/shared/contracts/notification"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 )
 
 type Handler struct {

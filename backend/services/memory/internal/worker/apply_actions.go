@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	memoryrepo "github.com/LoveLosita/smartflow/backend/services/memory/internal/repo"
 	memoryutils "github.com/LoveLosita/smartflow/backend/services/memory/internal/utils"
 	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 )
 
 // ApplyActionOutcome 是单个决策动作的执行结果。

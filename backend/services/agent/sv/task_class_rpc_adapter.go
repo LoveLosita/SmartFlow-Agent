@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	agenttools "github.com/LoveLosita/smartflow/backend/services/agent/tools"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	taskclasscontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/taskclass"
 )
 

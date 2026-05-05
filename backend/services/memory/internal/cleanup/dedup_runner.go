@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	memoryrepo "github.com/LoveLosita/smartflow/backend/services/memory/internal/repo"
 	memoryutils "github.com/LoveLosita/smartflow/backend/services/memory/internal/utils"
 	memoryvectorsync "github.com/LoveLosita/smartflow/backend/services/memory/internal/vectorsync"
 	memoryobserve "github.com/LoveLosita/smartflow/backend/services/memory/observe"
+	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	"gorm.io/gorm"
 )
 
