@@ -2,57 +2,65 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"net/http"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
-	"github.com/LoveLosita/smartflow/backend/service"
+	coursecontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/course"
+	"github.com/LoveLosita/smartflow/backend/shared/ports"
 	"github.com/gin-gonic/gin"
 )
 
+const courseRequestTimeout = 10 * time.Second
+
 type CourseHandler struct {
-	service *service.CourseService
+	client ports.CourseCommandClient
 }
 
-func NewCourseHandler(service *service.CourseService) *CourseHandler {
-	return &CourseHandler{
-		service: service,
-	}
+func NewCourseHandler(client ports.CourseCommandClient) *CourseHandler {
+	return &CourseHandler{client: client}
+}
+
+type courseImportConflict interface {
+	ConflictsJSON() json.RawMessage
 }
 
 func (sa *CourseHandler) CheckUserCourse(c *gin.Context) {
-	var req model.UserCheckCourseRequest
+	var req coursecontracts.UserCheckCourseRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
 		return
 	}
 
-	if service.CheckSingleCourse(req) {
-		c.JSON(http.StatusOK, respond.Ok)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), courseRequestTimeout)
+	defer cancel()
+	if err := sa.client.ValidateCourse(ctx, req); err != nil {
+		respond.DealWithError(c, err)
 		return
 	}
-	c.JSON(http.StatusBadRequest, respond.WrongCourseInfo)
+	c.JSON(http.StatusOK, respond.Ok)
 }
 
 func (sa *CourseHandler) AddUserCourses(c *gin.Context) {
-	var req model.UserImportCoursesRequest
+	var req coursecontracts.UserImportCoursesRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
 		return
 	}
 
-	userID := c.GetInt("user_id")
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	req.UserID = c.GetInt("user_id")
+	ctx, cancel := context.WithTimeout(c.Request.Context(), courseRequestTimeout)
 	defer cancel()
 
-	conflicts, err := sa.service.AddUserCourses(ctx, req, userID)
+	_, err := sa.client.ImportCourses(ctx, req)
 	if err != nil {
-		if errors.Is(err, respond.ScheduleConflict) {
-			c.JSON(http.StatusConflict, respond.RespWithData(respond.ScheduleConflict, conflicts))
+		var conflict courseImportConflict
+		if errors.As(err, &conflict) {
+			c.JSON(http.StatusConflict, respond.RespWithData(respond.ScheduleConflict, conflict.ConflictsJSON()))
 			return
 		}
 		respond.DealWithError(c, err)
@@ -107,39 +115,47 @@ func (sa *CourseHandler) ParseCourseTableImage(c *gin.Context) {
 	ctx, cancel := context.WithCancel(c.Request.Context())
 	defer cancel()
 
-	draft, err := sa.service.ParseCourseTableImage(ctx, model.CourseImageParseRequest{
+	rawDraft, err := sa.client.ParseCourseTableImage(ctx, coursecontracts.CourseImageParseRequest{
 		Filename:   fileHeader.Filename,
 		MIMEType:   fileHeader.Header.Get("Content-Type"),
 		ImageBytes: imageBytes,
 	})
 	if err != nil {
+		var resp respond.Response
 		switch {
-		case errors.Is(err, service.ErrCourseImageParserUnavailable):
+		case errors.As(err, &resp) && resp.Status == "50003":
 			log.Printf("[COURSE_PARSE][API] parser unavailable user=%d filename=%q", userID, fileHeader.Filename)
-			c.JSON(http.StatusServiceUnavailable, respond.Response{Status: "50003", Info: "course image parser is not configured"})
+			c.JSON(http.StatusServiceUnavailable, resp)
 			return
-		case errors.Is(err, service.ErrCourseImageTooLarge):
+		case errors.As(err, &resp) && resp.Status == "40064":
 			log.Printf("[COURSE_PARSE][API] file too large user=%d filename=%q bytes=%d", userID, fileHeader.Filename, len(imageBytes))
-			c.JSON(http.StatusBadRequest, respond.Response{Status: "40064", Info: "course image too large"})
+			c.JSON(http.StatusBadRequest, resp)
 			return
-		case errors.Is(err, service.ErrCourseImageUnsupportedMIME):
+		case errors.As(err, &resp) && resp.Status == "40065":
 			log.Printf(
 				"[COURSE_PARSE][API] unsupported mime user=%d filename=%q header_content_type=%q",
 				userID,
 				fileHeader.Filename,
 				fileHeader.Header.Get("Content-Type"),
 			)
-			c.JSON(http.StatusBadRequest, respond.Response{Status: "40065", Info: "unsupported course image format"})
+			c.JSON(http.StatusBadRequest, resp)
 			return
-		case errors.Is(err, service.ErrCourseImageEmpty):
+		case errors.As(err, &resp) && resp.Status == "40066":
 			log.Printf("[COURSE_PARSE][API] empty file user=%d filename=%q", userID, fileHeader.Filename)
-			c.JSON(http.StatusBadRequest, respond.Response{Status: "40066", Info: "course image is empty"})
+			c.JSON(http.StatusBadRequest, resp)
 			return
 		default:
 			log.Printf("[COURSE_PARSE][API] unexpected failure user=%d filename=%q err=%v", userID, fileHeader.Filename, err)
 			respond.DealWithError(c, err)
 			return
 		}
+	}
+
+	var draft coursecontracts.CourseImageParseResponse
+	if err := json.Unmarshal(rawDraft, &draft); err != nil {
+		log.Printf("[COURSE_PARSE][API] decode response failed user=%d filename=%q err=%v", userID, fileHeader.Filename, err)
+		respond.DealWithError(c, err)
+		return
 	}
 
 	log.Printf(

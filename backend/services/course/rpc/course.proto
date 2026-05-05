@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package smartflow.course;
+
+option go_package = "github.com/LoveLosita/smartflow/backend/services/course/rpc/pb";
+
+service Course {
+  rpc Ping(StatusResponse) returns (StatusResponse);
+  rpc ValidateCourse(JSONRequest) returns (JSONResponse);
+  rpc ImportCourses(JSONRequest) returns (JSONResponse);
+  rpc ParseCourseImage(CourseImageRequest) returns (JSONResponse);
+}
+
+message JSONRequest {
+  bytes payload_json = 1;
+}
+
+message JSONResponse {
+  bytes data_json = 1;
+}
+
+message CourseImageRequest {
+  string filename = 1;
+  string mime_type = 2;
+  bytes image_bytes = 3;
+}
+
+message StatusResponse {
+}

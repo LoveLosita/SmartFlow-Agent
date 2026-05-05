@@ -15,6 +15,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/gateway/api"
 	gatewayactivescheduler "github.com/LoveLosita/smartflow/backend/gateway/client/activescheduler"
+	gatewaycourse "github.com/LoveLosita/smartflow/backend/gateway/client/course"
 	gatewaynotification "github.com/LoveLosita/smartflow/backend/gateway/client/notification"
 	gatewayschedule "github.com/LoveLosita/smartflow/backend/gateway/client/schedule"
 	gatewaytask "github.com/LoveLosita/smartflow/backend/gateway/client/task"
@@ -195,7 +196,6 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	agentCacheRepo := dao.NewAgentCache(rdb)
 	_ = db.Use(middleware.NewGormCachePlugin(cacheRepo))
 	taskRepo := dao.NewTaskDAO(db)
-	courseRepo := dao.NewCourseDAO(db)
 	taskClassRepo := dao.NewTaskClassDAO(db)
 	scheduleRepo := dao.NewScheduleDAO(db)
 	manager := dao.NewManager(db)
@@ -248,6 +248,15 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize task-class zrpc client: %w", err)
 	}
+	courseClient, err := gatewaycourse.NewClient(gatewaycourse.ClientConfig{
+		Endpoints:     viper.GetStringSlice("course.rpc.endpoints"),
+		Target:        viper.GetString("course.rpc.target"),
+		Timeout:       viper.GetDuration("course.rpc.timeout"),
+		MaxImageBytes: viper.GetInt64("courseImport.maxImageBytes"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize course zrpc client: %w", err)
+	}
 	activeSchedulerClient, err := gatewayactivescheduler.NewClient(gatewayactivescheduler.ClientConfig{
 		Endpoints: viper.GetStringSlice("activeScheduler.rpc.endpoints"),
 		Target:    viper.GetString("activeScheduler.rpc.target"),
@@ -262,7 +271,6 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	taskOutboxPublisher := buildTaskOutboxPublisher(outboxRepo)
 	taskSv := service.NewTaskService(taskRepo, cacheRepo, taskOutboxPublisher)
 	taskSv.SetActiveScheduleDAO(manager.ActiveSchedule)
-	courseService := buildCourseService(llmService, courseRepo, scheduleRepo)
 	scheduleService := service.NewScheduleService(scheduleRepo, taskClassRepo, manager, cacheRepo)
 	agentService := service.NewAgentServiceWithSchedule(
 		llmService,
@@ -325,7 +333,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		return nil, err
 	}
 	agentService.SetActiveScheduleSessionRerunFunc(buildActiveScheduleSessionRerunFunc(manager.ActiveSchedule, activeScheduleGraphRunner, activeSchedulePreviewConfirm, activeScheduleFeedbackLocator))
-	handlers := buildAPIHandlers(taskClient, taskClassClient, courseService, scheduleClient, agentService, memoryModule, activeSchedulerClient, notificationClient)
+	handlers := buildAPIHandlers(taskClient, taskClassClient, courseClient, scheduleClient, agentService, memoryModule, activeSchedulerClient, notificationClient)
 
 	runtime := &appRuntime{
 		db:          db,
@@ -915,7 +923,7 @@ func buildQuickTaskQueryFunc(agentService *service.AgentService) func(ctx contex
 func buildAPIHandlers(
 	taskClient ports.TaskCommandClient,
 	taskClassClient ports.TaskClassCommandClient,
-	courseService *service.CourseService,
+	courseClient ports.CourseCommandClient,
 	scheduleClient ports.ScheduleCommandClient,
 	agentService *service.AgentService,
 	memoryModule *memory.Module,
@@ -925,7 +933,7 @@ func buildAPIHandlers(
 	return &api.ApiHandlers{
 		TaskHandler:      api.NewTaskHandler(taskClient),
 		TaskClassHandler: api.NewTaskClassHandler(taskClassClient),
-		CourseHandler:    api.NewCourseHandler(courseService),
+		CourseHandler:    api.NewCourseHandler(courseClient),
 		ScheduleHandler:  api.NewScheduleAPI(scheduleClient),
 		AgentHandler:     api.NewAgentHandler(agentService),
 		MemoryHandler:    api.NewMemoryHandler(memoryModule),

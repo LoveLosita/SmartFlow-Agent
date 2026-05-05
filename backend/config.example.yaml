@@ -83,6 +83,14 @@ taskClass:
       - "127.0.0.1:9086"
     timeout: 6s
 
+# 课程服务配置。
+course:
+  rpc:
+    listenOn: "0.0.0.0:9087"
+    endpoints:
+      - "127.0.0.1:9087"
+    timeout: 10s
+
 # 主动调度服务配置。
 activeScheduler:
   rpc:
