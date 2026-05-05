@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package smartflow.taskclass;
+
+option go_package = "github.com/LoveLosita/smartflow/backend/services/task_class/rpc/pb";
+
+service TaskClass {
+  rpc Ping(StatusResponse) returns (StatusResponse);
+  rpc AddTaskClass(JSONRequest) returns (JSONResponse);
+  rpc ListTaskClasses(JSONRequest) returns (JSONResponse);
+  rpc GetTaskClass(JSONRequest) returns (JSONResponse);
+  rpc UpdateTaskClass(JSONRequest) returns (JSONResponse);
+  rpc InsertTaskClassItemIntoSchedule(JSONRequest) returns (JSONResponse);
+  rpc DeleteTaskClassItem(JSONRequest) returns (JSONResponse);
+  rpc DeleteTaskClass(JSONRequest) returns (JSONResponse);
+  rpc ApplyBatchIntoSchedule(JSONRequest) returns (JSONResponse);
+}
+
+message JSONRequest {
+  bytes payload_json = 1;
+}
+
+message JSONResponse {
+  bytes data_json = 1;
+}
+
+message StatusResponse {
+}

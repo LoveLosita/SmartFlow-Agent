@@ -418,7 +418,9 @@ func (d *ScheduleDAO) SetScheduleEmbeddedTaskIDToNull(ctx context.Context, event
 }
 
 func (d *ScheduleDAO) FindEmbeddedTaskIDAndDeleteIt(ctx context.Context, taskID int) (int, error) {
-	// 1. 先找到 schedules 表中 embedded_task_id = taskID 的记录，获取对应的 event_id
+	// 1. 先找到 schedules 表中 embedded_task_id = taskID 的记录，获取对应的 event_id。
+	// 1.1 该 taskID 可能是“嵌入课程”的任务块，也可能是“独立任务日程”的任务块；
+	// 1.2 两者撤销策略不同：课程只清 embedded_task_id，独立任务需要删除 schedules 后再删 event。
 	type row struct {
 		EventID *int `gorm:"column:event_id"`
 	}
@@ -438,30 +440,72 @@ func (d *ScheduleDAO) FindEmbeddedTaskIDAndDeleteIt(ctx context.Context, taskID 
 	}
 	eventID := *r.EventID
 
-	// 2. 删除该 event_id 对应的课程事件（通过级联删除实现）
-	res := d.db.WithContext(ctx).
-		Table("schedule_events").
+	var event model.ScheduleEvent
+	if err := d.db.WithContext(ctx).
 		Where("id = ?", eventID).
-		Delete(&model.ScheduleEvent{})
-	if res.Error != nil {
-		return 0, res.Error
+		First(&event).Error; err != nil {
+		return 0, err
 	}
-	if res.RowsAffected == 0 {
+
+	if event.Type == "task" && event.RelID != nil && *event.RelID == taskID {
+		// 2. 独立任务日程：schedules.event_id 是外键，必须先删原子槽位再删事件。
+		if err := d.db.WithContext(ctx).
+			Table("schedules").
+			Where("event_id = ?", eventID).
+			Delete(&model.Schedule{}).Error; err != nil {
+			return 0, err
+		}
+		res := d.db.WithContext(ctx).
+			Table("schedule_events").
+			Where("id = ?", eventID).
+			Delete(&model.ScheduleEvent{})
+		if res.Error != nil {
+			return 0, res.Error
+		}
+		if res.RowsAffected == 0 {
+			return 0, respond.TargetTaskNotEmbeddedInAnySchedule
+		}
+		return eventID, nil
+	}
+
+	// 3. 嵌入课程：保留课程事件与课程槽位，只清空 embedded_task_id。
+	clearRes := d.db.WithContext(ctx).
+		Table("schedules").
+		Where("embedded_task_id = ?", taskID).
+		Update("embedded_task_id", nil)
+	if clearRes.Error != nil {
+		return 0, clearRes.Error
+	}
+	if clearRes.RowsAffected == 0 {
 		return 0, respond.TargetTaskNotEmbeddedInAnySchedule
 	}
 	return eventID, nil
 }
 
 func (d *ScheduleDAO) DeleteScheduleEventByTaskItemID(ctx context.Context, taskItemID int) error {
-	//直接找schedule_events表中type=task且rel_id=taskItemID的记录，删除它（级联删schedules）
-	res := d.db.WithContext(ctx).
+	// 1. 先找 type=task 且 rel_id=taskItemID 的正式事件；若前一步已经删除则保持幂等成功。
+	var eventIDs []int
+	if err := d.db.WithContext(ctx).
 		Table("schedule_events").
 		Where("type = ? AND rel_id = ?", "task", taskItemID).
-		Delete(&model.ScheduleEvent{})
-	if res.Error != nil {
-		return res.Error
+		Pluck("id", &eventIDs).Error; err != nil {
+		return err
 	}
-	return nil
+	if len(eventIDs) == 0 {
+		return nil
+	}
+
+	// 2. schedules.event_id 指向 schedule_events.id，删除顺序必须先子表后父表。
+	if err := d.db.WithContext(ctx).
+		Table("schedules").
+		Where("event_id IN ?", eventIDs).
+		Delete(&model.Schedule{}).Error; err != nil {
+		return err
+	}
+	return d.db.WithContext(ctx).
+		Table("schedule_events").
+		Where("id IN ?", eventIDs).
+		Delete(&model.ScheduleEvent{}).Error
 }
 
 func (d *ScheduleDAO) GetUserRecentCompletedSchedules(ctx context.Context, nowTime time.Time, userID int, index, limit int) ([]model.Schedule, error) {

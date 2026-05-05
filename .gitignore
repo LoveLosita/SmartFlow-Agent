@@ -18,6 +18,7 @@ backend/config.yaml
 # 4. 临时文件与日志 (Logs & Temp)
 *.log
 /tmp/
+/.tmp/
 /frontend/dist/
 /scripts/
 

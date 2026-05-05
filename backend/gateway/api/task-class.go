@@ -6,41 +6,34 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
-	"github.com/LoveLosita/smartflow/backend/service"
+	taskclasscontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/taskclass"
+	"github.com/LoveLosita/smartflow/backend/shared/ports"
 	"github.com/gin-gonic/gin"
 )
 
+const taskClassRequestTimeout = 6 * time.Second
+
 type TaskClassHandler struct {
-	svc *service.TaskClassService
+	client ports.TaskClassCommandClient
 }
 
-// NewTaskClassHandler 组装 Handler 的“工厂”
-func NewTaskClassHandler(svc *service.TaskClassService) *TaskClassHandler {
-	return &TaskClassHandler{
-		svc: svc, // 把传进来的 Service 揣进口袋里
-	}
+// NewTaskClassHandler 创建 task-class HTTP 门面。
+func NewTaskClassHandler(client ports.TaskClassCommandClient) *TaskClassHandler {
+	return &TaskClassHandler{client: client}
 }
-
-const (
-	create = 0
-	update = 1
-)
 
 func (api *TaskClassHandler) UserAddTaskClass(c *gin.Context) {
-	var req model.UserAddTaskClassRequest
-	err := c.ShouldBindJSON(&req)
-	if err != nil {
+	var req taskclasscontracts.UpsertTaskClassRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
 		return
 	}
-	userIDInterface := c.GetInt("user_id")
-	// 创建一个带 1 秒超时的上下文
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
-	defer cancel() // 记得释放资源
-	err = api.svc.AddOrUpdateTaskClass(ctx, &req, userIDInterface, create, 0)
-	if err != nil {
+	req.UserID = c.GetInt("user_id")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), taskClassRequestTimeout)
+	defer cancel()
+	if _, err := api.client.AddTaskClass(ctx, req); err != nil {
 		respond.DealWithError(c, err)
 		return
 	}
@@ -48,11 +41,11 @@ func (api *TaskClassHandler) UserAddTaskClass(c *gin.Context) {
 }
 
 func (api *TaskClassHandler) UserGetTaskClassInfos(c *gin.Context) {
-	userIDInterface := c.GetInt("user_id")
-	// 创建一个带 1 秒超时的上下文
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
-	defer cancel() // 记得释放资源
-	resp, err := api.svc.GetUserTaskClassInfos(ctx, userIDInterface)
+	userID := c.GetInt("user_id")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), taskClassRequestTimeout)
+	defer cancel()
+	resp, err := api.client.ListTaskClasses(ctx, userID)
 	if err != nil {
 		respond.DealWithError(c, err)
 		return
@@ -62,7 +55,6 @@ func (api *TaskClassHandler) UserGetTaskClassInfos(c *gin.Context) {
 
 func (api *TaskClassHandler) UserGetCompleteTaskClass(c *gin.Context) {
 	taskClassID := c.Query("task_class_id")
-	//将taskClassID转换为int
 	intTaskClassID, err := strconv.Atoi(taskClassID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
@@ -72,11 +64,14 @@ func (api *TaskClassHandler) UserGetCompleteTaskClass(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, respond.MissingParam)
 		return
 	}
-	userIDInterface := c.GetInt("user_id")
-	// 创建一个带 1 秒超时的上下文
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
-	defer cancel() // 记得释放资源
-	resp, err := api.svc.GetUserCompleteTaskClass(ctx, userIDInterface, intTaskClassID)
+	userID := c.GetInt("user_id")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), taskClassRequestTimeout)
+	defer cancel()
+	resp, err := api.client.GetTaskClass(ctx, taskclasscontracts.GetTaskClassRequest{
+		UserID:      userID,
+		TaskClassID: intTaskClassID,
+	})
 	if err != nil {
 		respond.DealWithError(c, err)
 		return
@@ -85,21 +80,23 @@ func (api *TaskClassHandler) UserGetCompleteTaskClass(c *gin.Context) {
 }
 
 func (api *TaskClassHandler) UserUpdateTaskClass(c *gin.Context) {
-	var req model.UserAddTaskClassRequest
-	err := c.ShouldBindJSON(&req)
-	if err != nil {
+	var req taskclasscontracts.UpsertTaskClassRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
 		return
 	}
 	taskClassID := c.Query("task_class_id")
-	//将taskClassID转换为int
 	intTaskClassID, err := strconv.Atoi(taskClassID)
-	userIDInterface := c.GetInt("user_id")
-	// 创建一个带 1 秒超时的上下文
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
-	defer cancel() // 记得释放资源
-	err = api.svc.AddOrUpdateTaskClass(ctx, &req, userIDInterface, update, intTaskClassID)
 	if err != nil {
+		c.JSON(http.StatusBadRequest, respond.WrongParamType)
+		return
+	}
+	req.UserID = c.GetInt("user_id")
+	req.TaskClassID = intTaskClassID
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), taskClassRequestTimeout)
+	defer cancel()
+	if _, err := api.client.UpdateTaskClass(ctx, req); err != nil {
 		respond.DealWithError(c, err)
 		return
 	}
@@ -107,25 +104,23 @@ func (api *TaskClassHandler) UserUpdateTaskClass(c *gin.Context) {
 }
 
 func (api *TaskClassHandler) UserAddTaskClassItemIntoSchedule(c *gin.Context) {
-	var req model.UserInsertTaskClassItemToScheduleRequest
-	err := c.ShouldBindJSON(&req)
-	if err != nil {
+	var req taskclasscontracts.InsertTaskClassItemIntoScheduleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
 		return
 	}
 	taskID := c.Query("task_item_id")
-	//将taskID转换为int
 	intTaskID, err := strconv.Atoi(taskID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
 		return
 	}
-	userIDInterface := c.GetInt("user_id")
-	// 创建一个带 1 秒超时的上下文
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
-	defer cancel() // 记得释放资源
-	err = api.svc.AddTaskClassItemIntoSchedule(ctx, &req, userIDInterface, intTaskID)
-	if err != nil {
+	req.UserID = c.GetInt("user_id")
+	req.TaskItemID = intTaskID
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), taskClassRequestTimeout)
+	defer cancel()
+	if _, err := api.client.InsertTaskClassItemIntoSchedule(ctx, req); err != nil {
 		respond.DealWithError(c, err)
 		return
 	}
@@ -134,18 +129,19 @@ func (api *TaskClassHandler) UserAddTaskClassItemIntoSchedule(c *gin.Context) {
 
 func (api *TaskClassHandler) DeleteTaskClassItem(c *gin.Context) {
 	taskID := c.Query("task_item_id")
-	//将taskID转换为int
 	intTaskID, err := strconv.Atoi(taskID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
 		return
 	}
 	userID := c.GetInt("user_id")
-	// 创建一个带 1 秒超时的上下文
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
-	defer cancel() // 记得释放资源
-	err = api.svc.DeleteTaskClassItem(ctx, userID, intTaskID)
-	if err != nil {
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), taskClassRequestTimeout)
+	defer cancel()
+	if _, err := api.client.DeleteTaskClassItem(ctx, taskclasscontracts.DeleteTaskClassItemRequest{
+		UserID:     userID,
+		TaskItemID: intTaskID,
+	}); err != nil {
 		respond.DealWithError(c, err)
 		return
 	}
@@ -154,18 +150,19 @@ func (api *TaskClassHandler) DeleteTaskClassItem(c *gin.Context) {
 
 func (api *TaskClassHandler) DeleteTaskClass(c *gin.Context) {
 	taskClassID := c.Query("task_class_id")
-	//将taskClassID转换为int
 	intTaskClassID, err := strconv.Atoi(taskClassID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
 		return
 	}
 	userID := c.GetInt("user_id")
-	// 创建一个带 1 秒超时的上下文
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
-	defer cancel() // 记得释放资源
-	err = api.svc.DeleteTaskClass(ctx, userID, intTaskClassID)
-	if err != nil {
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), taskClassRequestTimeout)
+	defer cancel()
+	if _, err := api.client.DeleteTaskClass(ctx, taskclasscontracts.DeleteTaskClassRequest{
+		UserID:      userID,
+		TaskClassID: intTaskClassID,
+	}); err != nil {
 		respond.DealWithError(c, err)
 		return
 	}
@@ -173,18 +170,16 @@ func (api *TaskClassHandler) DeleteTaskClass(c *gin.Context) {
 }
 
 func (api *TaskClassHandler) UserInsertBatchTaskClassItemsIntoSchedule(c *gin.Context) {
-	var req model.UserInsertTaskClassItemToScheduleRequestBatch
-	err := c.ShouldBindJSON(&req)
-	if err != nil {
+	var req taskclasscontracts.ApplyBatchIntoScheduleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
 		return
 	}
-	userID := c.GetInt("user_id")
-	// 创建一个带 1 秒超时的上下文
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
-	defer cancel() // 记得释放资源
-	err = api.svc.BatchApplyPlans(ctx, req.TaskClassID, userID, &req)
-	if err != nil {
+	req.UserID = c.GetInt("user_id")
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), taskClassRequestTimeout)
+	defer cancel()
+	if _, err := api.client.ApplyBatchIntoSchedule(ctx, req); err != nil {
 		respond.DealWithError(c, err)
 		return
 	}
