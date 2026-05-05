@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package smartflow.memory;
+
+option go_package = "github.com/LoveLosita/smartflow/backend/services/memory/rpc/pb";
+
+service Memory {
+  rpc Ping(StatusResponse) returns (StatusResponse);
+  rpc Retrieve(JSONRequest) returns (JSONResponse);
+  rpc ListItems(JSONRequest) returns (JSONResponse);
+  rpc GetItem(JSONRequest) returns (JSONResponse);
+  rpc CreateItem(JSONRequest) returns (JSONResponse);
+  rpc UpdateItem(JSONRequest) returns (JSONResponse);
+  rpc DeleteItem(JSONRequest) returns (JSONResponse);
+  rpc RestoreItem(JSONRequest) returns (JSONResponse);
+}
+
+message JSONRequest {
+  bytes payload_json = 1;
+}
+
+message JSONResponse {
+  bytes data_json = 1;
+}
+
+message StatusResponse {
+}

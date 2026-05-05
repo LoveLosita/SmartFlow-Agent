@@ -26,6 +26,16 @@ const (
 	maxMemorySourceTextLength       = 1500
 )
 
+// RegisterMemoryExtractRoute 只登记 memory.extract.requested 的服务归属。
+//
+// 职责边界：
+// 1. 只保证发布侧能把事件写入 memory_outbox_messages；
+// 2. 不注册消费 handler，消费边界在阶段 6 CP1 起归 cmd/memory；
+// 3. 重复调用按 outbox 路由注册的幂等语义处理。
+func RegisterMemoryExtractRoute() error {
+	return outboxinfra.RegisterEventService(EventTypeMemoryExtractRequested, outboxinfra.ServiceMemory)
+}
+
 // RegisterMemoryExtractRequestedHandler 注册“记忆抽取请求”消费者。
 //
 // 职责边界：

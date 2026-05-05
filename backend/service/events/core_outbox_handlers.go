@@ -10,13 +10,13 @@ import (
 	"github.com/LoveLosita/smartflow/backend/shared/ports"
 )
 
-// RegisterCoreOutboxHandlers 注册核心业务 outbox handler。
+// RegisterCoreOutboxHandlers 注册单体残留内仍由 agent 边界消费的 outbox handler。
 //
 // 职责边界：
-// 1. 只负责聚合注册当前核心业务 handler，便于 start / worker/all 等启动入口复用同一套接线顺序。
-// 2. 不负责创建 eventBus/outboxRepo/DAO/memoryModule，也不负责启动或关闭事件总线。
+// 1. 只负责聚合注册当前单体残留内仍归 agent 进程消费的 handler；
+// 2. 不负责创建 eventBus/outboxRepo/DAO，也不负责启动或关闭事件总线。
 // 3. 不改变单个 Register* 函数的职责；具体 payload 解析、幂等消费和业务落库仍由各自 handler 负责。
-// 4. 这里以显式 route table 的方式列出“事件类型 -> 服务归属 -> handler”，避免后续新增事件时只改启动入口不改接线表。
+// 4. memory.extract.requested 已在阶段 6 CP1 迁往 cmd/memory，这里只登记其路由，不再注册消费 handler。
 func RegisterCoreOutboxHandlers(
 	eventBus OutboxBus,
 	outboxRepo *outboxinfra.Repository,
@@ -26,7 +26,10 @@ func RegisterCoreOutboxHandlers(
 	memoryModule *memory.Module,
 	adjuster ports.TokenUsageAdjuster,
 ) error {
-	if err := validateCoreOutboxHandlerDeps(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo, memoryModule); err != nil {
+	if err := validateCoreOutboxHandlerDeps(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo); err != nil {
+		return err
+	}
+	if err := RegisterMemoryExtractRoute(); err != nil {
 		return err
 	}
 
@@ -77,7 +80,6 @@ func validateCoreOutboxHandlerDeps(
 	repoManager *dao.RepoManager,
 	agentRepo *dao.AgentDAO,
 	cacheRepo *dao.CacheDAO,
-	memoryModule *memory.Module,
 ) error {
 	if eventBus == nil {
 		return errors.New("event bus is nil")
@@ -94,9 +96,6 @@ func validateCoreOutboxHandlerDeps(
 	if cacheRepo == nil {
 		return errors.New("cache repo is nil")
 	}
-	if memoryModule == nil {
-		return errors.New("memory module is nil")
-	}
 	return nil
 }
 
@@ -110,7 +109,7 @@ func validateAllOutboxHandlerDeps(
 	memoryModule *memory.Module,
 	activeTriggerWorkflow ActiveScheduleTriggeredProcessor,
 ) error {
-	if err := validateCoreOutboxHandlerDeps(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo, memoryModule); err != nil {
+	if err := validateCoreOutboxHandlerDeps(eventBus, outboxRepo, repoManager, agentRepo, cacheRepo); err != nil {
 		return err
 	}
 	if activeTriggerWorkflow == nil {
@@ -156,13 +155,6 @@ func coreOutboxHandlerRoutes(
 			Service:   outboxHandlerServiceAgent,
 			Register: func() error {
 				return RegisterAgentTimelinePersistHandler(eventBus, outboxRepo, agentRepo, cacheRepo)
-			},
-		},
-		{
-			EventType: EventTypeMemoryExtractRequested,
-			Service:   outboxHandlerServiceMemory,
-			Register: func() error {
-				return RegisterMemoryExtractRequestedHandler(eventBus, outboxRepo, memoryModule)
 			},
 		},
 	}

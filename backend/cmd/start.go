@@ -16,6 +16,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/gateway/api"
 	gatewayactivescheduler "github.com/LoveLosita/smartflow/backend/gateway/client/activescheduler"
 	gatewaycourse "github.com/LoveLosita/smartflow/backend/gateway/client/course"
+	gatewaymemory "github.com/LoveLosita/smartflow/backend/gateway/client/memory"
 	gatewaynotification "github.com/LoveLosita/smartflow/backend/gateway/client/notification"
 	gatewayschedule "github.com/LoveLosita/smartflow/backend/gateway/client/schedule"
 	gatewaytask "github.com/LoveLosita/smartflow/backend/gateway/client/task"
@@ -114,7 +115,7 @@ func StartAPI() {
 }
 
 // StartWorker 只启动后台异步能力，不注册 Gin 路由。
-// 当前包含单体残留域 outbox relay / Kafka consumer / memory worker；主动调度扫描已迁到 cmd/active-scheduler。
+// 当前只包含单体残留域 agent outbox relay / Kafka consumer；memory worker 已迁到 cmd/memory。
 func StartWorker() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -202,10 +203,11 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	agentRepo := dao.NewAgentDAO(db)
 	outboxRepo := outboxinfra.NewRepository(db)
 
-	eventBus, err := buildEventBus(outboxRepo)
+	eventBus, err := buildAgentEventBus(outboxRepo)
 	if err != nil {
 		return nil, err
 	}
+	eventPublisher := buildCoreOutboxPublisher(outboxRepo)
 
 	// Service 层初始化。
 	userAuthClient, err := gatewayuserauth.NewClient(gatewayuserauth.ClientConfig{
@@ -257,6 +259,14 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize course zrpc client: %w", err)
 	}
+	memoryClient, err := gatewaymemory.NewClient(gatewaymemory.ClientConfig{
+		Endpoints: viper.GetStringSlice("memory.rpc.endpoints"),
+		Target:    viper.GetString("memory.rpc.target"),
+		Timeout:   viper.GetDuration("memory.rpc.timeout"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize memory zrpc client: %w", err)
+	}
 	activeSchedulerClient, err := gatewayactivescheduler.NewClient(gatewayactivescheduler.ClientConfig{
 		Endpoints: viper.GetStringSlice("activeScheduler.rpc.endpoints"),
 		Target:    viper.GetString("activeScheduler.rpc.target"),
@@ -280,7 +290,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		agentCacheRepo,
 		manager.ActiveSchedule,
 		manager.ActiveScheduleSession,
-		eventBus,
+		eventPublisher,
 		scheduleService,
 		taskSv,
 	)
@@ -293,8 +303,10 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		taskRepo,
 		taskClassRepo,
 		scheduleRepo,
-		memoryModule,
+		memoryClient,
 		memoryCfg,
+		memoryObserver,
+		memoryMetrics,
 	)
 
 	// 1. task_pool facts 已统一走 task RPC，避免聊天 rerun 继续直连 tasks 表；
@@ -333,7 +345,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		return nil, err
 	}
 	agentService.SetActiveScheduleSessionRerunFunc(buildActiveScheduleSessionRerunFunc(manager.ActiveSchedule, activeScheduleGraphRunner, activeSchedulePreviewConfirm, activeScheduleFeedbackLocator))
-	handlers := buildAPIHandlers(taskClient, taskClassClient, courseClient, scheduleClient, agentService, memoryModule, activeSchedulerClient, notificationClient)
+	handlers := buildAPIHandlers(taskClient, taskClassClient, courseClient, scheduleClient, agentService, memoryClient, activeSchedulerClient, notificationClient)
 
 	runtime := &appRuntime{
 		db:          db,
@@ -380,21 +392,19 @@ func buildRAGService(ctx context.Context) (*ragservice.Service, error) {
 	return ragService, nil
 }
 
-func buildEventBus(outboxRepo *outboxinfra.Repository) (eventsvc.OutboxBus, error) {
-	// outbox 多 service 门面装配：
-	// 1. 按 service 维度创建独立 engine，topic / group 由 service 名称推导；
-	// 2. 对外仍然只暴露一个 Publish / Start / Close 门面；
-	// 3. kafka.enabled=false 时返回 nil，业务按既有降级策略执行。
+func buildAgentEventBus(outboxRepo *outboxinfra.Repository) (eventsvc.OutboxBus, error) {
+	// agent outbox 消费边界装配：
+	// 1. 单体残留在 CP1 后只消费 agent 自己的 outbox；
+	// 2. memory.extract.requested 仍可被发布到 memory_outbox_messages，但消费与 worker 已迁往 cmd/memory；
+	// 3. kafka.enabled=false 时返回 nil，业务按既有同步降级策略执行。
 	kafkaCfg := kafkabus.LoadConfig()
-	serviceBuses := make(map[string]eventsvc.OutboxBus, len(eventsvc.OutboxServiceNames()))
-	for _, serviceName := range eventsvc.OutboxServiceNames() {
-		bus, err := eventsvc.NewServiceOutboxBus(outboxRepo, kafkaCfg, serviceName)
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize outbox event bus for service %s: %w", serviceName, err)
-		}
-		if bus != nil {
-			serviceBuses[serviceName] = bus
-		}
+	bus, err := eventsvc.NewServiceOutboxBus(outboxRepo, kafkaCfg, outboxinfra.ServiceAgent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize outbox event bus for service %s: %w", outboxinfra.ServiceAgent, err)
+	}
+	serviceBuses := make(map[string]eventsvc.OutboxBus, 1)
+	if bus != nil {
+		serviceBuses[outboxinfra.ServiceAgent] = bus
 	}
 
 	eventBus := eventsvc.NewRoutedOutboxBus(serviceBuses)
@@ -402,6 +412,23 @@ func buildEventBus(outboxRepo *outboxinfra.Repository) (eventsvc.OutboxBus, erro
 		log.Println("Outbox event bus is disabled")
 	}
 	return eventBus, nil
+}
+
+// buildCoreOutboxPublisher 构造单体残留发布器。
+//
+// 职责边界：
+// 1. 只负责把 agent 主链路产生的跨服务事件写入对应服务 outbox 表；
+// 2. 不创建 memory consumer / relay，memory 消费边界已迁往 cmd/memory；
+// 3. kafka.enabled=false 时返回 nil，让聊天历史继续走同步 DB fallback。
+func buildCoreOutboxPublisher(outboxRepo *outboxinfra.Repository) outboxinfra.EventPublisher {
+	kafkaCfg := kafkabus.LoadConfig()
+	if !kafkaCfg.Enabled || outboxRepo == nil {
+		return nil
+	}
+	return &repositoryOutboxPublisher{
+		repo:     outboxRepo,
+		maxRetry: kafkaCfg.MaxRetry,
+	}
 }
 
 type repositoryOutboxPublisher struct {
@@ -429,12 +456,12 @@ func buildTaskOutboxPublisher(outboxRepo *outboxinfra.Repository) outboxinfra.Ev
 // Publish 以 publish-only 方式写入服务级 outbox。
 //
 // 说明：
-// 1. 这里不复用 outbox EventBus，是因为 EventBus 会创建并启动对应 service engine；
-// 2. 单体残留只允许发布 task 事件，不允许启动 task consumer，否则会和 cmd/task 抢同一 consumer group；
-// 3. payload 仍包装成统一 OutboxEventPayload，确保 cmd/task relay / consumer 能按标准协议解析。
+// 1. 这里不复用 outbox EventBus，是因为 EventBus 会创建并可能启动对应 service engine；
+// 2. 单体残留在 task / memory 等迁移期只允许发布跨服务事件，不允许抢对应 consumer group；
+// 3. payload 仍包装成统一 OutboxEventPayload，确保独立服务 relay / consumer 能按标准协议解析。
 func (p *repositoryOutboxPublisher) Publish(ctx context.Context, req outboxinfra.PublishRequest) error {
 	if p == nil || p.repo == nil {
-		return fmt.Errorf("task outbox publisher is not initialized")
+		return fmt.Errorf("outbox publisher is not initialized")
 	}
 
 	eventType := strings.TrimSpace(req.EventType)
@@ -746,8 +773,10 @@ func configureAgentService(
 	taskRepo *dao.TaskDAO,
 	taskClassRepo *dao.TaskClassDAO,
 	scheduleRepo *dao.ScheduleDAO,
-	memoryModule *memory.Module,
+	memoryReaderClient ports.MemoryReaderClient,
 	memoryCfg memorymodel.Config,
+	memoryObserver memoryobserve.Observer,
+	memoryMetrics memoryobserve.MetricsRecorder,
 ) {
 	if agentService == nil {
 		return
@@ -790,7 +819,11 @@ func configureAgentService(
 		CreateTask: buildQuickTaskCreateFunc(taskRepo),
 		QueryTasks: buildQuickTaskQueryFunc(agentService),
 	})
-	agentService.SetMemoryReader(memoryModule, memoryCfg)
+	// 1. agent 主链路读取记忆统一走 memory zrpc，避免 CP3 后继续直连本进程 memory.Module；
+	// 2. observer / metrics 继续复用启动期装配，保证注入侧观测在 RPC 切流后不丢；
+	// 3. 旧 memoryModule 仍保留在启动图中，作为迁移期依赖和后续回退面；
+	// 4. memory 服务暂不可用时，预取链路只记录警告并软降级，不阻断聊天主流程。
+	agentService.SetMemoryReader(agentsvcsvc.NewMemoryRPCReader(memoryReaderClient, memoryObserver, memoryMetrics), memoryCfg)
 }
 
 func buildTaskClassUpsertFunc(taskClassRepo *dao.TaskClassDAO) func(userID int, input newagenttools.TaskClassUpsertInput) (newagenttools.TaskClassUpsertPersistResult, error) {
@@ -926,7 +959,7 @@ func buildAPIHandlers(
 	courseClient ports.CourseCommandClient,
 	scheduleClient ports.ScheduleCommandClient,
 	agentService *service.AgentService,
-	memoryModule *memory.Module,
+	memoryClient ports.MemoryCommandClient,
 	activeSchedulerClient ports.ActiveSchedulerCommandClient,
 	notificationClient ports.NotificationCommandClient,
 ) *api.ApiHandlers {
@@ -936,7 +969,7 @@ func buildAPIHandlers(
 		CourseHandler:    api.NewCourseHandler(courseClient),
 		ScheduleHandler:  api.NewScheduleAPI(scheduleClient),
 		AgentHandler:     api.NewAgentHandler(agentService),
-		MemoryHandler:    api.NewMemoryHandler(memoryModule),
+		MemoryHandler:    api.NewMemoryHandler(memoryClient),
 		ActiveSchedule:   api.NewActiveScheduleAPI(activeSchedulerClient),
 		Notification:     api.NewNotificationAPI(notificationClient),
 	}
@@ -953,10 +986,7 @@ func (r *appRuntime) startWorkers(ctx context.Context) {
 	} else {
 		log.Println("Outbox event bus is disabled")
 	}
-
-	if r.memoryModule != nil {
-		r.memoryModule.StartWorker(ctx)
-	}
+	log.Println("Memory worker is managed by cmd/memory in phase 6 CP1")
 }
 
 func (r *appRuntime) registerEventHandlers() error {

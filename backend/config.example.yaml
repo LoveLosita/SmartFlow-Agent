@@ -156,6 +156,11 @@ rag:
 
 # 记忆模块配置。
 memory:
+  rpc:
+    listenOn: "0.0.0.0:9088"
+    endpoints:
+      - "127.0.0.1:9088"
+    timeout: 6s
   enabled: true
   rag:
     enabled: true

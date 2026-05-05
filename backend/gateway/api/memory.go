@@ -8,25 +8,30 @@ import (
 	"strings"
 	"time"
 
-	memorypkg "github.com/LoveLosita/smartflow/backend/memory"
-	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
-	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
+	memorycontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/memory"
+	"github.com/LoveLosita/smartflow/backend/shared/ports"
 	"github.com/gin-gonic/gin"
 )
 
 type MemoryHandler struct {
-	module *memorypkg.Module
+	client ports.MemoryCommandClient
 }
 
 var errMemoryHandlerNotReady = errors.New("memory handler is not initialized")
 
-func NewMemoryHandler(module *memorypkg.Module) *MemoryHandler {
-	return &MemoryHandler{module: module}
+// NewMemoryHandler 创建 memory HTTP 门面。
+//
+// 职责边界：
+// 1. gateway 只负责鉴权后的参数绑定、超时和响应透传；
+// 2. 记忆管理业务、审计、向量同步和状态校验都交给 memory zrpc 服务；
+// 3. agent 的 memory reader 已在 CP3 切到 memory zrpc，HTTP 管理面这里只保留管理职责。
+func NewMemoryHandler(client ports.MemoryCommandClient) *MemoryHandler {
+	return &MemoryHandler{client: client}
 }
 
 func (h *MemoryHandler) ListItems(c *gin.Context) {
-	if h == nil || h.module == nil {
+	if h == nil || h.client == nil {
 		c.JSON(http.StatusInternalServerError, respond.InternalError(errMemoryHandlerNotReady))
 		return
 	}
@@ -48,7 +53,7 @@ func (h *MemoryHandler) ListItems(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
 
-	items, err := h.module.ListItems(ctx, memorymodel.ListItemsRequest{
+	resp, err := h.client.ListItems(ctx, memorycontracts.ListItemsRequest{
 		UserID:         c.GetInt("user_id"),
 		ConversationID: strings.TrimSpace(c.Query("conversation_id")),
 		Statuses:       splitCSV(statusesRaw),
@@ -60,11 +65,11 @@ func (h *MemoryHandler) ListItems(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, toMemoryItemViews(items)))
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
 }
 
 func (h *MemoryHandler) GetItem(c *gin.Context) {
-	if h == nil || h.module == nil {
+	if h == nil || h.client == nil {
 		c.JSON(http.StatusInternalServerError, respond.InternalError(errMemoryHandlerNotReady))
 		return
 	}
@@ -78,7 +83,7 @@ func (h *MemoryHandler) GetItem(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
 
-	item, err := h.module.GetItem(ctx, model.MemoryGetItemRequest{
+	resp, err := h.client.GetItem(ctx, memorycontracts.GetItemRequest{
 		UserID:   c.GetInt("user_id"),
 		MemoryID: memoryID,
 	})
@@ -86,16 +91,16 @@ func (h *MemoryHandler) GetItem(c *gin.Context) {
 		respond.DealWithError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, toMemoryItemView(item)))
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
 }
 
 func (h *MemoryHandler) CreateItem(c *gin.Context) {
-	if h == nil || h.module == nil {
+	if h == nil || h.client == nil {
 		c.JSON(http.StatusInternalServerError, respond.InternalError(errMemoryHandlerNotReady))
 		return
 	}
 
-	var req model.MemoryCreateItemRequest
+	var req memorycontracts.CreateItemRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
 		return
@@ -106,16 +111,16 @@ func (h *MemoryHandler) CreateItem(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
 
-	item, err := h.module.CreateItem(ctx, req)
+	resp, err := h.client.CreateItem(ctx, req)
 	if err != nil {
 		respond.DealWithError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, toMemoryItemView(item)))
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
 }
 
 func (h *MemoryHandler) UpdateItem(c *gin.Context) {
-	if h == nil || h.module == nil {
+	if h == nil || h.client == nil {
 		c.JSON(http.StatusInternalServerError, respond.InternalError(errMemoryHandlerNotReady))
 		return
 	}
@@ -126,7 +131,7 @@ func (h *MemoryHandler) UpdateItem(c *gin.Context) {
 		return
 	}
 
-	var req model.MemoryUpdateItemRequest
+	var req memorycontracts.UpdateItemRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
 		return
@@ -138,16 +143,16 @@ func (h *MemoryHandler) UpdateItem(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
 
-	item, err := h.module.UpdateItem(ctx, req)
+	resp, err := h.client.UpdateItem(ctx, req)
 	if err != nil {
 		respond.DealWithError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, toMemoryItemView(item)))
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
 }
 
 func (h *MemoryHandler) DeleteItem(c *gin.Context) {
-	if h == nil || h.module == nil {
+	if h == nil || h.client == nil {
 		c.JSON(http.StatusInternalServerError, respond.InternalError(errMemoryHandlerNotReady))
 		return
 	}
@@ -166,7 +171,7 @@ func (h *MemoryHandler) DeleteItem(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
 
-	item, err := h.module.DeleteItem(ctx, model.MemoryDeleteItemRequest{
+	resp, err := h.client.DeleteItem(ctx, memorycontracts.DeleteItemRequest{
 		UserID:       c.GetInt("user_id"),
 		MemoryID:     memoryID,
 		Reason:       strings.TrimSpace(body.Reason),
@@ -176,11 +181,11 @@ func (h *MemoryHandler) DeleteItem(c *gin.Context) {
 		respond.DealWithError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, toMemoryItemView(item)))
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
 }
 
 func (h *MemoryHandler) RestoreItem(c *gin.Context) {
-	if h == nil || h.module == nil {
+	if h == nil || h.client == nil {
 		c.JSON(http.StatusInternalServerError, respond.InternalError(errMemoryHandlerNotReady))
 		return
 	}
@@ -199,7 +204,7 @@ func (h *MemoryHandler) RestoreItem(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
 
-	item, err := h.module.RestoreItem(ctx, model.MemoryRestoreItemRequest{
+	resp, err := h.client.RestoreItem(ctx, memorycontracts.RestoreItemRequest{
 		UserID:       c.GetInt("user_id"),
 		MemoryID:     memoryID,
 		Reason:       strings.TrimSpace(body.Reason),
@@ -209,7 +214,7 @@ func (h *MemoryHandler) RestoreItem(c *gin.Context) {
 		respond.DealWithError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, toMemoryItemView(item)))
+	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
 }
 
 func parseMemoryIDParam(c *gin.Context) (int64, bool) {
@@ -251,40 +256,4 @@ func splitCSV(raw string) []string {
 		result = append(result, part)
 	}
 	return result
-}
-
-func toMemoryItemViews(items []memorymodel.ItemDTO) []model.MemoryItemView {
-	if len(items) == 0 {
-		return nil
-	}
-	result := make([]model.MemoryItemView, 0, len(items))
-	for _, item := range items {
-		result = append(result, toMemoryItemView(&item))
-	}
-	return result
-}
-
-func toMemoryItemView(item *memorymodel.ItemDTO) model.MemoryItemView {
-	if item == nil {
-		return model.MemoryItemView{}
-	}
-	return model.MemoryItemView{
-		ID:               item.ID,
-		UserID:           item.UserID,
-		ConversationID:   item.ConversationID,
-		AssistantID:      item.AssistantID,
-		RunID:            item.RunID,
-		MemoryType:       item.MemoryType,
-		Title:            item.Title,
-		Content:          item.Content,
-		ContentHash:      item.ContentHash,
-		Confidence:       item.Confidence,
-		Importance:       item.Importance,
-		SensitivityLevel: item.SensitivityLevel,
-		IsExplicit:       item.IsExplicit,
-		Status:           item.Status,
-		TTLAt:            item.TTLAt,
-		CreatedAt:        item.CreatedAt,
-		UpdatedAt:        item.UpdatedAt,
-	}
 }
