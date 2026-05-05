@@ -6,6 +6,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/bootstrap"
 	legacydao "github.com/LoveLosita/smartflow/backend/dao"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
+	"github.com/LoveLosita/smartflow/backend/inits"
 	"github.com/LoveLosita/smartflow/backend/services/taskclassforum/adapter"
 	forumdao "github.com/LoveLosita/smartflow/backend/services/taskclassforum/dao"
 	forumrpc "github.com/LoveLosita/smartflow/backend/services/taskclassforum/rpc"
@@ -32,10 +33,17 @@ func main() {
 	// 3. 后续 task-class 独立成服务后，只替换这里的 adapter 注入点。
 	taskClassPort := adapter.NewLegacyTaskClassAdapter(legacydao.NewTaskClassDAO(db))
 	eventPublisher := outboxinfra.NewRepositoryPublisher(outboxinfra.NewRepository(db), viper.GetInt("kafka.maxRetry"))
+	commentTreeCache := forumsv.CommentTreeCachePort(nil)
+	if rdb, redisErr := inits.OpenRedisFromConfig(); redisErr != nil {
+		log.Printf("taskclassforum 评论树缓存已降级关闭，Redis 连接失败: %v", redisErr)
+	} else {
+		commentTreeCache = forumdao.NewCommentTreeCache(rdb)
+	}
 	svc := forumsv.New(forumsv.Options{
-		DB:             db,
-		TaskClassPort:  taskClassPort,
-		EventPublisher: eventPublisher,
+		DB:               db,
+		TaskClassPort:    taskClassPort,
+		EventPublisher:   eventPublisher,
+		CommentTreeCache: commentTreeCache,
 	})
 	forumrpc.Start(forumrpc.ServerOptions{
 		ListenOn: viper.GetString("taskclassforum.rpc.listenOn"),

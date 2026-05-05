@@ -9,6 +9,7 @@ import (
 
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
 	forumdao "github.com/LoveLosita/smartflow/backend/services/taskclassforum/dao"
+	forumcontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/taskclassforum"
 	sharedevents "github.com/LoveLosita/smartflow/backend/shared/events"
 	"gorm.io/gorm"
 )
@@ -17,6 +18,18 @@ const forumRewardPublishTimeout = 800 * time.Millisecond
 
 type transactionalEventPublisher interface {
 	PublishWithTx(ctx context.Context, tx *gorm.DB, req outboxinfra.PublishRequest) error
+}
+
+// CommentTreeCachePort 是计划广场评论树缓存端口。
+//
+// 职责边界：
+// 1. 只暴露“读分页树、写分页树、递增版本”三个能力，避免 service 依赖 Redis 细节；
+// 2. 缓存内容必须是去个性化读模型，不能带入当前用户的 can_delete；
+// 3. Redis 异常不应影响主链路，service 层会降级回源 DB。
+type CommentTreeCachePort interface {
+	GetCommentTree(ctx context.Context, postID uint64, page int, pageSize int, sort string) ([]forumcontracts.ForumCommentNode, forumcontracts.PageResult, bool, error)
+	SetCommentTree(ctx context.Context, postID uint64, page int, pageSize int, sort string, items []forumcontracts.ForumCommentNode, pageResult forumcontracts.PageResult) error
+	BumpCommentTreeVersion(ctx context.Context, postID uint64) error
 }
 
 // TaskClassSnapshotPort 是计划广场读取和写入 TaskClass 快照的端口。
@@ -67,9 +80,10 @@ type CreatedTaskClass struct {
 
 // Options 是计划广场服务的依赖注入参数。
 type Options struct {
-	DB             *gorm.DB
-	TaskClassPort  TaskClassSnapshotPort
-	EventPublisher outboxinfra.EventPublisher
+	DB               *gorm.DB
+	TaskClassPort    TaskClassSnapshotPort
+	EventPublisher   outboxinfra.EventPublisher
+	CommentTreeCache CommentTreeCachePort
 }
 
 // Service 承载计划广场服务内部业务编排。
@@ -79,18 +93,20 @@ type Options struct {
 // 2. 不负责 HTTP 参数绑定，也不直接返回 respond.Response；
 // 3. 不持有 TaskClass 原表，只通过 TaskClassSnapshotPort 读取和创建副本。
 type Service struct {
-	db             *gorm.DB
-	forumDAO       *forumdao.ForumDAO
-	taskClassPort  TaskClassSnapshotPort
-	eventPublisher outboxinfra.EventPublisher
+	db               *gorm.DB
+	forumDAO         *forumdao.ForumDAO
+	taskClassPort    TaskClassSnapshotPort
+	eventPublisher   outboxinfra.EventPublisher
+	commentTreeCache CommentTreeCachePort
 }
 
 func New(opts Options) *Service {
 	return &Service{
-		db:             opts.DB,
-		forumDAO:       forumdao.NewForumDAO(opts.DB),
-		taskClassPort:  opts.TaskClassPort,
-		eventPublisher: opts.EventPublisher,
+		db:               opts.DB,
+		forumDAO:         forumdao.NewForumDAO(opts.DB),
+		taskClassPort:    opts.TaskClassPort,
+		eventPublisher:   opts.EventPublisher,
+		commentTreeCache: opts.CommentTreeCache,
 	}
 }
 

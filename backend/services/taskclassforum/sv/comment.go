@@ -2,6 +2,7 @@ package sv
 
 import (
 	"context"
+	"log"
 	"strings"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 // 职责边界：
 // 1. P0 按根评论分页，避免一次把超大评论区全部暴露给前端；
 // 2. 数据库存储仍是扁平 parent_comment_id，树结构由 commenttree 包组装；
-// 3. 不做评论缓存，新增、回复、删除后直接读库保持语义简单。
+// 3. 采用 cache-aside 缓存去个性化评论树，返回前再补当前用户的删除权限。
 func (s *Service) ListComments(ctx context.Context, actorUserID uint64, postID uint64, page int, pageSize int, sortBy string) ([]forumcontracts.ForumCommentNode, forumcontracts.PageResult, error) {
 	if err := s.Ready(); err != nil {
 		return nil, forumcontracts.PageResult{}, err
@@ -26,8 +27,13 @@ func (s *Service) ListComments(ctx context.Context, actorUserID uint64, postID u
 		return nil, forumcontracts.PageResult{}, respond.MissingParam
 	}
 	page, pageSize = normalizePage(page, pageSize)
+	sortBy = normalizeCommentSort(sortBy)
 	if _, err := s.forumDAO.FindPublishedPost(ctx, postID); err != nil {
 		return nil, forumcontracts.PageResult{}, normalizeRecordNotFound(err, respond.UserTaskClassNotFound)
+	}
+
+	if cachedItems, cachedPage, hit := s.getCommentTreeCacheBestEffort(ctx, postID, page, pageSize, sortBy); hit {
+		return personalizeCommentNodesForActor(cachedItems, actorUserID), cachedPage, nil
 	}
 
 	total, err := s.forumDAO.CountRootComments(ctx, postID)
@@ -38,15 +44,19 @@ func (s *Service) ListComments(ctx context.Context, actorUserID uint64, postID u
 	if err != nil {
 		return nil, forumcontracts.PageResult{}, err
 	}
+	resultPage := pageResult(page, pageSize, total)
 	if len(roots) == 0 {
-		return []forumcontracts.ForumCommentNode{}, pageResult(page, pageSize, total), nil
+		emptyItems := []forumcontracts.ForumCommentNode{}
+		s.setCommentTreeCacheBestEffort(ctx, postID, page, pageSize, sortBy, emptyItems, resultPage)
+		return emptyItems, resultPage, nil
 	}
 	allComments, err := s.forumDAO.ListCommentsByPostID(ctx, postID)
 	if err != nil {
 		return nil, forumcontracts.PageResult{}, err
 	}
-	nodes := commenttree.BuildForumCommentTree(filterCommentsForRoots(allComments, roots), actorUserID)
-	return nodes, pageResult(page, pageSize, total), nil
+	sharedNodes := commenttree.BuildForumCommentTree(filterCommentsForRoots(allComments, roots), 0)
+	s.setCommentTreeCacheBestEffort(ctx, postID, page, pageSize, sortBy, sharedNodes, resultPage)
+	return personalizeCommentNodesForActor(sharedNodes, actorUserID), resultPage, nil
 }
 
 // CreateComment 创建帖子评论或多层回复。
@@ -100,6 +110,7 @@ func (s *Service) CreateComment(ctx context.Context, req forumcontracts.CreateFo
 	}); err != nil {
 		return nil, err
 	}
+	s.bumpCommentTreeVersionBestEffort(req.PostID)
 	return commentModelToNode(created, req.ActorUserID), nil
 }
 
@@ -113,6 +124,7 @@ func (s *Service) DeleteComment(ctx context.Context, actorUserID uint64, comment
 	}
 
 	var deletedAt *string
+	var changedPostID uint64
 	status := forummodel.ForumCommentStatusDeleted
 	if err := s.forumDAO.Transaction(ctx, func(txDAO *forumdao.ForumDAO) error {
 		comment, err := txDAO.LockCommentByID(ctx, commentID)
@@ -133,10 +145,14 @@ func (s *Service) DeleteComment(ctx context.Context, actorUserID uint64, comment
 		if err := txDAO.AddPostCounter(ctx, comment.PostID, "comment_count", -1); err != nil {
 			return err
 		}
+		changedPostID = comment.PostID
 		deletedAt = formatTimePtr(&now)
 		return nil
 	}); err != nil {
 		return nil, err
+	}
+	if changedPostID != 0 {
+		s.bumpCommentTreeVersionBestEffort(changedPostID)
 	}
 	return &forumcontracts.DeleteForumCommentResult{
 		CommentID: commentID,
@@ -199,4 +215,70 @@ func collectDescendantCommentIDs(parentID uint64, comments []forummodel.ForumCom
 		result[comment.ID] = struct{}{}
 		collectDescendantCommentIDs(comment.ID, comments, result)
 	}
+}
+
+func normalizeCommentSort(sortBy string) string {
+	if strings.TrimSpace(sortBy) == "latest" {
+		return "latest"
+	}
+	return "oldest"
+}
+
+func (s *Service) getCommentTreeCacheBestEffort(ctx context.Context, postID uint64, page int, pageSize int, sortBy string) ([]forumcontracts.ForumCommentNode, forumcontracts.PageResult, bool) {
+	if s == nil || s.commentTreeCache == nil {
+		return nil, forumcontracts.PageResult{}, false
+	}
+	items, resultPage, hit, err := s.commentTreeCache.GetCommentTree(ctx, postID, page, pageSize, sortBy)
+	if err != nil {
+		log.Printf("评论树缓存读取失败，已降级回源 DB post_id=%d page=%d page_size=%d sort=%s err=%v", postID, page, pageSize, sortBy, err)
+		return nil, forumcontracts.PageResult{}, false
+	}
+	return items, resultPage, hit
+}
+
+func (s *Service) setCommentTreeCacheBestEffort(ctx context.Context, postID uint64, page int, pageSize int, sortBy string, items []forumcontracts.ForumCommentNode, resultPage forumcontracts.PageResult) {
+	if s == nil || s.commentTreeCache == nil {
+		return
+	}
+	if err := s.commentTreeCache.SetCommentTree(ctx, postID, page, pageSize, sortBy, items, resultPage); err != nil {
+		log.Printf("评论树缓存写入失败，已保持 DB 结果返回 post_id=%d page=%d page_size=%d sort=%s err=%v", postID, page, pageSize, sortBy, err)
+	}
+}
+
+func (s *Service) bumpCommentTreeVersionBestEffort(postID uint64) {
+	if s == nil || s.commentTreeCache == nil || postID == 0 {
+		return
+	}
+
+	// 1. 写库事务已经成功，缓存失效不应再反向影响评论发布/删除结果。
+	// 2. 使用独立短超时 context，避免客户端取消请求后漏掉版本递增。
+	// 3. 失败时只记录日志，旧缓存依靠短 TTL 自然过期作为兜底。
+	cacheCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if err := s.commentTreeCache.BumpCommentTreeVersion(cacheCtx, postID); err != nil {
+		log.Printf("评论树缓存版本递增失败，等待短 TTL 自然过期 post_id=%d err=%v", postID, err)
+	}
+}
+
+func personalizeCommentNodesForActor(nodes []forumcontracts.ForumCommentNode, actorUserID uint64) []forumcontracts.ForumCommentNode {
+	if nodes == nil {
+		return []forumcontracts.ForumCommentNode{}
+	}
+	result := make([]forumcontracts.ForumCommentNode, 0, len(nodes))
+	for _, node := range nodes {
+		result = append(result, personalizeCommentNodeForActor(node, actorUserID))
+	}
+	return result
+}
+
+func personalizeCommentNodeForActor(node forumcontracts.ForumCommentNode, actorUserID uint64) forumcontracts.ForumCommentNode {
+	children := make([]forumcontracts.ForumCommentNode, 0, len(node.Children))
+	for _, child := range node.Children {
+		children = append(children, personalizeCommentNodeForActor(child, actorUserID))
+	}
+	node.Children = children
+	node.CanDelete = actorUserID != 0 &&
+		node.Author.UserID == actorUserID &&
+		node.Status == forummodel.ForumCommentStatusVisible
+	return node
 }
