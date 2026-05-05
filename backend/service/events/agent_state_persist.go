@@ -10,7 +10,7 @@ import (
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
 	"github.com/LoveLosita/smartflow/backend/model"
-	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
+	agentmodel "github.com/LoveLosita/smartflow/backend/services/agent/model"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -86,7 +86,7 @@ func RegisterAgentStateSnapshotHandler(
 func PublishAgentStateSnapshot(
 	ctx context.Context,
 	publisher outboxinfra.EventPublisher,
-	snapshot *newagentmodel.AgentStateSnapshot,
+	snapshot *agentmodel.AgentStateSnapshot,
 	conversationID string,
 	userID int,
 ) {

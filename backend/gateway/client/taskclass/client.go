@@ -81,6 +81,11 @@ func (c *Client) UpdateTaskClass(ctx context.Context, req taskclasscontracts.Ups
 	return jsonFromResponse(resp, err)
 }
 
+func (c *Client) GetAgentTaskClasses(ctx context.Context, req taskclasscontracts.AgentTaskClassesRequest) (json.RawMessage, error) {
+	resp, err := c.callJSON(ctx, c.rpc.GetAgentTaskClasses, req)
+	return jsonFromResponse(resp, err)
+}
+
 func (c *Client) InsertTaskClassItemIntoSchedule(ctx context.Context, req taskclasscontracts.InsertTaskClassItemIntoScheduleRequest) (json.RawMessage, error) {
 	resp, err := c.callJSON(ctx, c.rpc.InsertTaskClassItemIntoSchedule, req)
 	return jsonFromResponse(resp, err)

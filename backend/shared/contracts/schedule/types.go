@@ -55,6 +55,63 @@ type SmartPlanningMultiRequest struct {
 	TaskClassIDs []int `json:"task_class_ids"`
 }
 
+// AgentScheduleWeekRequest 是 agent schedule provider 按周读取原始日程槽位的契约。
+//
+// 职责边界：
+// 1. 只按 user_id + week 读取已经落库的 schedule/schedule_event 事实；
+// 2. 不走前端周课表 DTO，避免丢失 embedded_task_id / can_be_embedded 等编排语义；
+// 3. 该契约只服务 agent 内部状态加载，不改变现有 HTTP 周课表响应。
+type AgentScheduleWeekRequest struct {
+	UserID int `json:"user_id"`
+	Week   int `json:"week"`
+}
+
+type AgentScheduleWeekResponse struct {
+	Schedules []AgentScheduleSlot `json:"schedules"`
+}
+
+type AgentScheduleSlot struct {
+	ID             int                    `json:"id"`
+	EventID        int                    `json:"event_id"`
+	UserID         int                    `json:"user_id"`
+	Week           int                    `json:"week"`
+	DayOfWeek      int                    `json:"day_of_week"`
+	Section        int                    `json:"section"`
+	EmbeddedTaskID *int                   `json:"embedded_task_id,omitempty"`
+	Status         string                 `json:"status"`
+	Event          *AgentScheduleEvent    `json:"event,omitempty"`
+	EmbeddedTask   *AgentScheduleTaskItem `json:"embedded_task,omitempty"`
+}
+
+type AgentScheduleEvent struct {
+	ID             int       `json:"id"`
+	UserID         int       `json:"user_id"`
+	Name           string    `json:"name"`
+	Location       *string   `json:"location,omitempty"`
+	Type           string    `json:"type"`
+	RelID          *int      `json:"rel_id,omitempty"`
+	TaskSourceType string    `json:"task_source_type,omitempty"`
+	CanBeEmbedded  bool      `json:"can_be_embedded"`
+	StartTime      time.Time `json:"start_time,omitempty"`
+	EndTime        time.Time `json:"end_time,omitempty"`
+}
+
+type AgentScheduleTaskItem struct {
+	ID           int                      `json:"id"`
+	CategoryID   *int                     `json:"category_id,omitempty"`
+	Order        *int                     `json:"order,omitempty"`
+	Content      string                   `json:"content"`
+	EmbeddedTime *AgentScheduleTargetTime `json:"embedded_time,omitempty"`
+	Status       *int                     `json:"status,omitempty"`
+}
+
+type AgentScheduleTargetTime struct {
+	Week        int `json:"week"`
+	DayOfWeek   int `json:"day_of_week"`
+	SectionFrom int `json:"section_from"`
+	SectionTo   int `json:"section_to"`
+}
+
 // Slot 是跨进程表达日程原子节次的稳定契约。
 type Slot struct {
 	Week      int       `json:"week"`

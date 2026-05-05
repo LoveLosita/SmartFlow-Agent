@@ -320,7 +320,7 @@ CREATE TABLE `users`
 
 ## 4.2 Agent可调用的工具定义
 
-以下定义基于当前代码实现（`backend/newAgent/tools/registry.go` + `backend/cmd/start.go` 注入），不是规划态文档。
+以下定义基于当前代码实现（`backend/services/agent/tools/registry.go` + `backend/cmd/start.go` 注入），不是规划态文档。
 
 ### 4.2.1 调用契约
 

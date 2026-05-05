@@ -26,7 +26,7 @@ type Options struct {
 	CourseImageResponsesClient *ArkResponsesClient
 }
 
-// AgentModelClients 一次性暴露 newAgent 图常用的模型分配结果。
+// AgentModelClients 一次性暴露 agent 图常用的模型分配结果。
 type AgentModelClients struct {
 	Chat    *Client
 	Plan    *Client
@@ -94,7 +94,7 @@ func (s *Service) CourseImageResponsesClient() *ArkResponsesClient {
 	return s.courseImageResponsesClient
 }
 
-// NewAgentModelClients 一次性返回 newAgent 图里常用的模型分配。
+// NewAgentModelClients 一次性返回 agent 图里常用的模型分配。
 func (s *Service) NewAgentModelClients() AgentModelClients {
 	if s == nil {
 		return AgentModelClients{}

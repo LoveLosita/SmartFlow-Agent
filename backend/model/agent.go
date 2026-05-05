@@ -47,7 +47,7 @@ const (
 //	  }
 //	}
 //
-// TODO(newagent/api): 进入聊天主流程前，优先调用 req.ResumeRequest()；若命中恢复协议，则不要把本轮请求按普通聊天处理。
+// TODO(agent/api): 进入聊天主流程前，优先调用 req.ResumeRequest()；若命中恢复协议，则不要把本轮请求按普通聊天处理。
 type AgentResumeRequest struct {
 	InteractionID string            `json:"interaction_id"`
 	Type          AgentResumeType   `json:"type,omitempty"`

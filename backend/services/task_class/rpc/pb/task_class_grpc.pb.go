@@ -14,6 +14,7 @@ const (
 	TaskClass_ListTaskClasses_FullMethodName                 = "/smartflow.taskclass.TaskClass/ListTaskClasses"
 	TaskClass_GetTaskClass_FullMethodName                    = "/smartflow.taskclass.TaskClass/GetTaskClass"
 	TaskClass_UpdateTaskClass_FullMethodName                 = "/smartflow.taskclass.TaskClass/UpdateTaskClass"
+	TaskClass_GetAgentTaskClasses_FullMethodName             = "/smartflow.taskclass.TaskClass/GetAgentTaskClasses"
 	TaskClass_InsertTaskClassItemIntoSchedule_FullMethodName = "/smartflow.taskclass.TaskClass/InsertTaskClassItemIntoSchedule"
 	TaskClass_DeleteTaskClassItem_FullMethodName             = "/smartflow.taskclass.TaskClass/DeleteTaskClassItem"
 	TaskClass_DeleteTaskClass_FullMethodName                 = "/smartflow.taskclass.TaskClass/DeleteTaskClass"
@@ -26,6 +27,7 @@ type TaskClassClient interface {
 	ListTaskClasses(ctx context.Context, in *JSONRequest, opts ...grpc.CallOption) (*JSONResponse, error)
 	GetTaskClass(ctx context.Context, in *JSONRequest, opts ...grpc.CallOption) (*JSONResponse, error)
 	UpdateTaskClass(ctx context.Context, in *JSONRequest, opts ...grpc.CallOption) (*JSONResponse, error)
+	GetAgentTaskClasses(ctx context.Context, in *JSONRequest, opts ...grpc.CallOption) (*JSONResponse, error)
 	InsertTaskClassItemIntoSchedule(ctx context.Context, in *JSONRequest, opts ...grpc.CallOption) (*JSONResponse, error)
 	DeleteTaskClassItem(ctx context.Context, in *JSONRequest, opts ...grpc.CallOption) (*JSONResponse, error)
 	DeleteTaskClass(ctx context.Context, in *JSONRequest, opts ...grpc.CallOption) (*JSONResponse, error)
@@ -70,6 +72,12 @@ func (c *taskClassClient) UpdateTaskClass(ctx context.Context, in *JSONRequest, 
 	return out, err
 }
 
+func (c *taskClassClient) GetAgentTaskClasses(ctx context.Context, in *JSONRequest, opts ...grpc.CallOption) (*JSONResponse, error) {
+	out := new(JSONResponse)
+	err := c.cc.Invoke(ctx, TaskClass_GetAgentTaskClasses_FullMethodName, in, out, opts...)
+	return out, err
+}
+
 func (c *taskClassClient) InsertTaskClassItemIntoSchedule(ctx context.Context, in *JSONRequest, opts ...grpc.CallOption) (*JSONResponse, error) {
 	out := new(JSONResponse)
 	err := c.cc.Invoke(ctx, TaskClass_InsertTaskClassItemIntoSchedule_FullMethodName, in, out, opts...)
@@ -100,6 +108,7 @@ type TaskClassServer interface {
 	ListTaskClasses(context.Context, *JSONRequest) (*JSONResponse, error)
 	GetTaskClass(context.Context, *JSONRequest) (*JSONResponse, error)
 	UpdateTaskClass(context.Context, *JSONRequest) (*JSONResponse, error)
+	GetAgentTaskClasses(context.Context, *JSONRequest) (*JSONResponse, error)
 	InsertTaskClassItemIntoSchedule(context.Context, *JSONRequest) (*JSONResponse, error)
 	DeleteTaskClassItem(context.Context, *JSONRequest) (*JSONResponse, error)
 	DeleteTaskClass(context.Context, *JSONRequest) (*JSONResponse, error)
@@ -122,6 +131,9 @@ func (UnimplementedTaskClassServer) GetTaskClass(context.Context, *JSONRequest) 
 }
 func (UnimplementedTaskClassServer) UpdateTaskClass(context.Context, *JSONRequest) (*JSONResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method UpdateTaskClass not implemented")
+}
+func (UnimplementedTaskClassServer) GetAgentTaskClasses(context.Context, *JSONRequest) (*JSONResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetAgentTaskClasses not implemented")
 }
 func (UnimplementedTaskClassServer) InsertTaskClassItemIntoSchedule(context.Context, *JSONRequest) (*JSONResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method InsertTaskClassItemIntoSchedule not implemented")
@@ -181,6 +193,7 @@ var TaskClass_ServiceDesc = grpc.ServiceDesc{
 		{MethodName: "ListTaskClasses", Handler: _TaskClass_JSON_Handler(TaskClass_ListTaskClasses_FullMethodName, TaskClassServer.ListTaskClasses)},
 		{MethodName: "GetTaskClass", Handler: _TaskClass_JSON_Handler(TaskClass_GetTaskClass_FullMethodName, TaskClassServer.GetTaskClass)},
 		{MethodName: "UpdateTaskClass", Handler: _TaskClass_JSON_Handler(TaskClass_UpdateTaskClass_FullMethodName, TaskClassServer.UpdateTaskClass)},
+		{MethodName: "GetAgentTaskClasses", Handler: _TaskClass_JSON_Handler(TaskClass_GetAgentTaskClasses_FullMethodName, TaskClassServer.GetAgentTaskClasses)},
 		{MethodName: "InsertTaskClassItemIntoSchedule", Handler: _TaskClass_JSON_Handler(TaskClass_InsertTaskClassItemIntoSchedule_FullMethodName, TaskClassServer.InsertTaskClassItemIntoSchedule)},
 		{MethodName: "DeleteTaskClassItem", Handler: _TaskClass_JSON_Handler(TaskClass_DeleteTaskClassItem_FullMethodName, TaskClassServer.DeleteTaskClassItem)},
 		{MethodName: "DeleteTaskClass", Handler: _TaskClass_JSON_Handler(TaskClass_DeleteTaskClass_FullMethodName, TaskClassServer.DeleteTaskClass)},

@@ -31,14 +31,8 @@ import (
 	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	"github.com/LoveLosita/smartflow/backend/middleware"
 	"github.com/LoveLosita/smartflow/backend/model"
-	newagentconv "github.com/LoveLosita/smartflow/backend/newAgent/conv"
-	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
-	newagentstream "github.com/LoveLosita/smartflow/backend/newAgent/stream"
-	newagenttools "github.com/LoveLosita/smartflow/backend/newAgent/tools"
-	"github.com/LoveLosita/smartflow/backend/newAgent/tools/web"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	"github.com/LoveLosita/smartflow/backend/service"
-	agentsvcsvc "github.com/LoveLosita/smartflow/backend/service/agentsvc"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
 	activeadapters "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/adapters"
 	activeapplyadapter "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/applyadapter"
@@ -48,6 +42,10 @@ import (
 	activesel "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/selection"
 	activesvc "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/service"
 	activeTrigger "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/trigger"
+	agentstream "github.com/LoveLosita/smartflow/backend/services/agent/stream"
+	agentsv "github.com/LoveLosita/smartflow/backend/services/agent/sv"
+	agenttools "github.com/LoveLosita/smartflow/backend/services/agent/tools"
+	"github.com/LoveLosita/smartflow/backend/services/agent/tools/web"
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
 	ragconfig "github.com/LoveLosita/smartflow/backend/services/rag/config"
@@ -61,7 +59,7 @@ import (
 //
 // 职责边界：
 // 1. 只负责保存启动期已经装配好的基础设施、仓储、服务和 HTTP handler；
-// 2. 不承载业务逻辑，业务仍然由 service / newAgent / memory 等领域模块负责；
+// 2. 不承载业务逻辑，业务仍然由 service / agent / memory 等领域模块负责；
 // 3. 不决定进程角色，api / worker / all 由 StartAPI、StartWorker、StartAll 选择启动哪些生命周期。
 type appRuntime struct {
 	db             *gorm.DB
@@ -141,7 +139,7 @@ func mustBuildRuntime(ctx context.Context) *appRuntime {
 //
 // 步骤说明：
 // 1. 先初始化配置、数据库、Redis、模型、RAG、memory 等基础设施；
-// 2. 再构造 DAO / Service / newAgent 依赖；
+// 2. 再构造 DAO / Service / agent 依赖；
 // 3. 最后构造 HTTP handlers，供 api/all 模式按需启动；
 // 4. worker 模式暂时也复用完整依赖图，避免同轮迁移拆出两套装配逻辑。
 func buildRuntime(ctx context.Context) (*appRuntime, error) {
@@ -282,7 +280,7 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	taskSv := service.NewTaskService(taskRepo, cacheRepo, taskOutboxPublisher)
 	taskSv.SetActiveScheduleDAO(manager.ActiveSchedule)
 	scheduleService := service.NewScheduleService(scheduleRepo, taskClassRepo, manager, cacheRepo)
-	agentService := service.NewAgentServiceWithSchedule(
+	agentService := agentsv.NewAgentService(
 		llmService,
 		agentRepo,
 		taskRepo,
@@ -291,18 +289,22 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		manager.ActiveSchedule,
 		manager.ActiveScheduleSession,
 		eventPublisher,
-		scheduleService,
-		taskSv,
 	)
+	// 1. 仍由启动装配层注入旧 service 的排程能力，避免 agent/sv 反向 import 旧 service 形成循环依赖。
+	// 2. 后续 schedule/task 完全走 RPC 后，这两个函数注入点可继续缩掉。
+	agentService.SmartPlanningMultiRawFunc = scheduleService.SmartPlanningMultiRaw
+	agentService.HybridScheduleWithPlanMultiFunc = scheduleService.HybridScheduleWithPlanMulti
+	agentService.ResolvePlanningWindowFunc = scheduleService.ResolvePlanningWindowByTaskClasses
+	agentService.GetTasksWithUrgencyPromotionFunc = taskSv.GetTasksWithUrgencyPromotion
 
 	configureAgentService(
 		agentService,
 		ragRuntime,
 		agentRepo,
 		cacheRepo,
-		taskRepo,
-		taskClassRepo,
-		scheduleRepo,
+		taskClient,
+		taskClassClient,
+		scheduleClient,
 		memoryClient,
 		memoryCfg,
 		memoryObserver,
@@ -528,14 +530,14 @@ func buildActiveScheduleSessionRerunFunc(
 	graphRunner *activegraph.Runner,
 	previewConfirm *activesvc.PreviewConfirmService,
 	feedbackLocator *activefeedbacklocate.Service,
-) agentsvcsvc.ActiveScheduleSessionRerunFunc {
+) agentsv.ActiveScheduleSessionRerunFunc {
 	return func(
 		ctx context.Context,
 		session *model.ActiveScheduleSessionSnapshot,
 		userMessage string,
 		traceID string,
 		requestStart time.Time,
-	) (*agentsvcsvc.ActiveScheduleSessionRerunResult, error) {
+	) (*agentsv.ActiveScheduleSessionRerunResult, error) {
 		if activeDAO == nil || graphRunner == nil || previewConfirm == nil {
 			return nil, fmt.Errorf("主动调度 rerun 依赖未初始化")
 		}
@@ -568,7 +570,7 @@ func buildActiveScheduleSessionRerunFunc(
 				nextState.LastNotificationID = ""
 				nextState.FailedReason = ""
 				nextState.ExpiresAt = nil
-				return &agentsvcsvc.ActiveScheduleSessionRerunResult{
+				return &agentsv.ActiveScheduleSessionRerunResult{
 					AssistantText: question,
 					SessionState:  nextState,
 					SessionStatus: model.ActiveScheduleSessionStatusWaitingUserReply,
@@ -596,7 +598,7 @@ func buildActiveScheduleSessionRerunFunc(
 				nextState.LastNotificationID = ""
 				nextState.FailedReason = ""
 				nextState.ExpiresAt = nil
-				return &agentsvcsvc.ActiveScheduleSessionRerunResult{
+				return &agentsv.ActiveScheduleSessionRerunResult{
 					AssistantText: question,
 					SessionState:  nextState,
 					SessionStatus: model.ActiveScheduleSessionStatusWaitingUserReply,
@@ -666,9 +668,9 @@ func buildActiveScheduleSessionRerunFunc(
 			expiresAt := previewResp.Detail.ExpiresAt
 			state.ExpiresAt = &expiresAt
 
-			return &agentsvcsvc.ActiveScheduleSessionRerunResult{
+			return &agentsv.ActiveScheduleSessionRerunResult{
 				AssistantText: firstNonEmptyString(selectionResult.ExplanationText, selectionResult.NotificationSummary, previewResp.Detail.Explanation, previewResp.Detail.Notification, "主动调度建议已更新。"),
-				BusinessCard: &newagentstream.StreamBusinessCardExtra{
+				BusinessCard: &agentstream.StreamBusinessCardExtra{
 					CardType: "active_schedule_preview",
 					Title:    "SmartFlow 日程调整建议",
 					Summary:  firstNonEmptyString(selectionResult.NotificationSummary, previewResp.Detail.Notification, previewResp.Detail.Explanation),
@@ -683,7 +685,7 @@ func buildActiveScheduleSessionRerunFunc(
 			question := firstNonEmptyString(selectionResult.AskUserQuestion, selectionResult.ExplanationText, "请继续补充主动调度需要的信息。")
 			state.PendingQuestion = question
 			state.ExpiresAt = nil
-			return &agentsvcsvc.ActiveScheduleSessionRerunResult{
+			return &agentsv.ActiveScheduleSessionRerunResult{
 				AssistantText: question,
 				SessionState:  state,
 				SessionStatus: model.ActiveScheduleSessionStatusWaitingUserReply,
@@ -694,7 +696,7 @@ func buildActiveScheduleSessionRerunFunc(
 			state.PendingQuestion = ""
 			state.MissingInfo = nil
 			state.ExpiresAt = nil
-			return &agentsvcsvc.ActiveScheduleSessionRerunResult{
+			return &agentsv.ActiveScheduleSessionRerunResult{
 				AssistantText: assistantText,
 				SessionState:  state,
 				SessionStatus: model.ActiveScheduleSessionStatusIgnored,
@@ -766,13 +768,13 @@ func containsString(values []string, target string) bool {
 }
 
 func configureAgentService(
-	agentService *service.AgentService,
+	agentService *agentsv.AgentService,
 	ragRuntime ragservice.Runtime,
 	agentRepo *dao.AgentDAO,
 	cacheRepo *dao.CacheDAO,
-	taskRepo *dao.TaskDAO,
-	taskClassRepo *dao.TaskClassDAO,
-	scheduleRepo *dao.ScheduleDAO,
+	taskClient agentsv.TaskRPCClient,
+	taskClassClient agentsv.TaskClassAgentRPCClient,
+	scheduleClient agentsv.ScheduleAgentRPCClient,
 	memoryReaderClient ports.MemoryReaderClient,
 	memoryCfg memorymodel.Config,
 	memoryObserver memoryobserve.Observer,
@@ -782,7 +784,7 @@ func configureAgentService(
 		return
 	}
 
-	// newAgent 依赖接线。
+	// agent 依赖接线。
 	agentService.SetAgentStateStore(dao.NewAgentStateStoreAdapter(cacheRepo))
 
 	var webSearchProvider web.SearchProvider
@@ -806,151 +808,24 @@ func configureAgentService(
 		webSearchProvider = &web.MockProvider{}
 	}
 
-	agentService.SetToolRegistry(newagenttools.NewDefaultRegistryWithDeps(newagenttools.DefaultRegistryDeps{
+	agentService.SetToolRegistry(agenttools.NewDefaultRegistryWithDeps(agenttools.DefaultRegistryDeps{
 		RAGRuntime:        ragRuntime,
 		WebSearchProvider: webSearchProvider,
-		TaskClassWriteDeps: newagenttools.TaskClassWriteDeps{
-			UpsertTaskClass: buildTaskClassUpsertFunc(taskClassRepo),
+		TaskClassWriteDeps: agenttools.TaskClassWriteDeps{
+			UpsertTaskClass: agentsv.NewTaskClassRPCUpsertFunc(taskClassClient),
 		},
 	}))
-	agentService.SetScheduleProvider(newagentconv.NewScheduleProvider(scheduleRepo, taskClassRepo))
+	agentService.SetScheduleProvider(agentsv.NewScheduleRPCProvider(scheduleClient, taskClassClient))
 	agentService.SetCompactionStore(agentRepo)
-	agentService.SetQuickTaskDeps(newagentmodel.QuickTaskDeps{
-		CreateTask: buildQuickTaskCreateFunc(taskRepo),
-		QueryTasks: buildQuickTaskQueryFunc(agentService),
-	})
+	// 1. quick task 创建 / 查询统一走 task zrpc，避免 agent 工具链继续直连 tasks 表；
+	// 2. task-class upsert 与 schedule provider 已在 CP5 统一切到 task-class/schedule zrpc；
+	// 3. task 服务不可用时由 quick_task 节点返回轻量失败文案，不影响 agent 其它分支。
+	agentService.SetQuickTaskDeps(agentsv.NewTaskRPCQuickTaskDeps(taskClient))
 	// 1. agent 主链路读取记忆统一走 memory zrpc，避免 CP3 后继续直连本进程 memory.Module；
 	// 2. observer / metrics 继续复用启动期装配，保证注入侧观测在 RPC 切流后不丢；
 	// 3. 旧 memoryModule 仍保留在启动图中，作为迁移期依赖和后续回退面；
 	// 4. memory 服务暂不可用时，预取链路只记录警告并软降级，不阻断聊天主流程。
-	agentService.SetMemoryReader(agentsvcsvc.NewMemoryRPCReader(memoryReaderClient, memoryObserver, memoryMetrics), memoryCfg)
-}
-
-func buildTaskClassUpsertFunc(taskClassRepo *dao.TaskClassDAO) func(userID int, input newagenttools.TaskClassUpsertInput) (newagenttools.TaskClassUpsertPersistResult, error) {
-	return func(userID int, input newagenttools.TaskClassUpsertInput) (newagenttools.TaskClassUpsertPersistResult, error) {
-		req := input.Request
-		taskClassID := 0
-		created := input.ID == 0
-
-		err := taskClassRepo.Transaction(func(txDAO *dao.TaskClassDAO) error {
-			// 1. 先构造任务类主体，保持与现有 AddOrUpdateTaskClass 口径一致。
-			taskClass := &model.TaskClass{
-				ID:                 input.ID,
-				Name:               &req.Name,
-				Mode:               &req.Mode,
-				SubjectType:        stringPtrOrNil(req.SubjectType),
-				DifficultyLevel:    stringPtrOrNil(req.DifficultyLevel),
-				CognitiveIntensity: stringPtrOrNil(req.CognitiveIntensity),
-				TotalSlots:         &req.Config.TotalSlots,
-				Strategy:           &req.Config.Strategy,
-				ExcludedSlots:      req.Config.ExcludedSlots,
-				ExcludedDaysOfWeek: req.Config.ExcludedDaysOfWeek,
-			}
-			taskClass.AllowFillerCourse = &req.Config.AllowFillerCourse
-
-			// 2. 自动模式下写入日期范围；手动模式允许为空。
-			if req.StartDate != "" {
-				startDate, parseErr := time.ParseInLocation("2006-01-02", req.StartDate, time.Local)
-				if parseErr != nil {
-					return parseErr
-				}
-				taskClass.StartDate = &startDate
-			}
-			if req.EndDate != "" {
-				endDate, parseErr := time.ParseInLocation("2006-01-02", req.EndDate, time.Local)
-				if parseErr != nil {
-					return parseErr
-				}
-				taskClass.EndDate = &endDate
-			}
-
-			// 3. upsert 主体后拿到稳定 task_class_id，供 items 绑定 category_id。
-			updatedID, upsertErr := txDAO.AddOrUpdateTaskClass(userID, taskClass)
-			if upsertErr != nil {
-				return upsertErr
-			}
-			taskClassID = updatedID
-
-			// 4. 构造任务块并批量 upsert。
-			items := make([]model.TaskClassItem, 0, len(req.Items))
-			for _, itemReq := range req.Items {
-				categoryID := taskClassID
-				order := itemReq.Order
-				content := itemReq.Content
-				status := model.TaskItemStatusUnscheduled
-				items = append(items, model.TaskClassItem{
-					ID:           itemReq.ID,
-					CategoryID:   &categoryID,
-					Order:        &order,
-					Content:      &content,
-					EmbeddedTime: itemReq.EmbeddedTime,
-					Status:       &status,
-				})
-			}
-			return txDAO.AddOrUpdateTaskClassItems(userID, items)
-		})
-		if err != nil {
-			return newagenttools.TaskClassUpsertPersistResult{}, err
-		}
-		return newagenttools.TaskClassUpsertPersistResult{
-			TaskClassID: taskClassID,
-			Created:     created,
-		}, nil
-	}
-}
-
-func buildQuickTaskCreateFunc(taskRepo *dao.TaskDAO) func(userID int, title string, priorityGroup int, estimatedSections int, deadlineAt *time.Time, urgencyThresholdAt *time.Time) (int, error) {
-	return func(userID int, title string, priorityGroup int, estimatedSections int, deadlineAt *time.Time, urgencyThresholdAt *time.Time) (int, error) {
-		created, err := taskRepo.AddTask(&model.Task{
-			UserID:             userID,
-			Title:              title,
-			Priority:           priorityGroup,
-			EstimatedSections:  model.NormalizeEstimatedSections(&estimatedSections),
-			IsCompleted:        false,
-			DeadlineAt:         deadlineAt,
-			UrgencyThresholdAt: urgencyThresholdAt,
-		})
-		if err != nil {
-			return 0, err
-		}
-		return created.ID, nil
-	}
-}
-
-func buildQuickTaskQueryFunc(agentService *service.AgentService) func(ctx context.Context, userID int, params newagentmodel.TaskQueryParams) ([]newagentmodel.TaskQueryResult, error) {
-	return func(ctx context.Context, userID int, params newagentmodel.TaskQueryParams) ([]newagentmodel.TaskQueryResult, error) {
-		req := newagentmodel.TaskQueryRequest{
-			UserID:           userID,
-			Quadrant:         params.Quadrant,
-			SortBy:           params.SortBy,
-			Order:            params.Order,
-			Limit:            params.Limit,
-			IncludeCompleted: params.IncludeCompleted,
-			Keyword:          params.Keyword,
-			DeadlineBefore:   params.DeadlineBefore,
-			DeadlineAfter:    params.DeadlineAfter,
-		}
-		records, err := agentService.QueryTasksForTool(ctx, req)
-		if err != nil {
-			return nil, err
-		}
-		results := make([]newagentmodel.TaskQueryResult, 0, len(records))
-		for _, r := range records {
-			deadlineStr := ""
-			if r.DeadlineAt != nil {
-				deadlineStr = r.DeadlineAt.In(time.Local).Format("2006-01-02 15:04")
-			}
-			results = append(results, newagentmodel.TaskQueryResult{
-				ID:                r.ID,
-				Title:             r.Title,
-				PriorityGroup:     r.PriorityGroup,
-				EstimatedSections: model.NormalizeEstimatedSections(&r.EstimatedSections),
-				IsCompleted:       r.IsCompleted,
-				DeadlineAt:        deadlineStr,
-			})
-		}
-		return results, nil
-	}
+	agentService.SetMemoryReader(agentsv.NewMemoryRPCReader(memoryReaderClient, memoryObserver, memoryMetrics), memoryCfg)
 }
 
 func buildAPIHandlers(
@@ -958,7 +833,7 @@ func buildAPIHandlers(
 	taskClassClient ports.TaskClassCommandClient,
 	courseClient ports.CourseCommandClient,
 	scheduleClient ports.ScheduleCommandClient,
-	agentService *service.AgentService,
+	agentService *agentsv.AgentService,
 	memoryClient ports.MemoryCommandClient,
 	activeSchedulerClient ports.ActiveSchedulerCommandClient,
 	notificationClient ports.NotificationCommandClient,
@@ -1017,12 +892,4 @@ func (r *appRuntime) close() {
 	if r.eventBus != nil {
 		r.eventBus.Close()
 	}
-}
-
-func stringPtrOrNil(value string) *string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return nil
-	}
-	return &trimmed
 }

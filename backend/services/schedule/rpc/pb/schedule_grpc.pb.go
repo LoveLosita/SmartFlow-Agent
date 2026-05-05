@@ -18,6 +18,7 @@ const (
 	Schedule_RevokeTaskItem_FullMethodName             = "/smartflow.schedule.Schedule/RevokeTaskItem"
 	Schedule_SmartPlanning_FullMethodName              = "/smartflow.schedule.Schedule/SmartPlanning"
 	Schedule_SmartPlanningMulti_FullMethodName         = "/smartflow.schedule.Schedule/SmartPlanningMulti"
+	Schedule_GetAgentWeekSchedule_FullMethodName       = "/smartflow.schedule.Schedule/GetAgentWeekSchedule"
 	Schedule_GetScheduleFactsByWindow_FullMethodName   = "/smartflow.schedule.Schedule/GetScheduleFactsByWindow"
 	Schedule_GetFeedbackSignal_FullMethodName          = "/smartflow.schedule.Schedule/GetFeedbackSignal"
 	Schedule_ApplyActiveScheduleChanges_FullMethodName = "/smartflow.schedule.Schedule/ApplyActiveScheduleChanges"
@@ -33,6 +34,7 @@ type ScheduleClient interface {
 	RevokeTaskItem(ctx context.Context, in *RevokeTaskItemRequest, opts ...grpc.CallOption) (*StatusResponse, error)
 	SmartPlanning(ctx context.Context, in *SmartPlanningRequest, opts ...grpc.CallOption) (*JSONResponse, error)
 	SmartPlanningMulti(ctx context.Context, in *SmartPlanningMultiRequest, opts ...grpc.CallOption) (*JSONResponse, error)
+	GetAgentWeekSchedule(ctx context.Context, in *JSONRequest, opts ...grpc.CallOption) (*JSONResponse, error)
 	GetScheduleFactsByWindow(ctx context.Context, in *JSONRequest, opts ...grpc.CallOption) (*JSONResponse, error)
 	GetFeedbackSignal(ctx context.Context, in *JSONRequest, opts ...grpc.CallOption) (*JSONResponse, error)
 	ApplyActiveScheduleChanges(ctx context.Context, in *JSONRequest, opts ...grpc.CallOption) (*JSONResponse, error)
@@ -100,6 +102,12 @@ func (c *scheduleClient) SmartPlanningMulti(ctx context.Context, in *SmartPlanni
 	return out, err
 }
 
+func (c *scheduleClient) GetAgentWeekSchedule(ctx context.Context, in *JSONRequest, opts ...grpc.CallOption) (*JSONResponse, error) {
+	out := new(JSONResponse)
+	err := c.cc.Invoke(ctx, Schedule_GetAgentWeekSchedule_FullMethodName, in, out, opts...)
+	return out, err
+}
+
 func (c *scheduleClient) GetScheduleFactsByWindow(ctx context.Context, in *JSONRequest, opts ...grpc.CallOption) (*JSONResponse, error) {
 	out := new(JSONResponse)
 	err := c.cc.Invoke(ctx, Schedule_GetScheduleFactsByWindow_FullMethodName, in, out, opts...)
@@ -128,6 +136,7 @@ type ScheduleServer interface {
 	RevokeTaskItem(context.Context, *RevokeTaskItemRequest) (*StatusResponse, error)
 	SmartPlanning(context.Context, *SmartPlanningRequest) (*JSONResponse, error)
 	SmartPlanningMulti(context.Context, *SmartPlanningMultiRequest) (*JSONResponse, error)
+	GetAgentWeekSchedule(context.Context, *JSONRequest) (*JSONResponse, error)
 	GetScheduleFactsByWindow(context.Context, *JSONRequest) (*JSONResponse, error)
 	GetFeedbackSignal(context.Context, *JSONRequest) (*JSONResponse, error)
 	ApplyActiveScheduleChanges(context.Context, *JSONRequest) (*JSONResponse, error)
@@ -162,6 +171,9 @@ func (UnimplementedScheduleServer) SmartPlanning(context.Context, *SmartPlanning
 }
 func (UnimplementedScheduleServer) SmartPlanningMulti(context.Context, *SmartPlanningMultiRequest) (*JSONResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SmartPlanningMulti not implemented")
+}
+func (UnimplementedScheduleServer) GetAgentWeekSchedule(context.Context, *JSONRequest) (*JSONResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetAgentWeekSchedule not implemented")
 }
 func (UnimplementedScheduleServer) GetScheduleFactsByWindow(context.Context, *JSONRequest) (*JSONResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetScheduleFactsByWindow not implemented")
@@ -312,6 +324,21 @@ func _Schedule_SmartPlanningMulti_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Schedule_GetAgentWeekSchedule_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(JSONRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ScheduleServer).GetAgentWeekSchedule(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: Schedule_GetAgentWeekSchedule_FullMethodName}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ScheduleServer).GetAgentWeekSchedule(ctx, req.(*JSONRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Schedule_GetScheduleFactsByWindow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(JSONRequest)
 	if err := dec(in); err != nil {
@@ -370,6 +397,7 @@ var Schedule_ServiceDesc = grpc.ServiceDesc{
 		{MethodName: "RevokeTaskItem", Handler: _Schedule_RevokeTaskItem_Handler},
 		{MethodName: "SmartPlanning", Handler: _Schedule_SmartPlanning_Handler},
 		{MethodName: "SmartPlanningMulti", Handler: _Schedule_SmartPlanningMulti_Handler},
+		{MethodName: "GetAgentWeekSchedule", Handler: _Schedule_GetAgentWeekSchedule_Handler},
 		{MethodName: "GetScheduleFactsByWindow", Handler: _Schedule_GetScheduleFactsByWindow_Handler},
 		{MethodName: "GetFeedbackSignal", Handler: _Schedule_GetFeedbackSignal_Handler},
 		{MethodName: "ApplyActiveScheduleChanges", Handler: _Schedule_ApplyActiveScheduleChanges_Handler},

@@ -10,6 +10,7 @@ service TaskClass {
   rpc ListTaskClasses(JSONRequest) returns (JSONResponse);
   rpc GetTaskClass(JSONRequest) returns (JSONResponse);
   rpc UpdateTaskClass(JSONRequest) returns (JSONResponse);
+  rpc GetAgentTaskClasses(JSONRequest) returns (JSONResponse);
   rpc InsertTaskClassItemIntoSchedule(JSONRequest) returns (JSONResponse);
   rpc DeleteTaskClassItem(JSONRequest) returns (JSONResponse);
   rpc DeleteTaskClass(JSONRequest) returns (JSONResponse);

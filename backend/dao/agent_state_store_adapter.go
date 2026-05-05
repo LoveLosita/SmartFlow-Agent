@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 
-	newagentmodel "github.com/LoveLosita/smartflow/backend/newAgent/model"
+	agentmodel "github.com/LoveLosita/smartflow/backend/services/agent/model"
 )
 
-// AgentStateStoreAdapter 将 CacheDAO 适配为 newAgent 的 AgentStateStore 接口。
+// AgentStateStoreAdapter 将 CacheDAO 适配为 agent 的 AgentStateStore 接口。
 //
 // 职责边界：
 // 1. CacheDAO 的 LoadAgentState 使用 out-parameter 模式，需要适配到返回值模式；
@@ -23,7 +23,7 @@ func NewAgentStateStoreAdapter(cache *CacheDAO) *AgentStateStoreAdapter {
 }
 
 // Save 序列化并保存 agent 状态快照。
-func (a *AgentStateStoreAdapter) Save(ctx context.Context, conversationID string, snapshot *newagentmodel.AgentStateSnapshot) error {
+func (a *AgentStateStoreAdapter) Save(ctx context.Context, conversationID string, snapshot *agentmodel.AgentStateSnapshot) error {
 	if a == nil || a.cache == nil {
 		return errors.New("agent state store adapter is not initialized")
 	}
@@ -31,12 +31,12 @@ func (a *AgentStateStoreAdapter) Save(ctx context.Context, conversationID string
 }
 
 // Load 读取并反序列化 agent 状态快照。
-func (a *AgentStateStoreAdapter) Load(ctx context.Context, conversationID string) (*newagentmodel.AgentStateSnapshot, bool, error) {
+func (a *AgentStateStoreAdapter) Load(ctx context.Context, conversationID string) (*agentmodel.AgentStateSnapshot, bool, error) {
 	if a == nil || a.cache == nil {
 		return nil, false, errors.New("agent state store adapter is not initialized")
 	}
 
-	var snapshot newagentmodel.AgentStateSnapshot
+	var snapshot agentmodel.AgentStateSnapshot
 	ok, err := a.cache.LoadAgentState(ctx, conversationID, &snapshot)
 	if err != nil || !ok {
 		return nil, ok, err

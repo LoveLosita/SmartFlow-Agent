@@ -148,6 +148,18 @@ func (c *Client) SmartPlanningMulti(ctx context.Context, req schedulecontracts.S
 	return jsonFromResponse(resp, err)
 }
 
+func (c *Client) GetAgentWeekSchedule(ctx context.Context, req schedulecontracts.AgentScheduleWeekRequest) (json.RawMessage, error) {
+	if err := c.ensureReady(); err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.rpc.GetAgentWeekSchedule(ctx, &schedulepb.JSONRequest{PayloadJson: payload})
+	return jsonFromResponse(resp, err)
+}
+
 func (c *Client) ensureReady() error {
 	if c == nil || c.rpc == nil {
 		return errors.New("schedule zrpc client is not initialized")

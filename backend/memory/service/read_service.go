@@ -26,7 +26,7 @@ const (
 // 职责边界：
 // 1. 负责把 memory_items 读出来并做用户设置过滤；
 // 2. 负责最小可用的排序与截断，为后续 prompt 注入提供稳定入口；
-// 3. 不直接依赖 newAgent，不负责真正把记忆拼进 prompt。
+// 3. 不直接依赖 agent，不负责真正把记忆拼进 prompt。
 type ReadService struct {
 	itemRepo     *memoryrepo.ItemRepo
 	settingsRepo *memoryrepo.SettingsRepo

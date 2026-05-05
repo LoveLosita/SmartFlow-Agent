@@ -78,10 +78,11 @@ type UserAddTaskResponse struct {
 }
 
 type UserAddTaskRequest struct {
-	Title             string     `json:"title"`
-	PriorityGroup     int        `json:"priority_group"`
-	EstimatedSections int        `json:"estimated_sections"`
-	DeadlineAt        *time.Time `json:"deadline_at"`
+	Title              string     `json:"title"`
+	PriorityGroup      int        `json:"priority_group"`
+	EstimatedSections  int        `json:"estimated_sections"`
+	DeadlineAt         *time.Time `json:"deadline_at"`
+	UrgencyThresholdAt *time.Time `json:"urgency_threshold_at"`
 }
 
 // UserCompleteTaskRequest 是"标记任务完成"接口的请求体。

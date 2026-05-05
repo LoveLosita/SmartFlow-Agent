@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	rootmodel "github.com/LoveLosita/smartflow/backend/model"
+	"github.com/LoveLosita/smartflow/backend/respond"
 	"github.com/LoveLosita/smartflow/backend/services/schedule/core/applyadapter"
 	schedulecontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/schedule"
 )
@@ -28,6 +29,26 @@ func (ss *ScheduleService) GetScheduleFactsByWindow(ctx context.Context, req sch
 		return schedulecontracts.ScheduleWindowFacts{}, errors.New("schedule facts service 未初始化")
 	}
 	return ss.scheduleDAO.GetScheduleFactsByWindow(ctx, req)
+}
+
+// GetAgentWeekSchedule 为 agent provider 暴露原始周日程槽位事实。
+//
+// 职责边界：
+// 1. 只读取 schedule 服务拥有的 schedules / schedule_events 数据；
+// 2. 保留 embedded_task_id 和 can_be_embedded，避免 agent 用前端 DTO 还原时丢语义；
+// 3. 不做缓存、不做前端展示聚合，调用侧负责组装 ScheduleState。
+func (ss *ScheduleService) GetAgentWeekSchedule(ctx context.Context, req schedulecontracts.AgentScheduleWeekRequest) (schedulecontracts.AgentScheduleWeekResponse, error) {
+	if ss == nil || ss.scheduleDAO == nil {
+		return schedulecontracts.AgentScheduleWeekResponse{}, errors.New("schedule agent week service 未初始化")
+	}
+	if req.Week < 0 || req.Week > 25 {
+		return schedulecontracts.AgentScheduleWeekResponse{}, respond.WeekOutOfRange
+	}
+	schedules, err := ss.scheduleDAO.GetUserWeeklySchedule(ctx, req.UserID, req.Week)
+	if err != nil {
+		return schedulecontracts.AgentScheduleWeekResponse{}, err
+	}
+	return schedulesToAgentWeekContract(schedules), nil
 }
 
 // GetFeedbackSignal 暴露主动调度 unfinished_feedback 的日程目标定位事实。
@@ -81,6 +102,92 @@ func toAdapterApplyRequest(req schedulecontracts.ApplyActiveScheduleRequest) app
 		RequestedAt: req.RequestedAt,
 		TraceID:     req.TraceID,
 	}
+}
+
+func schedulesToAgentWeekContract(schedules []rootmodel.Schedule) schedulecontracts.AgentScheduleWeekResponse {
+	out := make([]schedulecontracts.AgentScheduleSlot, 0, len(schedules))
+	for _, item := range schedules {
+		out = append(out, schedulecontracts.AgentScheduleSlot{
+			ID:             item.ID,
+			EventID:        item.EventID,
+			UserID:         item.UserID,
+			Week:           item.Week,
+			DayOfWeek:      item.DayOfWeek,
+			Section:        item.Section,
+			EmbeddedTaskID: cloneIntPtr(item.EmbeddedTaskID),
+			Status:         item.Status,
+			Event:          scheduleEventToAgentContract(item.Event),
+			EmbeddedTask:   scheduleTaskItemToAgentContract(item.EmbeddedTask),
+		})
+	}
+	return schedulecontracts.AgentScheduleWeekResponse{Schedules: out}
+}
+
+func scheduleEventToAgentContract(event *rootmodel.ScheduleEvent) *schedulecontracts.AgentScheduleEvent {
+	if event == nil {
+		return nil
+	}
+	return &schedulecontracts.AgentScheduleEvent{
+		ID:             event.ID,
+		UserID:         event.UserID,
+		Name:           event.Name,
+		Location:       cloneStringPtr(event.Location),
+		Type:           event.Type,
+		RelID:          cloneIntPtr(event.RelID),
+		TaskSourceType: event.TaskSourceType,
+		CanBeEmbedded:  event.CanBeEmbedded,
+		StartTime:      event.StartTime,
+		EndTime:        event.EndTime,
+	}
+}
+
+func scheduleTaskItemToAgentContract(item *rootmodel.TaskClassItem) *schedulecontracts.AgentScheduleTaskItem {
+	if item == nil {
+		return nil
+	}
+	return &schedulecontracts.AgentScheduleTaskItem{
+		ID:           item.ID,
+		CategoryID:   cloneIntPtr(item.CategoryID),
+		Order:        cloneIntPtr(item.Order),
+		Content:      derefString(item.Content),
+		EmbeddedTime: scheduleTargetTimeToAgentContract(item.EmbeddedTime),
+		Status:       cloneIntPtr(item.Status),
+	}
+}
+
+func scheduleTargetTimeToAgentContract(value *rootmodel.TargetTime) *schedulecontracts.AgentScheduleTargetTime {
+	if value == nil {
+		return nil
+	}
+	return &schedulecontracts.AgentScheduleTargetTime{
+		Week:        value.Week,
+		DayOfWeek:   value.DayOfWeek,
+		SectionFrom: value.SectionFrom,
+		SectionTo:   value.SectionTo,
+	}
+}
+
+func cloneIntPtr(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
+}
+
+func cloneStringPtr(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func toAdapterSlotSpan(span *schedulecontracts.SlotSpan) *applyadapter.SlotSpan {

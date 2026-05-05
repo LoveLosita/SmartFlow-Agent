@@ -29,7 +29,7 @@ const (
 //
 // 职责边界：
 // 1. 只推进主动调度 trigger 的后台状态机，不负责启动 outbox worker；
-// 2. dry-run 与选择器都复用 active_scheduler 独立模块，不再往 newAgent 里塞主动调度逻辑；
+// 2. dry-run 与选择器都复用 active_scheduler 独立模块，不再往 agent 里塞主动调度逻辑；
 // 3. notification 只发布 requested 事件，不直接接真实飞书 provider。
 type TriggerWorkflowService struct {
 	activeDAO   *dao.ActiveScheduleDAO

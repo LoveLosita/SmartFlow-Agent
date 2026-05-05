@@ -38,10 +38,11 @@ func (h *Handler) AddTask(ctx context.Context, req *pb.JSONRequest) (*pb.JSONRes
 		return nil, grpcErrorFromServiceError(respond.WrongParamType)
 	}
 	data, err := h.svc.AddTask(ctx, &model.UserAddTaskRequest{
-		Title:             contractReq.Title,
-		PriorityGroup:     contractReq.PriorityGroup,
-		EstimatedSections: contractReq.EstimatedSections,
-		DeadlineAt:        contractReq.DeadlineAt,
+		Title:              contractReq.Title,
+		PriorityGroup:      contractReq.PriorityGroup,
+		EstimatedSections:  contractReq.EstimatedSections,
+		DeadlineAt:         contractReq.DeadlineAt,
+		UrgencyThresholdAt: contractReq.UrgencyThresholdAt,
 	}, contractReq.UserID)
 	return jsonResponse(data, err)
 }

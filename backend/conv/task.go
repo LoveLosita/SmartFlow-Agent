@@ -8,11 +8,12 @@ import (
 
 func UserAddTaskRequestToModel(request *model.UserAddTaskRequest, userID int) *model.Task {
 	return &model.Task{
-		Title:             request.Title,
-		Priority:          request.PriorityGroup,
-		EstimatedSections: model.NormalizeEstimatedSections(&request.EstimatedSections),
-		DeadlineAt:        request.DeadlineAt,
-		UserID:            userID,
+		Title:              request.Title,
+		Priority:           request.PriorityGroup,
+		EstimatedSections:  model.NormalizeEstimatedSections(&request.EstimatedSections),
+		DeadlineAt:         request.DeadlineAt,
+		UrgencyThresholdAt: request.UrgencyThresholdAt,
+		UserID:             userID,
 	}
 }
 
@@ -28,7 +29,7 @@ func ModelToUserAddTaskResponse(task *model.Task) *model.UserAddTaskResponse {
 		EstimatedSections: model.NormalizeEstimatedSections(&task.EstimatedSections),
 		DeadlineAt:        task.DeadlineAt,
 		Status:            status,
-		CreatedAt:         time.Now(), // 创建时间为当前时间
+		CreatedAt:         time.Now(), // 创建时间使用当前服务时间，保持既有响应语义。
 	}
 }
 

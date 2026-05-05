@@ -108,6 +108,18 @@ func (h *Handler) SmartPlanningMulti(ctx context.Context, req *pb.SmartPlanningM
 	return jsonResponse(data, err)
 }
 
+func (h *Handler) GetAgentWeekSchedule(ctx context.Context, req *pb.JSONRequest) (*pb.JSONResponse, error) {
+	if err := h.ensureReady(req); err != nil {
+		return nil, err
+	}
+	var contractReq schedulecontracts.AgentScheduleWeekRequest
+	if err := json.Unmarshal(req.PayloadJson, &contractReq); err != nil {
+		return nil, grpcErrorFromServiceError(respond.WrongParamType)
+	}
+	data, err := h.svc.GetAgentWeekSchedule(ctx, contractReq)
+	return jsonResponse(data, err)
+}
+
 func (h *Handler) GetScheduleFactsByWindow(ctx context.Context, req *pb.JSONRequest) (*pb.JSONResponse, error) {
 	if err := h.ensureReady(req); err != nil {
 		return nil, err

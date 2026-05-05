@@ -13,6 +13,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
 	taskclassdao "github.com/LoveLosita/smartflow/backend/services/task_class/dao"
+	taskclasscontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/taskclass"
 	"github.com/go-redis/redis/v8"
 	"gorm.io/gorm"
 )
@@ -34,34 +35,39 @@ func NewTaskClassService(taskClassRepo *taskclassdao.TaskClassDAO, cacheRepo *ro
 	}
 }
 
-// AddOrUpdateTaskClass 为指定用户添加任务类
-func (sv *TaskClassService) AddOrUpdateTaskClass(ctx context.Context, req *model.UserAddTaskClassRequest, userID int, method int, targetTaskClassID int) error {
+// AddOrUpdateTaskClass 为指定用户新增或更新任务类，并返回最终 task_class_id。
+//
+// 职责边界：
+// 1. 继续复用旧 service/dao 的校验和事务写入语义，不在 RPC 迁移期重写业务规则；
+// 2. 只额外把事务内拿到的稳定主键返回给调用方，供 agent 工具结果回填；
+// 3. 失败时返回 0 + error，调用方不得猜测 ID。
+func (sv *TaskClassService) AddOrUpdateTaskClass(ctx context.Context, req *model.UserAddTaskClassRequest, userID int, method int, targetTaskClassID int) (int, error) {
 	//1.先校验参数
 	if req.Mode == "auto" {
 		if req.StartDate == "" || req.EndDate == "" {
-			return respond.MissingParamForAutoScheduling
+			return 0, respond.MissingParamForAutoScheduling
 		}
 		st, err := time.Parse("2006-01-02", req.StartDate)
 		if err != nil {
-			return respond.WrongParamType
+			return 0, respond.WrongParamType
 		}
 		ed, err := time.Parse("2006-01-02", req.EndDate)
 		if err != nil {
-			return respond.WrongParamType
+			return 0, respond.WrongParamType
 		}
 		if st.After(ed) {
-			return respond.InvalidDateRange
+			return 0, respond.InvalidDateRange
 		}
 	}
 	if req.Mode == "" || req.Name == "" || len(req.Items) == 0 {
-		return respond.MissingParam
+		return 0, respond.MissingParam
 	}
 	// 1. excluded_slots 属于“半天块索引”，每个索引映射 2 节（1->1-2，...，6->11-12）；
 	// 2. 若允许 7~12，会在粗排网格展开时产生越界节次，触发运行时 panic；
 	// 3. 这里统一在写入入口拦截，避免脏数据落库后污染后续排程链路。
 	for _, slot := range req.Config.ExcludedSlots {
 		if slot < 1 || slot > 6 {
-			return respond.WrongParamType
+			return 0, respond.WrongParamType
 		}
 	}
 	// 1. excluded_days_of_week 表示“整天不可排”的硬约束，粗排时会直接整天屏蔽；
@@ -69,10 +75,11 @@ func (sv *TaskClassService) AddOrUpdateTaskClass(ctx context.Context, req *model
 	// 3. 若写入非法值，会导致粗排过滤口径和前端展示口径不一致，因此入口直接拦截。
 	for _, dayOfWeek := range req.Config.ExcludedDaysOfWeek {
 		if dayOfWeek < 1 || dayOfWeek > 7 {
-			return respond.WrongParamType
+			return 0, respond.WrongParamType
 		}
 	}
 	//2.写数据库（事务内）
+	taskClassID := 0
 	if err := sv.taskClassRepo.Transaction(func(txDAO *taskclassdao.TaskClassDAO) error {
 		taskClass, items, err := conv.ProcessUserAddTaskClassRequest(req, userID)
 		if err != nil {
@@ -82,10 +89,11 @@ func (sv *TaskClassService) AddOrUpdateTaskClass(ctx context.Context, req *model
 			taskClass.ID = targetTaskClassID
 		}
 
-		taskClassID, err := txDAO.AddOrUpdateTaskClass(userID, taskClass)
+		updatedID, err := txDAO.AddOrUpdateTaskClass(userID, taskClass)
 		if err != nil {
 			return err
 		}
+		taskClassID = updatedID
 
 		for i := range items {
 			items[i].CategoryID = &taskClassID
@@ -95,10 +103,130 @@ func (sv *TaskClassService) AddOrUpdateTaskClass(ctx context.Context, req *model
 		}
 		return nil
 	}); err != nil {
-		return err
+		return 0, err
 	}
 
-	return nil
+	return taskClassID, nil
+}
+
+// GetAgentTaskClasses 为 agent provider 读取完整任务类事实。
+//
+// 职责边界：
+// 1. 只读取 task_classes/task_items 并转换为跨进程契约；
+// 2. TaskClassIDs 为空时读取用户全部任务类，非空时按用户与 ID 双重过滤；
+// 3. 不复用前端详情 DTO，避免丢失 item.status 等编排状态。
+func (sv *TaskClassService) GetAgentTaskClasses(ctx context.Context, req taskclasscontracts.AgentTaskClassesRequest) (taskclasscontracts.AgentTaskClassesResponse, error) {
+	if sv == nil || sv.taskClassRepo == nil {
+		return taskclasscontracts.AgentTaskClassesResponse{}, errors.New("task-class service 未初始化")
+	}
+	ids := append([]int(nil), req.TaskClassIDs...)
+	if len(ids) == 0 {
+		basicClasses, err := sv.taskClassRepo.GetUserTaskClasses(req.UserID)
+		if err != nil {
+			return taskclasscontracts.AgentTaskClassesResponse{}, err
+		}
+		ids = make([]int, 0, len(basicClasses))
+		for _, taskClass := range basicClasses {
+			if taskClass.ID > 0 {
+				ids = append(ids, taskClass.ID)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return taskclasscontracts.AgentTaskClassesResponse{TaskClasses: []taskclasscontracts.AgentTaskClass{}}, nil
+	}
+	taskClasses, err := sv.taskClassRepo.GetCompleteTaskClassesByIDs(ctx, req.UserID, ids)
+	if err != nil {
+		return taskclasscontracts.AgentTaskClassesResponse{}, err
+	}
+	return taskClassesToAgentContract(taskClasses), nil
+}
+
+func taskClassesToAgentContract(taskClasses []model.TaskClass) taskclasscontracts.AgentTaskClassesResponse {
+	out := make([]taskclasscontracts.AgentTaskClass, 0, len(taskClasses))
+	for _, taskClass := range taskClasses {
+		userID := 0
+		if taskClass.UserID != nil {
+			userID = *taskClass.UserID
+		}
+		items := make([]taskclasscontracts.AgentTaskClassItem, 0, len(taskClass.Items))
+		for _, item := range taskClass.Items {
+			items = append(items, taskclasscontracts.AgentTaskClassItem{
+				ID:           item.ID,
+				CategoryID:   cloneIntPtr(item.CategoryID),
+				Order:        cloneIntPtr(item.Order),
+				Content:      derefString(item.Content),
+				EmbeddedTime: toTaskClassContractTargetTime(item.EmbeddedTime),
+				Status:       cloneIntPtr(item.Status),
+			})
+		}
+		out = append(out, taskclasscontracts.AgentTaskClass{
+			ID:                 taskClass.ID,
+			UserID:             userID,
+			Name:               derefString(taskClass.Name),
+			Mode:               derefString(taskClass.Mode),
+			StartDate:          formatDatePtr(taskClass.StartDate),
+			EndDate:            formatDatePtr(taskClass.EndDate),
+			SubjectType:        derefString(taskClass.SubjectType),
+			DifficultyLevel:    derefString(taskClass.DifficultyLevel),
+			CognitiveIntensity: derefString(taskClass.CognitiveIntensity),
+			TotalSlots:         derefInt(taskClass.TotalSlots),
+			AllowFillerCourse:  derefBoolDefault(taskClass.AllowFillerCourse, false),
+			Strategy:           derefString(taskClass.Strategy),
+			ExcludedSlots:      append([]int(nil), []int(taskClass.ExcludedSlots)...),
+			ExcludedDaysOfWeek: append([]int(nil), []int(taskClass.ExcludedDaysOfWeek)...),
+			Items:              items,
+		})
+	}
+	return taskclasscontracts.AgentTaskClassesResponse{TaskClasses: out}
+}
+
+func toTaskClassContractTargetTime(value *model.TargetTime) *taskclasscontracts.TargetTime {
+	if value == nil {
+		return nil
+	}
+	return &taskclasscontracts.TargetTime{
+		Week:        value.Week,
+		DayOfWeek:   value.DayOfWeek,
+		SectionFrom: value.SectionFrom,
+		SectionTo:   value.SectionTo,
+	}
+}
+
+func cloneIntPtr(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func derefInt(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func derefBoolDefault(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func formatDatePtr(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.Format("2006-01-02")
 }
 
 func (sv *TaskClassService) GetUserTaskClassInfos(ctx context.Context, userID int) (*model.UserGetTaskClassesResponse, error) {

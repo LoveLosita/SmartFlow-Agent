@@ -12,18 +12,18 @@ import (
 
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
-	"github.com/LoveLosita/smartflow/backend/service"
+	agentsv "github.com/LoveLosita/smartflow/backend/services/agent/sv"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
 type AgentHandler struct {
-	svc *service.AgentService
+	svc *agentsv.AgentService
 }
 
 // NewAgentHandler 组装 AgentHandler。
-func NewAgentHandler(svc *service.AgentService) *AgentHandler {
+func NewAgentHandler(svc *agentsv.AgentService) *AgentHandler {
 	return &AgentHandler{
 		svc: svc,
 	}

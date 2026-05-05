@@ -42,8 +42,8 @@ func (h *Handler) AddTaskClass(ctx context.Context, req *pb.JSONRequest) (*pb.JS
 	if err := json.Unmarshal(req.PayloadJson, &contractReq); err != nil {
 		return nil, grpcErrorFromServiceError(respond.WrongParamType)
 	}
-	err := h.svc.AddOrUpdateTaskClass(ctx, toModelTaskClassRequest(contractReq), contractReq.UserID, taskClassCreate, 0)
-	return jsonResponse(nil, err)
+	taskClassID, err := h.svc.AddOrUpdateTaskClass(ctx, toModelTaskClassRequest(contractReq), contractReq.UserID, taskClassCreate, 0)
+	return jsonResponse(taskclasscontracts.UpsertTaskClassResponse{TaskClassID: taskClassID, Created: true}, err)
 }
 
 func (h *Handler) ListTaskClasses(ctx context.Context, req *pb.JSONRequest) (*pb.JSONResponse, error) {
@@ -78,8 +78,20 @@ func (h *Handler) UpdateTaskClass(ctx context.Context, req *pb.JSONRequest) (*pb
 	if err := json.Unmarshal(req.PayloadJson, &contractReq); err != nil {
 		return nil, grpcErrorFromServiceError(respond.WrongParamType)
 	}
-	err := h.svc.AddOrUpdateTaskClass(ctx, toModelTaskClassRequest(contractReq), contractReq.UserID, taskClassUpdate, contractReq.TaskClassID)
-	return jsonResponse(nil, err)
+	taskClassID, err := h.svc.AddOrUpdateTaskClass(ctx, toModelTaskClassRequest(contractReq), contractReq.UserID, taskClassUpdate, contractReq.TaskClassID)
+	return jsonResponse(taskclasscontracts.UpsertTaskClassResponse{TaskClassID: taskClassID, Created: false}, err)
+}
+
+func (h *Handler) GetAgentTaskClasses(ctx context.Context, req *pb.JSONRequest) (*pb.JSONResponse, error) {
+	if err := h.ensureReady(req); err != nil {
+		return nil, err
+	}
+	var contractReq taskclasscontracts.AgentTaskClassesRequest
+	if err := json.Unmarshal(req.PayloadJson, &contractReq); err != nil {
+		return nil, grpcErrorFromServiceError(respond.WrongParamType)
+	}
+	data, err := h.svc.GetAgentTaskClasses(ctx, contractReq)
+	return jsonResponse(data, err)
 }
 
 func (h *Handler) InsertTaskClassItemIntoSchedule(ctx context.Context, req *pb.JSONRequest) (*pb.JSONResponse, error) {

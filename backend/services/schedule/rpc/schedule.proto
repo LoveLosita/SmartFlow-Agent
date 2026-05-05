@@ -14,6 +14,7 @@ service Schedule {
   rpc RevokeTaskItem(RevokeTaskItemRequest) returns (StatusResponse);
   rpc SmartPlanning(SmartPlanningRequest) returns (JSONResponse);
   rpc SmartPlanningMulti(SmartPlanningMultiRequest) returns (JSONResponse);
+  rpc GetAgentWeekSchedule(JSONRequest) returns (JSONResponse);
   rpc GetScheduleFactsByWindow(JSONRequest) returns (JSONResponse);
   rpc GetFeedbackSignal(JSONRequest) returns (JSONResponse);
   rpc ApplyActiveScheduleChanges(JSONRequest) returns (JSONResponse);

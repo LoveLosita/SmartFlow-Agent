@@ -211,7 +211,7 @@ func loadConversationTimelineMaxSeq(
 // 说明：
 // 1. 这里只在缓存存在时执行；未接 Redis 的环境直接跳过即可；
 // 2. 需要整表重建而不是只 append 一条，因为旧缓存里已经存在错误 seq 的事件；
-// 3. 这里不抽到 agentsvc 复用，是因为 events 不能反向依赖 service，否则会形成循环依赖。
+// 3. 这里不抽到 agent/sv 复用，是因为 events 不能反向依赖 service，否则会形成循环依赖。
 func rebuildConversationTimelineCache(
 	ctx context.Context,
 	agentRepo *dao.AgentDAO,
