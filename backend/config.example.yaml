@@ -109,6 +109,15 @@ time:
 
 # 智能体模型配置。
 agent:
+  rpc:
+    listenOn: "0.0.0.0:9089"
+    endpoints:
+      - "127.0.0.1:9089"
+    timeout: 0s
+    chat:
+      enabled: true
+    api:
+      enabled: true
   liteModel: "doubao-seed-2-0-code-preview-260215"
   proModel: "doubao-seed-2-0-code-preview-260215"
   maxModel: "doubao-seed-2-0-code-preview-260215"

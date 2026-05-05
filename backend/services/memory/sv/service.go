@@ -7,10 +7,10 @@ import (
 
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	memorymodule "github.com/LoveLosita/smartflow/backend/memory"
-	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
 	coremodel "github.com/LoveLosita/smartflow/backend/model"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
+	memorymodule "github.com/LoveLosita/smartflow/backend/services/memory"
+	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
 	memorycontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/memory"
 )
 

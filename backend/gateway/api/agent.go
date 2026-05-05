@@ -8,24 +8,50 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	gatewayagent "github.com/LoveLosita/smartflow/backend/gateway/client/agent"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/respond"
 	agentsv "github.com/LoveLosita/smartflow/backend/services/agent/sv"
+	agentcontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/agent"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/spf13/viper"
 	"gorm.io/gorm"
 )
 
+const (
+	agentChatHeartbeatInterval = 5 * time.Second
+	agentRPCChatEnabledKey     = "agent.rpc.chat.enabled"
+	agentRPCAPIEnabledKey      = "agent.rpc.api.enabled"
+)
+
 type AgentHandler struct {
-	svc *agentsv.AgentService
+	svc         *agentsv.AgentService
+	rpcClient   *gatewayagent.Client
+	rpcClientMu sync.Mutex
 }
 
 // NewAgentHandler 组装 AgentHandler。
 func NewAgentHandler(svc *agentsv.AgentService) *AgentHandler {
 	return &AgentHandler{
 		svc: svc,
+	}
+}
+
+// NewAgentHandlerWithRPC 组装带 agent RPC stream 适配能力的 AgentHandler。
+//
+// 职责边界：
+// 1. HTTP / SSE 协议仍由 Gateway 持有；
+// 2. agent RPC 作为 chat stream 与非 chat /agent/* 查询/命令的服务间通道；
+// 3. svc 只用于 RPC 开关关闭时的迁移期 fallback，当前默认可为 nil；
+// 4. rpcClient 为空时允许按配置懒加载，避免测试和旧装配必须提前构造 client。
+func NewAgentHandlerWithRPC(svc *agentsv.AgentService, rpcClient *gatewayagent.Client) *AgentHandler {
+	return &AgentHandler{
+		svc:       svc,
+		rpcClient: rpcClient,
 	}
 }
 
@@ -49,6 +75,13 @@ func mapResumeConfirmAction(action model.AgentResumeAction) string {
 	default:
 		return "reject"
 	}
+}
+
+type agentChatStreamEvent struct {
+	payload   string
+	done      bool
+	errorJSON json.RawMessage
+	err       error
 }
 
 func (api *AgentHandler) ChatAgent(c *gin.Context) {
@@ -103,6 +136,16 @@ func (api *AgentHandler) ChatAgent(c *gin.Context) {
 	c.Writer.Header().Set("X-Conversation-ID", conversationID)
 
 	userID := c.GetInt("user_id")
+	if api.useAgentRPCChat() {
+		api.streamAgentChatByRPC(c, req, userID, conversationID)
+		return
+	}
+	if api.svc == nil {
+		writeAgentSSEError(c.Writer, errors.New("agent local fallback is disabled"))
+		flushSSEWriter(c.Writer)
+		return
+	}
+
 	outChan, errChan := api.svc.AgentChat(c.Request.Context(), req.Message, req.Thinking, req.Model, userID, conversationID, req.Extra)
 
 	// 4) 转发 SSE 流
@@ -115,22 +158,7 @@ func (api *AgentHandler) ChatAgent(c *gin.Context) {
 		select {
 		case err, ok := <-errChan:
 			if ok && err != nil {
-				// 4.1 统一 SSE 错误体：
-				// 4.1.1 默认按内部错误输出 message/type；
-				// 4.1.2 若是 respond.Response（含业务码），额外透传 code，便于前端识别 5xxxx 等自定义错误。
-				errorBody := map[string]any{
-					"message": err.Error(),
-					"type":    "server_error",
-				}
-				var respErr respond.Response
-				if errors.As(err, &respErr) {
-					errorBody["code"] = respErr.Status
-				}
-				errPayload, _ := json.Marshal(map[string]any{
-					"error": errorBody,
-				})
-				_ = writeSSEData(w, string(errPayload))
-				_ = writeSSEData(w, "[DONE]")
+				writeAgentSSEError(w, err)
 			}
 			return false
 		case msg, ok := <-outChan:
@@ -150,6 +178,263 @@ func (api *AgentHandler) ChatAgent(c *gin.Context) {
 			return true
 		}
 	})
+}
+
+func (api *AgentHandler) useAgentRPCChat() bool {
+	return api != nil && viper.GetBool(agentRPCChatEnabledKey)
+}
+
+func (api *AgentHandler) useAgentRPCAPI() bool {
+	return api != nil && viper.GetBool(agentRPCAPIEnabledKey)
+}
+
+// streamAgentChatByRPC 把 agent RPC server-stream 平滑转成前端既有 SSE。
+//
+// 职责边界：
+// 1. Gateway 继续负责 SSE header、心跳和 data 帧写出；
+// 2. agent RPC 只负责服务间 chunk stream，不暴露 Go channel 给跨进程调用方；
+// 3. RPC 建流失败或服务端 error_json 仍按现有 SSE 错误体输出，再追加 [DONE]。
+func (api *AgentHandler) streamAgentChatByRPC(c *gin.Context, req model.UserSendMessageRequest, userID int, conversationID string) {
+	client, err := api.getAgentRPCClient()
+	if err != nil {
+		writeAgentSSEError(c.Writer, err)
+		flushSSEWriter(c.Writer)
+		return
+	}
+
+	extraJSON, err := json.Marshal(req.Extra)
+	if err != nil {
+		writeAgentSSEError(c.Writer, err)
+		flushSSEWriter(c.Writer)
+		return
+	}
+	stream, err := client.Chat(c.Request.Context(), agentcontracts.ChatRequest{
+		Message:        req.Message,
+		Thinking:       req.Thinking,
+		Model:          req.Model,
+		UserID:         userID,
+		ConversationID: conversationID,
+		ExtraJSON:      extraJSON,
+	})
+	if err != nil {
+		writeAgentSSEError(c.Writer, err)
+		flushSSEWriter(c.Writer)
+		return
+	}
+
+	recvCh := make(chan agentChatStreamEvent, 1)
+	requestCtx := c.Request.Context()
+	go func() {
+		defer close(recvCh)
+		sendEvent := func(event agentChatStreamEvent) bool {
+			select {
+			case recvCh <- event:
+				return true
+			case <-requestCtx.Done():
+				return false
+			}
+		}
+		for {
+			chunk, recvErr := stream.Recv()
+			if recvErr != nil {
+				if errors.Is(recvErr, io.EOF) {
+					return
+				}
+				sendEvent(agentChatStreamEvent{err: recvErr})
+				return
+			}
+			if !sendEvent(agentChatStreamEvent{
+				payload:   chunk.Payload,
+				done:      chunk.Done,
+				errorJSON: append(json.RawMessage(nil), chunk.ErrorJSON...),
+			}) {
+				return
+			}
+			if chunk.Done || len(chunk.ErrorJSON) > 0 {
+				return
+			}
+		}
+	}()
+
+	heartbeat := time.NewTicker(agentChatHeartbeatInterval)
+	defer heartbeat.Stop()
+
+	c.Stream(func(w io.Writer) bool {
+		select {
+		case event, ok := <-recvCh:
+			if !ok {
+				return false
+			}
+			if event.err != nil {
+				writeAgentSSEError(w, event.err)
+				return false
+			}
+			if event.payload != "" {
+				if err := writeSSEData(w, event.payload); err != nil {
+					return false
+				}
+			}
+			if len(event.errorJSON) > 0 {
+				_ = writeSSEData(w, string(normalizeAgentRPCErrorJSON(event.errorJSON)))
+				_ = writeSSEData(w, "[DONE]")
+				return false
+			}
+			if event.done {
+				_ = writeSSEData(w, "[DONE]")
+				return false
+			}
+			return true
+		case <-c.Request.Context().Done():
+			return false
+		case <-heartbeat.C:
+			_, _ = io.WriteString(w, ": ping\n\n")
+			flushSSEWriter(c.Writer)
+			return true
+		}
+	})
+}
+
+func writeAgentSSEError(w io.Writer, err error) {
+	if err == nil {
+		return
+	}
+	_ = writeSSEData(w, string(buildAgentErrorEnvelopeJSON(errorCodeFromError(err), err.Error(), "server_error")))
+	_ = writeSSEData(w, "[DONE]")
+}
+
+func (api *AgentHandler) getAgentRPCClient() (*gatewayagent.Client, error) {
+	if api == nil {
+		return nil, errors.New("agent handler is not initialized")
+	}
+
+	api.rpcClientMu.Lock()
+	defer api.rpcClientMu.Unlock()
+
+	if api.rpcClient != nil {
+		return api.rpcClient, nil
+	}
+
+	client, err := gatewayagent.NewClient(gatewayagent.ClientConfig{
+		Endpoints: viper.GetStringSlice("agent.rpc.endpoints"),
+		Target:    viper.GetString("agent.rpc.target"),
+		Timeout:   viper.GetDuration("agent.rpc.timeout"),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	api.rpcClient = client
+	return api.rpcClient, nil
+}
+
+func normalizeAgentRPCErrorJSON(raw json.RawMessage) json.RawMessage {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return buildAgentErrorEnvelopeJSON("", "agent rpc service returned empty error payload", "server_error")
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+		return buildAgentErrorEnvelopeJSON("", trimmed, "server_error")
+	}
+
+	if nested, ok := payload["error"].(map[string]any); ok {
+		return buildAgentErrorEnvelopeJSON(
+			firstNonEmptyString(stringFromAny(nested["code"]), stringFromAny(nested["status"])),
+			firstNonEmptyString(stringFromAny(nested["message"]), stringFromAny(nested["info"]), "agent rpc service returned error"),
+			firstNonEmptyString(stringFromAny(nested["type"]), "server_error"),
+		)
+	}
+
+	return buildAgentErrorEnvelopeJSON(
+		firstNonEmptyString(stringFromAny(payload["code"]), stringFromAny(payload["status"])),
+		firstNonEmptyString(stringFromAny(payload["message"]), stringFromAny(payload["info"]), trimmed),
+		firstNonEmptyString(stringFromAny(payload["type"]), "server_error"),
+	)
+}
+
+func buildAgentErrorEnvelopeJSON(code string, message string, errorType string) json.RawMessage {
+	errorBody := map[string]any{
+		"message": strings.TrimSpace(message),
+		"type":    strings.TrimSpace(errorType),
+	}
+	if errorBody["message"] == "" {
+		errorBody["message"] = "agent stream error"
+	}
+	if errorBody["type"] == "" {
+		errorBody["type"] = "server_error"
+	}
+	if trimmedCode := strings.TrimSpace(code); trimmedCode != "" {
+		errorBody["code"] = trimmedCode
+	}
+
+	payload, err := json.Marshal(map[string]any{"error": errorBody})
+	if err != nil {
+		return json.RawMessage(`{"error":{"message":"agent stream error","type":"server_error"}}`)
+	}
+	return payload
+}
+
+func errorCodeFromError(err error) string {
+	var respErr respond.Response
+	if errors.As(err, &respErr) {
+		return strings.TrimSpace(respErr.Status)
+	}
+	return ""
+}
+
+func stringFromAny(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case json.Number:
+		return strings.TrimSpace(typed.String())
+	case float64:
+		return strings.TrimSpace(strconv.FormatFloat(typed, 'f', -1, 64))
+	case float32:
+		return strings.TrimSpace(strconv.FormatFloat(float64(typed), 'f', -1, 32))
+	case int:
+		return strconv.Itoa(typed)
+	case int32:
+		return strconv.FormatInt(int64(typed), 10)
+	case int64:
+		return strconv.FormatInt(typed, 10)
+	case uint:
+		return strconv.FormatUint(uint64(typed), 10)
+	case uint32:
+		return strconv.FormatUint(uint64(typed), 10)
+	case uint64:
+		return strconv.FormatUint(typed, 10)
+	default:
+		return ""
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func flushSSEWriter(w io.Writer) {
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func writeAgentHTTPError(c *gin.Context, err error) {
+	if err == nil {
+		return
+	}
+	var respErr respond.Response
+	if errors.As(err, &respErr) && respErr.Status == respond.ConversationNotFound.Status {
+		c.JSON(http.StatusNotFound, respErr)
+		return
+	}
+	respond.DealWithError(c, err)
 }
 
 // GetConversationMeta 返回单个会话的元信息（标题、消息数、最近消息时间等）。
@@ -172,8 +457,31 @@ func (api *AgentHandler) GetConversationMeta(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
 	defer cancel()
 
+	if api.useAgentRPCAPI() {
+		client, err := api.getAgentRPCClient()
+		if err != nil {
+			writeAgentHTTPError(c, err)
+			return
+		}
+		meta, err := client.GetConversationMeta(ctx, agentcontracts.ConversationQueryRequest{
+			UserID:         userID,
+			ConversationID: conversationID,
+		})
+		if err != nil {
+			writeAgentHTTPError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, meta))
+		return
+	}
+
+	localSvc, ok := api.localAgentService(c)
+	if !ok {
+		return
+	}
+
 	// 4. 调 service 查询会话元信息。
-	meta, err := api.svc.GetConversationMeta(ctx, userID, conversationID)
+	meta, err := localSvc.GetConversationMeta(ctx, userID, conversationID)
 	if err != nil {
 		// 会话不存在或越权访问时返回 404，让前端能和“参数格式错误”区分开。
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -241,8 +549,33 @@ func (api *AgentHandler) GetConversationList(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
 	defer cancel()
 
+	if api.useAgentRPCAPI() {
+		client, err := api.getAgentRPCClient()
+		if err != nil {
+			writeAgentHTTPError(c, err)
+			return
+		}
+		resp, err := client.GetConversationList(ctx, agentcontracts.ConversationListRequest{
+			UserID:   userID,
+			Page:     page,
+			PageSize: pageSize,
+			Status:   status,
+		})
+		if err != nil {
+			writeAgentHTTPError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, resp))
+		return
+	}
+
+	localSvc, ok := api.localAgentService(c)
+	if !ok {
+		return
+	}
+
 	// 5. 调 service 查询并返回统一响应结构。
-	resp, err := api.svc.GetConversationList(ctx, userID, page, pageSize, status)
+	resp, err := localSvc.GetConversationList(ctx, userID, page, pageSize, status)
 	if err != nil {
 		respond.DealWithError(c, err)
 		return
@@ -268,7 +601,30 @@ func (api *AgentHandler) GetConversationTimeline(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
 
-	timeline, err := api.svc.GetConversationTimeline(ctx, userID, conversationID)
+	if api.useAgentRPCAPI() {
+		client, err := api.getAgentRPCClient()
+		if err != nil {
+			writeAgentHTTPError(c, err)
+			return
+		}
+		timeline, err := client.GetConversationTimeline(ctx, agentcontracts.ConversationQueryRequest{
+			UserID:         userID,
+			ConversationID: conversationID,
+		})
+		if err != nil {
+			writeAgentHTTPError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, timeline))
+		return
+	}
+
+	localSvc, ok := api.localAgentService(c)
+	if !ok {
+		return
+	}
+
+	timeline, err := localSvc.GetConversationTimeline(ctx, userID, conversationID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, respond.ConversationNotFound)
@@ -302,8 +658,31 @@ func (api *AgentHandler) GetSchedulePlanPreview(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
 	defer cancel()
 
+	if api.useAgentRPCAPI() {
+		client, err := api.getAgentRPCClient()
+		if err != nil {
+			writeAgentHTTPError(c, err)
+			return
+		}
+		preview, err := client.GetSchedulePlanPreview(ctx, agentcontracts.ConversationQueryRequest{
+			UserID:         userID,
+			ConversationID: conversationID,
+		})
+		if err != nil {
+			writeAgentHTTPError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, preview))
+		return
+	}
+
+	localSvc, ok := api.localAgentService(c)
+	if !ok {
+		return
+	}
+
 	// 4. 调 service 查询并返回统一响应结构。
-	preview, err := api.svc.GetSchedulePlanPreview(ctx, userID, conversationID)
+	preview, err := localSvc.GetSchedulePlanPreview(ctx, userID, conversationID)
 	if err != nil {
 		respond.DealWithError(c, err)
 		return
@@ -324,7 +703,34 @@ func (api *AgentHandler) GetContextStats(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 1*time.Second)
 	defer cancel()
 
-	statsJSON, err := api.svc.GetContextStats(ctx, userID, conversationID)
+	if api.useAgentRPCAPI() {
+		client, err := api.getAgentRPCClient()
+		if err != nil {
+			writeAgentHTTPError(c, err)
+			return
+		}
+		statsJSON, err := client.GetContextStats(ctx, agentcontracts.ConversationQueryRequest{
+			UserID:         userID,
+			ConversationID: conversationID,
+		})
+		if err != nil {
+			writeAgentHTTPError(c, err)
+			return
+		}
+		if strings.TrimSpace(statsJSON) == "" {
+			statsJSON = "null"
+		}
+		var raw json.RawMessage = json.RawMessage(statsJSON)
+		c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, raw))
+		return
+	}
+
+	localSvc, ok := api.localAgentService(c)
+	if !ok {
+		return
+	}
+
+	statsJSON, err := localSvc.GetContextStats(ctx, userID, conversationID)
 	if err != nil {
 		respond.DealWithError(c, err)
 		return
@@ -373,10 +779,65 @@ func (api *AgentHandler) SaveScheduleState(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
 
+	if api.useAgentRPCAPI() {
+		client, err := api.getAgentRPCClient()
+		if err != nil {
+			writeAgentHTTPError(c, err)
+			return
+		}
+		if err := client.SaveScheduleState(ctx, agentcontracts.SaveScheduleStateRequest{
+			UserID:         userID,
+			ConversationID: conversationID,
+			Items:          toAgentContractScheduleStateItems(req.Items),
+		}); err != nil {
+			writeAgentHTTPError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, nil))
+		return
+	}
+
+	localSvc, ok := api.localAgentService(c)
+	if !ok {
+		return
+	}
+
 	// 5. 调用 service 层执行 Load → 应用放置项 → Save。
-	if err := api.svc.SaveScheduleState(ctx, userID, conversationID, req.Items); err != nil {
+	if err := localSvc.SaveScheduleState(ctx, userID, conversationID, req.Items); err != nil {
 		respond.DealWithError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, respond.RespWithData(respond.Ok, nil))
+}
+
+// localAgentService 返回迁移期本地 fallback 服务。
+//
+// 职责边界：
+// 1. 只服务于 RPC 开关关闭时的回退路径；
+// 2. 默认 RPC 切流态允许 svc 为 nil，因此所有本地调用前必须经过此处；
+// 3. 缺失时返回 500，提示启动配置和运行时装配不一致，而不是让 handler panic。
+func (api *AgentHandler) localAgentService(c *gin.Context) (*agentsv.AgentService, bool) {
+	if api != nil && api.svc != nil {
+		return api.svc, true
+	}
+	respond.DealWithError(c, errors.New("agent local fallback is disabled"))
+	return nil, false
+}
+
+func toAgentContractScheduleStateItems(items []model.SaveScheduleStatePlacedItem) []agentcontracts.SaveScheduleStatePlacedItem {
+	if len(items) == 0 {
+		return nil
+	}
+	result := make([]agentcontracts.SaveScheduleStatePlacedItem, 0, len(items))
+	for _, item := range items {
+		result = append(result, agentcontracts.SaveScheduleStatePlacedItem{
+			TaskItemID:         item.TaskItemID,
+			Week:               item.Week,
+			DayOfWeek:          item.DayOfWeek,
+			StartSection:       item.StartSection,
+			EndSection:         item.EndSection,
+			EmbedCourseEventID: item.EmbedCourseEventID,
+		})
+	}
+	return result
 }

@@ -13,9 +13,9 @@ import (
 
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	"github.com/LoveLosita/smartflow/backend/memory"
-	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
 	"github.com/LoveLosita/smartflow/backend/model"
+	"github.com/LoveLosita/smartflow/backend/services/memory"
+	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
 	"github.com/spf13/viper"
 	"gorm.io/gorm"
 )

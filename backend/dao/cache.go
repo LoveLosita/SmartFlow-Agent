@@ -6,7 +6,7 @@ import (
 	"errors"
 
 	"fmt"
-	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
+	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
 	"strings"
 	"time"
 

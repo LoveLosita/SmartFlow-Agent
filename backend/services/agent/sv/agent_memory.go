@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
-	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	agentmodel "github.com/LoveLosita/smartflow/backend/services/agent/model"
+	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
+	memoryobserve "github.com/LoveLosita/smartflow/backend/services/memory/observe"
 )
 
 const (

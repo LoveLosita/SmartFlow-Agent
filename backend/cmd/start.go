@@ -15,6 +15,7 @@ import (
 	"github.com/LoveLosita/smartflow/backend/dao"
 	"github.com/LoveLosita/smartflow/backend/gateway/api"
 	gatewayactivescheduler "github.com/LoveLosita/smartflow/backend/gateway/client/activescheduler"
+	gatewayagent "github.com/LoveLosita/smartflow/backend/gateway/client/agent"
 	gatewaycourse "github.com/LoveLosita/smartflow/backend/gateway/client/course"
 	gatewaymemory "github.com/LoveLosita/smartflow/backend/gateway/client/memory"
 	gatewaynotification "github.com/LoveLosita/smartflow/backend/gateway/client/notification"
@@ -26,9 +27,6 @@ import (
 	kafkabus "github.com/LoveLosita/smartflow/backend/infra/kafka"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
 	"github.com/LoveLosita/smartflow/backend/inits"
-	"github.com/LoveLosita/smartflow/backend/memory"
-	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
-	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	"github.com/LoveLosita/smartflow/backend/middleware"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/pkg"
@@ -47,12 +45,20 @@ import (
 	agenttools "github.com/LoveLosita/smartflow/backend/services/agent/tools"
 	"github.com/LoveLosita/smartflow/backend/services/agent/tools/web"
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
+	"github.com/LoveLosita/smartflow/backend/services/memory"
+	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
+	memoryobserve "github.com/LoveLosita/smartflow/backend/services/memory/observe"
 	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
 	ragconfig "github.com/LoveLosita/smartflow/backend/services/rag/config"
 	"github.com/LoveLosita/smartflow/backend/shared/ports"
 	"github.com/go-redis/redis/v8"
 	"github.com/spf13/viper"
 	"gorm.io/gorm"
+)
+
+const (
+	gatewayAgentRPCChatEnabledKey = "agent.rpc.chat.enabled"
+	gatewayAgentRPCAPIEnabledKey  = "agent.rpc.api.enabled"
 )
 
 // appRuntime 承载一次进程启动所需的依赖图。
@@ -69,8 +75,6 @@ type appRuntime struct {
 	agentCache     *dao.AgentCache
 	manager        *dao.RepoManager
 	outboxRepo     *outboxinfra.Repository
-	eventBus       eventsvc.OutboxBus
-	memoryModule   *memory.Module
 	limiter        *pkg.RateLimiter
 	handlers       *api.ApiHandlers
 	userAuthClient *gatewayuserauth.Client
@@ -112,8 +116,11 @@ func StartAPI() {
 	runtime.startHTTP(ctx)
 }
 
-// StartWorker 只启动后台异步能力，不注册 Gin 路由。
-// 当前只包含单体残留域 agent outbox relay / Kafka consumer；memory worker 已迁到 cmd/memory。
+// StartWorker 保留历史 worker 入口，但阶段 6 后不再拥有 agent / memory 消费边界。
+// 当前语义：
+// 1. agent outbox relay / consumer 已迁到 cmd/agent；
+// 2. memory worker 已迁到 cmd/memory；
+// 3. 该入口仅用于兼容旧启动命令，后续可在 gateway 收口阶段删除。
 func StartWorker() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -138,10 +145,10 @@ func mustBuildRuntime(ctx context.Context) *appRuntime {
 // buildRuntime 装配应用依赖图，但不启动 HTTP 或后台循环。
 //
 // 步骤说明：
-// 1. 先初始化配置、数据库、Redis、模型、RAG、memory 等基础设施；
-// 2. 再构造 DAO / Service / agent 依赖；
+// 1. 先初始化配置、数据库、Redis 等 gateway 必需基础设施；
+// 2. 再构造各服务 zrpc client，并按开关决定是否装配 agent 本地 fallback；
 // 3. 最后构造 HTTP handlers，供 api/all 模式按需启动；
-// 4. worker 模式暂时也复用完整依赖图，避免同轮迁移拆出两套装配逻辑。
+// 4. worker 模式暂时也复用 gateway 依赖图，但不再启动 agent / memory worker。
 func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err := loadConfig(); err != nil {
 		return nil, err
@@ -158,54 +165,9 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	}
 	limiter := pkg.NewRateLimiter(rdb)
 
-	aiHub, err := inits.InitEino()
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize Eino: %w", err)
-	}
-
-	llmService := llmservice.New(llmservice.Options{
-		AIHub:             aiHub,
-		APIKey:            os.Getenv("ARK_API_KEY"),
-		BaseURL:           viper.GetString("agent.baseURL"),
-		CourseVisionModel: viper.GetString("courseImport.visionModel"),
-	})
-
-	ragService, err := buildRAGService(ctx)
-	if err != nil {
-		return nil, err
-	}
-	ragRuntime := ragService.Runtime()
-
-	memoryCfg := memory.LoadConfigFromViper()
-	memoryObserver := memoryobserve.NewLoggerObserver(log.Default())
-	memoryMetrics := memoryobserve.NewMetricsRegistry()
-	memoryModule := memory.NewModuleWithObserve(
-		db,
-		llmService.ProClient(),
-		ragRuntime,
-		memoryCfg,
-		memory.ObserveDeps{
-			Observer: memoryObserver,
-			Metrics:  memoryMetrics,
-		},
-	)
-
 	// DAO 层初始化。
 	cacheRepo := dao.NewCacheDAO(rdb)
-	agentCacheRepo := dao.NewAgentCache(rdb)
 	_ = db.Use(middleware.NewGormCachePlugin(cacheRepo))
-	taskRepo := dao.NewTaskDAO(db)
-	taskClassRepo := dao.NewTaskClassDAO(db)
-	scheduleRepo := dao.NewScheduleDAO(db)
-	manager := dao.NewManager(db)
-	agentRepo := dao.NewAgentDAO(db)
-	outboxRepo := outboxinfra.NewRepository(db)
-
-	eventBus, err := buildAgentEventBus(outboxRepo)
-	if err != nil {
-		return nil, err
-	}
-	eventPublisher := buildCoreOutboxPublisher(outboxRepo)
 
 	// Service 层初始化。
 	userAuthClient, err := gatewayuserauth.NewClient(gatewayuserauth.ClientConfig{
@@ -265,6 +227,14 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize memory zrpc client: %w", err)
 	}
+	agentRPCClient, err := gatewayagent.NewClient(gatewayagent.ClientConfig{
+		Endpoints: viper.GetStringSlice("agent.rpc.endpoints"),
+		Target:    viper.GetString("agent.rpc.target"),
+		Timeout:   viper.GetDuration("agent.rpc.timeout"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize agent zrpc client: %w", err)
+	}
 	activeSchedulerClient, err := gatewayactivescheduler.NewClient(gatewayactivescheduler.ClientConfig{
 		Endpoints: viper.GetStringSlice("activeScheduler.rpc.endpoints"),
 		Target:    viper.GetString("activeScheduler.rpc.target"),
@@ -273,81 +243,123 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize active-scheduler zrpc client: %w", err)
 	}
-	if err := eventsvc.RegisterTaskUrgencyPromoteRoute(); err != nil {
-		return nil, fmt.Errorf("failed to register task outbox route: %w", err)
-	}
-	taskOutboxPublisher := buildTaskOutboxPublisher(outboxRepo)
-	taskSv := service.NewTaskService(taskRepo, cacheRepo, taskOutboxPublisher)
-	taskSv.SetActiveScheduleDAO(manager.ActiveSchedule)
-	scheduleService := service.NewScheduleService(scheduleRepo, taskClassRepo, manager, cacheRepo)
-	agentService := agentsv.NewAgentService(
-		llmService,
-		agentRepo,
-		taskRepo,
-		cacheRepo,
-		agentCacheRepo,
-		manager.ActiveSchedule,
-		manager.ActiveScheduleSession,
-		eventPublisher,
-	)
-	// 1. 仍由启动装配层注入旧 service 的排程能力，避免 agent/sv 反向 import 旧 service 形成循环依赖。
-	// 2. 后续 schedule/task 完全走 RPC 后，这两个函数注入点可继续缩掉。
-	agentService.SmartPlanningMultiRawFunc = scheduleService.SmartPlanningMultiRaw
-	agentService.HybridScheduleWithPlanMultiFunc = scheduleService.HybridScheduleWithPlanMulti
-	agentService.ResolvePlanningWindowFunc = scheduleService.ResolvePlanningWindowByTaskClasses
-	agentService.GetTasksWithUrgencyPromotionFunc = taskSv.GetTasksWithUrgencyPromotion
+	var agentRepo *dao.AgentDAO
+	var agentCacheRepo *dao.AgentCache
+	var manager *dao.RepoManager
+	var outboxRepo *outboxinfra.Repository
+	var agentService *agentsv.AgentService
+	if shouldBuildGatewayAgentFallback() {
+		log.Println("Gateway agent RPC fallback is enabled; building local AgentService compatibility path")
 
-	configureAgentService(
-		agentService,
-		ragRuntime,
-		agentRepo,
-		cacheRepo,
-		taskClient,
-		taskClassClient,
-		scheduleClient,
-		memoryClient,
-		memoryCfg,
-		memoryObserver,
-		memoryMetrics,
-	)
+		aiHub, err := inits.InitEino()
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize Eino: %w", err)
+		}
+		llmService := llmservice.New(llmservice.Options{
+			AIHub:             aiHub,
+			APIKey:            os.Getenv("ARK_API_KEY"),
+			BaseURL:           viper.GetString("agent.baseURL"),
+			CourseVisionModel: viper.GetString("courseImport.visionModel"),
+		})
 
-	// 1. task_pool facts 已统一走 task RPC，避免聊天 rerun 继续直连 tasks 表；
-	// 2. schedule facts / feedback / apply 已统一走 schedule RPC，避免聊天 rerun 继续直连 schedule 表。
-	activeTaskAdapter, err := activeadapters.NewTaskRPCAdapter(activeadapters.TaskRPCConfig{
-		Endpoints: viper.GetStringSlice("task.rpc.endpoints"),
-		Target:    viper.GetString("task.rpc.target"),
-		Timeout:   viper.GetDuration("task.rpc.timeout"),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize task rpc adapter for active-scheduler rerun: %w", err)
+		ragService, err := buildRAGService(ctx)
+		if err != nil {
+			return nil, err
+		}
+		ragRuntime := ragService.Runtime()
+		memoryCfg := memory.LoadConfigFromViper()
+		memoryObserver := memoryobserve.NewLoggerObserver(log.Default())
+		memoryMetrics := memoryobserve.NewMetricsRegistry()
+
+		agentCacheRepo = dao.NewAgentCache(rdb)
+		taskRepo := dao.NewTaskDAO(db)
+		taskClassRepo := dao.NewTaskClassDAO(db)
+		scheduleRepo := dao.NewScheduleDAO(db)
+		manager = dao.NewManager(db)
+		agentRepo = dao.NewAgentDAO(db)
+		outboxRepo = outboxinfra.NewRepository(db)
+
+		// 1. fallback 仅用于 RPC 开关关闭时的迁移期回退，不再启动 agent outbox event bus。
+		// 2. fallback 产生的事件仍写入服务级 outbox 表，由 cmd/agent / cmd/task 独立进程负责 relay / consume。
+		eventPublisher := buildCoreOutboxPublisher(outboxRepo)
+		if err := eventsvc.RegisterTaskUrgencyPromoteRoute(); err != nil {
+			return nil, fmt.Errorf("failed to register task outbox route: %w", err)
+		}
+		taskOutboxPublisher := buildTaskOutboxPublisher(outboxRepo)
+		taskSv := service.NewTaskService(taskRepo, cacheRepo, taskOutboxPublisher)
+		taskSv.SetActiveScheduleDAO(manager.ActiveSchedule)
+		scheduleService := service.NewScheduleService(scheduleRepo, taskClassRepo, manager, cacheRepo)
+		agentService = agentsv.NewAgentService(
+			llmService,
+			agentRepo,
+			taskRepo,
+			cacheRepo,
+			agentCacheRepo,
+			manager.ActiveSchedule,
+			manager.ActiveScheduleSession,
+			eventPublisher,
+		)
+		// 1. 仍由启动装配层注入旧 service 的排程能力，避免 agent/sv 反向 import 旧 service 形成循环依赖。
+		// 2. 后续 schedule/task 完全走 RPC 后，这两个函数注入点可继续缩掉。
+		agentService.SmartPlanningMultiRawFunc = scheduleService.SmartPlanningMultiRaw
+		agentService.HybridScheduleWithPlanMultiFunc = scheduleService.HybridScheduleWithPlanMulti
+		agentService.ResolvePlanningWindowFunc = scheduleService.ResolvePlanningWindowByTaskClasses
+		agentService.GetTasksWithUrgencyPromotionFunc = taskSv.GetTasksWithUrgencyPromotion
+
+		configureAgentService(
+			agentService,
+			ragRuntime,
+			agentRepo,
+			cacheRepo,
+			taskClient,
+			taskClassClient,
+			scheduleClient,
+			memoryClient,
+			memoryCfg,
+			memoryObserver,
+			memoryMetrics,
+		)
+
+		// 1. task_pool facts 已统一走 task RPC，避免聊天 rerun 继续直连 tasks 表；
+		// 2. schedule facts / feedback / apply 已统一走 schedule RPC，避免聊天 rerun 继续直连 schedule 表。
+		activeTaskAdapter, err := activeadapters.NewTaskRPCAdapter(activeadapters.TaskRPCConfig{
+			Endpoints: viper.GetStringSlice("task.rpc.endpoints"),
+			Target:    viper.GetString("task.rpc.target"),
+			Timeout:   viper.GetDuration("task.rpc.timeout"),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize task rpc adapter for active-scheduler rerun: %w", err)
+		}
+		activeScheduleAdapter, err := activeadapters.NewScheduleRPCAdapter(activeadapters.ScheduleRPCConfig{
+			Endpoints: viper.GetStringSlice("schedule.rpc.endpoints"),
+			Target:    viper.GetString("schedule.rpc.target"),
+			Timeout:   viper.GetDuration("schedule.rpc.timeout"),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize schedule rpc adapter for active-scheduler rerun: %w", err)
+		}
+		activeScheduleDryRun, err := activesvc.NewDryRunService(activeadapters.ReadersWithScheduleRPC(activeTaskAdapter, activeScheduleAdapter))
+		if err != nil {
+			return nil, err
+		}
+		activeSchedulePreviewConfirm, err := buildActiveSchedulePreviewConfirmService(manager.ActiveSchedule, activeScheduleDryRun, activeScheduleAdapter)
+		if err != nil {
+			return nil, err
+		}
+		// 1. 主动调度选择器单独复用 Pro 模型，LLM 失败时由 selection 层显式回退到确定性候选；
+		// 2. dry-run 与 selection 通过 graph runner 串起来，避免 trigger_pipeline 再拼第二套候选逻辑。
+		activeScheduleLLMClient := llmService.ProClient()
+		activeScheduleSelector := activesel.NewService(activeScheduleLLMClient)
+		activeScheduleFeedbackLocator := activefeedbacklocate.NewService(activeScheduleAdapter, activeScheduleLLMClient)
+		activeScheduleGraphRunner, err := activegraph.NewRunner(activeScheduleDryRun.AsGraphDryRunFunc(), activeScheduleSelector)
+		if err != nil {
+			return nil, err
+		}
+		agentService.SetActiveScheduleSessionRerunFunc(buildActiveScheduleSessionRerunFunc(manager.ActiveSchedule, activeScheduleGraphRunner, activeSchedulePreviewConfirm, activeScheduleFeedbackLocator))
+	} else {
+		log.Println("Gateway agent local fallback is disabled; /agent HTTP routes use cmd/agent zrpc")
 	}
-	activeScheduleAdapter, err := activeadapters.NewScheduleRPCAdapter(activeadapters.ScheduleRPCConfig{
-		Endpoints: viper.GetStringSlice("schedule.rpc.endpoints"),
-		Target:    viper.GetString("schedule.rpc.target"),
-		Timeout:   viper.GetDuration("schedule.rpc.timeout"),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize schedule rpc adapter for active-scheduler rerun: %w", err)
-	}
-	activeScheduleDryRun, err := activesvc.NewDryRunService(activeadapters.ReadersWithScheduleRPC(activeTaskAdapter, activeScheduleAdapter))
-	if err != nil {
-		return nil, err
-	}
-	activeSchedulePreviewConfirm, err := buildActiveSchedulePreviewConfirmService(manager.ActiveSchedule, activeScheduleDryRun, activeScheduleAdapter)
-	if err != nil {
-		return nil, err
-	}
-	// 1. 主动调度选择器单独复用 Pro 模型，LLM 失败时由 selection 层显式回退到确定性候选；
-	// 2. dry-run 与 selection 通过 graph runner 串起来，避免 trigger_pipeline 再拼第二套候选逻辑。
-	activeScheduleLLMClient := llmService.ProClient()
-	activeScheduleSelector := activesel.NewService(activeScheduleLLMClient)
-	activeScheduleFeedbackLocator := activefeedbacklocate.NewService(activeScheduleAdapter, activeScheduleLLMClient)
-	activeScheduleGraphRunner, err := activegraph.NewRunner(activeScheduleDryRun.AsGraphDryRunFunc(), activeScheduleSelector)
-	if err != nil {
-		return nil, err
-	}
-	agentService.SetActiveScheduleSessionRerunFunc(buildActiveScheduleSessionRerunFunc(manager.ActiveSchedule, activeScheduleGraphRunner, activeSchedulePreviewConfirm, activeScheduleFeedbackLocator))
-	handlers := buildAPIHandlers(taskClient, taskClassClient, courseClient, scheduleClient, agentService, memoryClient, activeSchedulerClient, notificationClient)
+	handlers := buildAPIHandlers(taskClient, taskClassClient, courseClient, scheduleClient, agentService, agentRPCClient, memoryClient, activeSchedulerClient, notificationClient)
 
 	runtime := &appRuntime{
 		db:          db,
@@ -358,18 +370,21 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		agentCache:     agentCacheRepo,
 		manager:        manager,
 		outboxRepo:     outboxRepo,
-		eventBus:       eventBus,
-		memoryModule:   memoryModule,
 		limiter:        limiter,
 		handlers:       handlers,
 		userAuthClient: userAuthClient,
 	}
-	if runtime.eventBus != nil {
-		if err := runtime.registerEventHandlers(); err != nil {
-			return nil, err
-		}
-	}
 	return runtime, nil
+}
+
+// shouldBuildGatewayAgentFallback 判断 gateway 是否需要保留本地 AgentService 回退面。
+//
+// 职责边界：
+// 1. 只读取启动期配置，不做运行时动态切换；
+// 2. chat 或非 chat 任一 RPC 开关关闭时，保守装配 fallback，避免旧环境无法启动；
+// 3. 两个开关都开启时跳过本地 agent 编排依赖，让 gateway 只保留 HTTP/SSE 门面。
+func shouldBuildGatewayAgentFallback() bool {
+	return !viper.GetBool(gatewayAgentRPCChatEnabledKey) || !viper.GetBool(gatewayAgentRPCAPIEnabledKey)
 }
 
 func buildRAGService(ctx context.Context) (*ragservice.Service, error) {
@@ -392,28 +407,6 @@ func buildRAGService(ctx context.Context) (*ragservice.Service, error) {
 	}
 	log.Printf("RAG service initialized: store=%s embed=%s reranker=%s", ragCfg.Store, ragCfg.EmbedProvider, ragCfg.RerankerProvider)
 	return ragService, nil
-}
-
-func buildAgentEventBus(outboxRepo *outboxinfra.Repository) (eventsvc.OutboxBus, error) {
-	// agent outbox 消费边界装配：
-	// 1. 单体残留在 CP1 后只消费 agent 自己的 outbox；
-	// 2. memory.extract.requested 仍可被发布到 memory_outbox_messages，但消费与 worker 已迁往 cmd/memory；
-	// 3. kafka.enabled=false 时返回 nil，业务按既有同步降级策略执行。
-	kafkaCfg := kafkabus.LoadConfig()
-	bus, err := eventsvc.NewServiceOutboxBus(outboxRepo, kafkaCfg, outboxinfra.ServiceAgent)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize outbox event bus for service %s: %w", outboxinfra.ServiceAgent, err)
-	}
-	serviceBuses := make(map[string]eventsvc.OutboxBus, 1)
-	if bus != nil {
-		serviceBuses[outboxinfra.ServiceAgent] = bus
-	}
-
-	eventBus := eventsvc.NewRoutedOutboxBus(serviceBuses)
-	if eventBus == nil {
-		log.Println("Outbox event bus is disabled")
-	}
-	return eventBus, nil
 }
 
 // buildCoreOutboxPublisher 构造单体残留发布器。
@@ -823,7 +816,7 @@ func configureAgentService(
 	agentService.SetQuickTaskDeps(agentsv.NewTaskRPCQuickTaskDeps(taskClient))
 	// 1. agent 主链路读取记忆统一走 memory zrpc，避免 CP3 后继续直连本进程 memory.Module；
 	// 2. observer / metrics 继续复用启动期装配，保证注入侧观测在 RPC 切流后不丢；
-	// 3. 旧 memoryModule 仍保留在启动图中，作为迁移期依赖和后续回退面；
+	// 3. gateway 不再组装 memory.Module，memory worker / 管理能力统一交给 cmd/memory；
 	// 4. memory 服务暂不可用时，预取链路只记录警告并软降级，不阻断聊天主流程。
 	agentService.SetMemoryReader(agentsv.NewMemoryRPCReader(memoryReaderClient, memoryObserver, memoryMetrics), memoryCfg)
 }
@@ -834,6 +827,7 @@ func buildAPIHandlers(
 	courseClient ports.CourseCommandClient,
 	scheduleClient ports.ScheduleCommandClient,
 	agentService *agentsv.AgentService,
+	agentRPCClient *gatewayagent.Client,
 	memoryClient ports.MemoryCommandClient,
 	activeSchedulerClient ports.ActiveSchedulerCommandClient,
 	notificationClient ports.NotificationCommandClient,
@@ -843,7 +837,7 @@ func buildAPIHandlers(
 		TaskClassHandler: api.NewTaskClassHandler(taskClassClient),
 		CourseHandler:    api.NewCourseHandler(courseClient),
 		ScheduleHandler:  api.NewScheduleAPI(scheduleClient),
-		AgentHandler:     api.NewAgentHandler(agentService),
+		AgentHandler:     api.NewAgentHandlerWithRPC(agentService, agentRPCClient),
 		MemoryHandler:    api.NewMemoryHandler(memoryClient),
 		ActiveSchedule:   api.NewActiveScheduleAPI(activeSchedulerClient),
 		Notification:     api.NewNotificationAPI(notificationClient),
@@ -855,29 +849,8 @@ func (r *appRuntime) startWorkers(ctx context.Context) {
 		return
 	}
 
-	if r.eventBus != nil {
-		r.eventBus.Start(ctx)
-		log.Println("Outbox event bus started")
-	} else {
-		log.Println("Outbox event bus is disabled")
-	}
-	log.Println("Memory worker is managed by cmd/memory in phase 6 CP1")
-}
-
-func (r *appRuntime) registerEventHandlers() error {
-	// 调用目的：只注册仍留在单体残留域内的 outbox handler；active-scheduler / notification 已由各自独立进程管理消费边界。
-	if err := eventsvc.RegisterCoreOutboxHandlers(
-		r.eventBus,
-		r.outboxRepo,
-		r.manager,
-		r.agentRepo,
-		r.cacheRepo,
-		r.memoryModule,
-		r.userAuthClient,
-	); err != nil {
-		return err
-	}
-	return nil
+	log.Println("Gateway outbox worker is disabled; agent relay/consumer is managed by cmd/agent")
+	log.Println("Memory worker is managed by cmd/memory in phase 6")
 }
 
 func (r *appRuntime) startHTTP(ctx context.Context) {
@@ -888,8 +861,5 @@ func (r *appRuntime) startHTTP(ctx context.Context) {
 func (r *appRuntime) close() {
 	if r == nil {
 		return
-	}
-	if r.eventBus != nil {
-		r.eventBus.Close()
 	}
 }

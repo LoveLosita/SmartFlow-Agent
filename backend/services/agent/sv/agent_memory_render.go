@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
+	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
 )
 
 // renderMemoryPinnedContentByMode 根据配置选择记忆渲染方式。

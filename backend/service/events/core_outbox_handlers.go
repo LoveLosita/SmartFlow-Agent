@@ -5,7 +5,7 @@ import (
 
 	"github.com/LoveLosita/smartflow/backend/dao"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	"github.com/LoveLosita/smartflow/backend/memory"
+	"github.com/LoveLosita/smartflow/backend/services/memory"
 	sharedevents "github.com/LoveLosita/smartflow/backend/shared/events"
 	"github.com/LoveLosita/smartflow/backend/shared/ports"
 )

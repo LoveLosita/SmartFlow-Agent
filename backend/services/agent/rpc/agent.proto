@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package smartflow.agent;
+
+option go_package = "github.com/LoveLosita/smartflow/backend/services/agent/rpc/pb";
+
+service Agent {
+  rpc Ping(StatusResponse) returns (StatusResponse);
+  rpc Chat(ChatRequest) returns (stream ChatChunk);
+  rpc GetConversationMeta(JSONRequest) returns (JSONResponse);
+  rpc GetConversationList(JSONRequest) returns (JSONResponse);
+  rpc GetConversationTimeline(JSONRequest) returns (JSONResponse);
+  rpc GetSchedulePlanPreview(JSONRequest) returns (JSONResponse);
+  rpc GetContextStats(JSONRequest) returns (JSONResponse);
+  rpc SaveScheduleState(JSONRequest) returns (JSONResponse);
+}
+
+message ChatRequest {
+  string message = 1;
+  string thinking = 2;
+  string model = 3;
+  int32 user_id = 4;
+  string conversation_id = 5;
+  bytes extra_json = 6;
+}
+
+message ChatChunk {
+  string payload = 1;
+  bool done = 2;
+  bytes error_json = 3;
+}
+
+message StatusResponse {
+}
+
+message JSONRequest {
+  bytes payload_json = 1;
+}
+
+message JSONResponse {
+  bytes data_json = 1;
+}

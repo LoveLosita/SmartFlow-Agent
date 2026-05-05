@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
-	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
+	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
+	memoryobserve "github.com/LoveLosita/smartflow/backend/services/memory/observe"
 	memorycontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/memory"
 )
 

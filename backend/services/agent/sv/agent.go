@@ -12,8 +12,6 @@ import (
 	"github.com/LoveLosita/smartflow/backend/conv"
 	"github.com/LoveLosita/smartflow/backend/dao"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/infra/outbox"
-	memorymodel "github.com/LoveLosita/smartflow/backend/memory/model"
-	memoryobserve "github.com/LoveLosita/smartflow/backend/memory/observe"
 	"github.com/LoveLosita/smartflow/backend/model"
 	"github.com/LoveLosita/smartflow/backend/pkg"
 	eventsvc "github.com/LoveLosita/smartflow/backend/service/events"
@@ -21,6 +19,8 @@ import (
 	agentprompt "github.com/LoveLosita/smartflow/backend/services/agent/prompt"
 	agenttools "github.com/LoveLosita/smartflow/backend/services/agent/tools"
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
+	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
+	memoryobserve "github.com/LoveLosita/smartflow/backend/services/memory/observe"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 )
