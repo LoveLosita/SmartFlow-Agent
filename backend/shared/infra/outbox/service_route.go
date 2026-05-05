@@ -10,6 +10,8 @@ const (
 	ServiceNameMemory          = "memory"
 	ServiceNameActiveScheduler = "active-scheduler"
 	ServiceNameNotification    = "notification"
+	ServiceNameTaskClassForum  = "taskclass-forum"
+	ServiceNameTokenStore      = "token-store"
 )
 
 // ServiceRoute 描述一个 outbox 服务的终态路由信息。
@@ -56,6 +58,18 @@ var builtinServiceRoutes = map[string]ServiceRoute{
 		Topic:       "smartflow.notification.outbox",
 		GroupID:     "smartflow-notification-outbox-consumer",
 	},
+	ServiceNameTaskClassForum: {
+		ServiceName: ServiceNameTaskClassForum,
+		TableName:   "taskclass_forum_outbox_messages",
+		Topic:       "smartflow.taskclass-forum.outbox",
+		GroupID:     "smartflow-taskclass-forum-outbox-consumer",
+	},
+	ServiceNameTokenStore: {
+		ServiceName: ServiceNameTokenStore,
+		TableName:   "token_store_outbox_messages",
+		Topic:       "smartflow.token-store.outbox",
+		GroupID:     "smartflow-token-store-outbox-consumer",
+	},
 }
 
 // DefaultServiceRoutes 返回当前已知服务的默认路由清单。
@@ -71,6 +85,8 @@ func DefaultServiceRoutes() []ServiceRoute {
 		builtinServiceRoutes[ServiceNameMemory],
 		builtinServiceRoutes[ServiceNameActiveScheduler],
 		builtinServiceRoutes[ServiceNameNotification],
+		builtinServiceRoutes[ServiceNameTaskClassForum],
+		builtinServiceRoutes[ServiceNameTokenStore],
 	}
 }
 

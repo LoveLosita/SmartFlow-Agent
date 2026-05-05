@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { useRoute, useRouter } from 'vue-router'
+import { useRouter } from 'vue-router'
 
 import TaskQuadrantCard from '@/components/dashboard/TaskQuadrantCard.vue'
 import TodayTimeline from '@/components/dashboard/TodayTimeline.vue'
@@ -277,7 +277,7 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
           </header>
 
           <div ref="dashboardContentRef" class="dashboard-content page-shell">
-            <TodayTimeline class="dashboard-item-pop" :style="{ '--anim-delay': '0.04s' }" :events="todayEvents" :loading="scheduleLoading || pageLoading" />
+            <TodayTimeline :style="{ '--anim-delay': '0.04s' }" :events="todayEvents" :loading="scheduleLoading || pageLoading" />
 
             <div class="dashboard-actions dashboard-item-pop" :style="{ '--anim-delay': '0.08s' }">
               <button type="button" class="dashboard-actions__primary" @click="openCreateTaskDialog">添加任务</button>
@@ -375,15 +375,15 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
 ::-webkit-scrollbar-thumb { background: rgba(15, 23, 42, 0.08); border-radius: 10px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(15, 23, 42, 0.15); }
 
-@keyframes dashboard-item-spring {
-  0% { opacity: 0; transform: scale(0.9) translateY(20px); }
-  60% { opacity: 1; transform: scale(1.02) translateY(-2px); }
-  100% { opacity: 1; transform: scale(1) translateY(0); }
+@keyframes dashboard-item-fade-in {
+  0% { opacity: 0; transform: translateY(10px); }
+  100% { opacity: 1; transform: translateY(0); }
 }
 
 .dashboard-item-pop {
-  animation: dashboard-item-spring 0.55s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation: dashboard-item-fade-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
   animation-delay: var(--anim-delay, 0s);
+  --anim-delay: 0s;
   transform-origin: center center;
 }
 
@@ -543,12 +543,11 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
 
 /* 弹出动画覆写 */
 :global(.dialog-fade-enter-active .premium-dialog) {
-  animation: premium-dialog-pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation: premium-dialog-fade-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
-@keyframes premium-dialog-pop {
-  0% { opacity: 0; transform: scale(0.92) translateY(20px); }
-  60% { opacity: 1; transform: scale(1.02) translateY(-2px); }
+@keyframes premium-dialog-fade-in {
+  0% { opacity: 0; transform: scale(0.98) translateY(10px); }
   100% { opacity: 1; transform: scale(1) translateY(0); }
 }
 

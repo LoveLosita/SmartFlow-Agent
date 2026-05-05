@@ -1,0 +1,156 @@
+syntax = "proto3";
+
+package smartflow.tokenstore;
+
+option go_package = "github.com/LoveLosita/smartflow/backend/services/tokenstore/rpc/pb";
+
+service TokenStoreService {
+  rpc GetSummary(GetTokenSummaryRequest) returns (GetTokenSummaryResponse);
+  rpc ListProducts(ListTokenProductsRequest) returns (ListTokenProductsResponse);
+  rpc CreateOrder(CreateTokenOrderRequest) returns (CreateTokenOrderResponse);
+  rpc ListOrders(ListTokenOrdersRequest) returns (ListTokenOrdersResponse);
+  rpc GetOrder(GetTokenOrderRequest) returns (GetTokenOrderResponse);
+  rpc MockPaidOrder(MockPaidOrderRequest) returns (MockPaidOrderResponse);
+  rpc ListGrants(ListTokenGrantsRequest) returns (ListTokenGrantsResponse);
+  rpc RecordForumRewardGrant(RecordForumRewardGrantRequest) returns (RecordForumRewardGrantResponse);
+}
+
+message PageResponse {
+  int32 page = 1;
+  int32 page_size = 2;
+  int32 total = 3;
+  bool has_more = 4;
+}
+
+message TokenSummary {
+  int64 recorded_token_total = 1;
+  int64 applied_token_total = 2;
+  int64 pending_apply_token_total = 3;
+  string quota_sync_status = 4;
+  string tip = 5;
+}
+
+message TokenProductView {
+  uint64 product_id = 1;
+  string name = 2;
+  string description = 3;
+  int64 token_amount = 4;
+  int64 price_cent = 5;
+  string price_text = 6;
+  string currency = 7;
+  string badge = 8;
+  string status = 9;
+  int32 sort_order = 10;
+}
+
+message TokenGrantView {
+  uint64 grant_id = 1;
+  string event_id = 2;
+  string source = 3;
+  string source_label = 4;
+  int64 amount = 5;
+  string status = 6;
+  bool quota_applied = 7;
+  string description = 8;
+  string created_at = 9;
+}
+
+message TokenOrderView {
+  uint64 order_id = 1;
+  string order_no = 2;
+  string status = 3;
+  int64 token_amount = 4;
+  int64 amount_cent = 5;
+  string price_text = 6;
+  string currency = 7;
+  string payment_mode = 8;
+  TokenGrantView grant = 9;
+  string created_at = 10;
+  string paid_at = 11;
+  string granted_at = 12;
+  string product_snapshot = 13;
+  string product_name = 14;
+  int32 quantity = 15;
+}
+
+message GetTokenSummaryRequest {
+  uint64 actor_user_id = 1;
+}
+
+message GetTokenSummaryResponse {
+  TokenSummary summary = 1;
+}
+
+message ListTokenProductsRequest {
+  uint64 actor_user_id = 1;
+}
+
+message ListTokenProductsResponse {
+  repeated TokenProductView items = 1;
+}
+
+message CreateTokenOrderRequest {
+  uint64 actor_user_id = 1;
+  uint64 product_id = 2;
+  int32 quantity = 3;
+  string idempotency_key = 4;
+}
+
+message CreateTokenOrderResponse {
+  TokenOrderView order = 1;
+}
+
+message ListTokenOrdersRequest {
+  uint64 actor_user_id = 1;
+  int32 page = 2;
+  int32 page_size = 3;
+  string status = 4;
+}
+
+message ListTokenOrdersResponse {
+  repeated TokenOrderView items = 1;
+  PageResponse page = 2;
+}
+
+message GetTokenOrderRequest {
+  uint64 actor_user_id = 1;
+  uint64 order_id = 2;
+}
+
+message GetTokenOrderResponse {
+  TokenOrderView order = 1;
+}
+
+message MockPaidOrderRequest {
+  uint64 actor_user_id = 1;
+  uint64 order_id = 2;
+  string mock_channel = 3;
+  string idempotency_key = 4;
+}
+
+message MockPaidOrderResponse {
+  TokenOrderView order = 1;
+}
+
+message ListTokenGrantsRequest {
+  uint64 actor_user_id = 1;
+  int32 page = 2;
+  int32 page_size = 3;
+  string source = 4;
+}
+
+message ListTokenGrantsResponse {
+  repeated TokenGrantView items = 1;
+  PageResponse page = 2;
+}
+
+message RecordForumRewardGrantRequest {
+  string event_id = 1;
+  uint64 receiver_user_id = 2;
+  string source = 3;
+  string source_ref_id = 4;
+}
+
+message RecordForumRewardGrantResponse {
+  TokenGrantView grant = 1;
+}

@@ -19,6 +19,8 @@ import (
 	scheduleclient "github.com/LoveLosita/smartflow/backend/client/schedule"
 	taskclient "github.com/LoveLosita/smartflow/backend/client/task"
 	taskclassclient "github.com/LoveLosita/smartflow/backend/client/taskclass"
+	taskclassforumclient "github.com/LoveLosita/smartflow/backend/client/taskclassforum"
+	tokenstoreclient "github.com/LoveLosita/smartflow/backend/client/tokenstore"
 	userauthclient "github.com/LoveLosita/smartflow/backend/client/userauth"
 	coreinit "github.com/LoveLosita/smartflow/backend/cmd/internal/coreinit"
 	"github.com/LoveLosita/smartflow/backend/gateway/api"
@@ -84,6 +86,8 @@ type appRuntime struct {
 	limiter        *ratelimit.RateLimiter
 	handlers       *api.ApiHandlers
 	userAuthClient *userauthclient.Client
+	forumClient    *taskclassforumclient.Client
+	tokenClient    *tokenstoreclient.Client
 }
 
 // loadConfig 锻炼?
@@ -191,6 +195,22 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize notification zrpc client: %w", err)
+	}
+	forumClient, err := taskclassforumclient.NewClient(taskclassforumclient.ClientConfig{
+		Endpoints: viper.GetStringSlice("taskclassforum.rpc.endpoints"),
+		Target:    viper.GetString("taskclassforum.rpc.target"),
+		Timeout:   viper.GetDuration("taskclassforum.rpc.timeout"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize taskclassforum zrpc client: %w", err)
+	}
+	tokenClient, err := tokenstoreclient.NewClient(tokenstoreclient.ClientConfig{
+		Endpoints: viper.GetStringSlice("tokenstore.rpc.endpoints"),
+		Target:    viper.GetString("tokenstore.rpc.target"),
+		Timeout:   viper.GetDuration("tokenstore.rpc.timeout"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize tokenstore zrpc client: %w", err)
 	}
 	scheduleClient, err := scheduleclient.NewClient(scheduleclient.ClientConfig{
 		Endpoints: viper.GetStringSlice("schedule.rpc.endpoints"),
@@ -380,6 +400,8 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 		limiter:        limiter,
 		handlers:       handlers,
 		userAuthClient: userAuthClient,
+		forumClient:    forumClient,
+		tokenClient:    tokenClient,
 	}
 	return runtime, nil
 }
@@ -861,7 +883,7 @@ func (r *appRuntime) startWorkers(ctx context.Context) {
 }
 
 func (r *appRuntime) startHTTP(ctx context.Context) {
-	router := gatewayrouter.RegisterRouters(r.handlers, r.userAuthClient, r.cacheRepo, r.limiter)
+	router := gatewayrouter.RegisterRouters(r.handlers, r.userAuthClient, r.forumClient, r.tokenClient, r.cacheRepo, r.limiter)
 	gatewayrouter.StartEngine(ctx, router)
 }
 
