@@ -7,12 +7,15 @@ import DashboardView from '@/views/DashboardView.vue'
 import ScheduleView from '@/views/ScheduleView.vue'
 import AssistantReasoningDebug from '@/views/debug/AssistantReasoningDebug.vue'
 
+import HomeView from '@/views/HomeView.vue'
+
 const router = createRouter({
   history: createWebHistory(),
   routes: [
     {
       path: '/',
-      redirect: '/dashboard',
+      name: 'home',
+      component: HomeView,
     },
     {
       path: '/auth',
@@ -42,6 +45,30 @@ const router = createRouter({
       path: '/schedule',
       name: 'schedule',
       component: ScheduleView,
+      meta: {
+        requiresAuth: true,
+      },
+    },
+    {
+      path: '/forum',
+      name: 'forum',
+      component: () => import('@/views/ForumView.vue'),
+      meta: {
+        requiresAuth: true,
+      },
+    },
+    {
+      path: '/forum/:id',
+      name: 'plan-detail',
+      component: () => import('@/views/PlanDetailView.vue'),
+      meta: {
+        requiresAuth: true,
+      },
+    },
+    {
+      path: '/store',
+      name: 'store',
+      component: () => import('@/views/StoreView.vue'),
       meta: {
         requiresAuth: true,
       },

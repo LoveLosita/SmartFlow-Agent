@@ -109,35 +109,38 @@ const renderSlots = computed<RenderSlot[]>(() =>
       </div>
     </header>
 
-    <transition name="grid-pop" mode="out-in">
-      <div v-if="loading" key="loading" class="pastel-grid">
-        <div v-for="n in 8" :key="n" class="skeleton-pill" />
-      </div>
+    <div v-if="loading" key="loading" class="pastel-grid">
+      <div 
+        v-for="slot in slotBlueprint" 
+        :key="slot.key" 
+        class="skeleton-pill"
+        :class="{ 'is-pause': slot.kind === 'pause' }"
+      />
+    </div>
 
-      <div v-else key="content" class="pastel-grid">
-        <template v-for="slot in renderSlots" :key="slot.key">
-          <article
-            v-if="slot.kind === 'event'"
-            class="pastel-item"
-            :class="[`tone--${slot.tone}`]"
-          >
-            <div class="item-time">{{ slot.timeText }}</div>
-            <strong class="item-title">{{ slot.title }}</strong>
-            <div class="item-footer">
-              <svg class="location-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"></path>
-                <circle cx="12" cy="10" r="3"></circle>
-              </svg>
-              <span class="location-text">{{ slot.locationText }}</span>
-            </div>
-          </article>
+    <div v-else key="content" class="pastel-grid">
+      <template v-for="slot in renderSlots" :key="slot.key">
+        <article
+          v-if="slot.kind === 'event'"
+          class="pastel-item"
+          :class="[`tone--${slot.tone}`]"
+        >
+          <div class="item-time">{{ slot.timeText }}</div>
+          <strong class="item-title">{{ slot.title }}</strong>
+          <div class="item-footer">
+            <svg class="location-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"></path>
+              <circle cx="12" cy="10" r="3"></circle>
+            </svg>
+            <span class="location-text">{{ slot.locationText }}</span>
+          </div>
+        </article>
 
-          <article v-else class="pause-item">
-             <span class="pause-tag">{{ slot.title }}</span>
-          </article>
-        </template>
-      </div>
-    </transition>
+        <article v-else class="pause-item">
+           <span class="pause-tag">{{ slot.title }}</span>
+        </article>
+      </template>
+    </div>
   </section>
 </template>
 
@@ -187,14 +190,7 @@ const renderSlots = computed<RenderSlot[]>(() =>
   flex-direction: column;
   justify-content: space-between;
   min-height: 140px;
-  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
   cursor: default;
-}
-
-.pastel-item:hover {
-  transform: scale(1.03) translateY(-4px);
-  box-shadow: 0 15px 30px -10px rgba(0, 0, 0, 0.1);
-  z-index: 10;
 }
 
 .item-time {
@@ -266,20 +262,16 @@ const renderSlots = computed<RenderSlot[]>(() =>
   animation: pill-shimmer 1.5s infinite linear;
 }
 
+.skeleton-pill.is-pause {
+  min-height: 80px;
+}
+
 @keyframes pill-shimmer {
   0% { opacity: 0.5; }
   50% { opacity: 1; }
   100% { opacity: 0.5; }
 }
 
-/* 动画效果 */
-.grid-pop-enter-active {
-  transition: all 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-.grid-pop-enter-from {
-  opacity: 0;
-  transform: scale(0.9);
-}
 
 @media (max-width: 1200px) {
   .pastel-grid { grid-template-columns: repeat(4, 1fr); }

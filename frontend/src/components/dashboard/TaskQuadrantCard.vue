@@ -333,6 +333,11 @@ const visibleTasks = computed(() => props.tasks)
 .action-btn.delete:hover { background: #fee2e2; transform: scale(1.1); }
 
 /* --- 骨架屏 --- */
+.quadrant-card__skeleton {
+  display: grid;
+  gap: 12px;
+}
+
 .quadrant-card__skeleton-item {
   border-radius: 18px;
   min-height: 72px;

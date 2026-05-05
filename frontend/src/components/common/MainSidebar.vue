@@ -4,16 +4,18 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 
 interface SidebarItem {
-  key: 'home' | 'task' | 'calendar' | 'ai'
+  key: 'home' | 'task' | 'calendar' | 'ai' | 'forum' | 'store'
   label: string
   short: string
-  to?: '/dashboard' | '/assistant' | '/schedule'
+  to?: '/dashboard' | '/assistant' | '/schedule' | '/forum' | '/store'
 }
 
 const sidebarItems: SidebarItem[] = [
   { key: 'home', label: '总览', short: '总', to: '/dashboard' },
   { key: 'calendar', label: '日程', short: '程', to: '/schedule' },
   { key: 'ai', label: '助手', short: 'AI', to: '/assistant' },
+  { key: 'forum', label: '社区', short: '区', to: '/forum' },
+  { key: 'store', label: '商店', short: '商', to: '/store' },
 ]
 
 const route = useRoute()
@@ -22,6 +24,8 @@ const router = useRouter()
 const activeSidebarKey = computed<SidebarItem['key']>(() => {
   if (route.path.startsWith('/assistant')) return 'ai'
   if (route.path.startsWith('/schedule')) return 'calendar'
+  if (route.path.startsWith('/forum')) return 'forum'
+  if (route.path.startsWith('/store')) return 'store'
   return 'home'
 })
 
@@ -30,6 +34,7 @@ const activeSidebarIndex = computed(() => {
 })
 
 const activeIndicatorStyle = computed(() => {
+  // 每个项高度 60px + 间隔 12px = 72px
   return {
     transform: `translateY(${activeSidebarIndex.value * 72}px)`
   }
