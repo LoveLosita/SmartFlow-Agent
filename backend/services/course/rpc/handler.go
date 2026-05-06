@@ -70,6 +70,7 @@ func (h *Handler) ParseCourseImage(ctx context.Context, req *pb.CourseImageReque
 		return nil, err
 	}
 	draft, err := h.svc.ParseCourseTableImage(ctx, model.CourseImageParseRequest{
+		UserID:     int(req.UserId),
 		Filename:   req.Filename,
 		MIMEType:   req.MimeType,
 		ImageBytes: req.ImageBytes,

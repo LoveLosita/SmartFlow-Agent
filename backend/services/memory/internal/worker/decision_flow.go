@@ -3,7 +3,9 @@ package worker
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	memoryrepo "github.com/LoveLosita/smartflow/backend/services/memory/internal/repo"
 	memoryutils "github.com/LoveLosita/smartflow/backend/services/memory/internal/utils"
 	memorymodel "github.com/LoveLosita/smartflow/backend/services/memory/model"
@@ -144,7 +146,7 @@ func (r *Runner) executeDecisionForFact(
 	}
 
 	// Step 3: 逐对 LLM 比对。
-	comparisons := r.compareWithCandidates(ctx, fact, candidates)
+	comparisons := r.compareWithCandidates(ctx, payload, fact, candidates)
 
 	// Step 4: 确定性汇总。
 	decision := memoryutils.AggregateComparisons(fact, comparisons, candidates)
@@ -298,6 +300,7 @@ func (r *Runner) recallCandidatesFromMySQL(
 // 3. 无候选或决策编排器为空时返回空切片，上层直接走 ADD 路径。
 func (r *Runner) compareWithCandidates(
 	ctx context.Context,
+	payload memorymodel.ExtractJobPayload,
 	fact memorymodel.NormalizedFact,
 	candidates []memorymodel.CandidateSnapshot,
 ) []memorymodel.ComparisonResult {
@@ -307,7 +310,7 @@ func (r *Runner) compareWithCandidates(
 
 	comparisons := make([]memorymodel.ComparisonResult, 0, len(candidates))
 	for _, candidate := range candidates {
-		compResult, err := r.decisionOrchestrator.Compare(ctx, fact, candidate)
+		compResult, err := r.decisionOrchestrator.Compare(ctx, buildMemoryDecisionBillingContext(payload, fact, candidate), fact, candidate)
 		if err != nil {
 			// LLM 调用失败 → 视为 unrelated，不影响其他候选。
 			if r.logger != nil {
@@ -333,6 +336,26 @@ func (r *Runner) compareWithCandidates(
 		}
 	}
 	return comparisons
+}
+
+func buildMemoryDecisionBillingContext(
+	payload memorymodel.ExtractJobPayload,
+	fact memorymodel.NormalizedFact,
+	candidate memorymodel.CandidateSnapshot,
+) llmservice.BillingContext {
+	requestID := strings.TrimSpace(payload.TraceID)
+	if requestID == "" {
+		requestID = fmt.Sprintf("memory_decision:%d:%s:%d", payload.UserID, strings.TrimSpace(payload.ConversationID), payload.SourceMessageID)
+	}
+	eventID := fmt.Sprintf("%s:%d:%s", requestID, candidate.MemoryID, fact.ContentHash)
+	return llmservice.BillingContext{
+		UserID:         uint64(payload.UserID),
+		EventID:        eventID,
+		Scene:          "memory_decision_compare",
+		RequestID:      requestID,
+		ConversationID: strings.TrimSpace(payload.ConversationID),
+		ModelAlias:     "memory_decision_compare",
+	}
 }
 
 // collectActionOutcome 汇总单个动作结果到全局 outcome。

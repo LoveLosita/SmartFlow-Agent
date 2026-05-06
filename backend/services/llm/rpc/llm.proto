@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package smartflow.llm;
+
+service LLM {
+  rpc Ping (PingRequest) returns (PingResponse);
+  rpc GenerateText (TextRequest) returns (TextResponse);
+  rpc StreamText (StreamTextRequest) returns (stream StreamChunk);
+  rpc GenerateResponsesText (ResponsesRequest) returns (ResponsesResponse);
+}
+
+message PingRequest {}
+message PingResponse {}
+message TextRequest {}
+message TextResponse {}
+message StreamTextRequest {}
+message StreamChunk {}
+message ResponsesRequest {}
+message ResponsesResponse {}

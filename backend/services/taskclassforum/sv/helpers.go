@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LoveLosita/smartflow/backend/shared/respond"
 	forummodel "github.com/LoveLosita/smartflow/backend/services/taskclassforum/model"
 	forumcontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/taskclassforum"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 )
 
 const (
@@ -23,6 +23,66 @@ const (
 	maxCommentLen   = 500
 	maxImportTitle  = 80
 )
+
+var defaultForumTags = []string{
+	"期末复习",
+	"考研备考",
+	"四六级",
+	"编程学习",
+	"实习求职",
+	"习惯养成",
+	"竞赛项目",
+	"证书考试",
+}
+
+func buildForumTagItems(rawTags []string, limit int) []forumcontracts.ForumTagItem {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+
+	// 1. 先聚合真实帖子里的标签热度，保证已有社区语义优先展示。
+	// 2. 空白标签直接忽略，避免把脏数据继续透给前端。
+	// 3. 默认标签只在缺失时兜底补齐，保证清库后分类区仍可用。
+	counter := make(map[string]int)
+	for _, raw := range rawTags {
+		for _, tag := range tagsFromJSON(raw) {
+			trimmedTag := strings.TrimSpace(tag)
+			if trimmedTag == "" {
+				continue
+			}
+			counter[trimmedTag]++
+		}
+	}
+
+	items := make([]forumcontracts.ForumTagItem, 0, len(counter)+len(defaultForumTags))
+	for tag, count := range counter {
+		items = append(items, forumcontracts.ForumTagItem{Tag: tag, PostCount: count})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].PostCount == items[j].PostCount {
+			return items[i].Tag < items[j].Tag
+		}
+		return items[i].PostCount > items[j].PostCount
+	})
+
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		seen[item.Tag] = struct{}{}
+	}
+	for _, tag := range defaultForumTags {
+		if _, exists := seen[tag]; exists {
+			continue
+		}
+		items = append(items, forumcontracts.ForumTagItem{
+			Tag:       tag,
+			PostCount: 0,
+		})
+	}
+	if len(items) > limit {
+		return items[:limit]
+	}
+	return items
+}
 
 func normalizePage(page int, pageSize int) (int, int) {
 	if page <= 0 {
@@ -67,6 +127,23 @@ func normalizeTags(tags []string) ([]string, error) {
 		}
 	}
 	return result, nil
+}
+
+// normalizeRequiredTags 负责统一“帖子标签去重 + 必填”规则。
+//
+// 职责边界：
+// 1. 负责清洗空白、去重、数量和长度限制；
+// 2. 额外补上“发布帖子至少一个标签”的业务校验；
+// 3. 不负责前端提示文案，调用方只消费 error。
+func normalizeRequiredTags(tags []string) ([]string, error) {
+	normalizedTags, err := normalizeTags(tags)
+	if err != nil {
+		return nil, err
+	}
+	if len(normalizedTags) == 0 {
+		return nil, ErrForumTagsRequired
+	}
+	return normalizedTags, nil
 }
 
 func validateRuneMax(value string, maxLen int) error {

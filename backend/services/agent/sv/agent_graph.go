@@ -14,6 +14,7 @@ import (
 	agentstream "github.com/LoveLosita/smartflow/backend/services/agent/stream"
 	agenttools "github.com/LoveLosita/smartflow/backend/services/agent/tools"
 	schedule "github.com/LoveLosita/smartflow/backend/services/agent/tools/schedule"
+	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	"github.com/cloudwego/eino/schema"
 	"github.com/spf13/viper"
 
@@ -65,6 +66,13 @@ func (s *AgentService) runAgentGraph(
 	// 1. 规范会话 ID 和模型选择。
 	chatID = normalizeConversationID(chatID)
 	_, resolvedModelName := s.pickChatModel(modelName)
+	requestCtx = llmservice.WithBillingContext(requestCtx, llmservice.BillingContext{
+		UserID:         uint64(userID),
+		Scene:          "agent_chat",
+		RequestID:      strings.TrimSpace(traceID),
+		ConversationID: chatID,
+		ModelAlias:     strings.TrimSpace(resolvedModelName),
+	})
 
 	// 2. 确保会话存在（优先缓存，必要时回源 DB）。
 	result, err := s.agentCache.GetConversationStatus(requestCtx, chatID)
@@ -543,36 +551,17 @@ func (s *AgentService) persistNewAgentConversationMessage(
 // placement，普通时段放置的任务全部被丢弃。
 // 正确做法：使用第一个返回值 []HybridScheduleEntry，过滤 Status="suggested" 且 TaskItemID>0 的条目，
 // 这样嵌入和非嵌入的粗排结果都能正确写入 ScheduleState。
-// adjustAgentRequestTokenUsage 负责把本轮 graph 的请求级 token 一次性回写到账本。
+// adjustAgentRequestTokenUsage 保留为迁移期兼容空实现。
 //
 // 说明：
-// 1. agent 逐条可见消息都按 0 token 落库，最终统一在这里补记整轮消耗；
-// 2. 如果启用了 outbox，就沿用异步 token 调整事件，保持写账口径一致；
-// 3. 该步骤属于请求收尾，不应反过来打断用户已看到的回复。
+// 1. Credit 计费已切到独立 LLM 服务出口，这里不再回写旧 token 账本；
+// 2. 会话级 tokens_total 仍由聊天历史持久化自己记录，不需要在这里二次补写；
+// 3. 先保留方法壳，避免同轮大面积改调用点。
 func (s *AgentService) adjustAgentRequestTokenUsage(ctx context.Context, userID int, chatID string, deltaTokens int) {
-	if s == nil || userID <= 0 || strings.TrimSpace(chatID) == "" || deltaTokens <= 0 {
-		return
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	if s.eventPublisher != nil {
-		if err := eventsvc.PublishChatTokenUsageAdjustRequested(ctx, s.eventPublisher, model.ChatTokenUsageAdjustPayload{
-			UserID:         userID,
-			ConversationID: chatID,
-			TokensDelta:    deltaTokens,
-			Reason:         "new_agent_request",
-			TriggeredAt:    time.Now(),
-		}); err != nil {
-			log.Printf("写入 agent 请求级 token 调整事件失败 chat=%s tokens=%d err=%v", chatID, deltaTokens, err)
-		}
-		return
-	}
-
-	if err := s.repo.AdjustTokenUsage(ctx, userID, chatID, deltaTokens, ""); err != nil {
-		log.Printf("同步写入 agent 请求级 token 调整失败 chat=%s tokens=%d err=%v", chatID, deltaTokens, err)
-	}
+	_ = ctx
+	_ = userID
+	_ = chatID
+	_ = deltaTokens
 }
 
 func (s *AgentService) makeRoughBuildFunc() agentmodel.RoughBuildFunc {

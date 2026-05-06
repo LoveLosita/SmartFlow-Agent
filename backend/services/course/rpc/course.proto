@@ -20,6 +20,7 @@ message JSONResponse {
 }
 
 message CourseImageRequest {
+  uint64 user_id = 4;
   string filename = 1;
   string mime_type = 2;
   bytes image_bytes = 3;

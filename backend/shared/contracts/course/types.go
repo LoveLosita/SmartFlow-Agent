@@ -37,6 +37,7 @@ type ImportCoursesResult struct {
 }
 
 type CourseImageParseRequest struct {
+	UserID     int    `json:"user_id"`
 	Filename   string `json:"filename"`
 	MIMEType   string `json:"mime_type"`
 	ImageBytes []byte `json:"image_bytes"`

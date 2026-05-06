@@ -75,8 +75,9 @@ func (s *Service) Select(ctx context.Context, req SelectRequest) (Result, error)
 		nil,
 		userPrompt,
 	)
+	invokeCtx := llmservice.WithBillingContext(ctx, buildSelectionBillingContext(req))
 	resp, rawResult, err := llmservice.GenerateJSON[llmSelectionResponse](
-		ctx,
+		invokeCtx,
 		s.client,
 		messages,
 		llmservice.GenerateOptions{
@@ -292,6 +293,26 @@ func (s *Service) now() time.Time {
 		return time.Now()
 	}
 	return s.clock()
+}
+
+func buildSelectionBillingContext(req SelectRequest) llmservice.BillingContext {
+	if req.ActiveContext == nil {
+		return llmservice.BillingContext{
+			Scene:      "active_scheduler_select",
+			ModelAlias: "active_scheduler_select",
+		}
+	}
+	traceID := strings.TrimSpace(req.ActiveContext.Trace.TraceID)
+	if traceID == "" {
+		traceID = fmt.Sprintf("active_scheduler_select:%d:%s", req.ActiveContext.User.UserID, strings.TrimSpace(req.ActiveContext.Trigger.TriggerID))
+	}
+	return llmservice.BillingContext{
+		UserID:     uint64(req.ActiveContext.User.UserID),
+		EventID:    traceID,
+		Scene:      "active_scheduler_select",
+		RequestID:  traceID,
+		ModelAlias: "active_scheduler_select",
+	}
 }
 
 func (r Result) String() string {

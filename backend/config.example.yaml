@@ -56,6 +56,14 @@ tokenstore:
       - "127.0.0.1:9095"
     timeout: 2s
 
+# LLM zrpc 独立服务与各业务服务客户端配置。
+llm:
+  rpc:
+    listenOn: "0.0.0.0:9096"
+    endpoints:
+      - "127.0.0.1:9096"
+    timeout: 0s
+
 # Kafka outbox 事件总线配置。
 kafka:
   enabled: true
@@ -66,6 +74,41 @@ kafka:
   retryScanInterval: 1s
   retryBatchSize: 100
   maxRetry: 20
+
+outbox:
+  services:
+    agent:
+      topic: "smartflow.agent.outbox"
+      groupID: "smartflow-agent-outbox-consumer"
+      table: "agent_outbox_messages"
+    task:
+      topic: "smartflow.task.outbox"
+      groupID: "smartflow-task-outbox-consumer"
+      table: "task_outbox_messages"
+    memory:
+      topic: "smartflow.memory.outbox"
+      groupID: "smartflow-memory-outbox-consumer"
+      table: "memory_outbox_messages"
+    active-scheduler:
+      topic: "smartflow.active-scheduler.outbox"
+      groupID: "smartflow-active-scheduler-outbox-consumer"
+      table: "active_scheduler_outbox_messages"
+    notification:
+      topic: "smartflow.notification.outbox"
+      groupID: "smartflow-notification-outbox-consumer"
+      table: "notification_outbox_messages"
+    taskclass-forum:
+      topic: "smartflow.taskclass-forum.outbox"
+      groupID: "smartflow-taskclass-forum-outbox-consumer"
+      table: "taskclass_forum_outbox_messages"
+    llm:
+      topic: "smartflow.llm.outbox"
+      groupID: "smartflow-llm-outbox-consumer"
+      table: "llm_outbox_messages"
+    token-store:
+      topic: "smartflow.token-store.outbox"
+      groupID: "smartflow-token-store-outbox-consumer"
+      table: "token_store_outbox_messages"
 
 # 通知投递配置。
 notification:

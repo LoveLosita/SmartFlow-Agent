@@ -92,6 +92,7 @@ func (c *Client) ImportCourses(ctx context.Context, req coursecontracts.UserImpo
 
 func (c *Client) ParseCourseTableImage(ctx context.Context, req coursecontracts.CourseImageParseRequest) (json.RawMessage, error) {
 	resp, err := c.rpc.ParseCourseImage(ctx, &coursepb.CourseImageRequest{
+		UserId:     uint64(req.UserID),
 		Filename:   req.Filename,
 		MimeType:   req.MIMEType,
 		ImageBytes: req.ImageBytes,

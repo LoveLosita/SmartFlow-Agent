@@ -11,6 +11,7 @@ const (
 	ServiceNameActiveScheduler = "active-scheduler"
 	ServiceNameNotification    = "notification"
 	ServiceNameTaskClassForum  = "taskclass-forum"
+	ServiceNameLLM             = "llm"
 	ServiceNameTokenStore      = "token-store"
 )
 
@@ -64,6 +65,12 @@ var builtinServiceRoutes = map[string]ServiceRoute{
 		Topic:       "smartflow.taskclass-forum.outbox",
 		GroupID:     "smartflow-taskclass-forum-outbox-consumer",
 	},
+	ServiceNameLLM: {
+		ServiceName: ServiceNameLLM,
+		TableName:   "llm_outbox_messages",
+		Topic:       "smartflow.llm.outbox",
+		GroupID:     "smartflow-llm-outbox-consumer",
+	},
 	ServiceNameTokenStore: {
 		ServiceName: ServiceNameTokenStore,
 		TableName:   "token_store_outbox_messages",
@@ -86,6 +93,7 @@ func DefaultServiceRoutes() []ServiceRoute {
 		builtinServiceRoutes[ServiceNameActiveScheduler],
 		builtinServiceRoutes[ServiceNameNotification],
 		builtinServiceRoutes[ServiceNameTaskClassForum],
+		builtinServiceRoutes[ServiceNameLLM],
 		builtinServiceRoutes[ServiceNameTokenStore],
 	}
 }

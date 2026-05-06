@@ -130,7 +130,7 @@ func RegisterRouters(
 		agentGroup := apiGroup.Group("/agent")
 		{
 			agentGroup.Use(gatewaymiddleware.JWTTokenAuth(authClient), rootmiddleware.RateLimitMiddleware(limiter, 20, 1))
-			agentGroup.POST("/chat", gatewaymiddleware.TokenQuotaGuard(authClient), handlers.AgentHandler.ChatAgent)
+			agentGroup.POST("/chat", handlers.AgentHandler.ChatAgent)
 			agentGroup.GET("/conversation-meta", handlers.AgentHandler.GetConversationMeta)
 			agentGroup.GET("/conversation-list", handlers.AgentHandler.GetConversationList)
 			agentGroup.GET("/conversation-timeline", handlers.AgentHandler.GetConversationTimeline)

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	userauthdao "github.com/LoveLosita/smartflow/backend/services/userauth/dao"
 	userauthauth "github.com/LoveLosita/smartflow/backend/services/userauth/internal/auth"
 	userauthmodel "github.com/LoveLosita/smartflow/backend/services/userauth/model"
 	contracts "github.com/LoveLosita/smartflow/backend/shared/contracts/userauth"
@@ -19,10 +18,6 @@ type UserRepo interface {
 	IfUsernameExists(ctx context.Context, name string) (bool, error)
 	GetUserHashedPasswordByName(ctx context.Context, name string) (string, error)
 	GetUserIDByName(ctx context.Context, name string) (int, error)
-	GetUserTokenQuotaByID(ctx context.Context, id int) (*userauthmodel.User, error)
-	ResetUserTokenUsageIfDue(ctx context.Context, id int, dueBefore time.Time, resetAt time.Time) (bool, error)
-	AddTokenUsage(ctx context.Context, id int, delta int) (bool, error)
-	AdjustTokenUsageOnce(ctx context.Context, eventID string, id int, delta int, dueBefore time.Time, resetAt time.Time) (*userauthmodel.User, bool, error)
 }
 
 type CacheRepo interface {
@@ -31,20 +26,14 @@ type CacheRepo interface {
 	SetBlacklistIfAbsent(jti string, expiration time.Duration) (bool, error)
 	IsSessionBlacklisted(sessionID string) (bool, error)
 	SetSessionBlacklist(sessionID string, expiration time.Duration) error
-	IsUserTokenBlocked(ctx context.Context, userID int) (bool, error)
-	GetUserTokenQuotaSnapshot(ctx context.Context, userID int) (*userauthdao.TokenQuotaSnapshot, bool, error)
-	SetUserTokenQuotaSnapshot(ctx context.Context, userID int, snapshot userauthdao.TokenQuotaSnapshot, ttl time.Duration) error
-	DeleteUserTokenQuotaSnapshot(ctx context.Context, userID int) error
-	SetUserTokenBlocked(ctx context.Context, userID int, ttl time.Duration) error
-	DeleteUserTokenBlocked(ctx context.Context, userID int) error
 }
 
 // Service 承载 user/auth 服务内部业务规则。
 //
 // 职责边界：
-// 1. 负责注册、登录、刷新、登出、JWT 签发/校验、黑名单和 token 额度门禁；
+// 1. 负责注册、登录、刷新、登出、JWT 签发/校验和黑名单；
 // 2. 不负责 Gin gateway 的响应适配、路由聚合和 SSE 等边缘职责；
-// 3. 不负责 agent 会话 token 统计，迁移期该链路仍由 agent 持久化事件触发 userauth 账本调整。
+// 3. 旧 token 额度门禁与记账能力已下线，不再由 userauth 承担计费相关职责。
 type Service struct {
 	userRepo  UserRepo
 	cacheRepo CacheRepo

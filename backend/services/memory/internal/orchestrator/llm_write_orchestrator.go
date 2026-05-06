@@ -59,9 +59,10 @@ func (o *LLMWriteOrchestrator) ExtractFacts(ctx context.Context, payload memorym
 		nil,
 		buildMemoryExtractUserPrompt(payload),
 	)
+	invokeCtx := llmservice.WithBillingContext(ctx, buildMemoryExtractBillingContext(payload))
 
 	resp, rawResult, err := llmservice.GenerateJSON[memoryExtractResponse](
-		ctx,
+		invokeCtx,
 		o.client,
 		messages,
 		llmservice.GenerateOptions{
@@ -328,4 +329,19 @@ func truncateForLog(raw *llmservice.TextResult) string {
 		return text
 	}
 	return text[:200] + "..."
+}
+
+func buildMemoryExtractBillingContext(payload memorymodel.ExtractJobPayload) llmservice.BillingContext {
+	requestID := strings.TrimSpace(payload.TraceID)
+	if requestID == "" {
+		requestID = fmt.Sprintf("memory_extract:%d:%s:%d", payload.UserID, strings.TrimSpace(payload.ConversationID), payload.SourceMessageID)
+	}
+	return llmservice.BillingContext{
+		UserID:         uint64(payload.UserID),
+		EventID:        requestID,
+		Scene:          "memory_extract",
+		RequestID:      requestID,
+		ConversationID: strings.TrimSpace(payload.ConversationID),
+		ModelAlias:     "memory_extract",
+	}
 }

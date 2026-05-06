@@ -7,10 +7,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/LoveLosita/smartflow/backend/shared/respond"
 	forumdao "github.com/LoveLosita/smartflow/backend/services/taskclassforum/dao"
 	forummodel "github.com/LoveLosita/smartflow/backend/services/taskclassforum/model"
 	forumcontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/taskclassforum"
+	"github.com/LoveLosita/smartflow/backend/shared/respond"
 	"gorm.io/gorm"
 )
 
@@ -73,38 +73,12 @@ func (s *Service) ListTags(ctx context.Context, actorUserID uint64, limit int) (
 	if err := s.Ready(); err != nil {
 		return nil, err
 	}
-	if limit <= 0 || limit > 50 {
-		limit = 20
-	}
 
 	rawTags, err := s.forumDAO.ListPublishedTagJSONs(ctx)
 	if err != nil {
 		return nil, err
 	}
-	counter := make(map[string]int)
-	for _, raw := range rawTags {
-		for _, tag := range tagsFromJSON(raw) {
-			if strings.TrimSpace(tag) == "" {
-				continue
-			}
-			counter[tag]++
-		}
-	}
-
-	items := make([]forumcontracts.ForumTagItem, 0, len(counter))
-	for tag, count := range counter {
-		items = append(items, forumcontracts.ForumTagItem{Tag: tag, PostCount: count})
-	}
-	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].PostCount == items[j].PostCount {
-			return items[i].Tag < items[j].Tag
-		}
-		return items[i].PostCount > items[j].PostCount
-	})
-	if len(items) > limit {
-		items = items[:limit]
-	}
-	return items, nil
+	return buildForumTagItems(rawTags, limit), nil
 }
 
 // CreatePost 发布计划，并把旧 TaskClass 复制为论坛快照。
@@ -141,7 +115,7 @@ func (s *Service) CreatePost(ctx context.Context, req forumcontracts.CreateForum
 		}
 	}
 
-	tags, err := normalizeTags(req.Tags)
+	tags, err := normalizeRequiredTags(req.Tags)
 	if err != nil {
 		return nil, err
 	}

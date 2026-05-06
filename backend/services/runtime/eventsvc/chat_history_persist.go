@@ -9,10 +9,8 @@ import (
 
 	"github.com/LoveLosita/smartflow/backend/services/runtime/dao"
 	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
-	contracts "github.com/LoveLosita/smartflow/backend/shared/contracts/userauth"
 	kafkabus "github.com/LoveLosita/smartflow/backend/shared/infra/kafka"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
-	"github.com/LoveLosita/smartflow/backend/shared/ports"
 	"gorm.io/gorm"
 )
 
@@ -25,13 +23,12 @@ const (
 // 职责边界：
 // 1. 只处理聊天历史事件，不处理其它业务事件；
 // 2. 只负责注册，不负责总线启动；
-// 3. 先写本地 chat 相关表，再调用 userauth 调整 token 额度；
+// 3. 先写本地 chat 相关表，不再把聊天 token 消耗同步到旧 userauth 额度账本；
 // 4. 当前版本仅注册新路由键，不再注册旧兼容键。
 func RegisterChatHistoryPersistHandler(
 	bus OutboxBus,
 	outboxRepo *outboxinfra.Repository,
 	repoManager *dao.RepoManager,
-	adjuster ports.TokenUsageAdjuster,
 ) error {
 	if bus == nil {
 		return errors.New("event bus is nil")
@@ -75,19 +72,6 @@ func RegisterChatHistoryPersistHandler(
 			)
 		}); err != nil {
 			return err
-		}
-
-		if payload.TokensConsumed > 0 {
-			if adjuster == nil {
-				return errors.New("userauth token adjuster is nil")
-			}
-			if _, err := adjuster.AdjustTokenUsage(ctx, contracts.AdjustTokenUsageRequest{
-				EventID:    eventID,
-				UserID:     payload.UserID,
-				TokenDelta: payload.TokensConsumed,
-			}); err != nil {
-				return err
-			}
 		}
 
 		return eventOutboxRepo.MarkConsumed(ctx, envelope.OutboxID)

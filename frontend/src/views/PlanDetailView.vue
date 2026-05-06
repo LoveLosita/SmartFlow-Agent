@@ -1,190 +1,73 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { 
-  ArrowLeft,
-  Connection, 
-  ChatDotRound, 
-  Star, 
-  Filter,
-  Check
-} from '@element-plus/icons-vue'
+import { ArrowLeft, ChatDotRound, Check, Connection, Filter } from '@element-plus/icons-vue'
 
-// --- 类型定义 ---
-interface UserBrief {
-  user_id: number
-  nickname: string
-  avatar_url: string
-}
+import {
+  createForumComment,
+  deleteForumComment,
+  getForumPostDetail,
+  importForumPost,
+  listForumComments,
+} from '@/api/forum'
+import type { ForumCommentNode, ForumPostBrief, ForumPostDetail, ForumTemplateDetail } from '@/types/forum'
 
-interface PlanSquarePost {
-  post_id: number
-  title: string
-  summary: string
-  tags: string[]
-  author: UserBrief
-  template_summary: {
-    task_count: number
-    mode: string
-    start_date: string
-    end_date: string
-    strategy_labels: string[]
-  }
-  counters: {
-    like_count: number
-    comment_count: number
-    import_count: number
-  }
-  viewer_state: {
-    liked: boolean
-    imported_once: boolean
-  }
-  status: 'published'
-  created_at: string
-}
-
-interface CommentNode {
-  comment_id: number
-  post_id: number
-  parent_comment_id: number | null
-  content: string
-  status: 'visible' | 'deleted'
-  author: UserBrief
-  can_delete: boolean
-  created_at: string
-  deleted_at: string | null
-  children: CommentNode[]
+interface ForumPostDetailView extends ForumPostBrief {
+  template: ForumTemplateDetail
 }
 
 const route = useRoute()
 const router = useRouter()
+
 const isLoading = ref(true)
-const selectedPost = ref<PlanSquarePost | null>(null)
-const mockComments = ref<CommentNode[]>([])
+const commentSubmitting = ref(false)
+const selectedPost = ref<ForumPostDetailView | null>(null)
+const comments = ref<ForumCommentNode[]>([])
 const newComment = ref('')
 const replyingToId = ref<number | null>(null)
 const replyText = ref('')
 
-// --- 初始化 Mock 数据 ---
-onMounted(async () => {
-  // 模拟加载延迟
-  await new Promise(r => setTimeout(r, 600))
-  
-  const postId = Number(route.params.id)
-  
-  // 模拟从后端获取详情
-  selectedPost.value = {
-    post_id: postId,
-    title: postId === 10001 ? "30 天高数强化复习计划 (深度进阶版)" : "雅思口语 7.5 分冲刺手册",
-    summary: `这是一份经过验证的高质量计划，帮助你快速达成目标。
-    
-    本计划不仅涵盖了基础知识点，还深入探讨了高数中最为棘手的证明题与综合题型。
-    在接下来的30天里，我们将通过系统的拆解，将复杂的微积分问题简化为可执行的每日任务。
-    无论你是为了考研冲刺，还是期末突击，这份计划都将是你最坚实的后盾。
-    
-    我们将重点关注以下几个模块：
-    1. 函数、极限与连续的深度理解
-    2. 一元函数微分学的应用技巧
-    3. 积分学的各种变换与计算模型
-    4. 空间解析几何与向量代数
-    5. 多元函数微分与积分学
-    6. 常微分方程的特殊解法
-    
-    每个模块都配备了精选的例题和课后练习，确保你能学以致用。
-    请务必严格按照计划执行，不要遗漏任何一个复盘环节。
-    祝你在数学的海洋中乘风破浪，取得优异成绩！`,
-    tags: ["高数", "复习", "冲刺", "考研", "干货"],
-    author: { user_id: 88, nickname: "小鹿同学", avatar_url: "https://api.dicebear.com/7.x/avataaars/svg?seed=Felix" },
-    template_summary: {
-      task_count: 30,
-      mode: "date_range",
-      start_date: "2026-05-05",
-      end_date: "2026-06-04",
-      strategy_labels: ["每日推进", "错题复盘", "阶段测试", "脑图总结"]
-    },
-    counters: { like_count: 128, comment_count: 32, import_count: 45 },
-    viewer_state: { liked: false, imported_once: false },
-    status: "published",
-    created_at: "2026-05-04T20:30:00+08:00"
+const previewItems = computed(() => selectedPost.value?.template.items_preview ?? [])
+const previewOverflowCount = computed(() => {
+  if (!selectedPost.value) {
+    return 0
   }
-
-  mockComments.value = Array.from({ length: 15 }).map((_, i) => ({
-    comment_id: 50000 + i,
-    post_id: postId,
-    parent_comment_id: null,
-    content: `这是第 ${i + 1} 条测试评论。这份计划真的太详细了，特别是关于${['微积分', '中值定理', '泰勒公式', '多重积分'][i % 4]}的部分，讲得非常透彻。`,
-    status: "visible",
-    author: { 
-      user_id: 100 + i, 
-      nickname: `学霸${i + 1}号`, 
-      avatar_url: `https://api.dicebear.com/7.x/avataaars/svg?seed=User${i}` 
-    },
-    can_delete: true, // 全部允许删除以便测试
-    created_at: "2026-05-04T20:40:00+08:00",
-    deleted_at: null,
-    children: i === 0 ? [
-      {
-        comment_id: 60001,
-        post_id: postId,
-        parent_comment_id: 50000,
-        content: "我也这么觉得，博主太用心了！",
-        status: "visible",
-        author: { user_id: 201, nickname: "回复人A", avatar_url: "https://api.dicebear.com/7.x/avataaars/svg?seed=A" },
-        can_delete: true,
-        created_at: "2026-05-04T21:00:00+08:00",
-        deleted_at: null,
-        children: []
-      }
-    ] : []
-  }))
-  
-  isLoading.value = false
+  return Math.max(selectedPost.value.template.task_count - previewItems.value.length, 0)
 })
 
 function goBack() {
   router.push('/forum')
 }
 
-function handleLike() {
-  if (!selectedPost.value) return
-  if (selectedPost.value.viewer_state.liked) {
-    selectedPost.value.viewer_state.liked = false
-    selectedPost.value.counters.like_count--
-  } else {
-    selectedPost.value.viewer_state.liked = true
-    selectedPost.value.counters.like_count++
-    ElMessage.success('点赞成功')
+function formatDate(iso: string) {
+  const date = new Date(iso)
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+function formatTemplateMode(mode: string) {
+  switch ((mode || '').trim()) {
+    case 'date_range':
+      return '日期范围'
+    case 'quantity':
+      return '固定数量'
+    case 'daily':
+      return '每日模式'
+    default:
+      return mode || '未设置'
   }
 }
 
-async function handleImport() {
-  if (!selectedPost.value) return
-  isLoading.value = true
-  await new Promise(r => setTimeout(r, 800))
-  selectedPost.value.viewer_state.imported_once = true
-  selectedPost.value.counters.import_count++
-  ElMessage.success('导入成功')
-  isLoading.value = false
+function resolvePostId() {
+  const value = Number(route.params.id)
+  return Number.isInteger(value) && value > 0 ? value : 0
 }
 
-function submitComment() {
-  if (!newComment.value.trim()) return
-  const comment: CommentNode = {
-    comment_id: Date.now(),
-    post_id: selectedPost.value!.post_id,
-    parent_comment_id: null,
-    content: newComment.value,
-    status: 'visible',
-    author: { user_id: 1, nickname: "我 (Me)", avatar_url: "https://api.dicebear.com/7.x/avataaars/svg?seed=Lucky" },
-    can_delete: true,
-    created_at: new Date().toISOString(),
-    deleted_at: null,
-    children: []
+function hydratePostDetail(detail: ForumPostDetail) {
+  selectedPost.value = {
+    ...detail.post,
+    template: detail.template,
   }
-  mockComments.value.unshift(comment)
-  newComment.value = ''
-  ElMessage.success('发表成功')
 }
 
 function startReply(commentId: number) {
@@ -192,63 +75,200 @@ function startReply(commentId: number) {
   replyText.value = ''
 }
 
-function submitReply(parentComment: CommentNode) {
-  if (!replyText.value.trim()) return
-  const reply: CommentNode = {
-    comment_id: Date.now(),
-    post_id: selectedPost.value!.post_id,
-    parent_comment_id: parentComment.comment_id,
-    content: replyText.value,
-    status: 'visible',
-    author: { user_id: 1, nickname: "我 (Me)", avatar_url: "https://api.dicebear.com/7.x/avataaars/svg?seed=Lucky" },
-    can_delete: true,
-    created_at: new Date().toISOString(),
-    deleted_at: null,
-    children: []
-  }
-  parentComment.children.push(reply)
+function resetReplyState() {
   replyingToId.value = null
   replyText.value = ''
-  ElMessage.success('回复成功')
 }
 
-function deleteComment(commentId: number) {
-  // 递归删除逻辑
-  const removeRecursive = (list: CommentNode[], id: number): boolean => {
-    for (let i = 0; i < list.length; i++) {
-      if (list[i].comment_id === id) {
-        list.splice(i, 1)
-        return true
-      }
-      if (list[i].children && removeRecursive(list[i].children, id)) {
-        return true
-      }
+function increaseCommentCount(delta: number) {
+  if (!selectedPost.value) {
+    return
+  }
+  selectedPost.value.counters.comment_count = Math.max(0, selectedPost.value.counters.comment_count + delta)
+}
+
+// patchCommentTree 负责在本地评论树里原地更新指定节点。
+// 职责边界：
+// 1. 只负责递归定位 comment_id 并执行更新函数，不负责网络请求；
+// 2. 找到目标后立即返回 true，避免重复修改多处节点；
+// 3. 未找到时返回 false，调用方自行决定是否需要兜底刷新。
+function patchCommentTree(list: ForumCommentNode[], commentID: number, updater: (node: ForumCommentNode) => void): boolean {
+  for (const node of list) {
+    if (node.comment_id === commentID) {
+      updater(node)
+      return true
     }
-    return false
+    if (patchCommentTree(node.children, commentID, updater)) {
+      return true
+    }
   }
-  
-  if (removeRecursive(mockComments.value, commentId)) {
+  return false
+}
+
+// appendReplyToTree 负责把新回复挂到命中的父评论 children 下。
+// 职责边界：
+// 1. 只处理内存树插入，不修改计数和输入框状态；
+// 2. 命中父节点后统一插到 children 头部，保证新回复优先可见；
+// 3. 若整棵树都没找到则返回 false，由上层决定是否整页重拉。
+function appendReplyToTree(list: ForumCommentNode[], parentCommentID: number, reply: ForumCommentNode): boolean {
+  for (const node of list) {
+    if (node.comment_id === parentCommentID) {
+      node.children = [reply, ...node.children]
+      return true
+    }
+    if (appendReplyToTree(node.children, parentCommentID, reply)) {
+      return true
+    }
+  }
+  return false
+}
+
+async function loadPostPage() {
+  const postID = resolvePostId()
+  if (postID <= 0) {
+    ElMessage.error('计划详情参数无效')
+    goBack()
+    return
+  }
+
+  isLoading.value = true
+
+  try {
+    const [detail, commentPage] = await Promise.all([
+      getForumPostDetail(postID),
+      listForumComments(postID, {
+        page: 1,
+        page_size: 100,
+        sort: 'latest',
+      }),
+    ])
+
+    hydratePostDetail(detail)
+    comments.value = commentPage.items ?? []
+    resetReplyState()
+    newComment.value = ''
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '计划详情加载失败，请稍后重试')
+    goBack()
+  } finally {
+    isLoading.value = false
+  }
+}
+
+async function handleImport() {
+  if (!selectedPost.value) {
+    return
+  }
+  if (selectedPost.value.viewer_state.imported_once) {
+    ElMessage.info('这个计划已经导入过啦')
+    return
+  }
+
+  try {
+    const result = await importForumPost(selectedPost.value.post_id, selectedPost.value.title)
+    selectedPost.value.viewer_state.imported_once = true
+    selectedPost.value.counters.import_count = result.import_count
+    ElMessage.success(`导入成功，已创建任务类《${result.task_class_title}》`)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '导入计划失败，请稍后重试')
+  }
+}
+
+async function submitComment() {
+  const content = newComment.value.trim()
+  if (!selectedPost.value || !content || commentSubmitting.value) {
+    return
+  }
+
+  commentSubmitting.value = true
+
+  try {
+    const comment = await createForumComment(selectedPost.value.post_id, { content })
+    comments.value = [comment, ...comments.value]
+    newComment.value = ''
+    increaseCommentCount(1)
+    ElMessage.success('评论发布成功')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '发表评论失败，请稍后重试')
+  } finally {
+    commentSubmitting.value = false
+  }
+}
+
+async function submitReply(parentComment: ForumCommentNode) {
+  const content = replyText.value.trim()
+  if (!selectedPost.value || !content || commentSubmitting.value) {
+    return
+  }
+
+  commentSubmitting.value = true
+
+  try {
+    const reply = await createForumComment(selectedPost.value.post_id, {
+      content,
+      parent_comment_id: parentComment.comment_id,
+    })
+
+    if (!appendReplyToTree(comments.value, parentComment.comment_id, reply)) {
+      comments.value = [reply, ...comments.value]
+    }
+
+    increaseCommentCount(1)
+    resetReplyState()
+    ElMessage.success('回复发布成功')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '回复失败，请稍后重试')
+  } finally {
+    commentSubmitting.value = false
+  }
+}
+
+async function handleDeleteComment(commentID: number) {
+  if (commentSubmitting.value) {
+    return
+  }
+
+  commentSubmitting.value = true
+
+  try {
+    const result = await deleteForumComment(commentID)
+    if (!patchCommentTree(comments.value, commentID, (node) => {
+      node.status = result.status
+      node.content = result.content
+      node.deleted_at = result.deleted_at
+      node.can_delete = false
+    })) {
+      await loadPostPage()
+      return
+    }
+
+    increaseCommentCount(-1)
     ElMessage.success('评论已删除')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '删除评论失败，请稍后重试')
+  } finally {
+    commentSubmitting.value = false
   }
 }
 
-function formatDate(iso: string) {
-  const date = new Date(iso)
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
-}
+watch(
+  () => route.params.id,
+  () => {
+    void loadPostPage()
+  },
+  { immediate: true },
+)
 </script>
-
 <template>
   <div class="detail-page-container" v-loading="isLoading">
     <div v-if="selectedPost" class="detail-wrapper">
-      <!-- Top Navigation -->
       <nav class="detail-nav">
         <el-button :icon="ArrowLeft" circle @click="goBack" />
         <span class="nav-title">计划详情</span>
         <div class="nav-actions">
-          <el-button 
-            type="primary" 
-            round 
+          <el-button
+            type="primary"
+            round
             :icon="selectedPost.viewer_state.imported_once ? Check : Connection"
             @click="handleImport"
           >
@@ -257,7 +277,6 @@ function formatDate(iso: string) {
         </div>
       </nav>
 
-      <!-- Main Content -->
       <div class="detail-main-layout">
         <aside class="detail-sidebar">
           <div class="author-card">
@@ -281,15 +300,15 @@ function formatDate(iso: string) {
             <div class="summary-info">
               <div class="info-row">
                 <span class="label">任务总数</span>
-                <span class="value">{{ selectedPost.template_summary.task_count }}</span>
+                <span class="value">{{ selectedPost.template.task_count }}</span>
               </div>
               <div class="info-row">
                 <span class="label">排程模式</span>
-                <span class="value">{{ selectedPost.template_summary.mode === 'date_range' ? '日期范围' : '固定天数' }}</span>
+                <span class="value">{{ formatTemplateMode(selectedPost.template.mode) }}</span>
               </div>
             </div>
             <div class="strategy-list">
-              <span v-for="tag in selectedPost.template_summary.strategy_labels" :key="tag" class="strategy-tag">
+              <span v-for="tag in selectedPost.template.strategy_labels" :key="tag" class="strategy-tag">
                 {{ tag }}
               </span>
             </div>
@@ -298,25 +317,13 @@ function formatDate(iso: string) {
           <div class="tasks-overview-card">
             <h4><el-icon><Filter /></el-icon> 任务预览</h4>
             <div class="items-list">
-              <div v-for="i in 10" :key="i" class="item-node">
-                <div class="node-idx">{{ String(i).padStart(2, '0') }}</div>
-                <div class="node-content">
-                  {{ [
-                    '复习极限与连续的基础概念，完成课后习题。',
-                    '导数与微分的中值定理深度解析，配合真题演练。',
-                    '泰勒展开式及其在近似计算中的应用技巧。',
-                    '不定积分的换元法与分部积分法专项突破。',
-                    '定积分的几何意义与物理应用案例分析。',
-                    '多元函数偏导数与全微分的计算模型。',
-                    '二重积分在极坐标下的变换与计算方法。',
-                    '常微分方程的一阶线性方程求解步骤。',
-                    '向量代数与空间解析几何的综合练习。',
-                    '全书重点难点回顾与思维导图梳理。'
-                  ][(i-1) % 10] }}
-                </div>
+              <div v-for="item in previewItems" :key="item.item_id || item.order" class="item-node">
+                <div class="node-idx">{{ String(item.order).padStart(2, '0') }}</div>
+                <div class="node-content">{{ item.content }}</div>
               </div>
-              <div class="item-node more">
-                ... 更多 {{ selectedPost.template_summary.task_count - 10 }} 个任务项 ...
+              <div v-if="previewItems.length === 0" class="item-node more">暂无任务预览</div>
+              <div v-else-if="previewOverflowCount > 0" class="item-node more">
+                ... 更多 {{ previewOverflowCount }} 个任务项 ...
               </div>
             </div>
           </div>
@@ -333,7 +340,7 @@ function formatDate(iso: string) {
 
           <section class="comments-section">
             <h3><el-icon><ChatDotRound /></el-icon> 互动区 ({{ selectedPost.counters.comment_count }})</h3>
-            
+
             <div class="comment-post-box">
               <img src="https://api.dicebear.com/7.x/avataaars/svg?seed=Lucky" class="current-user-avatar" />
               <div class="input-container">
@@ -346,13 +353,15 @@ function formatDate(iso: string) {
                   class="premium-input"
                 />
                 <div class="post-actions">
-                  <el-button type="primary" round size="default" @click="submitComment">发布评论</el-button>
+                  <el-button type="primary" round size="default" :loading="commentSubmitting" @click="submitComment">
+                    发布评论
+                  </el-button>
                 </div>
               </div>
             </div>
 
             <div class="comments-list">
-              <div v-for="comment in mockComments" :key="comment.comment_id" class="comment-item">
+              <div v-for="comment in comments" :key="comment.comment_id" class="comment-item">
                 <img :src="comment.author.avatar_url" class="c-avatar" />
                 <div class="c-body">
                   <div class="c-user">
@@ -361,30 +370,32 @@ function formatDate(iso: string) {
                   </div>
                   <div class="c-content">{{ comment.content }}</div>
                   <div class="c-actions">
-                    <span class="btn" @click="startReply(comment.comment_id)">回复</span>
-                    <span v-if="comment.can_delete" class="btn del" @click="deleteComment(comment.comment_id)">删除</span>
+                    <span v-if="comment.status === 'visible'" class="btn" @click="startReply(comment.comment_id)">回复</span>
+                    <span v-if="comment.can_delete && comment.status === 'visible'" class="btn del" @click="handleDeleteComment(comment.comment_id)">
+                      删除
+                    </span>
                   </div>
 
-                  <!-- Reply Input -->
                   <transition name="el-zoom-in-top">
                     <div v-if="replyingToId === comment.comment_id" class="reply-input-wrapper">
-                      <el-input 
-                        v-model="replyText" 
+                      <el-input
+                        v-model="replyText"
                         type="textarea"
                         :rows="1"
                         auto-grow
-                        placeholder="写下你的回复..." 
+                        placeholder="写下你的回复..."
                         class="reply-field"
                         @keyup.enter.ctrl="submitReply(comment)"
                       />
                       <div class="reply-btns">
-                        <el-button size="small" link @click="replyingToId = null">取消</el-button>
-                        <el-button size="small" type="primary" round @click="submitReply(comment)">提交回复</el-button>
+                        <el-button size="small" link @click="resetReplyState">取消</el-button>
+                        <el-button size="small" type="primary" round :loading="commentSubmitting" @click="submitReply(comment)">
+                          提交回复
+                        </el-button>
                       </div>
                     </div>
                   </transition>
 
-                  <!-- Child Comments -->
                   <div v-if="comment.children.length > 0" class="comment-children">
                     <div v-for="child in comment.children" :key="child.comment_id" class="comment-item child">
                       <img :src="child.author.avatar_url" class="c-avatar small" />
@@ -395,24 +406,27 @@ function formatDate(iso: string) {
                         </div>
                         <div class="c-content">{{ child.content }}</div>
                         <div class="c-actions">
-                          <span class="btn" @click="startReply(child.comment_id)">回复</span>
-                          <span v-if="child.can_delete" class="btn del" @click="deleteComment(child.comment_id)">删除</span>
+                          <span v-if="child.status === 'visible'" class="btn" @click="startReply(child.comment_id)">回复</span>
+                          <span v-if="child.can_delete && child.status === 'visible'" class="btn del" @click="handleDeleteComment(child.comment_id)">
+                            删除
+                          </span>
                         </div>
 
-                        <!-- Reply Input for child -->
                         <transition name="el-zoom-in-top">
                           <div v-if="replyingToId === child.comment_id" class="reply-input-wrapper">
-                            <el-input 
-                              v-model="replyText" 
+                            <el-input
+                              v-model="replyText"
                               type="textarea"
                               :rows="1"
-                              placeholder="写下你的回复..." 
+                              placeholder="写下你的回复..."
                               class="reply-field"
                               @keyup.enter.ctrl="submitReply(child)"
                             />
                             <div class="reply-btns">
-                              <el-button size="small" link @click="replyingToId = null">取消</el-button>
-                              <el-button size="small" type="primary" round @click="submitReply(child)">提交回复</el-button>
+                              <el-button size="small" link @click="resetReplyState">取消</el-button>
+                              <el-button size="small" type="primary" round :loading="commentSubmitting" @click="submitReply(child)">
+                                提交回复
+                              </el-button>
                             </div>
                           </div>
                         </transition>
@@ -428,7 +442,6 @@ function formatDate(iso: string) {
     </div>
   </div>
 </template>
-
 <style scoped>
 .detail-page-container {
   height: 100%;

@@ -35,6 +35,19 @@ type AgentModelClients struct {
 	Summary *Client
 }
 
+// StaticClients 用于在不依赖 AIHub 的情况下直接注入已构造好的客户端。
+//
+// 职责边界：
+// 1. 只负责把已经准备好的 client 聚合成 Service；
+// 2. 不负责选择 provider，也不负责初始化远端 RPC 连接；
+// 3. 供独立 llm zrpc client、测试替身和迁移期桥接入口复用。
+type StaticClients struct {
+	Lite                 *Client
+	Pro                  *Client
+	Max                  *Client
+	CourseImageResponses *ArkResponsesClient
+}
+
 // New 构造 llm-service。
 // 1. 不返回 error，是为了让上层继续按 nil 客户端做逐步降级。
 // 2. 只要 AIHub 已初始化，就把其中的 ChatModel 收敛成统一 Client。
@@ -60,6 +73,16 @@ func New(opts Options) *Service {
 	}
 
 	return svc
+}
+
+// NewWithClients 使用外部注入的现成客户端构造 Service。
+func NewWithClients(clients StaticClients) *Service {
+	return &Service{
+		liteClient:                 clients.Lite,
+		proClient:                  clients.Pro,
+		maxClient:                  clients.Max,
+		courseImageResponsesClient: clients.CourseImageResponses,
+	}
 }
 
 // LiteClient 返回低成本短输出模型客户端。

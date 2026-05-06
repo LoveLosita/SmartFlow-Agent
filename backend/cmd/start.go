@@ -14,6 +14,7 @@ import (
 	activeschedulerclient "github.com/LoveLosita/smartflow/backend/client/activescheduler"
 	agentclient "github.com/LoveLosita/smartflow/backend/client/agent"
 	courseclient "github.com/LoveLosita/smartflow/backend/client/course"
+	llmclient "github.com/LoveLosita/smartflow/backend/client/llm"
 	memoryclient "github.com/LoveLosita/smartflow/backend/client/memory"
 	notificationclient "github.com/LoveLosita/smartflow/backend/client/notification"
 	scheduleclient "github.com/LoveLosita/smartflow/backend/client/schedule"
@@ -53,7 +54,6 @@ import (
 	taskdao "github.com/LoveLosita/smartflow/backend/services/task/dao"
 	tasksv "github.com/LoveLosita/smartflow/backend/services/task/sv"
 	"github.com/LoveLosita/smartflow/backend/shared/infra/bootstrap"
-	einoinfra "github.com/LoveLosita/smartflow/backend/shared/infra/eino"
 	gormcache "github.com/LoveLosita/smartflow/backend/shared/infra/gormcache"
 	kafkabus "github.com/LoveLosita/smartflow/backend/shared/infra/kafka"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
@@ -273,16 +273,17 @@ func buildRuntime(ctx context.Context) (*appRuntime, error) {
 	if shouldBuildGatewayAgentFallback() {
 		log.Println("Gateway agent RPC fallback is enabled; building local AgentService compatibility path")
 
-		aiHub, err := einoinfra.InitEino()
-		if err != nil {
-			return nil, fmt.Errorf("failed to initialize Eino: %w", err)
-		}
-		llmService := llmservice.New(llmservice.Options{
-			AIHub:             aiHub,
-			APIKey:            os.Getenv("ARK_API_KEY"),
-			BaseURL:           viper.GetString("agent.baseURL"),
+		llmService, err := llmclient.NewService(llmclient.ServiceConfig{
+			ClientConfig: llmclient.ClientConfig{
+				Endpoints: viper.GetStringSlice("llm.rpc.endpoints"),
+				Target:    viper.GetString("llm.rpc.target"),
+				Timeout:   viper.GetDuration("llm.rpc.timeout"),
+			},
 			CourseVisionModel: viper.GetString("courseImport.visionModel"),
 		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize llm zrpc client: %w", err)
+		}
 
 		ragService, err := buildRAGService(ctx)
 		if err != nil {

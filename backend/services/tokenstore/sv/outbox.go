@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	tokencontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/tokenstore"
 	sharedevents "github.com/LoveLosita/smartflow/backend/shared/events"
 	kafkabus "github.com/LoveLosita/smartflow/backend/shared/infra/kafka"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
@@ -110,11 +109,19 @@ func registerForumRewardHandler(
 			return nil
 		}
 
-		grant, err := svc.RecordForumRewardGrant(ctx, tokencontracts.RecordForumRewardGrantRequest{
+		sourceRefID, parseErr := parseForumRewardSourceRefID(forumRewardSourceRefID(payload, source))
+		if parseErr != nil {
+			if markErr := eventOutboxRepo.MarkDead(ctx, envelope.OutboxID, "论坛奖励 source_ref_id 非法: "+parseErr.Error()); markErr != nil {
+				return markErr
+			}
+			return nil
+		}
+
+		transaction, err := svc.RecordForumRewardCredit(ctx, forumRewardGrantRequest{
 			EventID:        eventID,
 			ReceiverUserID: payload.RewardReceiverUserID,
 			Source:         forumRewardSource(payload, source),
-			SourceRefID:    forumRewardSourceRefID(payload, source),
+			SourceRefID:    sourceRefID,
 		})
 		if err != nil {
 			return err
@@ -124,10 +131,10 @@ func registerForumRewardHandler(
 		}
 
 		log.Printf(
-			"forum reward event consumed by tokenstore: event_type=%s event_id=%s grant_id=%d outbox_id=%d",
+			"forum reward event consumed by tokenstore: event_type=%s event_id=%s transaction_id=%d outbox_id=%d",
 			eventType,
 			eventID,
-			grant.GrantID,
+			transaction.TransactionID,
 			envelope.OutboxID,
 		)
 		return nil

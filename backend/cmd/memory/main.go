@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	llmclient "github.com/LoveLosita/smartflow/backend/client/llm"
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	memorymodule "github.com/LoveLosita/smartflow/backend/services/memory"
 	memorydao "github.com/LoveLosita/smartflow/backend/services/memory/dao"
@@ -17,7 +18,6 @@ import (
 	ragservice "github.com/LoveLosita/smartflow/backend/services/rag"
 	ragconfig "github.com/LoveLosita/smartflow/backend/services/rag/config"
 	"github.com/LoveLosita/smartflow/backend/shared/infra/bootstrap"
-	einoinfra "github.com/LoveLosita/smartflow/backend/shared/infra/eino"
 	kafkabus "github.com/LoveLosita/smartflow/backend/shared/infra/kafka"
 	outboxinfra "github.com/LoveLosita/smartflow/backend/shared/infra/outbox"
 	"github.com/spf13/viper"
@@ -96,20 +96,21 @@ func main() {
 //
 // 说明：
 // 1. CP1 先复用既有 llm-service canonical 入口，不在 memory 服务里重建模型调用封装；
-// 2. 当前启动入口与 cmd/start.go / cmd/active-scheduler 都需要 Eino 初始化，后续若出现第三处重复装配，应抽公共 bootstrap；
+// 2. 现在统一改走独立 llm zrpc client，memory 进程不再本地初始化 AIHub；
 // 3. 返回 ProClient 是因为现有 memory.Module 只需要 llmservice.Client，不需要完整 Service。
 func buildMemoryLLMClient() (*llmservice.Client, error) {
-	aiHub, err := einoinfra.InitEino()
+	remoteService, err := llmclient.NewService(llmclient.ServiceConfig{
+		ClientConfig: llmclient.ClientConfig{
+			Endpoints: viper.GetStringSlice("llm.rpc.endpoints"),
+			Target:    viper.GetString("llm.rpc.target"),
+			Timeout:   viper.GetDuration("llm.rpc.timeout"),
+		},
+		CourseVisionModel: viper.GetString("courseImport.visionModel"),
+	})
 	if err != nil {
 		return nil, err
 	}
-	llmService := llmservice.New(llmservice.Options{
-		AIHub:             aiHub,
-		APIKey:            os.Getenv("ARK_API_KEY"),
-		BaseURL:           viper.GetString("agent.baseURL"),
-		CourseVisionModel: viper.GetString("courseImport.visionModel"),
-	})
-	return llmService.ProClient(), nil
+	return remoteService.ProClient(), nil
 }
 
 // buildMemoryRAGRuntime 初始化 memory 检索与向量同步使用的 RAG Runtime。

@@ -13,6 +13,16 @@ service TokenStoreService {
   rpc MockPaidOrder(MockPaidOrderRequest) returns (MockPaidOrderResponse);
   rpc ListGrants(ListTokenGrantsRequest) returns (ListTokenGrantsResponse);
   rpc RecordForumRewardGrant(RecordForumRewardGrantRequest) returns (RecordForumRewardGrantResponse);
+  rpc GetCreditBalanceSnapshot(GetCreditBalanceSnapshotRequest) returns (GetCreditBalanceSnapshotResponse);
+  rpc GetCreditConsumptionDashboard(GetCreditConsumptionDashboardRequest) returns (GetCreditConsumptionDashboardResponse);
+  rpc ListCreditProducts(ListCreditProductsRequest) returns (ListCreditProductsResponse);
+  rpc CreateCreditOrder(CreateCreditOrderRequest) returns (CreateCreditOrderResponse);
+  rpc ListCreditOrders(ListCreditOrdersRequest) returns (ListCreditOrdersResponse);
+  rpc GetCreditOrder(GetCreditOrderRequest) returns (GetCreditOrderResponse);
+  rpc MockPaidCreditOrder(MockPaidCreditOrderRequest) returns (MockPaidCreditOrderResponse);
+  rpc ListCreditTransactions(ListCreditTransactionsRequest) returns (ListCreditTransactionsResponse);
+  rpc ListCreditPriceRules(ListCreditPriceRulesRequest) returns (ListCreditPriceRulesResponse);
+  rpc ListCreditRewardRules(ListCreditRewardRulesRequest) returns (ListCreditRewardRulesResponse);
 }
 
 message PageResponse {
@@ -153,4 +163,192 @@ message RecordForumRewardGrantRequest {
 
 message RecordForumRewardGrantResponse {
   TokenGrantView grant = 1;
+}
+
+message CreditBalanceSnapshotView {
+  uint64 user_id = 1;
+  int64 balance = 2;
+  bool is_blocked = 3;
+  string snapshot_source = 4;
+  string updated_at = 5;
+  int64 total_recharged = 6;
+  int64 total_rewarded = 7;
+  int64 total_consumed = 8;
+}
+
+message CreditProductView {
+  uint64 product_id = 1;
+  string name = 2;
+  string description = 3;
+  int64 credit_amount = 4;
+  int64 price_cent = 5;
+  string price_text = 6;
+  string currency = 7;
+  string badge = 8;
+  string status = 9;
+  int32 sort_order = 10;
+  int64 original_price_cent = 11;
+}
+
+message CreditOrderView {
+  uint64 order_id = 1;
+  string order_no = 2;
+  string status = 3;
+  int64 credit_amount = 4;
+  int64 amount_cent = 5;
+  string price_text = 6;
+  string currency = 7;
+  string payment_mode = 8;
+  string created_at = 9;
+  string paid_at = 10;
+  string credited_at = 11;
+  string product_snapshot = 12;
+  string product_name = 13;
+  int32 quantity = 14;
+}
+
+message CreditTransactionView {
+  uint64 transaction_id = 1;
+  string event_id = 2;
+  string source = 3;
+  string source_label = 4;
+  string direction = 5;
+  int64 amount = 6;
+  int64 balance_after = 7;
+  string status = 8;
+  string description = 9;
+  string metadata_json = 10;
+  string created_at = 11;
+  uint64 order_id = 12;
+}
+
+message CreditPriceRuleView {
+  uint64 rule_id = 1;
+  string scene = 2;
+  string provider_name = 3;
+  string model_name = 4;
+  int64 input_price_micros = 5;
+  int64 output_price_micros = 6;
+  int64 cached_price_micros = 7;
+  int64 reasoning_price_micros = 8;
+  int64 credit_per_yuan = 9;
+  string status = 10;
+  int32 priority = 11;
+  string description = 12;
+}
+
+message CreditRewardRuleView {
+  uint64 rule_id = 1;
+  string source = 2;
+  string name = 3;
+  int64 amount = 4;
+  string status = 5;
+  string description = 6;
+}
+
+message GetCreditBalanceSnapshotRequest {
+  uint64 user_id = 1;
+}
+
+message GetCreditBalanceSnapshotResponse {
+  CreditBalanceSnapshotView snapshot = 1;
+}
+
+message CreditConsumptionDashboardView {
+  string period = 1;
+  int64 credit_consumed = 2;
+  int64 token_consumed = 3;
+}
+
+message GetCreditConsumptionDashboardRequest {
+  uint64 actor_user_id = 1;
+  string period = 2;
+}
+
+message GetCreditConsumptionDashboardResponse {
+  CreditConsumptionDashboardView dashboard = 1;
+}
+
+message ListCreditProductsRequest {
+  uint64 actor_user_id = 1;
+}
+
+message ListCreditProductsResponse {
+  repeated CreditProductView items = 1;
+}
+
+message CreateCreditOrderRequest {
+  uint64 actor_user_id = 1;
+  uint64 product_id = 2;
+  int32 quantity = 3;
+  string idempotency_key = 4;
+}
+
+message CreateCreditOrderResponse {
+  CreditOrderView order = 1;
+}
+
+message ListCreditOrdersRequest {
+  uint64 actor_user_id = 1;
+  int32 page = 2;
+  int32 page_size = 3;
+  string status = 4;
+}
+
+message ListCreditOrdersResponse {
+  repeated CreditOrderView items = 1;
+  PageResponse page = 2;
+}
+
+message GetCreditOrderRequest {
+  uint64 actor_user_id = 1;
+  uint64 order_id = 2;
+}
+
+message GetCreditOrderResponse {
+  CreditOrderView order = 1;
+}
+
+message MockPaidCreditOrderRequest {
+  uint64 actor_user_id = 1;
+  uint64 order_id = 2;
+  string mock_channel = 3;
+  string idempotency_key = 4;
+}
+
+message MockPaidCreditOrderResponse {
+  CreditOrderView order = 1;
+}
+
+message ListCreditTransactionsRequest {
+  uint64 actor_user_id = 1;
+  int32 page = 2;
+  int32 page_size = 3;
+  string source = 4;
+  string direction = 5;
+}
+
+message ListCreditTransactionsResponse {
+  repeated CreditTransactionView items = 1;
+  PageResponse page = 2;
+}
+
+message ListCreditPriceRulesRequest {
+  string scene = 1;
+  string provider_name = 2;
+  string model_name = 3;
+  string status = 4;
+}
+
+message ListCreditPriceRulesResponse {
+  repeated CreditPriceRuleView items = 1;
+}
+
+message ListCreditRewardRulesRequest {
+  string source = 1;
+  string status = 2;
+}
+
+message ListCreditRewardRulesResponse {
+  repeated CreditRewardRuleView items = 1;
 }

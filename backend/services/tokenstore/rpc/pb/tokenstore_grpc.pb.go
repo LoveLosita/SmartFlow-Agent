@@ -9,14 +9,24 @@ import (
 )
 
 const (
-	TokenStoreService_GetSummary_FullMethodName             = "/smartflow.tokenstore.TokenStoreService/GetSummary"
-	TokenStoreService_ListProducts_FullMethodName           = "/smartflow.tokenstore.TokenStoreService/ListProducts"
-	TokenStoreService_CreateOrder_FullMethodName            = "/smartflow.tokenstore.TokenStoreService/CreateOrder"
-	TokenStoreService_ListOrders_FullMethodName             = "/smartflow.tokenstore.TokenStoreService/ListOrders"
-	TokenStoreService_GetOrder_FullMethodName               = "/smartflow.tokenstore.TokenStoreService/GetOrder"
-	TokenStoreService_MockPaidOrder_FullMethodName          = "/smartflow.tokenstore.TokenStoreService/MockPaidOrder"
-	TokenStoreService_ListGrants_FullMethodName             = "/smartflow.tokenstore.TokenStoreService/ListGrants"
-	TokenStoreService_RecordForumRewardGrant_FullMethodName = "/smartflow.tokenstore.TokenStoreService/RecordForumRewardGrant"
+	TokenStoreService_GetSummary_FullMethodName                    = "/smartflow.tokenstore.TokenStoreService/GetSummary"
+	TokenStoreService_ListProducts_FullMethodName                  = "/smartflow.tokenstore.TokenStoreService/ListProducts"
+	TokenStoreService_CreateOrder_FullMethodName                   = "/smartflow.tokenstore.TokenStoreService/CreateOrder"
+	TokenStoreService_ListOrders_FullMethodName                    = "/smartflow.tokenstore.TokenStoreService/ListOrders"
+	TokenStoreService_GetOrder_FullMethodName                      = "/smartflow.tokenstore.TokenStoreService/GetOrder"
+	TokenStoreService_MockPaidOrder_FullMethodName                 = "/smartflow.tokenstore.TokenStoreService/MockPaidOrder"
+	TokenStoreService_ListGrants_FullMethodName                    = "/smartflow.tokenstore.TokenStoreService/ListGrants"
+	TokenStoreService_RecordForumRewardGrant_FullMethodName        = "/smartflow.tokenstore.TokenStoreService/RecordForumRewardGrant"
+	TokenStoreService_GetCreditBalanceSnapshot_FullMethodName      = "/smartflow.tokenstore.TokenStoreService/GetCreditBalanceSnapshot"
+	TokenStoreService_GetCreditConsumptionDashboard_FullMethodName = "/smartflow.tokenstore.TokenStoreService/GetCreditConsumptionDashboard"
+	TokenStoreService_ListCreditProducts_FullMethodName            = "/smartflow.tokenstore.TokenStoreService/ListCreditProducts"
+	TokenStoreService_CreateCreditOrder_FullMethodName             = "/smartflow.tokenstore.TokenStoreService/CreateCreditOrder"
+	TokenStoreService_ListCreditOrders_FullMethodName              = "/smartflow.tokenstore.TokenStoreService/ListCreditOrders"
+	TokenStoreService_GetCreditOrder_FullMethodName                = "/smartflow.tokenstore.TokenStoreService/GetCreditOrder"
+	TokenStoreService_MockPaidCreditOrder_FullMethodName           = "/smartflow.tokenstore.TokenStoreService/MockPaidCreditOrder"
+	TokenStoreService_ListCreditTransactions_FullMethodName        = "/smartflow.tokenstore.TokenStoreService/ListCreditTransactions"
+	TokenStoreService_ListCreditPriceRules_FullMethodName          = "/smartflow.tokenstore.TokenStoreService/ListCreditPriceRules"
+	TokenStoreService_ListCreditRewardRules_FullMethodName         = "/smartflow.tokenstore.TokenStoreService/ListCreditRewardRules"
 )
 
 type TokenStoreServiceClient interface {
@@ -28,6 +38,16 @@ type TokenStoreServiceClient interface {
 	MockPaidOrder(ctx context.Context, in *MockPaidOrderRequest, opts ...grpc.CallOption) (*MockPaidOrderResponse, error)
 	ListGrants(ctx context.Context, in *ListTokenGrantsRequest, opts ...grpc.CallOption) (*ListTokenGrantsResponse, error)
 	RecordForumRewardGrant(ctx context.Context, in *RecordForumRewardGrantRequest, opts ...grpc.CallOption) (*RecordForumRewardGrantResponse, error)
+	GetCreditBalanceSnapshot(ctx context.Context, in *GetCreditBalanceSnapshotRequest, opts ...grpc.CallOption) (*GetCreditBalanceSnapshotResponse, error)
+	GetCreditConsumptionDashboard(ctx context.Context, in *GetCreditConsumptionDashboardRequest, opts ...grpc.CallOption) (*GetCreditConsumptionDashboardResponse, error)
+	ListCreditProducts(ctx context.Context, in *ListCreditProductsRequest, opts ...grpc.CallOption) (*ListCreditProductsResponse, error)
+	CreateCreditOrder(ctx context.Context, in *CreateCreditOrderRequest, opts ...grpc.CallOption) (*CreateCreditOrderResponse, error)
+	ListCreditOrders(ctx context.Context, in *ListCreditOrdersRequest, opts ...grpc.CallOption) (*ListCreditOrdersResponse, error)
+	GetCreditOrder(ctx context.Context, in *GetCreditOrderRequest, opts ...grpc.CallOption) (*GetCreditOrderResponse, error)
+	MockPaidCreditOrder(ctx context.Context, in *MockPaidCreditOrderRequest, opts ...grpc.CallOption) (*MockPaidCreditOrderResponse, error)
+	ListCreditTransactions(ctx context.Context, in *ListCreditTransactionsRequest, opts ...grpc.CallOption) (*ListCreditTransactionsResponse, error)
+	ListCreditPriceRules(ctx context.Context, in *ListCreditPriceRulesRequest, opts ...grpc.CallOption) (*ListCreditPriceRulesResponse, error)
+	ListCreditRewardRules(ctx context.Context, in *ListCreditRewardRulesRequest, opts ...grpc.CallOption) (*ListCreditRewardRulesResponse, error)
 }
 
 type tokenStoreServiceClient struct {
@@ -70,6 +90,46 @@ func (c *tokenStoreServiceClient) RecordForumRewardGrant(ctx context.Context, in
 	return invokeTokenStore[RecordForumRewardGrantResponse](ctx, c.cc, TokenStoreService_RecordForumRewardGrant_FullMethodName, in, opts...)
 }
 
+func (c *tokenStoreServiceClient) GetCreditBalanceSnapshot(ctx context.Context, in *GetCreditBalanceSnapshotRequest, opts ...grpc.CallOption) (*GetCreditBalanceSnapshotResponse, error) {
+	return invokeTokenStore[GetCreditBalanceSnapshotResponse](ctx, c.cc, TokenStoreService_GetCreditBalanceSnapshot_FullMethodName, in, opts...)
+}
+
+func (c *tokenStoreServiceClient) GetCreditConsumptionDashboard(ctx context.Context, in *GetCreditConsumptionDashboardRequest, opts ...grpc.CallOption) (*GetCreditConsumptionDashboardResponse, error) {
+	return invokeTokenStore[GetCreditConsumptionDashboardResponse](ctx, c.cc, TokenStoreService_GetCreditConsumptionDashboard_FullMethodName, in, opts...)
+}
+
+func (c *tokenStoreServiceClient) ListCreditProducts(ctx context.Context, in *ListCreditProductsRequest, opts ...grpc.CallOption) (*ListCreditProductsResponse, error) {
+	return invokeTokenStore[ListCreditProductsResponse](ctx, c.cc, TokenStoreService_ListCreditProducts_FullMethodName, in, opts...)
+}
+
+func (c *tokenStoreServiceClient) CreateCreditOrder(ctx context.Context, in *CreateCreditOrderRequest, opts ...grpc.CallOption) (*CreateCreditOrderResponse, error) {
+	return invokeTokenStore[CreateCreditOrderResponse](ctx, c.cc, TokenStoreService_CreateCreditOrder_FullMethodName, in, opts...)
+}
+
+func (c *tokenStoreServiceClient) ListCreditOrders(ctx context.Context, in *ListCreditOrdersRequest, opts ...grpc.CallOption) (*ListCreditOrdersResponse, error) {
+	return invokeTokenStore[ListCreditOrdersResponse](ctx, c.cc, TokenStoreService_ListCreditOrders_FullMethodName, in, opts...)
+}
+
+func (c *tokenStoreServiceClient) GetCreditOrder(ctx context.Context, in *GetCreditOrderRequest, opts ...grpc.CallOption) (*GetCreditOrderResponse, error) {
+	return invokeTokenStore[GetCreditOrderResponse](ctx, c.cc, TokenStoreService_GetCreditOrder_FullMethodName, in, opts...)
+}
+
+func (c *tokenStoreServiceClient) MockPaidCreditOrder(ctx context.Context, in *MockPaidCreditOrderRequest, opts ...grpc.CallOption) (*MockPaidCreditOrderResponse, error) {
+	return invokeTokenStore[MockPaidCreditOrderResponse](ctx, c.cc, TokenStoreService_MockPaidCreditOrder_FullMethodName, in, opts...)
+}
+
+func (c *tokenStoreServiceClient) ListCreditTransactions(ctx context.Context, in *ListCreditTransactionsRequest, opts ...grpc.CallOption) (*ListCreditTransactionsResponse, error) {
+	return invokeTokenStore[ListCreditTransactionsResponse](ctx, c.cc, TokenStoreService_ListCreditTransactions_FullMethodName, in, opts...)
+}
+
+func (c *tokenStoreServiceClient) ListCreditPriceRules(ctx context.Context, in *ListCreditPriceRulesRequest, opts ...grpc.CallOption) (*ListCreditPriceRulesResponse, error) {
+	return invokeTokenStore[ListCreditPriceRulesResponse](ctx, c.cc, TokenStoreService_ListCreditPriceRules_FullMethodName, in, opts...)
+}
+
+func (c *tokenStoreServiceClient) ListCreditRewardRules(ctx context.Context, in *ListCreditRewardRulesRequest, opts ...grpc.CallOption) (*ListCreditRewardRulesResponse, error) {
+	return invokeTokenStore[ListCreditRewardRulesResponse](ctx, c.cc, TokenStoreService_ListCreditRewardRules_FullMethodName, in, opts...)
+}
+
 func invokeTokenStore[Resp any](ctx context.Context, cc grpc.ClientConnInterface, fullMethod string, in interface{}, opts ...grpc.CallOption) (*Resp, error) {
 	out := new(Resp)
 	err := cc.Invoke(ctx, fullMethod, in, out, opts...)
@@ -88,6 +148,16 @@ type TokenStoreServiceServer interface {
 	MockPaidOrder(context.Context, *MockPaidOrderRequest) (*MockPaidOrderResponse, error)
 	ListGrants(context.Context, *ListTokenGrantsRequest) (*ListTokenGrantsResponse, error)
 	RecordForumRewardGrant(context.Context, *RecordForumRewardGrantRequest) (*RecordForumRewardGrantResponse, error)
+	GetCreditBalanceSnapshot(context.Context, *GetCreditBalanceSnapshotRequest) (*GetCreditBalanceSnapshotResponse, error)
+	GetCreditConsumptionDashboard(context.Context, *GetCreditConsumptionDashboardRequest) (*GetCreditConsumptionDashboardResponse, error)
+	ListCreditProducts(context.Context, *ListCreditProductsRequest) (*ListCreditProductsResponse, error)
+	CreateCreditOrder(context.Context, *CreateCreditOrderRequest) (*CreateCreditOrderResponse, error)
+	ListCreditOrders(context.Context, *ListCreditOrdersRequest) (*ListCreditOrdersResponse, error)
+	GetCreditOrder(context.Context, *GetCreditOrderRequest) (*GetCreditOrderResponse, error)
+	MockPaidCreditOrder(context.Context, *MockPaidCreditOrderRequest) (*MockPaidCreditOrderResponse, error)
+	ListCreditTransactions(context.Context, *ListCreditTransactionsRequest) (*ListCreditTransactionsResponse, error)
+	ListCreditPriceRules(context.Context, *ListCreditPriceRulesRequest) (*ListCreditPriceRulesResponse, error)
+	ListCreditRewardRules(context.Context, *ListCreditRewardRulesRequest) (*ListCreditRewardRulesResponse, error)
 }
 
 type UnimplementedTokenStoreServiceServer struct{}
@@ -122,6 +192,46 @@ func (UnimplementedTokenStoreServiceServer) ListGrants(context.Context, *ListTok
 
 func (UnimplementedTokenStoreServiceServer) RecordForumRewardGrant(context.Context, *RecordForumRewardGrantRequest) (*RecordForumRewardGrantResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RecordForumRewardGrant not implemented")
+}
+
+func (UnimplementedTokenStoreServiceServer) GetCreditBalanceSnapshot(context.Context, *GetCreditBalanceSnapshotRequest) (*GetCreditBalanceSnapshotResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetCreditBalanceSnapshot not implemented")
+}
+
+func (UnimplementedTokenStoreServiceServer) GetCreditConsumptionDashboard(context.Context, *GetCreditConsumptionDashboardRequest) (*GetCreditConsumptionDashboardResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetCreditConsumptionDashboard not implemented")
+}
+
+func (UnimplementedTokenStoreServiceServer) ListCreditProducts(context.Context, *ListCreditProductsRequest) (*ListCreditProductsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListCreditProducts not implemented")
+}
+
+func (UnimplementedTokenStoreServiceServer) CreateCreditOrder(context.Context, *CreateCreditOrderRequest) (*CreateCreditOrderResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateCreditOrder not implemented")
+}
+
+func (UnimplementedTokenStoreServiceServer) ListCreditOrders(context.Context, *ListCreditOrdersRequest) (*ListCreditOrdersResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListCreditOrders not implemented")
+}
+
+func (UnimplementedTokenStoreServiceServer) GetCreditOrder(context.Context, *GetCreditOrderRequest) (*GetCreditOrderResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetCreditOrder not implemented")
+}
+
+func (UnimplementedTokenStoreServiceServer) MockPaidCreditOrder(context.Context, *MockPaidCreditOrderRequest) (*MockPaidCreditOrderResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method MockPaidCreditOrder not implemented")
+}
+
+func (UnimplementedTokenStoreServiceServer) ListCreditTransactions(context.Context, *ListCreditTransactionsRequest) (*ListCreditTransactionsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListCreditTransactions not implemented")
+}
+
+func (UnimplementedTokenStoreServiceServer) ListCreditPriceRules(context.Context, *ListCreditPriceRulesRequest) (*ListCreditPriceRulesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListCreditPriceRules not implemented")
+}
+
+func (UnimplementedTokenStoreServiceServer) ListCreditRewardRules(context.Context, *ListCreditRewardRulesRequest) (*ListCreditRewardRulesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListCreditRewardRules not implemented")
 }
 
 func RegisterTokenStoreServiceServer(s grpc.ServiceRegistrar, srv TokenStoreServiceServer) {
@@ -178,6 +288,36 @@ var TokenStoreService_ServiceDesc = grpc.ServiceDesc{
 		}),
 		tokenStoreUnaryHandler[RecordForumRewardGrantRequest]("RecordForumRewardGrant", TokenStoreService_RecordForumRewardGrant_FullMethodName, func(s TokenStoreServiceServer, ctx context.Context, req *RecordForumRewardGrantRequest) (interface{}, error) {
 			return s.RecordForumRewardGrant(ctx, req)
+		}),
+		tokenStoreUnaryHandler[GetCreditBalanceSnapshotRequest]("GetCreditBalanceSnapshot", TokenStoreService_GetCreditBalanceSnapshot_FullMethodName, func(s TokenStoreServiceServer, ctx context.Context, req *GetCreditBalanceSnapshotRequest) (interface{}, error) {
+			return s.GetCreditBalanceSnapshot(ctx, req)
+		}),
+		tokenStoreUnaryHandler[GetCreditConsumptionDashboardRequest]("GetCreditConsumptionDashboard", TokenStoreService_GetCreditConsumptionDashboard_FullMethodName, func(s TokenStoreServiceServer, ctx context.Context, req *GetCreditConsumptionDashboardRequest) (interface{}, error) {
+			return s.GetCreditConsumptionDashboard(ctx, req)
+		}),
+		tokenStoreUnaryHandler[ListCreditProductsRequest]("ListCreditProducts", TokenStoreService_ListCreditProducts_FullMethodName, func(s TokenStoreServiceServer, ctx context.Context, req *ListCreditProductsRequest) (interface{}, error) {
+			return s.ListCreditProducts(ctx, req)
+		}),
+		tokenStoreUnaryHandler[CreateCreditOrderRequest]("CreateCreditOrder", TokenStoreService_CreateCreditOrder_FullMethodName, func(s TokenStoreServiceServer, ctx context.Context, req *CreateCreditOrderRequest) (interface{}, error) {
+			return s.CreateCreditOrder(ctx, req)
+		}),
+		tokenStoreUnaryHandler[ListCreditOrdersRequest]("ListCreditOrders", TokenStoreService_ListCreditOrders_FullMethodName, func(s TokenStoreServiceServer, ctx context.Context, req *ListCreditOrdersRequest) (interface{}, error) {
+			return s.ListCreditOrders(ctx, req)
+		}),
+		tokenStoreUnaryHandler[GetCreditOrderRequest]("GetCreditOrder", TokenStoreService_GetCreditOrder_FullMethodName, func(s TokenStoreServiceServer, ctx context.Context, req *GetCreditOrderRequest) (interface{}, error) {
+			return s.GetCreditOrder(ctx, req)
+		}),
+		tokenStoreUnaryHandler[MockPaidCreditOrderRequest]("MockPaidCreditOrder", TokenStoreService_MockPaidCreditOrder_FullMethodName, func(s TokenStoreServiceServer, ctx context.Context, req *MockPaidCreditOrderRequest) (interface{}, error) {
+			return s.MockPaidCreditOrder(ctx, req)
+		}),
+		tokenStoreUnaryHandler[ListCreditTransactionsRequest]("ListCreditTransactions", TokenStoreService_ListCreditTransactions_FullMethodName, func(s TokenStoreServiceServer, ctx context.Context, req *ListCreditTransactionsRequest) (interface{}, error) {
+			return s.ListCreditTransactions(ctx, req)
+		}),
+		tokenStoreUnaryHandler[ListCreditPriceRulesRequest]("ListCreditPriceRules", TokenStoreService_ListCreditPriceRules_FullMethodName, func(s TokenStoreServiceServer, ctx context.Context, req *ListCreditPriceRulesRequest) (interface{}, error) {
+			return s.ListCreditPriceRules(ctx, req)
+		}),
+		tokenStoreUnaryHandler[ListCreditRewardRulesRequest]("ListCreditRewardRules", TokenStoreService_ListCreditRewardRules_FullMethodName, func(s TokenStoreServiceServer, ctx context.Context, req *ListCreditRewardRulesRequest) (interface{}, error) {
+			return s.ListCreditRewardRules(ctx, req)
 		}),
 	},
 	Streams:  []grpc.StreamDesc{},

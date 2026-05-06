@@ -118,6 +118,19 @@ function Get-InfrastructureComposeServices {
     )
 }
 
+function Get-KafkaTopicDefinitions {
+    return @(
+        "smartflow.agent.outbox",
+        "smartflow.task.outbox",
+        "smartflow.memory.outbox",
+        "smartflow.active-scheduler.outbox",
+        "smartflow.notification.outbox",
+        "smartflow.taskclass-forum.outbox",
+        "smartflow.llm.outbox",
+        "smartflow.token-store.outbox"
+    )
+}
+
 function Get-BackendServiceDefinitions {
     return @(
         [pscustomobject]@{
@@ -161,6 +174,16 @@ function Get-BackendServiceDefinitions {
             Dependencies    = @()
         },
         [pscustomobject]@{
+            Name            = "llm"
+            Package         = "./cmd/llm"
+            BinaryPath      = (Join-Path $BinRoot "llm.exe")
+            Port            = 9096
+            ProbeType       = "tcp"
+            ProbeTarget     = $null
+            StartTimeoutSec = 120
+            Dependencies    = @()
+        },
+        [pscustomobject]@{
             Name            = "course"
             Package         = "./cmd/course"
             BinaryPath      = (Join-Path $BinRoot "course.exe")
@@ -168,7 +191,7 @@ function Get-BackendServiceDefinitions {
             ProbeType       = "tcp"
             ProbeTarget     = $null
             StartTimeoutSec = 120
-            Dependencies    = @()
+            Dependencies    = @("llm")
         },
         [pscustomobject]@{
             Name            = "tokenstore"
@@ -198,10 +221,11 @@ function Get-BackendServiceDefinitions {
             ProbeType       = "tcp"
             ProbeTarget     = $null
             StartTimeoutSec = 150
-            Dependencies    = @()
+            Dependencies    = @("llm")
         },
         [pscustomobject]@{
             Name            = "taskclassforum"
+            Aliases         = @("forum")
             Package         = "./cmd/taskclassforum"
             BinaryPath      = (Join-Path $BinRoot "taskclassforum.exe")
             Port            = 9090
@@ -218,7 +242,7 @@ function Get-BackendServiceDefinitions {
             ProbeType       = "tcp"
             ProbeTarget     = $null
             StartTimeoutSec = 120
-            Dependencies    = @("task", "schedule")
+            Dependencies    = @("task", "schedule", "llm")
         },
         [pscustomobject]@{
             Name            = "agent"
@@ -228,7 +252,7 @@ function Get-BackendServiceDefinitions {
             ProbeType       = "tcp"
             ProbeTarget     = $null
             StartTimeoutSec = 180
-            Dependencies    = @("task", "schedule", "task-class", "memory")
+            Dependencies    = @("task", "schedule", "task-class", "memory", "llm")
         },
         [pscustomobject]@{
             Name            = "api"
@@ -244,6 +268,7 @@ function Get-BackendServiceDefinitions {
                 "schedule",
                 "task-class",
                 "course",
+                "llm",
                 "tokenstore",
                 "notification",
                 "memory",
@@ -261,13 +286,33 @@ function Get-BackendServiceDefinition {
         [string]$Name
     )
 
-    foreach ($service in (Get-BackendServiceDefinitions)) {
-        if ($service.Name -eq $Name) {
+    $serviceDefinitions = @(Get-BackendServiceDefinitions)
+    foreach ($service in $serviceDefinitions) {
+        $aliases = @()
+        if ($service.PSObject.Properties.Name -contains "Aliases" -and $null -ne $service.Aliases) {
+            $aliases = @($service.Aliases)
+        }
+
+        if ($service.Name -eq $Name -or $aliases -contains $Name) {
             return $service
         }
     }
 
-    throw "Service definition not found: $Name"
+    $availableNames = foreach ($service in $serviceDefinitions) {
+        $aliases = @()
+        if ($service.PSObject.Properties.Name -contains "Aliases" -and $null -ne $service.Aliases) {
+            $aliases = @($service.Aliases)
+        }
+
+        if ($aliases.Count -gt 0) {
+            "{0} ({1})" -f $service.Name, ($aliases -join ", ")
+        }
+        else {
+            $service.Name
+        }
+    }
+
+    throw "Service definition not found: $Name. Available names: $($availableNames -join '; ')"
 }
 
 function Get-ServicePidFilePath {
@@ -858,6 +903,31 @@ function Start-BackendInfrastructure {
 
     foreach ($definition in (Get-InfrastructureDefinitions)) {
         Wait-ContainerStatus -ContainerDefinition $definition
+    }
+
+    Ensure-KafkaTopics
+}
+
+function Ensure-KafkaTopics {
+    Assert-ToolExists -Name "docker"
+
+    foreach ($topic in (Get-KafkaTopicDefinitions)) {
+        $arguments = @(
+            "exec",
+            "smartflow-kafka",
+            "/opt/kafka/bin/kafka-topics.sh",
+            "--bootstrap-server",
+            "localhost:9092",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            $topic,
+            "--partitions",
+            "3",
+            "--replication-factor",
+            "1"
+        )
+        Invoke-ExternalCommand -FilePath "docker" -Arguments $arguments -WorkingDirectory $RepoRoot
     }
 }
 

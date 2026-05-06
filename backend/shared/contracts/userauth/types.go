@@ -46,23 +46,3 @@ type ValidateAccessTokenResponse struct {
 	JTI       string    `json:"jti"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
-
-// CheckTokenQuotaRequest 是 agent/chat 进入业务前的额度门禁请求。
-type CheckTokenQuotaRequest struct {
-	UserID int `json:"user_id"`
-}
-
-// AdjustTokenUsageRequest 是业务链路回写用户 token 账本的请求。
-type AdjustTokenUsageRequest struct {
-	EventID    string `json:"event_id"`
-	UserID     int    `json:"user_id"`
-	TokenDelta int    `json:"token_delta"`
-}
-
-// CheckTokenQuotaResponse 返回额度门禁判断结果。
-type CheckTokenQuotaResponse struct {
-	Allowed     bool      `json:"allowed"`
-	TokenLimit  int       `json:"token_limit"`
-	TokenUsage  int       `json:"token_usage"`
-	LastResetAt time.Time `json:"last_reset_at"`
-}

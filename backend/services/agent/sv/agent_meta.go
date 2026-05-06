@@ -9,7 +9,6 @@ import (
 	"unicode/utf8"
 
 	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
-	eventsvc "github.com/LoveLosita/smartflow/backend/services/runtime/eventsvc"
 	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	"github.com/LoveLosita/smartflow/backend/shared/respond"
 	"github.com/cloudwego/eino/schema"
@@ -202,27 +201,10 @@ func (s *AgentService) ensureConversationTitleAsync(userID int, chatID string) {
 			return
 		}
 
-		// 4.1 标题生成成功后，把本次异步模型 token 记账：
-		// 4.1.1 启用 outbox 时走 adjust 事件，异步可靠入账；
-		// 4.1.2 未启用 outbox 时走同步兜底，直接更新账本。
-		if titleTokens > 0 {
-			if s.eventPublisher != nil {
-				publishErr := eventsvc.PublishChatTokenUsageAdjustRequested(ctx, s.eventPublisher, model.ChatTokenUsageAdjustPayload{
-					UserID:         userID,
-					ConversationID: chatID,
-					TokensDelta:    titleTokens,
-					Reason:         conversationTitleTokenAdjustReason,
-					TriggeredAt:    time.Now(),
-				})
-				if publishErr != nil {
-					log.Printf("异步标题 token 记账事件发布失败 chat=%s tokens=%d err=%v", chatID, titleTokens, publishErr)
-				}
-			} else {
-				if adjustErr := s.repo.AdjustTokenUsage(ctx, userID, chatID, titleTokens, ""); adjustErr != nil {
-					log.Printf("异步标题 token 同步记账失败 chat=%s tokens=%d err=%v", chatID, titleTokens, adjustErr)
-				}
-			}
-		}
+		// 4.1 标题生成的模型消耗不再走旧 token 账本。
+		// 4.1.1 当前 Credit 计费统一由独立 LLM 服务出口处理；
+		// 4.1.2 这里只保留 titleTokens 变量，避免同轮继续改动模型返回签名。
+		_ = titleTokens
 
 		// 5. 只在标题仍为空时写入，保证并发幂等。
 		if err = s.repo.UpdateConversationTitleIfEmpty(ctx, userID, chatID, generated); err != nil {

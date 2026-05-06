@@ -138,50 +138,6 @@ func (c *Client) ValidateAccessToken(ctx context.Context, accessToken string) (*
 	}, nil
 }
 
-func (c *Client) CheckTokenQuota(ctx context.Context, userID int) (*contracts.CheckTokenQuotaResponse, error) {
-	if err := c.ensureReady(); err != nil {
-		return nil, err
-	}
-	resp, err := c.rpc.CheckTokenQuota(ctx, &pb.CheckTokenQuotaRequest{
-		UserId: int64(userID),
-	})
-	if err != nil {
-		return nil, responseFromRPCError(err)
-	}
-	if resp == nil {
-		return nil, errors.New("userauth zrpc service returned empty quota response")
-	}
-	return &contracts.CheckTokenQuotaResponse{
-		Allowed:     resp.Allowed,
-		TokenLimit:  int(resp.TokenLimit),
-		TokenUsage:  int(resp.TokenUsage),
-		LastResetAt: timeFromUnixNano(resp.LastResetAtUnixNano),
-	}, nil
-}
-
-func (c *Client) AdjustTokenUsage(ctx context.Context, req contracts.AdjustTokenUsageRequest) (*contracts.CheckTokenQuotaResponse, error) {
-	if err := c.ensureReady(); err != nil {
-		return nil, err
-	}
-	resp, err := c.rpc.AdjustTokenUsage(ctx, &pb.AdjustTokenUsageRequest{
-		EventId:    req.EventID,
-		UserId:     int64(req.UserID),
-		TokenDelta: int64(req.TokenDelta),
-	})
-	if err != nil {
-		return nil, responseFromRPCError(err)
-	}
-	if resp == nil {
-		return nil, errors.New("userauth zrpc service returned empty adjust response")
-	}
-	return &contracts.CheckTokenQuotaResponse{
-		Allowed:     resp.Allowed,
-		TokenLimit:  int(resp.TokenLimit),
-		TokenUsage:  int(resp.TokenUsage),
-		LastResetAt: timeFromUnixNano(resp.LastResetAtUnixNano),
-	}, nil
-}
-
 func (c *Client) ensureReady() error {
 	if c == nil || c.rpc == nil {
 		return errors.New("userauth zrpc client is not initialized")

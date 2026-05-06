@@ -29,7 +29,19 @@ func main() {
 		log.Fatalf("failed to connect tokenstore database: %v", err)
 	}
 
-	svc := tokenstoresv.New(tokenstoresv.Options{DB: db})
+	var creditCache *tokenstoredao.CreditCacheDAO
+	rdb, err := tokenstoredao.OpenRedisFromConfig()
+	if err != nil {
+		log.Printf("tokenstore redis is unavailable, credit cache disabled: %v", err)
+	} else {
+		creditCache = tokenstoredao.NewCreditCacheDAO(rdb)
+		log.Println("Tokenstore credit cache enabled")
+	}
+
+	svc := tokenstoresv.New(tokenstoresv.Options{
+		DB:          db,
+		CreditCache: creditCache,
+	})
 
 	outboxRepo := outboxinfra.NewRepository(db)
 	eventBus, err := outboxinfra.NewEventBus(outboxRepo, kafkabus.LoadConfig())
@@ -39,6 +51,9 @@ func main() {
 	if eventBus != nil {
 		if err := tokenstoresv.RegisterForumRewardHandlers(eventBus, outboxRepo, svc); err != nil {
 			log.Fatalf("failed to register tokenstore outbox handlers: %v", err)
+		}
+		if err := tokenstoresv.RegisterCreditChargeHandlers(eventBus, outboxRepo, svc); err != nil {
+			log.Fatalf("failed to register credit charge handlers: %v", err)
 		}
 		eventBus.Start(ctx)
 		defer eventBus.Close()

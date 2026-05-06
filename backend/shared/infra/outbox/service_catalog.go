@@ -16,6 +16,7 @@ const (
 	ServiceActiveScheduler = "active-scheduler"
 	ServiceNotification    = "notification"
 	ServiceTaskClassForum  = "taskclass-forum"
+	ServiceLLM             = "llm"
 	ServiceTokenStore      = "token-store"
 )
 
@@ -90,6 +91,12 @@ func LoadServiceConfigs() map[string]ServiceConfig {
 			Topic:     "smartflow.taskclass-forum.outbox",
 			GroupID:   "smartflow-taskclass-forum-outbox-consumer",
 			TableName: "taskclass_forum_outbox_messages",
+		},
+		ServiceLLM: {
+			Name:      ServiceLLM,
+			Topic:     "smartflow.llm.outbox",
+			GroupID:   "smartflow-llm-outbox-consumer",
+			TableName: "llm_outbox_messages",
 		},
 		ServiceTokenStore: {
 			Name:      ServiceTokenStore,

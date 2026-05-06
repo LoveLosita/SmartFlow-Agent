@@ -32,6 +32,7 @@ type CourseImageParseResponse struct {
 }
 
 type CourseImageParseRequest struct {
+	UserID     int
 	Filename   string
 	MIMEType   string
 	ImageBytes []byte

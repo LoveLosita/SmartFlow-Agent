@@ -71,15 +71,29 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-    entrypoint: ["/bin/bash", "-c"]
-    command: >
-      /opt/kafka/bin/kafka-topics.sh
-      --bootstrap-server kafka:9094
-      --create
-      --if-not-exists
-      --topic smartflow.agent.outbox
-      --partitions 3
-      --replication-factor 1
+    entrypoint:
+      - /bin/bash
+      - -lc
+      - |
+          set -e
+          for topic in \
+            smartflow.agent.outbox \
+            smartflow.task.outbox \
+            smartflow.memory.outbox \
+            smartflow.active-scheduler.outbox \
+            smartflow.notification.outbox \
+            smartflow.taskclass-forum.outbox \
+            smartflow.llm.outbox \
+            smartflow.token-store.outbox
+          do
+            /opt/kafka/bin/kafka-topics.sh \
+              --bootstrap-server kafka:9094 \
+              --create \
+              --if-not-exists \
+              --topic "$$topic" \
+              --partitions 3 \
+              --replication-factor 1
+          done
     restart: "no"
 
   etcd:

@@ -117,6 +117,7 @@ func (sa *CourseHandler) ParseCourseTableImage(c *gin.Context) {
 	defer cancel()
 
 	rawDraft, err := sa.client.ParseCourseTableImage(ctx, coursecontracts.CourseImageParseRequest{
+		UserID:     userID,
 		Filename:   fileHeader.Filename,
 		MIMEType:   fileHeader.Header.Get("Content-Type"),
 		ImageBytes: imageBytes,

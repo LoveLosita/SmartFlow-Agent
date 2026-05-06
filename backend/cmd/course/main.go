@@ -7,10 +7,10 @@ import (
 	"os/signal"
 	"syscall"
 
+	llmclient "github.com/LoveLosita/smartflow/backend/client/llm"
 	coursedao "github.com/LoveLosita/smartflow/backend/services/course/dao"
 	courserpc "github.com/LoveLosita/smartflow/backend/services/course/rpc"
 	coursesv "github.com/LoveLosita/smartflow/backend/services/course/sv"
-	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	rootdao "github.com/LoveLosita/smartflow/backend/services/runtime/dao"
 	"github.com/LoveLosita/smartflow/backend/shared/infra/bootstrap"
 	"github.com/spf13/viper"
@@ -33,15 +33,21 @@ func main() {
 	// 2. scheduleRepo 用于复用既有冲突检查，后续若切 schedule RPC bridge 再替换这里。
 	courseRepo := coursedao.NewCourseDAO(db)
 	scheduleRepo := rootdao.NewScheduleDAO(db)
-	courseImageClient := llmservice.NewArkResponsesClient(
-		os.Getenv("ARK_API_KEY"),
-		viper.GetString("agent.baseURL"),
-		viper.GetString("courseImport.visionModel"),
-	)
+	llmService, err := llmclient.NewService(llmclient.ServiceConfig{
+		ClientConfig: llmclient.ClientConfig{
+			Endpoints: viper.GetStringSlice("llm.rpc.endpoints"),
+			Target:    viper.GetString("llm.rpc.target"),
+			Timeout:   viper.GetDuration("llm.rpc.timeout"),
+		},
+		CourseVisionModel: viper.GetString("courseImport.visionModel"),
+	})
+	if err != nil {
+		log.Fatalf("failed to initialize course llm client: %v", err)
+	}
 	svc := coursesv.NewCourseService(
 		courseRepo,
 		scheduleRepo,
-		courseImageClient,
+		llmService.CourseImageResponsesClient(),
 		coursesv.NewCourseImageParseConfig(
 			viper.GetInt64("courseImport.maxImageBytes"),
 			viper.GetInt("courseImport.maxTokens"),

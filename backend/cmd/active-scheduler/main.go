@@ -7,13 +7,12 @@ import (
 	"os/signal"
 	"syscall"
 
+	llmclient "github.com/LoveLosita/smartflow/backend/client/llm"
 	activeadapters "github.com/LoveLosita/smartflow/backend/services/active_scheduler/core/adapters"
 	activeschedulerdao "github.com/LoveLosita/smartflow/backend/services/active_scheduler/dao"
 	activeschedulerrpc "github.com/LoveLosita/smartflow/backend/services/active_scheduler/rpc"
 	activeschedulersv "github.com/LoveLosita/smartflow/backend/services/active_scheduler/sv"
-	llmservice "github.com/LoveLosita/smartflow/backend/services/llm"
 	"github.com/LoveLosita/smartflow/backend/shared/infra/bootstrap"
-	einoinfra "github.com/LoveLosita/smartflow/backend/shared/infra/eino"
 	kafkabus "github.com/LoveLosita/smartflow/backend/shared/infra/kafka"
 	"github.com/spf13/viper"
 )
@@ -31,16 +30,17 @@ func main() {
 		log.Fatalf("failed to connect active-scheduler database: %v", err)
 	}
 
-	aiHub, err := einoinfra.InitEino()
-	if err != nil {
-		log.Fatalf("failed to initialize active-scheduler Eino runtime: %v", err)
-	}
-	llmService := llmservice.New(llmservice.Options{
-		AIHub:             aiHub,
-		APIKey:            os.Getenv("ARK_API_KEY"),
-		BaseURL:           viper.GetString("agent.baseURL"),
+	llmService, err := llmclient.NewService(llmclient.ServiceConfig{
+		ClientConfig: llmclient.ClientConfig{
+			Endpoints: viper.GetStringSlice("llm.rpc.endpoints"),
+			Target:    viper.GetString("llm.rpc.target"),
+			Timeout:   viper.GetDuration("llm.rpc.timeout"),
+		},
 		CourseVisionModel: viper.GetString("courseImport.visionModel"),
 	})
+	if err != nil {
+		log.Fatalf("failed to initialize active-scheduler llm client: %v", err)
+	}
 
 	svc, err := activeschedulersv.New(db, llmService, activeschedulersv.Options{
 		JobScanEvery: viper.GetDuration("activeScheduler.jobScanEvery"),

@@ -24,23 +24,9 @@ type AccessTokenValidator interface {
 	ValidateAccessToken(ctx context.Context, accessToken string) (*contracts.ValidateAccessTokenResponse, error)
 }
 
-// TokenQuotaChecker 是 agent/chat 入口做额度门禁时依赖的最小接口。
-// 职责边界：只判断当前用户是否允许继续消费 token，不负责 token 入账。
-type TokenQuotaChecker interface {
-	CheckTokenQuota(ctx context.Context, userID int) (*contracts.CheckTokenQuotaResponse, error)
-}
-
-// TokenUsageAdjuster 是业务链路回写 token 账本时依赖的最小接口。
-// 职责边界：只做 token 账本增量调整，不承载鉴权与登录逻辑。
-type TokenUsageAdjuster interface {
-	AdjustTokenUsage(ctx context.Context, req contracts.AdjustTokenUsageRequest) (*contracts.CheckTokenQuotaResponse, error)
-}
-
 // UserAuthClient 组合当前阶段需要的 user/auth 能力。
 // 职责边界：作为统一装配口径，避免 gateway 和 core service 各自维护一份接口。
 type UserAuthClient interface {
 	UserCommandClient
 	AccessTokenValidator
-	TokenQuotaChecker
-	TokenUsageAdjuster
 }

@@ -2,9 +2,12 @@ package sv
 
 import (
 	"context"
+	"crypto/sha1"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -70,7 +73,8 @@ func (ss *CourseService) ParseCourseTableImage(ctx context.Context, req model.Co
 	// 1. 课程表图片识别输出体量大，显式透传 max_output_tokens，避免被默认值截断。
 	// 2. text_format 固定为 json_object，降低输出混入解释文本导致解析失败的概率。
 	// 3. thinking 显式关闭，优先保证课程导入链路稳定性。
-	draft, rawResult, err := llmservice.GenerateArkResponsesJSON[model.CourseImageParseResponse](ctx, ss.courseImageResponsesClient, messages, llmservice.ArkResponsesOptions{
+	invokeCtx := llmservice.WithBillingContext(ctx, buildCourseImageBillingContext(normalizedReq, ss.courseImageModel))
+	draft, rawResult, err := llmservice.GenerateArkResponsesJSON[model.CourseImageParseResponse](invokeCtx, ss.courseImageResponsesClient, messages, llmservice.ArkResponsesOptions{
 		Temperature:     courseImageParseTemperature,
 		MaxOutputTokens: ss.courseImageConfig.MaxTokens,
 		Thinking:        llmservice.ThinkingModeDisabled,
@@ -225,4 +229,26 @@ func isCourseImageOutputTruncated(rawResult *llmservice.ArkResponsesResult) bool
 	}
 
 	return strings.EqualFold(strings.TrimSpace(rawResult.Status), "incomplete") && reason == ""
+}
+
+func buildCourseImageBillingContext(req *model.CourseImageParseRequest, modelName string) llmservice.BillingContext {
+	if req == nil || req.UserID <= 0 {
+		return llmservice.BillingContext{
+			Scene:      "course_image_parse",
+			ModelAlias: strings.TrimSpace(modelName),
+		}
+	}
+
+	// 1. 当前 course 导入链路尚未单独透传外层 request_id，这里先用“用户 + 文件内容摘要”构造稳定请求键。
+	// 2. 这样同一张图片在同一请求链路内重试时，event_id 保持稳定，便于后续扣费幂等。
+	// 3. 后续若网关统一注入 request_id，可直接替换这里的兜底策略，不影响业务语义。
+	sum := sha1.Sum(req.ImageBytes)
+	requestID := "course_image_parse:" + strconv.Itoa(req.UserID) + ":" + hex.EncodeToString(sum[:])
+	return llmservice.BillingContext{
+		UserID:     uint64(req.UserID),
+		EventID:    requestID,
+		Scene:      "course_image_parse",
+		RequestID:  requestID,
+		ModelAlias: strings.TrimSpace(modelName),
+	}
 }

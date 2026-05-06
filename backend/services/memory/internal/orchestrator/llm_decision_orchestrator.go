@@ -41,6 +41,7 @@ func NewLLMDecisionOrchestrator(client *llmservice.Client, cfg memorymodel.Confi
 // 3. 不做最终决策，最终动作由确定性汇总逻辑产出。
 func (o *LLMDecisionOrchestrator) Compare(
 	ctx context.Context,
+	billing llmservice.BillingContext,
 	fact memorymodel.NormalizedFact,
 	candidate memorymodel.CandidateSnapshot,
 ) (*memorymodel.ComparisonResult, error) {
@@ -53,10 +54,11 @@ func (o *LLMDecisionOrchestrator) Compare(
 	userPrompt := buildDecisionCompareUserPrompt(fact, candidate)
 
 	messages := llmservice.BuildSystemUserMessages(systemPrompt, nil, userPrompt)
+	invokeCtx := llmservice.WithBillingContext(ctx, billing)
 
 	// 2. 调用 LLM 做结构化输出，温度用低值保证判断稳定。
 	resp, _, err := llmservice.GenerateJSON[decisionCompareResponse](
-		ctx,
+		invokeCtx,
 		o.client,
 		messages,
 		llmservice.GenerateOptions{

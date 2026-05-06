@@ -46,8 +46,9 @@ type ArkResponsesResult struct {
 
 // ArkResponsesClient 是 Ark SDK Responses 的统一模型出口。
 type ArkResponsesClient struct {
-	model  string
-	client *arkruntime.Client
+	model        string
+	client       *arkruntime.Client
+	generateText func(ctx context.Context, messages []ArkResponsesMessage, options ArkResponsesOptions) (*ArkResponsesResult, error)
 }
 
 // NewArkResponsesClient 创建 Ark SDK Responses 客户端。
@@ -71,8 +72,28 @@ func NewArkResponsesClient(apiKey string, baseURL string, model string) *ArkResp
 	}
 }
 
+// NewArkResponsesClientWithFunc 使用外部注入的 GenerateText 能力构造客户端。
+//
+// 职责边界：
+// 1. 供 llm zrpc remote client 和测试替身复用；
+// 2. 这里只负责挂接统一函数签名，不负责远端连接初始化；
+// 3. model 仅作为兼容字段保留，真正调用行为以 generateText 为准。
+func NewArkResponsesClientWithFunc(model string, generateText func(ctx context.Context, messages []ArkResponsesMessage, options ArkResponsesOptions) (*ArkResponsesResult, error)) *ArkResponsesClient {
+	if generateText == nil {
+		return nil
+	}
+	return &ArkResponsesClient{
+		model:        strings.TrimSpace(model),
+		generateText: generateText,
+	}
+}
+
 // GenerateText 执行一次非流式 Responses 调用并提取文本。
 func (c *ArkResponsesClient) GenerateText(ctx context.Context, messages []ArkResponsesMessage, options ArkResponsesOptions) (*ArkResponsesResult, error) {
+	if c != nil && c.generateText != nil {
+		return c.generateText(ctx, messages, options)
+	}
+
 	req, err := c.buildRequest(messages, options)
 	if err != nil {
 		return nil, err

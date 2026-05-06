@@ -9,6 +9,8 @@ import (
 	userauthsv "github.com/LoveLosita/smartflow/backend/services/userauth/sv"
 	contracts "github.com/LoveLosita/smartflow/backend/shared/contracts/userauth"
 	"github.com/LoveLosita/smartflow/backend/shared/respond"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type Handler struct {
@@ -124,49 +126,15 @@ func (h *Handler) ValidateAccessToken(ctx context.Context, req *pb.ValidateAcces
 }
 
 func (h *Handler) CheckTokenQuota(ctx context.Context, req *pb.CheckTokenQuotaRequest) (*pb.CheckTokenQuotaResponse, error) {
-	if h == nil || h.svc == nil {
-		return nil, grpcErrorFromServiceError(errors.New("userauth service dependency not initialized"))
-	}
-	if req == nil {
-		return nil, grpcErrorFromServiceError(respond.ErrUnauthorized)
-	}
-
-	resp, err := h.svc.CheckTokenQuota(ctx, contracts.CheckTokenQuotaRequest{
-		UserID: int(req.UserId),
-	})
-	if err != nil {
-		return nil, grpcErrorFromServiceError(err)
-	}
-	return &pb.CheckTokenQuotaResponse{
-		Allowed:             resp.Allowed,
-		TokenLimit:          int64(resp.TokenLimit),
-		TokenUsage:          int64(resp.TokenUsage),
-		LastResetAtUnixNano: timeToUnixNano(resp.LastResetAt),
-	}, nil
+	_ = ctx
+	_ = req
+	return nil, status.Error(codes.Unimplemented, "legacy token quota API has been removed")
 }
 
 func (h *Handler) AdjustTokenUsage(ctx context.Context, req *pb.AdjustTokenUsageRequest) (*pb.CheckTokenQuotaResponse, error) {
-	if h == nil || h.svc == nil {
-		return nil, grpcErrorFromServiceError(errors.New("userauth service dependency not initialized"))
-	}
-	if req == nil {
-		return nil, grpcErrorFromServiceError(respond.MissingParam)
-	}
-
-	resp, err := h.svc.AdjustTokenUsage(ctx, contracts.AdjustTokenUsageRequest{
-		EventID:    req.EventId,
-		UserID:     int(req.UserId),
-		TokenDelta: int(req.TokenDelta),
-	})
-	if err != nil {
-		return nil, grpcErrorFromServiceError(err)
-	}
-	return &pb.CheckTokenQuotaResponse{
-		Allowed:             resp.Allowed,
-		TokenLimit:          int64(resp.TokenLimit),
-		TokenUsage:          int64(resp.TokenUsage),
-		LastResetAtUnixNano: timeToUnixNano(resp.LastResetAt),
-	}, nil
+	_ = ctx
+	_ = req
+	return nil, status.Error(codes.Unimplemented, "legacy token usage adjust API has been removed")
 }
 
 func timeToUnixNano(value time.Time) int64 {

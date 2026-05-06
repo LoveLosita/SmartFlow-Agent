@@ -29,6 +29,7 @@ func (m *JSONResponse) String() string { return proto.CompactTextString(m) }
 func (*JSONResponse) ProtoMessage()    {}
 
 type CourseImageRequest struct {
+	UserId               uint64   `protobuf:"varint,4,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	Filename             string   `protobuf:"bytes,1,opt,name=filename,proto3" json:"filename,omitempty"`
 	MimeType             string   `protobuf:"bytes,2,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
 	ImageBytes           []byte   `protobuf:"bytes,3,opt,name=image_bytes,json=imageBytes,proto3" json:"image_bytes,omitempty"`

@@ -2,6 +2,8 @@ package feedbacklocate
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -102,8 +104,9 @@ func (s *Service) Resolve(ctx context.Context, req Request) (Result, error) {
 	}
 
 	messages := llmservice.BuildSystemUserMessages(strings.TrimSpace(locateSystemPrompt), nil, userPrompt)
+	invokeCtx := llmservice.WithBillingContext(ctx, buildFeedbackLocateBillingContext(req))
 	resp, rawResult, err := llmservice.GenerateJSON[llmResponse](
-		ctx,
+		invokeCtx,
 		s.client,
 		messages,
 		llmservice.GenerateOptions{
@@ -364,4 +367,22 @@ func minInt(left, right int) int {
 		return left
 	}
 	return right
+}
+
+func buildFeedbackLocateBillingContext(req Request) llmservice.BillingContext {
+	if req.UserID <= 0 {
+		return llmservice.BillingContext{
+			Scene:      "active_scheduler_feedback_locate",
+			ModelAlias: "active_scheduler_feedback_locate",
+		}
+	}
+	sum := sha1.Sum([]byte(strings.TrimSpace(req.UserMessage) + "|" + strings.TrimSpace(req.PendingQuestion)))
+	requestID := fmt.Sprintf("active_scheduler_feedback_locate:%d:%s", req.UserID, hex.EncodeToString(sum[:]))
+	return llmservice.BillingContext{
+		UserID:     uint64(req.UserID),
+		EventID:    requestID,
+		Scene:      "active_scheduler_feedback_locate",
+		RequestID:  requestID,
+		ModelAlias: "active_scheduler_feedback_locate",
+	}
 }

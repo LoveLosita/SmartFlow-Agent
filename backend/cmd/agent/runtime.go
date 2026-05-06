@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 
+	llmclient "github.com/LoveLosita/smartflow/backend/client/llm"
 	memoryclient "github.com/LoveLosita/smartflow/backend/client/memory"
 	scheduleclient "github.com/LoveLosita/smartflow/backend/client/schedule"
 	taskclient "github.com/LoveLosita/smartflow/backend/client/task"
@@ -34,7 +34,6 @@ import (
 	schedulesv "github.com/LoveLosita/smartflow/backend/services/schedule/sv"
 	taskdao "github.com/LoveLosita/smartflow/backend/services/task/dao"
 	tasksv "github.com/LoveLosita/smartflow/backend/services/task/sv"
-	einoinfra "github.com/LoveLosita/smartflow/backend/shared/infra/eino"
 	gormcache "github.com/LoveLosita/smartflow/backend/shared/infra/gormcache"
 	kafkabus "github.com/LoveLosita/smartflow/backend/shared/infra/kafka"
 	mysqlinfra "github.com/LoveLosita/smartflow/backend/shared/infra/mysql"
@@ -254,10 +253,6 @@ func (r *agentRuntime) startWorkers(ctx context.Context) error {
 		log.Println("Agent outbox consumer is disabled")
 		return nil
 	}
-	if r.userAuthClient == nil {
-		return fmt.Errorf("agent outbox consumer requires userauth zrpc client")
-	}
-
 	// 1. 先登记 agent 自己消费的 handler，同时补齐 memory.extract.requested 的服务路由。
 	// 2. 这里明确只接 agent 边界；memory 消费仍归 cmd/memory，task 事件仍是 publish-only 写入 task outbox。
 	// 3. 注册完成后再启动总线，避免服务一起来就抢先消费到尚未挂 handler 的消息。
@@ -268,7 +263,6 @@ func (r *agentRuntime) startWorkers(ctx context.Context) error {
 		r.agentRepo,
 		r.cacheRepo,
 		nil,
-		r.userAuthClient,
 	); err != nil {
 		return fmt.Errorf("register agent outbox handlers failed: %w", err)
 	}
@@ -370,16 +364,14 @@ func ensureAgentRuntimeDependencyTables(db *gorm.DB) error {
 }
 
 func buildAgentLLMService() (*llmservice.Service, error) {
-	aiHub, err := einoinfra.InitEino()
-	if err != nil {
-		return nil, err
-	}
-	return llmservice.New(llmservice.Options{
-		AIHub:             aiHub,
-		APIKey:            os.Getenv("ARK_API_KEY"),
-		BaseURL:           viper.GetString("agent.baseURL"),
+	return llmclient.NewService(llmclient.ServiceConfig{
+		ClientConfig: llmclient.ClientConfig{
+			Endpoints: viper.GetStringSlice("llm.rpc.endpoints"),
+			Target:    viper.GetString("llm.rpc.target"),
+			Timeout:   viper.GetDuration("llm.rpc.timeout"),
+		},
 		CourseVisionModel: viper.GetString("courseImport.visionModel"),
-	}), nil
+	})
 }
 
 func buildAgentRAGService(ctx context.Context) (*ragservice.Service, error) {
