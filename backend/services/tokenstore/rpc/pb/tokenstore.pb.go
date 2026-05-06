@@ -331,18 +331,23 @@ func (m *CreditTransactionView) String() string { return proto.CompactTextString
 func (*CreditTransactionView) ProtoMessage()    {}
 
 type CreditPriceRuleView struct {
-	RuleId               uint64 `protobuf:"varint,1,opt,name=rule_id,json=ruleId,proto3" json:"rule_id,omitempty"`
-	Scene                string `protobuf:"bytes,2,opt,name=scene,proto3" json:"scene,omitempty"`
-	ProviderName         string `protobuf:"bytes,3,opt,name=provider_name,json=providerName,proto3" json:"provider_name,omitempty"`
-	ModelName            string `protobuf:"bytes,4,opt,name=model_name,json=modelName,proto3" json:"model_name,omitempty"`
-	InputPriceMicros     int64  `protobuf:"varint,5,opt,name=input_price_micros,json=inputPriceMicros,proto3" json:"input_price_micros,omitempty"`
-	OutputPriceMicros    int64  `protobuf:"varint,6,opt,name=output_price_micros,json=outputPriceMicros,proto3" json:"output_price_micros,omitempty"`
-	CachedPriceMicros    int64  `protobuf:"varint,7,opt,name=cached_price_micros,json=cachedPriceMicros,proto3" json:"cached_price_micros,omitempty"`
-	ReasoningPriceMicros int64  `protobuf:"varint,8,opt,name=reasoning_price_micros,json=reasoningPriceMicros,proto3" json:"reasoning_price_micros,omitempty"`
-	CreditPerYuan        int64  `protobuf:"varint,9,opt,name=credit_per_yuan,json=creditPerYuan,proto3" json:"credit_per_yuan,omitempty"`
-	Status               string `protobuf:"bytes,10,opt,name=status,proto3" json:"status,omitempty"`
-	Priority             int32  `protobuf:"varint,11,opt,name=priority,proto3" json:"priority,omitempty"`
-	Description          string `protobuf:"bytes,12,opt,name=description,proto3" json:"description,omitempty"`
+	RuleId                     uint64 `protobuf:"varint,1,opt,name=rule_id,json=ruleId,proto3" json:"rule_id,omitempty"`
+	Scene                      string `protobuf:"bytes,2,opt,name=scene,proto3" json:"scene,omitempty"`
+	ProviderName               string `protobuf:"bytes,3,opt,name=provider_name,json=providerName,proto3" json:"provider_name,omitempty"`
+	ModelName                  string `protobuf:"bytes,4,opt,name=model_name,json=modelName,proto3" json:"model_name,omitempty"`
+	InputPriceMicros           int64  `protobuf:"varint,5,opt,name=input_price_micros,json=inputPriceMicros,proto3" json:"input_price_micros,omitempty"`
+	OutputPriceMicros          int64  `protobuf:"varint,6,opt,name=output_price_micros,json=outputPriceMicros,proto3" json:"output_price_micros,omitempty"`
+	CachedPriceMicros          int64  `protobuf:"varint,7,opt,name=cached_price_micros,json=cachedPriceMicros,proto3" json:"cached_price_micros,omitempty"`
+	ReasoningPriceMicros       int64  `protobuf:"varint,8,opt,name=reasoning_price_micros,json=reasoningPriceMicros,proto3" json:"reasoning_price_micros,omitempty"`
+	CreditPerYuan              int64  `protobuf:"varint,9,opt,name=credit_per_yuan,json=creditPerYuan,proto3" json:"credit_per_yuan,omitempty"`
+	Status                     string `protobuf:"bytes,10,opt,name=status,proto3" json:"status,omitempty"`
+	Priority                   int32  `protobuf:"varint,11,opt,name=priority,proto3" json:"priority,omitempty"`
+	Description                string `protobuf:"bytes,12,opt,name=description,proto3" json:"description,omitempty"`
+	ProfitRateBps              int64  `protobuf:"varint,13,opt,name=profit_rate_bps,json=profitRateBps,proto3" json:"profit_rate_bps,omitempty"`
+	ChargeInputPriceMicros     int64  `protobuf:"varint,14,opt,name=charge_input_price_micros,json=chargeInputPriceMicros,proto3" json:"charge_input_price_micros,omitempty"`
+	ChargeOutputPriceMicros    int64  `protobuf:"varint,15,opt,name=charge_output_price_micros,json=chargeOutputPriceMicros,proto3" json:"charge_output_price_micros,omitempty"`
+	ChargeCachedPriceMicros    int64  `protobuf:"varint,16,opt,name=charge_cached_price_micros,json=chargeCachedPriceMicros,proto3" json:"charge_cached_price_micros,omitempty"`
+	ChargeReasoningPriceMicros int64  `protobuf:"varint,17,opt,name=charge_reasoning_price_micros,json=chargeReasoningPriceMicros,proto3" json:"charge_reasoning_price_micros,omitempty"`
 }
 
 func (m *CreditPriceRuleView) Reset()         { *m = CreditPriceRuleView{} }

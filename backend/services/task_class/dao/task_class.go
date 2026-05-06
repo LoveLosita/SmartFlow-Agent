@@ -3,6 +3,7 @@ package dao
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/LoveLosita/smartflow/backend/services/runtime/model"
 	"github.com/LoveLosita/smartflow/backend/shared/respond"
@@ -40,16 +41,22 @@ func (dao *TaskClassDAO) AddOrUpdateTaskClass(userID int, taskClass *model.TaskC
 		}
 		return taskClass.ID, nil
 	}
-	// 更新：必须同时匹配 id + user_id，否则不会更新任何行（避免覆盖他人数据）
-	tx := dao.db.Model(&model.TaskClass{}).
+
+	// 1. 先显式校验任务类归属，避免“更新值与库内完全相同”时 RowsAffected=0 被误判成越权。
+	// 2. 这里只负责校验 id/user_id 是否匹配，不负责判断具体字段有没有变化。
+	// 3. 若确实不存在或不属于当前用户，统一返回 UserTaskClassForbidden。
+	if err := dao.ensureTaskClassOwned(userID, taskClass.ID); err != nil {
+		return 0, err
+	}
+
+	// 1. 更新语义是“前端提交什么，就以什么覆盖数据库当前值”。
+	// 2. 因此这里不能再直接用 struct Updates，否则 nil/空切片 等零值字段会被 GORM 跳过，刷新后看起来像“没更新”。
+	// 3. 统一改成显式字段映射，保证可选字段清空、排除数组清空都能真正落库。
+	tx := dao.db.Model(&model.TaskClass{UserID: &userID}).
 		Where("id = ? AND user_id = ?", taskClass.ID, userID).
-		Updates(taskClass)
+		Updates(buildTaskClassUpdateMap(taskClass))
 	if tx.Error != nil {
 		return 0, tx.Error
-	}
-	if tx.RowsAffected == 0 {
-		// 未匹配到记录：要么不存在，要么不属于该用户
-		return 0, respond.UserTaskClassForbidden
 	}
 	return taskClass.ID, nil
 }
@@ -82,7 +89,27 @@ func (dao *TaskClassDAO) AddOrUpdateTaskClassItems(userID int, items []model.Tas
 		return respond.UserTaskClassForbidden
 	}
 
-	// 2) 新增与更新分开处理：新增不受影响；更新时限定 category_id（防越权）
+	// 2. 收集本次要更新的已有 item，先做一次归属校验。
+	// 2.1 这里单独校验是为了避免“只更新成原值”时 RowsAffected=0 被误判为越权。
+	// 2.2 校验通过后，后面的 UPDATE 只关心数据库错误，不再用 RowsAffected 判权限。
+	// 2.3 若请求里混入了不属于这些 task_class 的 item_id，统一返回 UserTaskClassForbidden。
+	existingItemIDs := make([]int, 0, len(items))
+	existingItemIDSet := make(map[int]struct{}, len(items))
+	for _, it := range items {
+		if it.ID == 0 {
+			continue
+		}
+		if _, exists := existingItemIDSet[it.ID]; exists {
+			continue
+		}
+		existingItemIDSet[it.ID] = struct{}{}
+		existingItemIDs = append(existingItemIDs, it.ID)
+	}
+	if err := dao.ensureTaskClassItemsOwnedByCategories(existingItemIDs, categoryIDs); err != nil {
+		return err
+	}
+
+	// 3) 新增与更新分开处理：新增直接插入；已有 item 按现有契约更新可编辑字段。
 	var toCreate []model.TaskClassItem
 	for _, it := range items {
 		if it.ID == 0 {
@@ -93,13 +120,13 @@ func (dao *TaskClassDAO) AddOrUpdateTaskClassItems(userID int, items []model.Tas
 		tx := dao.db.Model(&model.TaskClassItem{}).
 			Where("id = ? AND category_id IN ?", it.ID, categoryIDs).
 			Updates(map[string]any{
-				"category_id": it.CategoryID,
+				"category_id":   it.CategoryID,
+				"order":         it.Order,
+				"content":       it.Content,
+				"embedded_time": it.EmbeddedTime,
 			})
 		if tx.Error != nil {
 			return tx.Error
-		}
-		if tx.RowsAffected == 0 {
-			return respond.UserTaskClassForbidden
 		}
 	}
 
@@ -109,6 +136,84 @@ func (dao *TaskClassDAO) AddOrUpdateTaskClassItems(userID int, items []model.Tas
 		}
 	}
 	return nil
+}
+
+// ensureTaskClassOwned 只负责校验 task_class 是否属于当前用户。
+func (dao *TaskClassDAO) ensureTaskClassOwned(userID int, taskClassID int) error {
+	var count int64
+	if err := dao.db.Model(&model.TaskClass{}).
+		Where("id = ? AND user_id = ?", taskClassID, userID).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		return respond.UserTaskClassForbidden
+	}
+	return nil
+}
+
+// ensureTaskClassItemsOwnedByCategories 只负责校验一批 item 是否都挂在允许的 task_class 下。
+func (dao *TaskClassDAO) ensureTaskClassItemsOwnedByCategories(itemIDs []int, categoryIDs []int) error {
+	if len(itemIDs) == 0 {
+		return nil
+	}
+
+	var count int64
+	if err := dao.db.Model(&model.TaskClassItem{}).
+		Where("id IN ? AND category_id IN ?", itemIDs, categoryIDs).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count != int64(len(itemIDs)) {
+		return respond.UserTaskClassForbidden
+	}
+	return nil
+}
+
+// buildTaskClassUpdateMap 负责把“全量更新”请求转换成显式列更新。
+func buildTaskClassUpdateMap(taskClass *model.TaskClass) map[string]any {
+	return map[string]any{
+		"name":                  nullableStringValue(taskClass.Name),
+		"mode":                  nullableStringValue(taskClass.Mode),
+		"start_date":            nullableTimeValue(taskClass.StartDate),
+		"end_date":              nullableTimeValue(taskClass.EndDate),
+		"subject_type":          nullableStringValue(taskClass.SubjectType),
+		"difficulty_level":      nullableStringValue(taskClass.DifficultyLevel),
+		"cognitive_intensity":   nullableStringValue(taskClass.CognitiveIntensity),
+		"total_slots":           nullableIntValue(taskClass.TotalSlots),
+		"allow_filler_course":   nullableBoolValue(taskClass.AllowFillerCourse),
+		"strategy":              nullableStringValue(taskClass.Strategy),
+		"excluded_slots":        taskClass.ExcludedSlots,
+		"excluded_days_of_week": taskClass.ExcludedDaysOfWeek,
+	}
+}
+
+func nullableStringValue(value *string) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func nullableIntValue(value *int) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func nullableBoolValue(value *bool) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func nullableTimeValue(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 // Transaction 在一个事务中执行传入的函数，供 service 层复用（自动提交/回滚）

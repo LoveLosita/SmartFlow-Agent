@@ -319,18 +319,23 @@ func creditPriceRuleFromPB(item *pb.CreditPriceRuleView) creditcontracts.CreditP
 		return creditcontracts.CreditPriceRuleView{}
 	}
 	return creditcontracts.CreditPriceRuleView{
-		RuleID:               item.RuleId,
-		Scene:                item.Scene,
-		ProviderName:         item.ProviderName,
-		ModelName:            item.ModelName,
-		InputPriceMicros:     item.InputPriceMicros,
-		OutputPriceMicros:    item.OutputPriceMicros,
-		CachedPriceMicros:    item.CachedPriceMicros,
-		ReasoningPriceMicros: item.ReasoningPriceMicros,
-		CreditPerYuan:        item.CreditPerYuan,
-		Status:               item.Status,
-		Priority:             int(item.Priority),
-		Description:          item.Description,
+		RuleID:                     item.RuleId,
+		Scene:                      item.Scene,
+		ProviderName:               item.ProviderName,
+		ModelName:                  item.ModelName,
+		InputPriceMicros:           item.InputPriceMicros,
+		OutputPriceMicros:          item.OutputPriceMicros,
+		CachedPriceMicros:          item.CachedPriceMicros,
+		ReasoningPriceMicros:       item.ReasoningPriceMicros,
+		CreditPerYuan:              item.CreditPerYuan,
+		ProfitRateBps:              item.ProfitRateBps,
+		ChargeInputPriceMicros:     item.ChargeInputPriceMicros,
+		ChargeOutputPriceMicros:    item.ChargeOutputPriceMicros,
+		ChargeCachedPriceMicros:    item.ChargeCachedPriceMicros,
+		ChargeReasoningPriceMicros: item.ChargeReasoningPriceMicros,
+		Status:                     item.Status,
+		Priority:                   int(item.Priority),
+		Description:                item.Description,
 	}
 }
 

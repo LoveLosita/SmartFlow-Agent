@@ -93,19 +93,30 @@ type CreditConsumptionDashboardView struct {
 }
 
 // CreditPriceRuleView 是 Credit 计价规则展示结构。
+//
+// 字段语义说明：
+//  1. InputPriceMicros / OutputPriceMicros / CachedPriceMicros / ReasoningPriceMicros
+//     表示原始 CNY 成本单价，方便管理端直接维护模型底价。
+//  2. Charge*PriceMicros 表示后端按利润率自动推导出来的实际计费单价，
+//     LLM 扣费时会使用这一组价格继续换算 credit。
 type CreditPriceRuleView struct {
-	RuleID               uint64 `json:"rule_id"`
-	Scene                string `json:"scene"`
-	ProviderName         string `json:"provider_name"`
-	ModelName            string `json:"model_name"`
-	InputPriceMicros     int64  `json:"input_price_micros"`
-	OutputPriceMicros    int64  `json:"output_price_micros"`
-	CachedPriceMicros    int64  `json:"cached_price_micros"`
-	ReasoningPriceMicros int64  `json:"reasoning_price_micros"`
-	CreditPerYuan        int64  `json:"credit_per_yuan"`
-	Status               string `json:"status"`
-	Priority             int    `json:"priority"`
-	Description          string `json:"description"`
+	RuleID                     uint64 `json:"rule_id"`
+	Scene                      string `json:"scene"`
+	ProviderName               string `json:"provider_name"`
+	ModelName                  string `json:"model_name"`
+	InputPriceMicros           int64  `json:"input_price_micros"`
+	OutputPriceMicros          int64  `json:"output_price_micros"`
+	CachedPriceMicros          int64  `json:"cached_price_micros"`
+	ReasoningPriceMicros       int64  `json:"reasoning_price_micros"`
+	CreditPerYuan              int64  `json:"credit_per_yuan"`
+	ProfitRateBps              int64  `json:"profit_rate_bps"`
+	ChargeInputPriceMicros     int64  `json:"charge_input_price_micros"`
+	ChargeOutputPriceMicros    int64  `json:"charge_output_price_micros"`
+	ChargeCachedPriceMicros    int64  `json:"charge_cached_price_micros"`
+	ChargeReasoningPriceMicros int64  `json:"charge_reasoning_price_micros"`
+	Status                     string `json:"status"`
+	Priority                   int    `json:"priority"`
+	Description                string `json:"description"`
 }
 
 // CreditRewardRuleView 是 Credit 奖励规则展示结构。

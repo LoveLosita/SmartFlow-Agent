@@ -336,18 +336,23 @@ func creditTransactionsToPB(items []creditcontracts.CreditTransactionView) []*pb
 
 func creditPriceRuleToPB(rule creditcontracts.CreditPriceRuleView) *pb.CreditPriceRuleView {
 	return &pb.CreditPriceRuleView{
-		RuleId:               rule.RuleID,
-		Scene:                rule.Scene,
-		ProviderName:         rule.ProviderName,
-		ModelName:            rule.ModelName,
-		InputPriceMicros:     rule.InputPriceMicros,
-		OutputPriceMicros:    rule.OutputPriceMicros,
-		CachedPriceMicros:    rule.CachedPriceMicros,
-		ReasoningPriceMicros: rule.ReasoningPriceMicros,
-		CreditPerYuan:        rule.CreditPerYuan,
-		Status:               rule.Status,
-		Priority:             int32(rule.Priority),
-		Description:          rule.Description,
+		RuleId:                     rule.RuleID,
+		Scene:                      rule.Scene,
+		ProviderName:               rule.ProviderName,
+		ModelName:                  rule.ModelName,
+		InputPriceMicros:           rule.InputPriceMicros,
+		OutputPriceMicros:          rule.OutputPriceMicros,
+		CachedPriceMicros:          rule.CachedPriceMicros,
+		ReasoningPriceMicros:       rule.ReasoningPriceMicros,
+		CreditPerYuan:              rule.CreditPerYuan,
+		ProfitRateBps:              rule.ProfitRateBps,
+		ChargeInputPriceMicros:     rule.ChargeInputPriceMicros,
+		ChargeOutputPriceMicros:    rule.ChargeOutputPriceMicros,
+		ChargeCachedPriceMicros:    rule.ChargeCachedPriceMicros,
+		ChargeReasoningPriceMicros: rule.ChargeReasoningPriceMicros,
+		Status:                     rule.Status,
+		Priority:                   int32(rule.Priority),
+		Description:                rule.Description,
 	}
 }
 

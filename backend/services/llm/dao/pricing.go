@@ -18,6 +18,7 @@ type CreditPriceRule struct {
 	CachedPriceMicros    int64  `gorm:"column:cached_price_micros"`
 	ReasoningPriceMicros int64  `gorm:"column:reasoning_price_micros"`
 	CreditPerYuan        int64  `gorm:"column:credit_per_yuan"`
+	ProfitRateBps        int64  `gorm:"column:profit_rate_bps"`
 	Status               string `gorm:"column:status"`
 	Priority             int    `gorm:"column:priority"`
 	Description          string `gorm:"column:description"`

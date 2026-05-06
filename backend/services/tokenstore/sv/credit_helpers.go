@@ -114,19 +114,31 @@ func creditTransactionViewFromModel(ledger storemodel.CreditLedger) creditcontra
 }
 
 func creditPriceRuleViewFromModel(rule storemodel.CreditPriceRule) creditcontracts.CreditPriceRuleView {
+	chargePrices := creditcontracts.DeriveChargePriceMicrosSet(
+		rule.InputPriceMicros,
+		rule.OutputPriceMicros,
+		rule.CachedPriceMicros,
+		rule.ReasoningPriceMicros,
+		rule.ProfitRateBps,
+	)
 	return creditcontracts.CreditPriceRuleView{
-		RuleID:               rule.ID,
-		Scene:                rule.Scene,
-		ProviderName:         rule.ProviderName,
-		ModelName:            rule.ModelName,
-		InputPriceMicros:     rule.InputPriceMicros,
-		OutputPriceMicros:    rule.OutputPriceMicros,
-		CachedPriceMicros:    rule.CachedPriceMicros,
-		ReasoningPriceMicros: rule.ReasoningPriceMicros,
-		CreditPerYuan:        rule.CreditPerYuan,
-		Status:               rule.Status,
-		Priority:             rule.Priority,
-		Description:          rule.Description,
+		RuleID:                     rule.ID,
+		Scene:                      rule.Scene,
+		ProviderName:               rule.ProviderName,
+		ModelName:                  rule.ModelName,
+		InputPriceMicros:           rule.InputPriceMicros,
+		OutputPriceMicros:          rule.OutputPriceMicros,
+		CachedPriceMicros:          rule.CachedPriceMicros,
+		ReasoningPriceMicros:       rule.ReasoningPriceMicros,
+		CreditPerYuan:              rule.CreditPerYuan,
+		ProfitRateBps:              rule.ProfitRateBps,
+		ChargeInputPriceMicros:     chargePrices.InputChargePriceMicros,
+		ChargeOutputPriceMicros:    chargePrices.OutputChargePriceMicros,
+		ChargeCachedPriceMicros:    chargePrices.CachedChargePriceMicros,
+		ChargeReasoningPriceMicros: chargePrices.ReasoningChargePriceMicros,
+		Status:                     rule.Status,
+		Priority:                   rule.Priority,
+		Description:                rule.Description,
 	}
 }
 

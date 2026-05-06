@@ -15,6 +15,7 @@ import { getTaskClassList } from '@/api/scheduleCenter'
 import { useRouter } from 'vue-router'
 import type { ForumPostBrief } from '@/types/forum'
 import type { TaskClassListItem } from '@/types/schedule'
+import { getAvatarUrl } from '@/utils/avatar'
 
 const router = useRouter()
 
@@ -293,7 +294,7 @@ onBeforeUnmount(() => {
 
           <div class="post-card__footer">
             <div class="author-info">
-              <img :src="post.author.avatar_url" class="author-avatar" />
+              <img :src="getAvatarUrl(post.author.avatar_url, post.author.user_id)" class="author-avatar" />
               <span class="author-name">{{ post.author.nickname }}</span>
             </div>
 

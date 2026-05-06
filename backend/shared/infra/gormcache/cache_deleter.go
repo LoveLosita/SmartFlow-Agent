@@ -69,6 +69,13 @@ func (p *GormCachePlugin) dispatchCacheLogic(modelObj interface{}) {
 	case model.Schedule:
 		p.invalidScheduleCache(m.UserID, m.Week)
 	case model.TaskClass:
+		// 1. update 场景若只用 Model(&model.TaskClass{}) 构造 SQL，插件拿到的模型实例里 UserID 可能为空。
+		// 2. 这类情况下缓存插件不能影响主事务，更不能因为取缓存键时解引用空指针把服务打崩。
+		// 3. 若确实缺少 UserID，则直接跳过本次失效，由调用方补齐 Model 上下文或后续重读兜底。
+		if m.UserID == nil {
+			log.Printf("[GORM-Cache] Skip task class cache invalidation because UserID is nil")
+			return
+		}
 		p.invalidTaskClassCache(*m.UserID)
 	case model.Task:
 		p.invalidTaskCache(m.UserID)

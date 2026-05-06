@@ -2,16 +2,19 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { ArrowLeft, ChatDotRound, Check, Connection, Filter } from '@element-plus/icons-vue'
+import { ArrowLeft, ChatDotRound, Check, Connection, Filter, Star, StarFilled } from '@element-plus/icons-vue'
 
 import {
   createForumComment,
   deleteForumComment,
   getForumPostDetail,
   importForumPost,
+  likeForumPost,
   listForumComments,
+  unlikeForumPost,
 } from '@/api/forum'
 import type { ForumCommentNode, ForumPostBrief, ForumPostDetail, ForumTemplateDetail } from '@/types/forum'
+import { getAvatarUrl } from '@/utils/avatar'
 
 interface ForumPostDetailView extends ForumPostBrief {
   template: ForumTemplateDetail
@@ -21,8 +24,9 @@ const route = useRoute()
 const router = useRouter()
 
 const isLoading = ref(true)
-const commentSubmitting = ref(false)
 const selectedPost = ref<ForumPostDetailView | null>(null)
+const isLiking = ref(false)
+const commentSubmitting = ref(false)
 const comments = ref<ForumCommentNode[]>([])
 const newComment = ref('')
 const replyingToId = ref<number | null>(null)
@@ -174,6 +178,41 @@ async function handleImport() {
   }
 }
 
+async function handleLikeToggle() {
+  if (!selectedPost.value || isLiking.value) return
+
+  isLiking.value = true
+  const postId = selectedPost.value.post_id
+  const isLiked = selectedPost.value.viewer_state.liked
+
+  try {
+    const result = isLiked
+      ? await unlikeForumPost(postId)
+      : await likeForumPost(postId)
+
+    // 以后端返回为准更新状态
+    if (selectedPost.value) {
+      selectedPost.value.viewer_state.liked = result.liked
+      selectedPost.value.counters.like_count = result.like_count
+
+      if (result.liked && result.reward_hint) {
+        ElMessage({
+          message: `点赞成功！已为您支持的作者贡献了 ${result.reward_hint.amount} 积分奖励`,
+          type: 'success',
+          duration: 4000,
+          showClose: true,
+        })
+      } else if (!isLiked) {
+        ElMessage.success('已点赞')
+      }
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '点赞操作失败')
+  } finally {
+    isLiking.value = false
+  }
+}
+
 async function submitComment() {
   const content = newComment.value.trim()
   if (!selectedPost.value || !content || commentSubmitting.value) {
@@ -267,6 +306,16 @@ watch(
         <span class="nav-title">计划详情</span>
         <div class="nav-actions">
           <el-button
+            round
+            class="nav-like-btn"
+            :class="{ 'is-active': selectedPost.viewer_state.liked }"
+            :icon="selectedPost.viewer_state.liked ? StarFilled : Star"
+            :loading="isLiking"
+            @click="handleLikeToggle"
+          >
+            {{ selectedPost.counters.like_count }}
+          </el-button>
+          <el-button
             type="primary"
             round
             :icon="selectedPost.viewer_state.imported_once ? Check : Connection"
@@ -280,7 +329,7 @@ watch(
       <div class="detail-main-layout">
         <aside class="detail-sidebar">
           <div class="author-card">
-            <img :src="selectedPost.author.avatar_url" class="author-avatar" />
+            <img :src="getAvatarUrl(selectedPost.author.avatar_url, selectedPost.author.user_id)" class="author-avatar" />
             <div class="author-name">{{ selectedPost.author.nickname }}</div>
             <div class="publish-time">发布于 {{ formatDate(selectedPost.created_at) }}</div>
             <div class="author-stats">
@@ -336,6 +385,22 @@ watch(
               <el-tag v-for="tag in selectedPost.tags" :key="tag" class="mx-1" effect="plain">{{ tag }}</el-tag>
             </div>
             <p class="plan-description">{{ selectedPost.summary }}</p>
+
+            <div class="content-interaction">
+              <button
+                class="big-like-btn"
+                :class="{ 'is-liked': selectedPost.viewer_state.liked }"
+                :disabled="isLiking"
+                @click="handleLikeToggle"
+              >
+                <div class="like-icon-wrapper">
+                  <el-icon v-if="isLiking" class="is-loading"><Connection /></el-icon>
+                  <el-icon v-else><StarFilled v-if="selectedPost.viewer_state.liked" /><Star v-else /></el-icon>
+                </div>
+                <span class="like-label">{{ selectedPost.viewer_state.liked ? '取消点赞' : '点赞支持' }}</span>
+                <span class="like-count">{{ selectedPost.counters.like_count }}</span>
+              </button>
+            </div>
           </section>
 
           <section class="comments-section">
@@ -362,7 +427,7 @@ watch(
 
             <div class="comments-list">
               <div v-for="comment in comments" :key="comment.comment_id" class="comment-item">
-                <img :src="comment.author.avatar_url" class="c-avatar" />
+                <img :src="getAvatarUrl(comment.author.avatar_url, comment.author.user_id)" class="c-avatar" />
                 <div class="c-body">
                   <div class="c-user">
                     {{ comment.author.nickname }}
@@ -398,7 +463,7 @@ watch(
 
                   <div v-if="comment.children.length > 0" class="comment-children">
                     <div v-for="child in comment.children" :key="child.comment_id" class="comment-item child">
-                      <img :src="child.author.avatar_url" class="c-avatar small" />
+                      <img :src="getAvatarUrl(child.author.avatar_url, child.author.user_id)" class="c-avatar small" />
                       <div class="c-body">
                         <div class="c-user">
                           {{ child.author.nickname }}
@@ -478,6 +543,29 @@ watch(
   font-size: 18px;
   color: #1e293b;
   flex: 1;
+}
+
+.nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.nav-like-btn {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+  color: #64748b;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.nav-like-btn.is-active {
+  background: #fff1f2;
+  border-color: #fecdd3;
+  color: #e11d48;
+}
+
+.nav-like-btn:hover {
+  transform: translateY(-1px);
 }
 
 .detail-main-layout {
@@ -678,6 +766,69 @@ watch(
   line-height: 1.8;
   color: #475569;
   white-space: pre-wrap;
+  margin-bottom: 32px;
+}
+
+.content-interaction {
+  display: flex;
+  justify-content: center;
+  padding: 24px 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.big-like-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 28px;
+  background: #ffffff;
+  border: 2px solid #f1f5f9;
+  border-radius: 100px;
+  cursor: pointer;
+  transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.02);
+}
+
+.big-like-btn:hover {
+  transform: scale(1.05);
+  border-color: #3b82f6;
+  background: #f0f7ff;
+}
+
+.big-like-btn.is-liked {
+  background: #fff1f2;
+  border-color: #fb7185;
+  color: #e11d48;
+  box-shadow: 0 8px 20px rgba(225, 29, 72, 0.12);
+}
+
+.big-like-btn.is-liked .like-icon-wrapper {
+  color: #e11d48;
+  transform: scale(1.2);
+}
+
+.like-icon-wrapper {
+  font-size: 24px;
+  display: flex;
+  transition: transform 0.3s ease;
+}
+
+.like-label {
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.like-count {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 800;
+  background: rgba(0, 0, 0, 0.05);
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.big-like-btn.is-liked .like-count {
+  background: rgba(225, 29, 72, 0.1);
 }
 
 .content-body h3, .comments-section h3 {

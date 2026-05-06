@@ -181,3 +181,19 @@ export async function importCourses(payload: CourseImportPayload, idempotencyKey
     throw new Error(extractErrorMessage(error, '\u8bfe\u7a0b\u5bfc\u5165\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5'))
   }
 }
+
+export async function updateTaskClass(taskClassId: number, payload: TaskClassCreatePayload, idempotencyKey = createIdempotencyKey('task-class-update')) {
+  try {
+    const response = await http.put<PlainResponse>('/task-class/update', payload, {
+      params: {
+        task_class_id: taskClassId,
+      },
+      headers: {
+        'X-Idempotency-Key': idempotencyKey,
+      },
+    })
+    return response.data
+  } catch (error) {
+    throw new Error(extractErrorMessage(error, '更新任务类失败，请稍后重试'))
+  }
+}

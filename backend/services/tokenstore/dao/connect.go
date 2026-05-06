@@ -264,6 +264,7 @@ func defaultCreditPriceRules() []storemodel.CreditPriceRule {
 			CachedPriceMicros:    800,
 			ReasoningPriceMicros: 16000,
 			CreditPerYuan:        100,
+			ProfitRateBps:        0,
 			Status:               storemodel.CreditPriceRuleStatusActive,
 			Priority:             100,
 			Description:          "Default Ark rule, prices are expressed in micros CNY per 1K tokens.",

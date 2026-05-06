@@ -235,6 +235,11 @@ message CreditPriceRuleView {
   string status = 10;
   int32 priority = 11;
   string description = 12;
+  int64 profit_rate_bps = 13;
+  int64 charge_input_price_micros = 14;
+  int64 charge_output_price_micros = 15;
+  int64 charge_cached_price_micros = 16;
+  int64 charge_reasoning_price_micros = 17;
 }
 
 message CreditRewardRuleView {

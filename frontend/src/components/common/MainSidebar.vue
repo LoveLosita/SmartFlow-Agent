@@ -51,7 +51,9 @@ function handleSidebarNavigate(item: SidebarItem) {
 
 <template>
   <aside class="dashboard-sidebar">
-    <div class="dashboard-sidebar__brand">S</div>
+    <div class="dashboard-sidebar__brand">
+      <img src="https://dl2.lecspace.com/SmartFlow-Agent/logo.png" alt="SmartFlow" />
+    </div>
     <nav class="dashboard-sidebar__nav">
       <div class="dashboard-sidebar__nav-indicator" :style="activeIndicatorStyle" />
       <button
@@ -89,13 +91,17 @@ function handleSidebarNavigate(item: SidebarItem) {
   height: 48px;
   border-radius: 14px;
   background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
-  color: #fff;
-  font-size: 20px;
-  font-weight: 800;
   display: flex;
   align-items: center;
   justify-content: center;
   box-shadow: 0 4px 10px rgba(37, 99, 235, 0.3);
+  overflow: hidden;
+}
+
+.dashboard-sidebar__brand img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .dashboard-sidebar__nav { position: relative; display: grid; gap: 12px; align-content: start; }

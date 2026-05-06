@@ -7,6 +7,7 @@ import (
 	"time"
 
 	llmdao "github.com/LoveLosita/smartflow/backend/services/llm/dao"
+	creditcontracts "github.com/LoveLosita/smartflow/backend/shared/contracts/creditstore"
 )
 
 const (
@@ -152,19 +153,18 @@ func quoteUsagePrice(rule llmdao.CreditPriceRule, input UsagePricingInput) Usage
 	nonCachedInputTokens := inputTokens - cachedTokens
 	nonReasoningOutputTokens := outputTokens - reasoningTokens
 
-	cachedPriceMicros := rule.CachedPriceMicros
-	if cachedPriceMicros <= 0 {
-		cachedPriceMicros = rule.InputPriceMicros
-	}
-	reasoningPriceMicros := rule.ReasoningPriceMicros
-	if reasoningPriceMicros <= 0 {
-		reasoningPriceMicros = rule.OutputPriceMicros
-	}
+	chargePrices := creditcontracts.DeriveChargePriceMicrosSet(
+		rule.InputPriceMicros,
+		rule.OutputPriceMicros,
+		rule.CachedPriceMicros,
+		rule.ReasoningPriceMicros,
+		rule.ProfitRateBps,
+	)
 
-	totalMicrosScaled := nonCachedInputTokens*maxInt64(rule.InputPriceMicros, 0) +
-		cachedTokens*maxInt64(cachedPriceMicros, 0) +
-		nonReasoningOutputTokens*maxInt64(rule.OutputPriceMicros, 0) +
-		reasoningTokens*maxInt64(reasoningPriceMicros, 0)
+	totalMicrosScaled := nonCachedInputTokens*maxInt64(chargePrices.InputChargePriceMicros, 0) +
+		cachedTokens*maxInt64(chargePrices.CachedChargePriceMicros, 0) +
+		nonReasoningOutputTokens*maxInt64(chargePrices.OutputChargePriceMicros, 0) +
+		reasoningTokens*maxInt64(chargePrices.ReasoningChargePriceMicros, 0)
 
 	rmbCostMicros := ceilDivInt64(totalMicrosScaled, tokenPriceScalePer1K)
 	creditCost := int64(0)

@@ -172,11 +172,12 @@ type CreditPriceRule struct {
 	Scene                string    `gorm:"column:scene;type:varchar(64);not null;index:idx_credit_price_rules_scene_status,priority:1;comment:计费场景"`
 	ProviderName         string    `gorm:"column:provider_name;type:varchar(64);not null;comment:模型提供方"`
 	ModelName            string    `gorm:"column:model_name;type:varchar(128);not null;comment:模型名称"`
-	InputPriceMicros     int64     `gorm:"column:input_price_micros;not null;default:0;comment:输入Token单价，单位微人民币"`
-	OutputPriceMicros    int64     `gorm:"column:output_price_micros;not null;default:0;comment:输出Token单价，单位微人民币"`
-	CachedPriceMicros    int64     `gorm:"column:cached_price_micros;not null;default:0;comment:缓存Token单价，单位微人民币"`
-	ReasoningPriceMicros int64     `gorm:"column:reasoning_price_micros;not null;default:0;comment:推理Token单价，单位微人民币"`
+	InputPriceMicros     int64     `gorm:"column:input_price_micros;not null;default:0;comment:原始输入Token成本单价，单位微人民币"`
+	OutputPriceMicros    int64     `gorm:"column:output_price_micros;not null;default:0;comment:原始输出Token成本单价，单位微人民币"`
+	CachedPriceMicros    int64     `gorm:"column:cached_price_micros;not null;default:0;comment:原始缓存Token成本单价，单位微人民币"`
+	ReasoningPriceMicros int64     `gorm:"column:reasoning_price_micros;not null;default:0;comment:原始推理Token成本单价，单位微人民币"`
 	CreditPerYuan        int64     `gorm:"column:credit_per_yuan;not null;default:0;comment:1元人民币换算多少Credit"`
+	ProfitRateBps        int64     `gorm:"column:profit_rate_bps;not null;default:0;comment:在原始CNY成本基础上加价多少基点，10000=100%"`
 	Status               string    `gorm:"column:status;type:varchar(32);not null;default:'inactive';index:idx_credit_price_rules_scene_status,priority:2;comment:active/inactive"`
 	Priority             int       `gorm:"column:priority;not null;default:0;comment:匹配优先级，越大越优先"`
 	Description          string    `gorm:"column:description;type:varchar(255);comment:规则说明"`

@@ -65,6 +65,7 @@ export interface TaskClassDetail {
 }
 
 export interface TaskClassCreateItemPayload {
+  id?: number
   order: number
   content: string
   embedded_time: TaskClassEmbeddedTime | null

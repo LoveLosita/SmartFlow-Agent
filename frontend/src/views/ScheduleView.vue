@@ -13,6 +13,7 @@ import {
   getWeekSchedule,
   smartPlanning,
   smartPlanningMulti,
+  updateTaskClass,
 } from '@/api/scheduleCenter'
 import CreateTaskClassDialog from '@/components/schedule/CreateTaskClassDialog.vue'
 import TaskClassSidebar from '@/components/schedule/TaskClassSidebar.vue'
@@ -131,6 +132,7 @@ const applyingLoading = ref(false)
 const deletingLoading = ref(false)
 const createDialogVisible = ref(false)
 const createDialogLoading = ref(false)
+const editDialogInitialData = ref<TaskClassDetail | null>(null)
 const courseImportDialogVisible = ref(false)
 
 const taskClasses = ref<TaskClassListItem[]>([])
@@ -1090,15 +1092,37 @@ function toggleManualEditMode() {
   }
 }
 
-async function handleCreateTaskClass(payload: Parameters<typeof createTaskClass>[0]) {
+async function handleOpenEditDialog() {
+  if (expandedTaskClassId.value === null) return
+
+  taskClassDetailLoading.value = true
+  try {
+    const detail = await getTaskClassDetail(expandedTaskClassId.value)
+    editDialogInitialData.value = detail
+    createDialogVisible.value = true
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '获取详情失败')
+  } finally {
+    taskClassDetailLoading.value = false
+  }
+}
+
+async function handleTaskClassSubmit(payload: Parameters<typeof createTaskClass>[0]) {
   createDialogLoading.value = true
   try {
-    await createTaskClass(payload)
-    ElMessage.success('任务类已创建')
+    if (editDialogInitialData.value && expandedTaskClassId.value !== null) {
+      await updateTaskClass(expandedTaskClassId.value, payload)
+      ElMessage.success('任务类已更新')
+      // 更新详情缓存
+      await loadTaskClassDetail(expandedTaskClassId.value)
+    } else {
+      await createTaskClass(payload)
+      ElMessage.success('任务类已创建')
+    }
     createDialogVisible.value = false
     await loadTaskClasses()
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '创建任务类失败')
+    ElMessage.error(error instanceof Error ? error.message : '保存失败')
   } finally {
     createDialogLoading.value = false
   }
@@ -1184,7 +1208,7 @@ onMounted(async () => {
             :manual-edit-mode="manualEditMode"
             @activate="handleActivateTaskClass"
             @toggle-multi-mode="handleToggleTaskClassMultiMode"
-            @create="createDialogVisible = true"
+            @create="() => { editDialogInitialData = null; createDialogVisible = true }"
             @delete-item="handleDeleteTaskItem"
           />
 
@@ -1225,6 +1249,15 @@ onMounted(async () => {
                   @click="courseImportDialogVisible = true"
                 >
                   导入课表
+                </button>
+
+                <button
+                  v-if="expandedTaskClassId !== null && !taskClassMultiSelectMode && !manualEditMode && !scheduleSelectionMode"
+                  type="button"
+                  class="schedule-board__toolbar-button schedule-board__toolbar-button--ghost"
+                  @click="handleOpenEditDialog"
+                >
+                  编辑任务类
                 </button>
 
                 <button
@@ -1308,7 +1341,8 @@ onMounted(async () => {
       <CreateTaskClassDialog
         v-model="createDialogVisible"
         :loading="createDialogLoading"
-        @submit="handleCreateTaskClass"
+        :initial-data="editDialogInitialData"
+        @submit="handleTaskClassSubmit"
       />
 
       <CourseImageImportDialog

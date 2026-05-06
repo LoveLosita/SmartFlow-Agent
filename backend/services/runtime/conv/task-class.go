@@ -67,6 +67,7 @@ func ProcessUserAddTaskClassRequest(req *model.UserAddTaskClassRequest, userID i
 	var items []model.TaskClassItem
 	for _, itemReq := range req.Items {
 		item := model.TaskClassItem{ //填充section 2
+			ID:           itemReq.ID,
 			Order:        &itemReq.Order,
 			Content:      &itemReq.Content,
 			EmbeddedTime: itemReq.EmbeddedTime,

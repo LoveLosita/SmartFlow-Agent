@@ -236,7 +236,7 @@ function syncDashboardMainScale() {
   const naturalHeight = topbar.offsetHeight + content.scrollHeight + gridGap
   if (!availableHeight || !naturalHeight) return
 
-  const nextScale = Number(Math.min(1, (availableHeight / naturalHeight) * 0.96).toFixed(4))
+  const nextScale = Number(Math.min(1.1, (availableHeight / naturalHeight) * 1.05).toFixed(4))
   dashboardMainScale.value = nextScale
 }
 
@@ -285,7 +285,7 @@ watch([() => tasks.value.length, () => todayEvents.value.length, taskLoading, sc
           <header ref="dashboardTopbarRef" class="dashboard-topbar glass-panel dashboard-item-pop" :style="{ '--anim-delay': '0s' }">
             <div>
               <div class="dashboard-topbar__brandline">
-                <strong>AI 智慧日程系统</strong>
+                <strong>SmartMate</strong>
                 <span>{{ pageTitleDate }}</span>
               </div>
             </div>

@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { reactive, watch } from 'vue'
+import { computed, reactive, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 
-import type { TaskClassCreatePayload, TaskClassCreateItemPayload } from '@/types/schedule'
+import type { TaskClassCreatePayload, TaskClassCreateItemPayload, TaskClassDetail } from '@/types/schedule'
 
 const props = defineProps<{
   modelValue: boolean
   loading?: boolean
+  initialData?: TaskClassDetail | null
 }>()
 
 const emit = defineEmits<{
@@ -36,20 +37,38 @@ watch(
       return
     }
 
-    form.name = ''
-    form.start_date = ''
-    form.end_date = ''
-    form.total_slots = 8
-    form.allow_filler_course = true
-    form.strategy = 'steady'
-    form.excluded_slots = []
-    form.items = [
-      { order: 1, content: '', embedded_time: null },
-      { order: 2, content: '', embedded_time: null },
-      { order: 3, content: '', embedded_time: null },
-    ]
+    if (props.initialData) {
+      form.name = props.initialData.name
+      form.start_date = props.initialData.start_date
+      form.end_date = props.initialData.end_date
+      form.total_slots = props.initialData.config.total_slots
+      form.allow_filler_course = props.initialData.config.allow_filler_course
+      form.strategy = props.initialData.config.strategy
+      form.excluded_slots = props.initialData.config.excluded_slots || []
+      form.items = props.initialData.items.map(item => ({
+        id: item.id,
+        order: item.order,
+        content: item.content,
+        embedded_time: item.embedded_time,
+      }))
+    } else {
+      form.name = ''
+      form.start_date = ''
+      form.end_date = ''
+      form.total_slots = 8
+      form.allow_filler_course = true
+      form.strategy = 'steady'
+      form.excluded_slots = []
+      form.items = [
+        { order: 1, content: '', embedded_time: null },
+        { order: 2, content: '', embedded_time: null },
+        { order: 3, content: '', embedded_time: null },
+      ]
+    }
   },
 )
+
+const isEdit = computed(() => !!props.initialData)
 
 function addItem() {
   form.items.push({
@@ -69,9 +88,10 @@ function removeItem(index: number) {
 function handleSubmit() {
   const filteredItems = form.items
     .map((item, index) => ({
+      id: item.id,
       order: index + 1,
       content: item.content.trim(),
-      embedded_time: null,
+      embedded_time: item.embedded_time,
     }))
     .filter((item) => item.content)
 
@@ -109,7 +129,7 @@ function handleSubmit() {
 <template>
   <el-dialog
     :model-value="modelValue"
-    title="创建任务类"
+    :title="isEdit ? '编辑任务类' : '创建任务类'"
     width="720px"
     align-center
     class="task-class-dialog"
@@ -187,7 +207,9 @@ function handleSubmit() {
     <template #footer>
       <div class="task-class-dialog__footer">
         <el-button @click="emit('update:modelValue', false)">取消</el-button>
-        <el-button type="primary" :loading="loading" @click="handleSubmit">创建任务类</el-button>
+        <el-button type="primary" :loading="loading" @click="handleSubmit">
+          {{ isEdit ? '保存修改' : '确认创建' }}
+        </el-button>
       </div>
     </template>
   </el-dialog>

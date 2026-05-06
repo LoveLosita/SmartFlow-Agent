@@ -82,10 +82,17 @@ export interface ForumPageEnvelope<T> {
   has_more: boolean
 }
 
+export interface ForumRewardHint {
+  receiver: string
+  status: string
+  amount: number
+}
+
 export interface ForumInteractionResult {
   post_id: number
   liked: boolean
   like_count: number
+  reward_hint?: ForumRewardHint
 }
 
 export interface ForumImportResult {
