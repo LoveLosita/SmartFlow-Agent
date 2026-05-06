@@ -39,6 +39,9 @@ var (
 	TokenUsageExceedsLimit      = rootrespond.TokenUsageExceedsLimit
 	ConversationNotFound        = rootrespond.ConversationNotFound
 	MissingConversationID       = rootrespond.MissingConversationID
+	CaptchaVerifyFailed         = rootrespond.CaptchaVerifyFailed
+	CaptchaInitFailed           = rootrespond.CaptchaInitFailed
+	CaptchaVerifyUnavailable    = rootrespond.CaptchaVerifyUnavailable
 )
 
 // RespWithData 为 gateway HTTP 门面生成带 data 的统一响应体。

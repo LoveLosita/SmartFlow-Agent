@@ -410,7 +410,7 @@ watch([() => tasks.value.length, () => todayEvents.value.length, taskLoading, sc
   transform-origin: center center;
 }
 
-.dashboard-main { min-width: 0; min-height: 0; overflow: hidden; height: 100%; }
+.dashboard-main { min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto; height: 100%; }
 
 .dashboard-main__scaled {
   --dashboard-main-scale: 1;
@@ -447,7 +447,7 @@ watch([() => tasks.value.length, () => todayEvents.value.length, taskLoading, sc
 .dashboard-topbar__profile strong { font-size: 13px; }
 .dashboard-topbar__profile span { width: 38px; height: 38px; border-radius: 999px; background: #eef3fb; color: #314156; display: inline-flex; align-items: center; justify-content: center; font-weight: 800; }
 
-.dashboard-content { width: 100%; display: grid; gap: 14px; align-content: start; }
+.dashboard-content { width: 100%; display: grid; gap: 14px; align-content: start; padding-bottom: 60px; }
 .dashboard-actions { display: flex; justify-content: flex-end; }
 .dashboard-actions__primary { height: 42px; padding: 0 20px; border: none; border-radius: 15px; background: #3b82f6; color: #fff; font-weight: 700; cursor: pointer; box-shadow: 0 4px 12px rgba(59, 130, 246, 0.2); }
 

@@ -2,6 +2,7 @@ import http from '@/api/http'
 import { extractErrorMessage } from '@/utils/http'
 import type {
   ApiResponse,
+  GeeTestRegisterData,
   LoginPayload,
   PlainResponse,
   RefreshTokenPayload,
@@ -9,6 +10,21 @@ import type {
   RegisterResult,
   TokenPair,
 } from '@/types/api'
+
+export async function fetchGeeTestRegisterData() {
+  try {
+    const response = await http.get<ApiResponse<GeeTestRegisterData>>('/user/captcha/register', {
+      params: {
+        t: Date.now(),
+      },
+      skipAuth: true,
+      skipRefresh: true,
+    })
+    return response.data.data
+  } catch (error) {
+    throw new Error(extractErrorMessage(error, '人机验证初始化失败，请刷新页面后重试'))
+  }
+}
 
 export async function login(payload: LoginPayload) {
   try {

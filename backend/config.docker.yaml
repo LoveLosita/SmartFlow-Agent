@@ -1,56 +1,49 @@
-# SmartFlow 后端配置示例
+# SmartFlow 容器化部署配置模板。
 #
 # 说明：
-# 1. 请复制为 config.yaml 后按实际环境填写。
-# 2. 本示例只保留当前代码仍会读取的配置项，避免示例与运行配置持续漂移。
+# 1. 该文件面向 Docker Compose 内部网络，所有依赖地址都改为服务名。
+# 2. 本地开发仍可继续使用 backend/config.yaml，不与该文件冲突。
+# 3. 正式部署前请至少替换 JWT 密钥、模型密钥与外部服务凭证。
 
-# 服务启动配置。
 server:
   port: 8080
 
-# MySQL 主库配置。
 database:
-  host: localhost
+  host: mysql
   port: 3306
   user: smartflow_user
-  password: "put_your_database_password_here"
-  dbname: "put_your_database_name_here"
+  password: "smartflow_password_456"
+  dbname: "smartflow"
 
-# 登录态与鉴权令牌配置。
 jwt:
-  accessSecret: "put_your_jwt_access_secret_here"
-  refreshSecret: "put_your_jwt_refresh_secret_here"
+  accessSecret: "change_me_access_secret"
+  refreshSecret: "change_me_refresh_secret"
   accessTokenExpire: 15min
   refreshTokenExpire: 7d
 
-# 极验行为验证配置。
 geetest:
-  captchaID: "put_your_geetest_captcha_id_here"
-  privateKey: "put_your_geetest_private_key_here"
+  captchaID: "80eb5b33de9fba62c69f5e57e36d9638"
+  privateKey: "991f9ad68191cbf6b823257ac67372f3"
 
-# Redis 配置。
 redis:
-  host: localhost
+  host: redis
   port: 6379
-  password: ""
+  password: "redis_password_789"
 
-# user/auth zrpc 独立服务与网关客户端配置。
 userauth:
   rpc:
     listenOn: "0.0.0.0:9081"
     endpoints:
-      - "127.0.0.1:9081"
+      - "userauth:9081"
     timeout: 2s
 
-# 计划广场 zrpc 独立服务与网关客户端配置。
 taskclassforum:
   rpc:
     listenOn: "0.0.0.0:9090"
     endpoints:
-      - "127.0.0.1:9090"
+      - "taskclassforum:9090"
     timeout: 2s
 
-# Token 商店 zrpc 独立服务与网关客户端配置。
 tokenstore:
   reward:
     forumLikeAmount: 1
@@ -58,22 +51,20 @@ tokenstore:
   rpc:
     listenOn: "0.0.0.0:9095"
     endpoints:
-      - "127.0.0.1:9095"
+      - "tokenstore:9095"
     timeout: 2s
 
-# LLM zrpc 独立服务与各业务服务客户端配置。
 llm:
   rpc:
     listenOn: "0.0.0.0:9096"
     endpoints:
-      - "127.0.0.1:9096"
+      - "llm:9096"
     timeout: 0s
 
-# Kafka outbox 事件总线配置。
 kafka:
   enabled: true
   brokers:
-    - "localhost:9092"
+    - "kafka:9092"
   topic: "smartflow.agent.outbox"
   groupID: "smartflow-agent-outbox-consumer"
   retryScanInterval: 1s
@@ -115,71 +106,68 @@ outbox:
       groupID: "smartflow-token-store-outbox-consumer"
       table: "token_store_outbox_messages"
 
-# 通知投递配置。
 notification:
   rpc:
     listenOn: "0.0.0.0:9082"
     endpoints:
-      - "127.0.0.1:9082"
+      - "notification:9082"
     timeout: 6s
-  frontendBaseURL: "http://localhost:5173"
+  frontendBaseURL: "https://smartflow.example.com"
   retryScanEvery: 1m
   retryBatchSize: 50
 
-# 日程服务配置。
+cors:
+  allowedOrigins:
+    - "http://localhost:5173"
+    - "https://smartflow.example.com"
+
 schedule:
   rpc:
     listenOn: "0.0.0.0:9084"
     endpoints:
-      - "127.0.0.1:9084"
+      - "schedule:9084"
     timeout: 6s
 
-# 任务服务配置。
 task:
   rpc:
     listenOn: "0.0.0.0:9085"
     endpoints:
-      - "127.0.0.1:9085"
+      - "task:9085"
     timeout: 6s
 
-# 任务类服务配置。
 taskClass:
   rpc:
     listenOn: "0.0.0.0:9086"
     endpoints:
-      - "127.0.0.1:9086"
+      - "task-class:9086"
     timeout: 6s
 
-# 课程服务配置。
 course:
   rpc:
     listenOn: "0.0.0.0:9087"
     endpoints:
-      - "127.0.0.1:9087"
+      - "course:9087"
     timeout: 5m
 
-# 主动调度服务配置。
 activeScheduler:
   rpc:
     listenOn: "0.0.0.0:9083"
     endpoints:
-      - "127.0.0.1:9083"
+      - "active-scheduler:9083"
     timeout: 8s
   jobScanEvery: 1m
   jobScanLimit: 50
 
-# 时间与学期边界配置。
 time:
   zone: "Asia/Shanghai"
   semesterStartDate: "2026-03-02"
   semesterEndDate: "2026-07-19"
 
-# 智能体模型配置。
 agent:
   rpc:
     listenOn: "0.0.0.0:9089"
     endpoints:
-      - "127.0.0.1:9089"
+      - "agent:9089"
     timeout: 0s
     chat:
       enabled: true
@@ -195,13 +183,11 @@ agent:
     deliver: false
     memory: false
 
-# 课表图片导入识别配置。
 courseImport:
   visionModel: ""
   maxImageBytes: 5242880
   maxTokens: 8192
 
-# 通用 RAG 配置。
 rag:
   enabled: true
   store: "milvus"
@@ -223,19 +209,18 @@ rag:
     provider: "noop"
     timeoutMs: 1200
   milvus:
-    address: "http://localhost:19530"
+    address: "http://milvus-standalone:19530"
     token: "root:Milvus"
     dbName: ""
     collectionName: "smartflow_rag_chunks"
     metricType: "COSINE"
     requestTimeoutMs: 1500
 
-# 记忆模块配置。
 memory:
   rpc:
     listenOn: "0.0.0.0:9088"
     endpoints:
-      - "127.0.0.1:9088"
+      - "memory:9088"
     timeout: 6s
   enabled: true
   rag:
@@ -269,7 +254,6 @@ memory:
     mode: legacy
     minConfidence: 0.5
 
-# 联网搜索能力配置。
 websearch:
   provider: bocha
   apiKey: ""

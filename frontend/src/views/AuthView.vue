@@ -1,11 +1,21 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 
+import { fetchGeeTestRegisterData } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
+import type { GeeTestValidateResult } from '@/types/api'
+import { createGeeTestCaptcha, type GeeTestCaptchaInstance } from '@/utils/geetest'
 
 type PanelName = 'login' | 'register'
+
+interface CaptchaPanelState {
+  instance: GeeTestCaptchaInstance | null
+  loading: boolean
+  ready: boolean
+  errorMessage: string
+}
 
 const router = useRouter()
 const route = useRoute()
@@ -26,12 +36,189 @@ const registerForm = reactive({
   password: '',
   confirmPassword: '',
 })
+const loginCaptchaContainer = ref<HTMLDivElement | null>(null)
+const registerCaptchaContainer = ref<HTMLDivElement | null>(null)
+const captchaStates = reactive<Record<PanelName, CaptchaPanelState>>({
+  login: createCaptchaState(),
+  register: createCaptchaState(),
+})
 
 const redirectPath = typeof route.query.redirect === 'string' ? route.query.redirect : '/dashboard'
+let captchaMountToken = 0
+
+function createCaptchaState(): CaptchaPanelState {
+  return {
+    instance: null,
+    loading: false,
+    ready: false,
+    errorMessage: '',
+  }
+}
+
+function getCaptchaContainer(panel: PanelName) {
+  const container = panel === 'login' ? loginCaptchaContainer.value : registerCaptchaContainer.value
+  if (container) {
+    return container
+  }
+  if (typeof document === 'undefined') {
+    return null
+  }
+  return document.querySelector<HTMLDivElement>(`[data-captcha-panel="${panel}"]`)
+}
+
+function teardownCaptcha(panel: PanelName) {
+  const state = captchaStates[panel]
+  state.instance?.destroy?.()
+  state.instance = null
+  state.loading = false
+  state.ready = false
+  state.errorMessage = ''
+}
+
+function getCaptchaHint(panel: PanelName) {
+  const state = captchaStates[panel]
+  if (state.errorMessage) {
+    return state.errorMessage
+  }
+  if (state.loading) {
+    return '人机验证加载中，请稍候...'
+  }
+  return '请先完成上方的人机验证，再继续提交。'
+}
+
+async function waitForCaptchaContainer(panel: PanelName, mountToken: number) {
+  // 1. 登录/注册面板切换使用了 `Transition mode="out-in"`。
+  // 2. 这意味着新面板的 DOM 不会在当前 tick 立即出现，只等一个 nextTick 还不够。
+  // 3. 这里用短轮询等待容器真正挂到页面上，超时后再显式报错，避免注册面板静默空白。
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    if (mountToken !== captchaMountToken) {
+      return null
+    }
+
+    const container = getCaptchaContainer(panel)
+    if (container) {
+      return container
+    }
+
+    await new Promise((resolve) => window.setTimeout(resolve, 80))
+  }
+
+  return null
+}
+
+async function initCaptcha(panel: PanelName, mountToken: number) {
+  const container = await waitForCaptchaContainer(panel, mountToken)
+  if (!container) {
+    if (mountToken === captchaMountToken) {
+      captchaStates[panel].errorMessage = '人机验证容器加载超时，请切换面板后重试'
+    }
+    return
+  }
+
+  const state = captchaStates[panel]
+  if (state.instance || state.loading) {
+    return
+  }
+  state.loading = true
+  state.ready = false
+  state.errorMessage = ''
+
+  try {
+    // 1. 先向后端申请一次最新 challenge，保证当前面板拿到的是可立即提交的新验证码。
+    // 2. 再初始化极验实例并挂到按钮上方的容器里，满足页面布局要求。
+    // 3. 若用户切换了登录/注册面板，则放弃当前异步结果，避免旧实例串到新容器里。
+    const registerData = await fetchGeeTestRegisterData()
+    const captcha = await createGeeTestCaptcha(registerData)
+    if (mountToken !== captchaMountToken || activePanel.value !== panel) {
+      captcha.destroy?.()
+      return
+    }
+
+    state.instance = captcha
+    captcha.onReady(() => {
+      state.loading = false
+      state.ready = true
+      state.errorMessage = ''
+    })
+    captcha.onSuccess(() => {
+      state.errorMessage = ''
+    })
+    captcha.onError(() => {
+      state.loading = false
+      state.ready = false
+      state.errorMessage = '人机验证加载失败，请刷新页面后重试'
+    })
+    captcha.appendTo(container)
+  } catch (error) {
+    state.instance = null
+    state.loading = false
+    state.ready = false
+    state.errorMessage = error instanceof Error ? error.message : '人机验证初始化失败，请稍后重试'
+    ElMessage.error(state.errorMessage)
+  }
+}
+
+function getCaptchaResult(panel: PanelName): GeeTestValidateResult | null {
+  const state = captchaStates[panel]
+  if (state.errorMessage) {
+    ElMessage.warning(state.errorMessage)
+    return null
+  }
+  if (!state.ready || !state.instance) {
+    ElMessage.warning('人机验证正在初始化，请稍后再试')
+    return null
+  }
+
+  const validateResult = state.instance.getValidate()
+  if (!validateResult) {
+    ElMessage.warning('请先完成按钮上方的人机验证')
+    return null
+  }
+  return validateResult
+}
+
+function resetCaptcha(panel: PanelName) {
+  captchaStates[panel].errorMessage = ''
+  captchaStates[panel].instance?.reset()
+}
+
+async function handlePanelAfterEnter() {
+  await initCaptcha(activePanel.value, captchaMountToken)
+}
+
+watch(
+  activePanel,
+  async (panel, previousPanel) => {
+    captchaMountToken += 1
+    const mountToken = captchaMountToken
+    if (previousPanel) {
+      teardownCaptcha(previousPanel)
+      return
+    }
+
+    await nextTick()
+    if (mountToken !== captchaMountToken) {
+      return
+    }
+    await initCaptcha(panel, mountToken)
+  },
+  { immediate: true },
+)
+
+onBeforeUnmount(() => {
+  captchaMountToken += 1
+  teardownCaptcha('login')
+  teardownCaptcha('register')
+})
 
 async function submitLogin() {
   if (!loginForm.username.trim() || !loginForm.password.trim()) {
     ElMessage.warning('请填写用户名和密码')
+    return
+  }
+
+  const captchaResult = getCaptchaResult('login')
+  if (!captchaResult) {
     return
   }
 
@@ -40,10 +227,12 @@ async function submitLogin() {
     await authStore.login({
       username: loginForm.username.trim(),
       password: loginForm.password,
+      ...captchaResult,
     })
     ElMessage.success('登录成功，欢迎回来')
     await router.push(redirectPath)
   } catch (error) {
+    resetCaptcha('login')
     ElMessage.error(error instanceof Error ? error.message : '登录失败')
   } finally {
     loginLoading.value = false
@@ -71,12 +260,18 @@ async function submitRegister() {
     return
   }
 
+  const captchaResult = getCaptchaResult('register')
+  if (!captchaResult) {
+    return
+  }
+
   registerLoading.value = true
   try {
     await authStore.register({
       username: registerForm.username.trim(),
       phone_number: registerForm.phone_number.trim(),
       password: registerForm.password,
+      ...captchaResult,
     })
     loginForm.username = registerForm.username.trim()
     loginForm.password = ''
@@ -85,6 +280,7 @@ async function submitRegister() {
     activePanel.value = 'login'
     ElMessage.success('注册成功，请使用新账号登录')
   } catch (error) {
+    resetCaptcha('register')
     ElMessage.error(error instanceof Error ? error.message : '注册失败')
   } finally {
     registerLoading.value = false
@@ -144,7 +340,7 @@ async function submitRegister() {
         </div>
 
         <div class="auth-form-container">
-          <Transition name="auth-fade" mode="out-in">
+          <Transition name="auth-fade" mode="out-in" @after-enter="handlePanelAfterEnter">
             <div v-if="activePanel === 'login'" key="login">
               <el-form label-position="top" class="auth-form" @submit.prevent="submitLogin">
               <el-form-item label="用户名">
@@ -164,6 +360,15 @@ async function submitRegister() {
                   size="large"
                   show-password
                 />
+              </el-form-item>
+
+              <el-form-item label="人机验证" class="auth-captcha-item">
+                <div class="auth-captcha">
+                  <div ref="loginCaptchaContainer" class="auth-captcha__box" data-captcha-panel="login" />
+                  <p :class="['auth-captcha__hint', { 'is-error': Boolean(captchaStates.login.errorMessage) }]">
+                    {{ getCaptchaHint('login') }}
+                  </p>
+                </div>
               </el-form-item>
 
               <el-button
@@ -216,6 +421,15 @@ async function submitRegister() {
                   size="large"
                   show-password
                 />
+              </el-form-item>
+
+              <el-form-item label="人机验证" class="auth-captcha-item">
+                <div class="auth-captcha">
+                  <div ref="registerCaptchaContainer" class="auth-captcha__box" data-captcha-panel="register" />
+                  <p :class="['auth-captcha__hint', { 'is-error': Boolean(captchaStates.register.errorMessage) }]">
+                    {{ getCaptchaHint('register') }}
+                  </p>
+                </div>
               </el-form-item>
 
               <el-button
@@ -436,6 +650,26 @@ async function submitRegister() {
 :deep(.auth-form .el-input__wrapper.is-focus) {
   background: #ffffff !important;
   box-shadow: 0 0 0 2px #3b82f6 inset !important;
+}
+
+.auth-captcha {
+  display: grid;
+  gap: 8px;
+}
+
+.auth-captcha__box {
+  min-height: 44px;
+}
+
+.auth-captcha__hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #64748b;
+}
+
+.auth-captcha__hint.is-error {
+  color: #dc2626;
 }
 
 .auth-submit {

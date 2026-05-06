@@ -382,6 +382,14 @@ func buildConversationTimelineCacheItem(
 	tokensConsumed int,
 	createdAt *time.Time,
 ) model.GetConversationTimelineItem {
+	// 1. Redis 热缓存先于 MySQL 落库写入时，eventID 可能暂时为 0。
+	// 2. 如果把 0 原样透传给前端，历史重建阶段所有 cache-only 事件都会共享同一个“空 id”。
+	// 3. 前端常把 timeline id 当消息/块的挂载主键，撞 key 后会把不同轮次的 assistant 状态桶错误复用。
+	// 4. 因此这里在未拿到真实主键时，先退回使用会话内唯一的 seq 作为临时 id；待后续从 DB 回源时再自然切换为真实 id。
+	if eventID <= 0 && seq > 0 {
+		eventID = seq
+	}
+
 	item := model.GetConversationTimelineItem{
 		ID:             eventID,
 		Seq:            seq,

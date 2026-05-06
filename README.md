@@ -8,33 +8,6 @@
 
 > 越用越懂你的成长型 AI 排程伙伴 · 面向大学生的陪伴式日程管理平台
 
-## 后端本地快速启动
-
-后端开发统一使用 `backend` 根目录下的 PowerShell 启动脚本，不再维护 `cmd/all` 聚合入口。
-
-```powershell
-cd backend
-.\scripts\dev-up.ps1
-.\scripts\services-up.ps1
-.\scripts\dev-status.ps1
-.\scripts\dev-logs.ps1 -Service api -Stream stdout -Follow
-.\scripts\service-restart.ps1 -Service api
-.\scripts\services-down.ps1
-.\scripts\dev-down.ps1
-.\scripts\dev-down.ps1 -StopInfra
-```
-
-说明：
-
-- 所有后端脚本统一收敛在 `backend/scripts` 目录下。
-- `scripts/dev-up.ps1` 会先确保 Docker 基础设施就绪，再按顺序构建并拉起全部 RPC 服务与 API。
-- `scripts/services-up.ps1` 只拉起后端服务本身，不触碰 Docker 基础设施。
-- `scripts/dev-status.ps1` 用于查看各服务是脚本托管、外部运行还是未启动。
-- `scripts/dev-logs.ps1` 用于查看单个服务最新日志；可选 `-Stream stdout|stderr|both`，带 `-Follow` 可持续追日志。
-- `scripts/service-restart.ps1 -Service <name>` 用于重启单个脚本托管的后端服务；若该服务由外部进程托管，则会直接拒绝操作。
-- `scripts/services-down.ps1` 只停止脚本托管的后端服务进程。
-- `scripts/dev-down.ps1` 默认只停止脚本托管的后端进程；加 `-StopInfra` 才会一并停止 Docker 基础设施。
-
 # 1 项目概览
 
 ## 1.1 总体介绍
@@ -89,7 +62,7 @@ cd backend
 
    目前暂未开放用户自定义时间尺度配置，当前仍以固定节次模型为主。后续会有更新计划的！
 
-2. **导入学校课表。** 本项目后端已提供学校课表导入能力(当前主要尝试兼容CQUPT的课表格式)，以便后续以课表为基底进行日程安排；前端完整导入流程入口仍在补齐。
+2. **导入学校课表。** 本项目后端已提供学校课表导入能力(当前主要尝试兼容CQUPT的课表图片识别与导入格式)，前端也已在 `/schedule` 页面接入完整导入流程，便于后续直接以课表为基底进行日程安排。
 
 3. **"水课"任务嵌入。** 正如上方**问题2**所言，在已导入课表的前提下，支持设置某一门你想拿来干其它事情的课为"可嵌入任务"状态，此时这门课所占据的时间区域就是可以嵌入任务的了，但是仍然有区别于其它完全空白的时间区域，便于真正安排适合在嘈杂环境下做的事情。
 
@@ -97,7 +70,7 @@ cd backend
 
 5. **一键编排任务。** 结合算法与用户配置，将任务基于导入的课表和任务类设置先生成预览结果；确认无误后，再正式应用到日程中。  
 
-6. **AI随口记与任务查询。** 正如问题4所言，当前版本支持通过AI随手记录一些大小事，也支持按象限、关键词、截止时间等维度查询任务；部分日程调整能力已接入确认流。
+6. **AI 对话与排程辅助。** 当前版本支持通过 AI 进行对话、查看历史会话与思考过程，并结合结构化工具完成排程分析、日程微调与确认流。
 
 7. **多用户。** 本系统可支持多个用户同时使用，并且记录AI对话、编排任务的Token使用情况等，并进行限额。
 
@@ -187,157 +160,223 @@ PS：此图截至版本v0.3.3
 
 ## 3.2 核心表结构
 
-其实每个表都很核心。在此展示它们的创建语句：
+以下结构以 **2026 年 5 月 7 日** 对运行中的 `smartflow-mysql` 容器执行 `SHOW TABLES`、`SHOW CREATE TABLE` 与 `information_schema.columns` 查询结果为准。
 
-```sql
-CREATE TABLE `agent_chats`
-(
-    `id`              int       NOT NULL AUTO_INCREMENT,
-    `user_id`         int            DEFAULT NULL,
-    `message_content` text COMMENT '用户或AI的话',
-    `role`            varchar(255)   DEFAULT NULL COMMENT 'user / assistant',
-    `tokens_consumed` int            DEFAULT '0' COMMENT '单次消耗，用于累加到 users 表',
-    `created_at`      timestamp NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_agent_chats_id` (`id`),
-    KEY `user_id` (`user_id`),
-    CONSTRAINT `agent_chats_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
-) ENGINE = InnoDB
-  DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_0900_ai_ci
-  
-CREATE TABLE `courses`
-(
-    `id`        int          NOT NULL AUTO_INCREMENT,
-    `user_id`   int          DEFAULT NULL,
-    `name`      varchar(255) NOT NULL,
-    `location`  varchar(255) DEFAULT NULL,
-    `is_filler` tinyint(1)   DEFAULT '0',
-    PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_courses_id` (`id`),
-    KEY `user_id` (`user_id`),
-    CONSTRAINT `courses_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
-) ENGINE = InnoDB
-  DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_0900_ai_ci
-  
-CREATE TABLE `schedule_events`
-(
-    `id`              int                    NOT NULL AUTO_INCREMENT,
-    `user_id`         int                    NOT NULL,
-    `name`            varchar(255)           NOT NULL COMMENT '课程或任务名称',
-    `location`        varchar(255)                    DEFAULT '' COMMENT '地点 (教学楼/会议室)',
-    `type`            enum ('course','task') NOT NULL COMMENT '日程类型',
-    `rel_id`          int                             DEFAULT NULL COMMENT '关联原始数据ID (如教务系统的课程ID)',
-    `can_be_embedded` tinyint(1)             NOT NULL DEFAULT '0' COMMENT '是否允许在此时段嵌入其他任务',
-    `created_at`      timestamp              NULL     DEFAULT CURRENT_TIMESTAMP,
-    `updated_at`      timestamp              NULL     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    `start_time`      datetime                        DEFAULT NULL COMMENT '任务开始的绝对时间',
-    `end_time`        datetime                        DEFAULT NULL COMMENT '任务结束的绝对时间',
-    PRIMARY KEY (`id`),
-    KEY `idx_user_events` (`user_id`),
-    KEY `idx_user_endtime` (`user_id`, `end_time` DESC),
-    CONSTRAINT `fk_event_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE = InnoDB
-  AUTO_INCREMENT = 148
-  DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_0900_ai_ci
-  
-CREATE TABLE `schedules`
-(
-    `id`               int NOT NULL AUTO_INCREMENT,
-    `event_id`         int NOT NULL COMMENT '关联元数据ID',
-    `user_id`          int NOT NULL COMMENT '冗余UID方便直接查询',
-    `week`             int NOT NULL COMMENT '周次 (1-25)',
-    `day_of_week`      int NOT NULL COMMENT '星期 (1-7)',
-    `section`          int NOT NULL COMMENT '原子化节次 (1-12)',
-    `embedded_task_id` int                           DEFAULT NULL COMMENT '若为水课嵌入，记录具体的任务项ID',
-    `status`           enum ('normal','interrupted') DEFAULT 'normal' COMMENT '状态: 正常/因故中断',
-    PRIMARY KEY (`id`),
-    UNIQUE KEY `idx_user_slot_atomic` (`user_id`, `week`, `day_of_week`, `section`),
-    KEY `idx_event_id` (`event_id`),
-    KEY `fk_embedded_task` (`embedded_task_id`),
-    CONSTRAINT `fk_embedded_task` FOREIGN KEY (`embedded_task_id`) REFERENCES `task_items` (`id`) ON DELETE SET NULL,
-    CONSTRAINT `fk_schedule_event` FOREIGN KEY (`event_id`) REFERENCES `schedule_events` (`id`) ON DELETE CASCADE,
-    CONSTRAINT `fk_schedule_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE = InnoDB
-  AUTO_INCREMENT = 214
-  DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_0900_ai_ci
-  
-CREATE TABLE `task_classes`
-(
-    `id`                  int NOT NULL AUTO_INCREMENT,
-    `user_id`             int                     DEFAULT NULL,
-    `name`                varchar(255)            DEFAULT NULL,
-    `mode`                enum ('auto','manual')  DEFAULT NULL,
-    `start_date`          date                    DEFAULT NULL,
-    `end_date`            date                    DEFAULT NULL,
-    `total_slots`         int                     DEFAULT NULL COMMENT '分配的总节数',
-    `allow_filler_course` tinyint(1)              DEFAULT '1',
-    `strategy`            enum ('steady','rapid') DEFAULT NULL,
-    `excluded_slots`      json                    DEFAULT NULL COMMENT '不想要的时段切片',
-    PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_task_classes_id` (`id`),
-    KEY `idx_task_classes_user_id` (`user_id`),
-    CONSTRAINT `task_classes_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
-) ENGINE = InnoDB
-  AUTO_INCREMENT = 15
-  DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_0900_ai_ci
-  
-CREATE TABLE `task_items`
-(
-    `id`            int NOT NULL AUTO_INCREMENT,
-    `category_id`   int  DEFAULT NULL,
-    `content`       text,
-    `embedded_time` json DEFAULT NULL COMMENT '目标时间{date,section_from,section_to}',
-    `status`        int  DEFAULT NULL COMMENT '1:未安排, 2:已应用',
-    `order`         int  DEFAULT NULL,
-    PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_task_items_id` (`id`),
-    KEY `task_items_ibfk_1` (`category_id`),
-    CONSTRAINT `task_items_ibfk_1` FOREIGN KEY (`category_id`) REFERENCES `task_classes` (`id`) ON DELETE CASCADE
-) ENGINE = InnoDB
-  AUTO_INCREMENT = 43
-  DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_0900_ai_ci
-  
-CREATE TABLE `tasks`
-(
-    `id`           int          NOT NULL AUTO_INCREMENT,
-    `user_id`      int               DEFAULT NULL,
-    `title`        varchar(255) NOT NULL,
-    `priority`     int               DEFAULT NULL,
-    `is_completed` tinyint(1)        DEFAULT '0',
-    `deadline_at`  timestamp    NULL DEFAULT NULL,
-    PRIMARY KEY (`id`),
-    UNIQUE KEY `uk_tasks_id` (`id`),
-    KEY `idx_user_id` (`user_id`),
-    CONSTRAINT `tasks_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`),
-    CONSTRAINT `chk_priority` CHECK ((`priority` in (1, 2, 3, 4)))
-) ENGINE = InnoDB
-  AUTO_INCREMENT = 23
-  DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_0900_ai_ci
-  
-CREATE TABLE `users`
-(
-    `id`            int          NOT NULL AUTO_INCREMENT,
-    `username`      varchar(255) NOT NULL,
-    `password`      varchar(255) NOT NULL,
-    `phone_number`  varchar(255)      DEFAULT NULL,
-    `token_limit`   int               DEFAULT '100000',
-    `token_usage`   int               DEFAULT '0',
-    `last_reset_at` timestamp    NULL DEFAULT NULL COMMENT '上次周用量重置时间',
-    PRIMARY KEY (`id`),
-    UNIQUE KEY `username` (`username`),
-    UNIQUE KEY `uk_users_id` (`id`)
-) ENGINE = InnoDB
-  AUTO_INCREMENT = 4
-  DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_0900_ai_ci
+### 3.2.0 全量表简述总览
+
+| 领域 | 表名 | 简述 |
+| --- | --- | --- |
+| 用户与账户 | `users` | 用户主表，保存账号、密码、手机号与 token 配额。 |
+| 用户与账户 | `user_token_usage_adjustments` | 用户 token 用量调整流水，按事件记录增减量。 |
+| 用户与账户 | `user_notification_channels` | 用户通知通道配置表，保存 webhook、鉴权方式与最近一次测试结果。 |
+| 任务与课表 | `tasks` | 首页任务池主表，承载优先级、DDL、预计节数与紧迫阈值。 |
+| 任务与课表 | `task_classes` | 任务类定义表，保存任务类模式、策略、节数与学习属性配置。 |
+| 任务与课表 | `task_items` | 任务类下的任务块明细表，记录内容、顺序、嵌入时间与状态。 |
+| 任务与课表 | `schedule_events` | 课程 / 任务事件元数据表，是正式日程块的事实来源。 |
+| 任务与课表 | `schedules` | 节次级日程展开表，把事件落到周次、星期与节次坐标。 |
+| Agent | `agent_chats` | AI 会话头表，保存会话标题、模型、状态、消息数与 token 汇总。 |
+| Agent | `chat_histories` | AI 消息明细表，保存正文、角色、推理内容、重试分支与 token 消耗。 |
+| Agent | `agent_timeline_events` | Agent 时间线事件表，给前端时间线、状态流与调试回放使用。 |
+| Agent | `agent_schedule_states` | Agent 排程状态快照表，保存会话内的排程运行态与 revision。 |
+| Agent | `agent_state_snapshot_records` | Agent 阶段性状态快照归档表，按 phase 留存排障用 snapshot。 |
+| 主动调度 | `active_schedule_jobs` | 主动调度后台任务表，管理定时触发、扫描状态、去重键与错误信息。 |
+| 主动调度 | `active_schedule_triggers` | 主动调度触发表，记录触发来源、目标对象、幂等键、处理状态与 trace。 |
+| 主动调度 | `active_schedule_previews` | 主动调度预览结果表，保存候选方案、决策结果、风险说明与 apply 结果。 |
+| 主动调度 | `active_schedule_sessions` | 主动调度会话表，串起 trigger、preview 与对话侧 session 状态。 |
+| Memory / RAG | `memory_items` | 记忆条目主表，保存内容、置信度、重要度、敏感级别与向量状态。 |
+| Memory / RAG | `memory_jobs` | 记忆任务表，保存提取 / 管理类任务的 payload、重试与错误状态。 |
+| Memory / RAG | `memory_audit_logs` | 记忆审计日志表，记录 memory 条目的变更前后内容与操作原因。 |
+| Memory / RAG | `memory_user_settings` | 用户级记忆配置表，控制 memory 总开关与隐式 / 敏感记忆开关。 |
+| 通知 | `notification_records` | 通知发送记录表，保存触发源、摘要、兜底文案、重试状态与供应商响应。 |
+| 社区 / 任务类分享 | `forum_posts` | 社区帖子主表，对应任务类分享内容及其点赞 / 评论 / 导入统计。 |
+| 社区 / 任务类分享 | `forum_post_templates` | 帖子对应的任务类模板表，固化分享时的任务类配置快照。 |
+| 社区 / 任务类分享 | `forum_post_template_items` | 帖子模板下的任务块明细表，保存来源 task_item 与排序。 |
+| 社区 / 任务类分享 | `forum_likes` | 帖子点赞记录表，记录点赞人、作者、事件 ID 与取消状态。 |
+| 社区 / 任务类分享 | `forum_comments` | 帖子评论表，支持父子评论结构、幂等键与软删除。 |
+| 社区 / 任务类分享 | `forum_imports` | 社区模板导入记录表，记录导入目标任务类、状态与失败原因。 |
+| Credit / 计费 | `credit_accounts` | 用户 Credit 账户表，维护余额与累计充值 / 奖励 / 消耗。 |
+| Credit / 计费 | `credit_ledger` | Credit 台账流水表，记录每次变动的来源、方向、前后余额与描述。 |
+| Credit / 计费 | `credit_orders` | Credit 购买订单表，保存商品快照、数量、金额、支付状态与入账状态。 |
+| Credit / 计费 | `credit_products` | Credit 商品表，定义 SKU、额度、价格、排序与上下架状态。 |
+| Credit / 计费 | `credit_price_rules` | 模型计费规则表，定义 provider / model 的价格与利润率映射。 |
+| Credit / 计费 | `credit_reward_rules` | Credit 奖励规则表，定义奖励来源、额度、状态与配置。 |
+| Outbox | `agent_outbox_messages` | Agent 域 Outbox 表，承接聊天持久化、时间线与状态事件投递。 |
+| Outbox | `task_outbox_messages` | 任务域 Outbox 表，承接任务相关异步事件投递。 |
+| Outbox | `memory_outbox_messages` | Memory 域 Outbox 表，承接记忆提取 / 管理类异步事件投递。 |
+| Outbox | `active_scheduler_outbox_messages` | 主动调度域 Outbox 表，承接调度触发相关异步事件。 |
+| Outbox | `notification_outbox_messages` | 通知域 Outbox 表，承接外部通知发送事件。 |
+| Outbox | `taskclass_forum_outbox_messages` | 社区 / 任务类分享域 Outbox 表，承接点赞、导入等异步事件。 |
+| Outbox | `llm_outbox_messages` | LLM 域 Outbox 表，承接模型计费 / 记账等异步事件。 |
+| Outbox | `token_store_outbox_messages` | Token / Credit 域 Outbox 表，承接 token 或 credit 账务类异步事件。 |
+
+当前库中与主业务链路最相关的核心表包括：
+
+- `users`
+- `tasks`
+- `task_classes`
+- `task_items`
+- `schedule_events`
+- `schedules`
+- `agent_chats`
+- `chat_histories`
+
+### 3.2.1 `users`
+
+```text
+id bigint unsigned PK AUTO_INCREMENT
+username varchar(255) NOT NULL UNIQUE
+password varchar(255) NOT NULL
+phone_number varchar(255) NULL
+token_limit bigint DEFAULT 100000
+token_usage bigint DEFAULT 0
+last_reset_at datetime(3) NULL
 ```
+
+### 3.2.2 `tasks`
+
+```text
+id bigint PK AUTO_INCREMENT
+user_id bigint NULL
+title varchar(255) NULL
+priority bigint NOT NULL
+is_completed tinyint(1) DEFAULT 0
+deadline_at datetime(3) NULL
+urgency_threshold_at datetime(3) NULL
+estimated_sections bigint NOT NULL DEFAULT 1
+索引:
+- idx_tasks_user_id(user_id)
+- idx_user_done_threshold_priority(user_id, is_completed, urgency_threshold_at, priority)
+```
+
+### 3.2.3 `task_classes`
+
+```text
+id bigint PK AUTO_INCREMENT
+user_id bigint NULL
+name varchar(255) NULL
+mode enum('auto','manual') NULL
+start_date datetime(3) NULL
+end_date datetime(3) NULL
+total_slots bigint NULL
+allow_filler_course tinyint(1) DEFAULT 1
+strategy enum('steady','rapid') NULL
+excluded_slots json NULL
+subject_type varchar(32) NULL
+difficulty_level varchar(16) NULL
+cognitive_intensity varchar(16) NULL
+excluded_days_of_week json NULL
+索引:
+- idx_task_classes_user_id(user_id)
+```
+
+### 3.2.4 `task_items`
+
+```text
+id bigint PK AUTO_INCREMENT
+category_id bigint NULL
+order bigint NULL
+content text NULL
+embedded_time json NULL
+status bigint NULL
+索引 / 约束:
+- fk_task_classes_items(category_id -> task_classes.id)
+```
+
+### 3.2.5 `schedule_events`
+
+```text
+id bigint PK AUTO_INCREMENT
+user_id bigint NOT NULL
+name varchar(255) NOT NULL
+location varchar(255) DEFAULT ''
+type enum('course','task') NOT NULL
+rel_id bigint NULL
+can_be_embedded tinyint(1) NOT NULL DEFAULT 0
+start_time datetime(3) NULL
+end_time datetime(3) NULL
+task_source_type varchar(32) NOT NULL DEFAULT ''
+makeup_for_event_id bigint NULL
+active_preview_id varchar(64) NULL
+索引:
+- idx_user_events(user_id)
+- idx_schedule_event_task_source(task_source_type)
+- idx_schedule_event_makeup_for(makeup_for_event_id)
+- idx_schedule_event_active_preview(active_preview_id)
+```
+
+### 3.2.6 `schedules`
+
+```text
+id bigint PK AUTO_INCREMENT
+event_id bigint NOT NULL
+user_id bigint NOT NULL
+week bigint NOT NULL
+day_of_week bigint NOT NULL
+section bigint NOT NULL
+embedded_task_id bigint NULL
+status enum('normal','interrupted') DEFAULT 'normal'
+索引 / 约束:
+- UNIQUE idx_user_slot_atomic(user_id, week, day_of_week, section)
+- idx_event_id(event_id)
+- fk_schedules_embedded_task(embedded_task_id -> task_items.id)
+- fk_schedules_event(event_id -> schedule_events.id)
+```
+
+### 3.2.7 `agent_chats`
+
+```text
+id bigint PK AUTO_INCREMENT
+chat_id varchar(36) NOT NULL UNIQUE
+user_id bigint NOT NULL
+title varchar(255) NULL
+system_prompt text NULL
+model varchar(100) NULL
+message_count bigint NOT NULL DEFAULT 0
+tokens_total bigint NOT NULL DEFAULT 0
+last_message_at datetime(3) NULL
+status varchar(32) NOT NULL DEFAULT 'active'
+created_at datetime(3) NULL
+updated_at datetime(3) NULL
+deleted_at datetime(3) NULL
+compaction_summary text NULL
+compaction_watermark bigint NOT NULL DEFAULT 0
+context_token_stats json NULL
+last_history_event_id varchar(64) NULL
+last_token_adjust_event_id varchar(64) NULL
+索引:
+- idx_user_last(user_id)
+- idx_user_status(user_id, status)
+```
+
+### 3.2.8 `chat_histories`
+
+```text
+id bigint PK AUTO_INCREMENT
+chat_id varchar(36) NOT NULL
+user_id bigint NOT NULL
+message_content text NULL
+role varchar(32) NULL
+tokens_consumed bigint NOT NULL DEFAULT 0
+created_at datetime(3) NULL
+reasoning_content text NULL
+reasoning_duration_seconds bigint NOT NULL DEFAULT 0
+retry_group_id varchar(64) NULL
+retry_index bigint NULL
+retry_from_user_message_id bigint NULL
+retry_from_assistant_message_id bigint NULL
+source_event_id varchar(64) NULL UNIQUE
+索引:
+- idx_user_chat(user_id, chat_id)
+- idx_chat_id(chat_id)
+- idx_retry_group(retry_group_id)
+```
+
+补充说明：
+
+1. 运行库里已经不存在 README 旧版那种“`agent_chats` 直接承载单条消息正文”的结构；现在是 `agent_chats` 管会话头，`chat_histories` 管消息明细。
+2. `task_classes.start_date` / `end_date` 在运行库中是 `datetime(3)`，不是旧文档里的 `date`。
+3. `tasks` 现在多了 `urgency_threshold_at` 与 `estimated_sections`，`task_classes` 现在多了 `subject_type`、`difficulty_level`、`cognitive_intensity`、`excluded_days_of_week`。
+4. README 此处如果后续再更新，建议继续以运行中的 MySQL 查询结果为准，而不是只看代码结构体。
 
 # 4 接口契约
 
@@ -358,40 +397,42 @@ CREATE TABLE `users`
 ```
 
 2. 日程写工具默认走 `confirm` 确认闸门（`always_execute=true` 时可跳过确认）。
-3. 非日程写工具（如 `quick_note_create`、`query_tasks`、`web_search`、`web_fetch`）走 `continue + tool_call`。
+3. 非日程类工具（如 `context_tools_add`、`context_tools_remove`、`web_search`、`web_fetch`）走 `continue + tool_call`；其中 `upsert_task_class` 虽不依赖 `ScheduleState`，但仍属于真实写库入口。
 4. 当前每轮只允许调用一个工具，不支持同轮批量工具数组。
 
 ### 4.2.2 工具清单（当前版本）
 
 | 工具名 | 类型 | 是否需确认 | 是否依赖 ScheduleState | 核心参数 | 作用与约束 |
 | --- | --- | --- | --- | --- | --- |
-| `get_overview` | 读 | 否 | 是 | 无 | 获取规划窗口总览（任务视角，全量返回） |
-| `query_range` | 读 | 否 | 是 | `day`(必填), `slot_start`, `slot_end` | 查询某天/某时段占用详情 |
+| `context_tools_add` | 上下文控制 | 否 | 否 | `domain`, `packs`, `mode` | 激活 `schedule` / `taskclass` 工具域；`schedule` 可按 pack 增量注入 `mutation / analyze / detail_read / deep_analyze / queue / web` |
+| `context_tools_remove` | 上下文控制 | 否 | 否 | `domain`, `packs`, `all` | 移除指定工具域或 pack；`core` 固定包不允许 remove |
+| `get_overview` | 读 | 否 | 是 | 无 | 获取当前规划窗口总览（任务视角，全量返回） |
+| `query_range` | 读 | 否 | 是 | `day`(必填), `slot_start`, `slot_end` | 查询某天 / 某时段占用详情 |
 | `query_available_slots` | 读 | 否 | 是 | `span`, `duration`, `limit`, `day_scope`, `week_filter` 等 | 查询候选空位池（纯空位优先，不足再补可嵌入位） |
-| `query_target_tasks` | 读 | 否 | 是 | `status`, `category`, `task_ids`, `enqueue` 等 | 过滤任务集合，可选自动入队供后续队列工具处理 |
-| `queue_pop_head` | 读 | 否 | 是 | 无 | 取出/复用当前队首任务（一次只处理一个） |
-| `queue_status` | 读 | 否 | 是 | 无 | 查看队列状态（pending/current/completed/skipped） |
+| `query_target_tasks` | 读 | 否 | 是 | `status`, `category`, `task_ids`, `enqueue`, `reset_queue` 等 | 过滤任务集合，可选自动入队供后续队列工具处理 |
+| `queue_pop_head` | 队列读 | 否 | 是 | 无 | 取出 / 复用当前队首任务（一次只处理一个） |
+| `queue_status` | 队列读 | 否 | 是 | 无 | 查看队列状态（pending / current / completed / skipped） |
 | `get_task_info` | 读 | 否 | 是 | `task_id`(必填) | 查询单任务详细信息 |
+| `analyze_rhythm` | 分析 | 否 | 是 | `category`, `include_pending`, `detail`, `hard_categories` | 分析学习节奏、连续同类任务与切换情况 |
+| `analyze_health` | 分析 | 否 | 是 | `detail`, `dimensions`, `threshold` | 作为主动优化裁判入口，判断当前排程是否仍值得继续优化 |
 | `place` | 写 | 是 | 是 | `task_id`, `day`, `slot_start`(均必填) | 将待安排任务预排到指定位置 |
 | `move` | 写 | 是 | 是 | `task_id`, `new_day`, `new_slot_start`(均必填) | 仅允许移动 `suggested`；`existing` 不可 `move` |
 | `swap` | 写 | 是 | 是 | `task_a`, `task_b`(均必填) | 交换两个已落位任务，要求时长一致 |
 | `batch_move` | 写 | 是 | 是 | `moves[]`(必填) | 原子批量移动，当前最多 2 条，任一冲突整批回滚 |
-| `queue_apply_head_move` | 写 | 是 | 是 | `new_day`, `new_slot_start`(均必填) | 移动当前队首并自动出队，不接受 `task_id` |
+| `queue_apply_head_move` | 队列写 | 是 | 是 | `new_day`, `new_slot_start`(均必填) | 移动当前队首并自动出队，不接受 `task_id` |
 | `queue_skip_head` | 队列控制 | 否 | 是 | `reason` | 跳过当前队首并标记 `skipped`（不改日程） |
-| `spread_even` | 写 | 是 | 是 | `task_ids`(必填，兼容 `task_id`) | 在任务集合内做均匀铺开，按筛选条件原子落地 |
-| `min_context_switch` | 写 | 是 | 是 | `task_ids`(必填，兼容 `task_id`) | 减少上下文切换重排；仅在用户明确允许打乱顺序时可执行 |
 | `unplace` | 写 | 是 | 是 | `task_id`(必填) | 取消任务落位并恢复待安排状态 |
-| `quick_note_create` | 读写混合（业务写入） | 否 | 否 | `title`(必填), `deadline_at`, `priority_group` | 记录随口记任务，支持中文相对时间；优先级可自动推断 |
-| `query_tasks` | 读 | 否 | 否 | `quadrant`, `keyword`, `deadline_before/after`, `limit` 等 | 按象限/关键词/时间边界查询任务 |
-| `web_search` | 读 | 否 | 否 | `query`(必填), `top_k`, `domain_allow`, `recency_days` | Web 检索，返回结构化标题/摘要/URL；未启用时优雅返回错误 observation |
+| `upsert_task_class` | 任务类写入 | 是 | 否 | `id`, `task_class`, `items`, `source` | 统一创建 / 更新任务类入口；会写库，但不直接修改当前日程预览 |
+| `web_search` | 读 | 否 | 否 | `query`(必填), `top_k`, `domain_allow`, `recency_days` | Web 检索，返回结构化标题 / 摘要 / URL；未启用时优雅返回错误 observation |
 | `web_fetch` | 读 | 否 | 否 | `url`(必填), `max_chars` | 抓取并清洗网页正文；服务不可用时优雅返回错误 observation |
 
 ### 4.2.3 当前实现中的关键规则
 
-1. `min_context_switch` 有顺序护栏：未授权“允许打乱顺序”会被后端拦截并返回拒绝结果。
-2. `batch_move` 有安全上限：当前最多支持 2 条移动请求，超出建议走队列化逐项处理。
-3. `quick_note_create` 和 `query_tasks` 不依赖 `ScheduleState`，由执行层注入 `_user_id` 后可直接调用。
-4. `web_search`/`web_fetch` 失败不会打断主链路，都会回传结构化错误 observation 给模型继续决策。
+1. `context_tools_add` / `context_tools_remove` 是动态区协议入口：`schedule` 支持按 pack 精细注入，`taskclass` 当前只有 `core` 固定包。
+2. 日程写工具默认走 `confirm` 确认闸门（`always_execute=true` 时可跳过）。
+3. `upsert_task_class` 虽不依赖 `ScheduleState`，但属于真实写库入口，仍要求 confirm。
+4. `batch_move` 有安全上限：当前最多支持 2 条移动请求，超出建议走队列化逐项处理。
+5. `web_search` / `web_fetch` 失败不会打断主链路，都会回传结构化错误 observation 给模型继续决策。
 
 
 # 5 后端实现
@@ -400,22 +441,169 @@ CREATE TABLE `users`
 
 | **分类**          | **选用技术**     | **在时伴中的应用场景**                          |
 | ----------------- | ---------------- | ------------------------------------------------------------ |
-| **Web 框架**      | **Gin**          | 负责全站 API 的路由分发，处理任务增删改查及智能排程的请求。  |
-| **持久层数据库**  | **MySQL 8.0**    | 存储用户、任务、课表及日程运行图（Schedules）的核心数据。    |
-| **ORM 框架**      | **GORM**         | 用于简化 Go 与数据库的交互，利用事务处理 `Apply` 接口的原子性操作。 |
-| **高性能缓存**    | **Redis**        | 缓存用户的周日程视图（避免频繁扫表）、存储 Token 临时限额、实现分布式锁防止重复排程。 |
-| **消息队列**      | **Outbox + Kafka** | **可靠异步解耦**：请求主链路先写 Outbox，后台再投递 Kafka 并消费落库，既降低首字延迟又避免消息瞬时丢失。 |
-| **AI 编排框架**   | **Eino**         | 作为 AI Agent 的大脑，根据排程策略（Steady/Rapid）计算任务与水课的嵌入逻辑。 |
-| **身份认证**      | **JWT**          | 实现无状态登录，将 `user_id` 封装在 Token 中，确保数据的用户隔离。 |
-| **配置管理**      | **Viper**        | 管理数据库、Redis、Kafka 的连接参数，支持多环境（开发/生产）切换。 |
-| **API 文档/调试** | **Apifox**       | 维护接口协议，进行前后端联调及自动化测试。                   |
-| **日志监控**      | **Zap / Logrus** | 记录系统运行状态，特别是 Kafka 消费失败或 AI 接口超时的错误日志。 |
+| **API 网关**      | **Gin**          | 负责统一 HTTP 入口、JWT 鉴权、限流、幂等控制与前端 API 聚合。 |
+| **服务间通信**    | **go-zero zrpc + gRPC** | `api` 网关通过 zrpc 调用 `userauth / task / schedule / agent / memory / llm` 等后端服务，支撑当前多服务拆分。 |
+| **持久层数据库**  | **MySQL 8.0**    | 存储用户、任务、课表、Agent 会话、主动调度、社区、Credit、memory 等核心结构化数据。 |
+| **ORM / 数据访问** | **GORM**        | 负责 MySQL 映射、事务处理、索引约束落地，以及日程 / Agent / memory 等域的数据访问。 |
+| **缓存与运行态存储** | **Redis**     | 缓存周课表与会话状态，承接幂等键、限流、Agent 状态快照、日程预览与 memory 预取上下文。 |
+| **异步事件总线**  | **Outbox + Kafka（segmentio/kafka-go）** | 用于聊天持久化、memory 抽取、主动调度触发、通知投递、Credit 记账等异步事件解耦。 |
+| **AI / Agent 编排** | **CloudWeGo Eino** | 承担对话规划、工具调用、确认流、排程执行与 deliver/interrupt 状态机编排。 |
+| **模型接入**      | **Volcengine Ark + OpenAI Compatible 接口** | `llm` / `course` / `memory` / `agent` 等服务通过统一模型层调用文本模型、推理模型与课表识别视觉模型。 |
+| **向量检索**      | **Milvus**       | 为长期记忆与 RAG 检索提供向量索引、召回与相似度搜索能力。 |
+| **向量依赖**      | **MinIO + etcd** | 作为 Milvus 的对象存储与元数据依赖，随容器编排一起部署。 |
+| **身份认证**      | **JWT**          | 实现无状态登录，并把 `user_id` 等身份信息透传到 API 与服务层。 |
+| **配置管理**      | **Viper**        | 管理数据库、Redis、Kafka、RPC、模型、memory/RAG、通知等多环境配置。 |
+| **容器化交付**    | **Dockerfile + Docker Compose + Nginx** | 已支持基础设施容器化与整站容器化；前端镜像通过 Nginx 托管静态产物。 |
+| **接口调试 / 文档** | **Apifox**      | 用于维护接口协议、联调接口与沉淀阶段性 API 文档。 |
+| **日志与观测**    | **标准库 `log` + Gin Logger/Recovery** | 当前代码以标准库日志为主，HTTP 层使用 Gin 默认日志与恢复中间件；Kafka、RAG、memory、Agent 链路也会输出关键观测日志。 |
 
 ## 5.2 架构图
 
-PS：截至v0.3.3。其中黑色箭头为请求数据链路，绿色箭头为返回数据，虚线箭头为控制流。
+基于当前 `docker-compose.full.yml`、`backend/cmd/*` 与各服务 `dao/connect.go` 整理。实线表示同步 HTTP / RPC / 直连存储关系，虚线表示 Outbox + Kafka 异步事件链路；标注“迁移期”的连线表示该服务仍在直接读写其他域的表。
 
-![后端架构图](docs/pics/backend_structure.png)
+```mermaid
+flowchart TB
+    FE["Frontend (Vue)"] --> API["api / Gin Gateway<br/>JWT 鉴权 / 限流 / 幂等"]
+
+    subgraph SVC["服务层"]
+        direction LR
+        UA["userauth"]
+        TASK["task"]
+        COURSE["course"]
+        TCLASS["task-class"]
+        SCH["schedule"]
+        AGENT["agent"]
+        MEM["memory"]
+        AS["active-scheduler"]
+        NOTI["notification"]
+        FORUM["taskclassforum"]
+        TOKEN["tokenstore"]
+        LLM["llm"]
+        RAG["RAG / Milvus"]
+    end
+
+    API --> UA
+    API --> TASK
+    API --> COURSE
+    API --> TCLASS
+    API --> SCH
+    API --> AGENT
+    API --> MEM
+    API --> AS
+    API --> NOTI
+    API --> FORUM
+    API --> TOKEN
+
+    AGENT --> LLM
+    AGENT --> TASK
+    AGENT --> TCLASS
+    AGENT --> SCH
+    AGENT --> MEM
+    AGENT --> RAG
+    COURSE --> LLM
+    MEM --> LLM
+    MEM --> RAG
+    AS --> LLM
+    AS --> TASK
+    AS --> SCH
+    FORUM --> TCLASS
+    LLM --> TOKEN
+
+    subgraph REDIS["Redis"]
+        direction TB
+        R_API["限流 / 幂等响应缓存"]
+        R_AUTH["JWT 黑名单 / Token 配额快照"]
+        R_TASK["任务列表缓存 / 紧急性提升去重锁"]
+        R_SCH["今日日程 / 周视图 / 最近完成 / 当前进行中缓存"]
+        R_TCLASS["任务集列表缓存"]
+        R_AGENT["会话历史 / Timeline / Schedule Preview / Agent State / Memory Prefetch"]
+        R_FORUM["评论树缓存"]
+        R_CREDIT["Credit 余额快照 / Blocked 标记"]
+    end
+
+    API --> R_API
+    UA --> R_AUTH
+    TASK --> R_TASK
+    SCH --> R_SCH
+    TCLASS --> R_TCLASS
+    AGENT --> R_AGENT
+    FORUM --> R_FORUM
+    TOKEN --> R_CREDIT
+    LLM --> R_CREDIT
+
+    subgraph MYSQL["MySQL"]
+        direction TB
+        T_USERS["users<br/>user_token_usage_adjustments"]
+        T_TASK["tasks"]
+        T_TCLASS["task_classes<br/>task_items"]
+        T_SCH["schedules<br/>schedule_events"]
+        T_AGENT["agent_chats<br/>chat_histories<br/>agent_timeline_events<br/>agent_schedule_states<br/>agent_state_snapshot_records"]
+        T_AS["active_schedule_jobs<br/>active_schedule_triggers<br/>active_schedule_previews<br/>active_schedule_sessions"]
+        T_MEM["memory_items<br/>memory_jobs<br/>memory_audit_logs<br/>memory_user_settings"]
+        T_NOTI["notification_records<br/>user_notification_channels"]
+        T_FORUM["forum_posts<br/>forum_post_templates<br/>forum_post_template_items<br/>forum_likes<br/>forum_comments<br/>forum_imports"]
+        T_CREDIT["credit_accounts<br/>credit_ledger<br/>credit_products<br/>credit_orders<br/>credit_price_rules<br/>credit_reward_rules"]
+
+        OB_AGENT["agent_outbox_messages"]
+        OB_TASK["task_outbox_messages"]
+        OB_MEM["memory_outbox_messages"]
+        OB_AS["active_scheduler_outbox_messages"]
+        OB_NOTI["notification_outbox_messages"]
+        OB_TOKEN["token_store_outbox_messages"]
+    end
+
+    UA --> T_USERS
+    TASK --> T_TASK
+    TCLASS --> T_TCLASS
+    TCLASS -.->|迁移期直写| T_SCH
+    SCH --> T_SCH
+    SCH -.->|迁移期依赖| T_TASK
+    SCH -.->|迁移期依赖| T_TCLASS
+    COURSE -.->|课表导入写入| T_SCH
+    AGENT --> T_AGENT
+    AGENT -.->|读取任务| T_TASK
+    AGENT -.->|读取任务集| T_TCLASS
+    AGENT -.->|读取日程 / 预览| T_SCH
+    AS --> T_AS
+    AS -.->|读取会话与时间线| T_AGENT
+    MEM --> T_MEM
+    NOTI --> T_NOTI
+    FORUM --> T_FORUM
+    TOKEN --> T_CREDIT
+    LLM -.->|读取价格规则 / Credit 守卫| T_CREDIT
+
+    subgraph KAFKA["Outbox + Kafka"]
+        direction TB
+        K_AGENT["smartflow.agent.outbox"]
+        K_TASK["smartflow.task.outbox"]
+        K_MEM["smartflow.memory.outbox"]
+        K_AS["smartflow.active-scheduler.outbox"]
+        K_NOTI["smartflow.notification.outbox"]
+        K_TOKEN["smartflow.token-store.outbox"]
+    end
+
+    AGENT -.->|聊天持久化 / 状态快照 / Timeline 持久化| OB_AGENT
+    AGENT -.->|memory.extract.requested| OB_MEM
+    TASK -.->|task.urgency.promote.requested| OB_TASK
+    AS -.->|active_schedule.triggered| OB_AS
+    AS -.->|notification.feishu.requested| OB_NOTI
+    FORUM -.->|forum.post.liked / forum.post.imported| OB_TOKEN
+    LLM -.->|credit.charge.requested| OB_TOKEN
+
+    OB_AGENT -.->|relay| K_AGENT
+    OB_TASK -.->|relay| K_TASK
+    OB_MEM -.->|relay| K_MEM
+    OB_AS -.->|relay| K_AS
+    OB_NOTI -.->|relay| K_NOTI
+    OB_TOKEN -.->|relay| K_TOKEN
+
+    K_AGENT -.->|consume| AGENT
+    K_TASK -.->|consume| TASK
+    K_MEM -.->|consume| MEM
+    K_AS -.->|consume| AS
+    K_NOTI -.->|consume| NOTI
+    K_TOKEN -.->|consume| TOKEN
+```
 
 ## 5.3 核心算法
 
@@ -713,12 +901,12 @@ frontend/src
 │  ├─ assistant/         # 上下文窗口、排程结果卡片、微调弹窗、任务类选择器
 │  ├─ common/            # 全局主侧边栏 MainSidebar
 │  ├─ dashboard/         # 首页卡片与 AssistantPanel
-│  └─ schedule/          # 任务类侧栏、周课表画板、创建弹窗
+│  └─ schedule/          # 任务类侧栏、周课表画板、创建弹窗、课表导入弹窗
 ├─ router/               # 路由定义与守卫
 ├─ stores/               # Pinia store（当前主要是 auth）
 ├─ types/                # dashboard / schedule / api 类型定义
 ├─ utils/                # 日期、Markdown、HTTP 错误、幂等 key 等工具
-├─ views/                # Auth / Dashboard / Assistant / Schedule / Prototype
+├─ views/                # Home / Auth / Dashboard / Assistant / Schedule / Forum / Store / PlanDetail / debug
 ├─ App.vue               # 全局布局壳层与 router-view 容器
 └─ main.ts               # Vue / Pinia / Router / Element Plus 挂载入口
 ```
@@ -729,8 +917,8 @@ frontend/src
 2. 本地开发通过 Vite 代理把 `/api` 转发到 `http://127.0.0.1:8080`。
 3. 常规接口统一走 `frontend/src/api/http.ts`，内置 `401 -> refresh token -> 原请求重放`。
 4. 对话流接口 `POST /api/v1/agent/chat` 单独走原生 `fetch`，并在前端手动处理一次 refresh token 重试。
-5. 写操作尽量补 `X-Idempotency-Key`，当前任务类创建、日程应用、日程删除、任务块删除都已接入。
-6. `App.vue` 会对 `/dashboard`、`/assistant`、`/schedule` 统一套用主壳层与 `MainSidebar`，而不是每个页面各自维护一套侧边栏。
+5. 写操作尽量补 `X-Idempotency-Key`，当前任务类创建 / 更新、课表导入、日程应用、日程删除、任务块删除都已接入。
+6. `App.vue` 会对 `/dashboard`、`/assistant`、`/schedule`、`/forum`、`/store` 与 `/forum/:id` 统一套用主壳层与 `MainSidebar`，而不是每个页面各自维护一套侧边栏。
 
 ## 6.2 当前页面与路由状态
 
@@ -738,18 +926,23 @@ frontend/src
 
 | 路由 | 页面状态 | 说明 |
 | --- | --- | --- |
-| `/` | 已完成 | 默认重定向到 `/dashboard` |
+| `/` | 已完成 | 独立 Home 落地页；CTA 会根据登录态跳转 `/auth` 或 `/dashboard` |
 | `/auth` | 已完成 | 登录/注册同页切换，支持 `redirect` 回跳 |
 | `/dashboard` | 已完成 | 首页工作台，承接四象限任务与今日日程 |
-| `/assistant` | 已完成 | `newAgent` 对话主入口，支持时间线、确认卡片、排程结果卡片 |
-| `/schedule` | 已完成 | 传统课表中心，支持任务类、粗排、拖拽预览与正式应用 |
-| `/prototype/tool-trace` | 原型页 | 用于展示工具 trace / 阻断 / 排程卡片交互原型，不在主导航中暴露 |
+| `/assistant/:id?` | 已完成 | `newAgent` 对话主入口，支持按会话 ID 直达历史会话 |
+| `/schedule` | 已完成 | 传统课表中心，支持任务类、课表导入、粗排、拖拽预览与正式应用 |
+| `/forum` | 已接路由 | 社区 / 方案广场入口，不在首页工作台内重复承载 |
+| `/forum/:id` | 已接路由 | 方案详情页，沿用主壳层与登录态守卫 |
+| `/store` | 已接路由 | 商店页，沿用主壳层与登录态守卫 |
+| `/debug/tool-card` | 调试页 | 单卡片调试页，不在主导航中暴露 |
+| `/debug/tool-cards` | 调试页 | 工具卡片集合调试页，不在主导航中暴露 |
+| `/debug/assistant/:id?` | 调试页 | 助手调试页，不在主导航中暴露 |
 
-当前仍未接出正式独立路由的入口：
+当前仍未纳入正式主导航 / 独立业务入口的部分：
 
 1. “任务”独立页仍未落地，侧边栏没有 `/task` 路由。
 2. 侧边栏底部“设置”按钮仍是视觉占位，尚未接出 `/settings`。
-3. `src/views/layout`、`src/views/login`、`src/views/register`、`src/views/settings` 以及 `src/store/` 目前更偏预留/历史残留目录，不承载当前主运行链路。
+3. 调试页已经接出正式路由，但仍只用于内部联调，不纳入正式主导航。
 
 ## 6.3 认证页 `/auth`
 
@@ -763,7 +956,7 @@ frontend/src
 
 1. 登录与注册共用一页，通过 tab 切换。
 2. 登录成功后会把 `access_token`、`refresh_token` 与最近一次用户名写入 `localStorage`。
-3. 路由守卫会阻止未登录用户进入 `/dashboard`、`/assistant`、`/schedule`。
+3. 路由守卫会阻止未登录用户进入 `/dashboard`、`/assistant`、`/schedule`、`/forum`、`/forum/:id` 与 `/store`。
 4. 普通 JSON 接口走 Axios 自动续签；流式对话接口走 `fetch` 时也会在前端手动尝试一次 refresh token 重试。
 5. 登出时会先尽力调用后端注销接口，再无条件清理本地登录态，避免前端出现“假在线”。
 
@@ -779,13 +972,13 @@ frontend/src
 
 当前已实现能力：
 
-1. `/dashboard`、`/assistant`、`/schedule` 已统一挂在同一套全局壳层下，由 `App.vue + MainSidebar` 负责外层布局。
-2. 侧边栏当前只保留“总览 / 日程 / 助手”三项主导航，避免过早把尚未做完的页面入口暴露出来。
+1. `/dashboard`、`/assistant`、`/schedule`、`/forum`、`/store` 与 `/forum/:id` 已统一挂在同一套全局壳层下，由 `App.vue + MainSidebar` 负责外层布局。
+2. 侧边栏当前提供“总览 / 日程 / 助手 / 社区 / 商店”五项主导航；底部“设置”按钮仍是视觉占位。
 3. 首页中心区展示四象限任务卡片，支持获取任务列表、创建任务、完成任务、撤销完成任务。
 4. 右侧展示“今日日程”，通过 `GET /api/v1/schedule/today` 拉取当天事件。
 5. 首页顶部已具备退出登录、用户昵称展示、当前日期展示等基础工作台能力。
 6. 首页整体做了缩放适配，目标是在常见笔记本分辨率下尽量完整展示主要内容，而不是依赖用户手动缩放浏览器。
-7. “课表导入”入口目前仍是占位提示，还没有真正接出导入向导页。
+7. 课表导入入口已经收敛到 `/schedule` 页工具栏，通过弹窗完成图片识别、确认与正式导入。
 
 ## 6.5 AI 对话页 `/assistant`
 
@@ -839,16 +1032,19 @@ frontend/src
 
 1. `/schedule` 仍然是一套独立于 `newAgent` 对话页的传统编排中心，主要承接任务类管理、粗排预览与正式应用。
 2. 左侧为任务类侧栏，右侧为周课表/排程画板，支持单选与批量多选两种任务类操作模式。
-3. 任务类侧栏支持获取任务类列表、展开详情、删除任务块、新建任务类弹窗，以及长列表滚动。
+3. 任务类侧栏支持获取任务类列表、展开详情、删除任务块、新建 / 更新任务类弹窗；右侧工具栏已接入课表图片导入对话框。
 4. 周课表支持周次切换，当前前端将请求范围限制在 `1 ~ 24` 周，并且加入请求序列号保护，快速切周时只认最后一次响应。
 5. 已接通的课表/编排相关接口包括：
    - `GET /api/v1/schedule/week`
    - `GET /api/v1/task-class/list`
    - `GET /api/v1/task-class/get`
    - `POST /api/v1/task-class/add`
+   - `PUT /api/v1/task-class/update`
    - `DELETE /api/v1/task-class/delete-item`
    - `GET /api/v1/schedule/smart-planning`
    - `POST /api/v1/schedule/smart-planning-multi`
+   - `POST /api/v1/course/parse-image`
+   - `POST /api/v1/course/import`
    - `PUT /api/v1/task-class/apply-batch-into-schedule`
    - `DELETE /api/v1/schedule/delete`
 6. 智能编排结果当前分为单任务类粗排和多任务类批量粗排，结果先进入前端运行时预览态，而不会立即写入正式课表。
@@ -860,32 +1056,38 @@ frontend/src
 
 ## 6.7 当前前后端衔接边界
 
-当前前端已经覆盖的主业务链路：
+当前前端已经覆盖的主业务链路与调试入口：
 
 1. 登录 / 注册 / 自动续签 / 安全登出。
 2. 首页四象限任务获取、创建、完成、撤销与今日日程展示。
 3. `newAgent` 对话、历史会话、思考内容展示、消息重试、结构化时间线、确认覆盖层、上下文窗口计量。
 4. AI 对话页中的排程结果卡片、结构化预览拉取、弹窗微调、暂存到 Redis 状态、正式应用到课表。
-5. 传统 `/schedule` 页面中的任务类管理、智能粗排、批量粗排、拖拽预览、正式应用、删除日程。
-6. `/prototype/tool-trace` 原型页，用于展示工具 trace 与交互形态。
+5. 传统 `/schedule` 页面中的任务类管理、课表导入、智能粗排、批量粗排、拖拽预览、正式应用、删除日程。
+6. `/debug/tool-card`、`/debug/tool-cards` 与 `/debug/assistant/:id?` 调试页，用于展示工具卡片与助手调试交互形态。
 
 当前仍明确留给后续迭代的部分：
 
 1. “任务”独立页面与“设置”独立页面尚未接出。
 2. AI 输入区已经预留附件上传按钮，但上传、解析、落盘、发送给模型的完整链路尚未接通。
 3. `/assistant` 与 `/schedule` 目前还是两套并行入口，状态模型与交互语义尚未完全统一。
-4. 课表导入流程入口虽然已预留，但还没有完整的导入页与导入向导。
-5. 用户消息“修改后原地替换旧消息”的真正后端语义尚未实现，目前仍按“复制到输入框后再发送一条新消息”处理。
-6. 原型页、预留目录和历史壳层代码还未进一步收敛清理，说明前端仍处在快速迭代期。
+4. 用户消息“修改后原地替换旧消息”的真正后端语义尚未实现，目前仍按“复制到输入框后再发送一条新消息”处理。
+5. 调试页、预留目录和历史壳层代码还未进一步收敛清理，说明前端仍处在快速迭代期。
 
 # 7 部署与监控
 
 ## 7.1 容器化部署方案
-当前项目已经具备一套**“依赖栈容器化 + 应用进程宿主机运行”**的落地方案，适合本地联调、答辩演示和单机部署。
+当前项目已经同时提供两档容器化形态：
+
+1. **基础设施容器化**：使用 `docker-compose.yml` 只拉起 MySQL / Redis / Kafka / Milvus 等依赖栈，适合本地开发与脚本托管后端。
+2. **整站容器化**：使用 `docker-compose.full.yml` 连同后端多服务与前端一起拉起，适合单机演示、联调和离线交付。
 
 ### 当前部署形态
 
-当前根目录已经提供 `docker-compose.yml`，用于启动以下基础设施：
+当前根目录已经同时提供 `docker-compose.yml` 与 `docker-compose.full.yml`：
+
+### 方案 A：基础设施容器化（本地开发）
+
+`docker-compose.yml` 用于启动以下基础设施：
 
 | 服务 | 端口 | 用途 |
 | --- | --- | --- |
@@ -896,64 +1098,39 @@ frontend/src
 | MinIO | `9000` / `9001` | Milvus 对象存储依赖 |
 | Milvus Standalone | `19530` / `9091` | RAG / memory 向量检索引擎 |
 | Attu | `8000` | Milvus 可视化管理台 |
-| kafka-init | 无外部端口 | 启动时自动创建 `smartflow.agent.outbox` topic |
+| kafka-init | 无外部端口 | 启动时自动创建 `smartflow.*.outbox` 相关 topic |
 
 其中，`docker-compose.yml` 已经为 MySQL、Redis、Kafka、etcd、MinIO、Milvus 配好了 `healthcheck`，并通过 `depends_on.condition: service_healthy` 保证依赖按健康状态顺序启动。
 
-### 推荐启动顺序
+### 方案 B：整站容器化（单机部署 / 演示）
 
-1. 先启动依赖栈：
+`docker-compose.full.yml` 会在上述基础设施之上，继续拉起：
 
-```bash
-docker compose up -d
-```
+1. 后端服务：`userauth`、`notification`、`active-scheduler`、`schedule`、`task`、`task-class`、`course`、`memory`、`agent`、`taskclassforum`、`tokenstore`、`llm`、`api`
+2. 前端服务：`frontend`
 
-2. 准备后端配置文件：
+对应镜像来源如下：
 
-```bash
-cd backend
-cp config.example.yaml config.yaml
-```
+1. `backend/Dockerfile`：统一构建后端多服务二进制，运行时镜像默认以 `api` 为入口，可被 `docker-compose.full.yml` 复用为整套后端服务。
+2. `frontend/Dockerfile`：构建 Vite 产物并通过 Nginx 提供静态站点服务。
+3. `deploy/docker-pack.ps1`：可在 Windows 环境打出 `smartflow/backend-suite` 与 `smartflow/frontend` 镜像包。
+4. `deploy/docker-load.sh`：可在目标机器批量导入镜像 tar 包。
 
-然后按实际环境修改以下配置：
+### 推荐使用方式
 
-1. `database`：MySQL 地址、用户名、密码、库名。
-2. `redis`：Redis 地址、密码。
-3. `kafka`：Broker 地址与 topic / groupID。
-4. `jwt`：`accessSecret` 与 `refreshSecret`。
-5. `agent`：模型名、`baseURL`、推理开关。
-6. `rag` / `memory`：Milvus 地址、embedding 配置、memory 模式。
-7. `websearch`：联网搜索 provider 与 API Key。
+1. **本地开发**：先执行 `docker compose up -d` 拉起 `docker-compose.yml` 里的依赖栈，然后按第 8 章的脚本流启动后端与前端开发环境。
+2. **整站部署 / 演示**：先构建或导入应用镜像，再执行 `docker compose -f docker-compose.full.yml up -d` 拉起完整站点。
 
-3. 启动后端：
+整站容器化默认暴露：
 
-```bash
-cd backend
-go run .
-```
-
-后端默认监听 `8080`，并提供健康检查接口：
-
-```text
-GET /api/v1/health
-```
-
-4. 启动前端：
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-前端默认运行在 `5173`，并通过 Vite 代理把 `/api` 转发到 `http://127.0.0.1:8080`。
+1. `api`：`8080`
+2. `frontend`：`80`
 
 ### 当前方案的边界
 
-1. **已容器化的部分**：MySQL、Redis、Kafka、Milvus 及其依赖。
-2. **未容器化的部分**：Go 后端进程与 Vue 前端进程当前仍以宿主机方式运行，仓库中尚未提供后端/前端 Dockerfile。
-3. **因此更准确的表述**：当前项目已经完成“基础设施容器化”，但还没有做到“整站一键镜像化部署”。
-4. **如果后续继续工程化**：优先补 `backend/Dockerfile`、`frontend/Dockerfile` 与生产态反向代理配置，再把前后端服务一并纳入 compose 编排。
+1. **已具备完整应用层容器化能力**：仓库已提供后端 / 前端 Dockerfile 与 full-stack compose，旧版 README 中“应用层尚未容器化”的表述已不再适用。
+2. **当前更偏单机编排**：`docker-compose.full.yml` 适合开发、演示与单机交付，尚未展开到多实例调度、灰度发布、集中式日志平台等更重的生产治理能力。
+3. **本地开发入口已切换**：仓库根 `go run .` 现在只是兼容壳入口；当前推荐的本地后端启动方式以 `backend/scripts/*.ps1` 为准，避免和第 8 章冲突。
 
 ## 7.2 性能监控&统计
 当前项目已经接入了一套**轻量级、以日志和内存计数器为主的观测方案**，但还没有完整接入 Prometheus / Grafana 这类统一监控平台。
@@ -1011,7 +1188,34 @@ npm run dev
 
 # 8 快速开始
 
-## 8.1 启动前端开发环境
+## 8.1 后端本地快速启动
+
+后端开发统一使用 `backend` 根目录下的 PowerShell 启动脚本，不再维护 `cmd/all` 聚合入口。
+
+```powershell
+cd backend
+.\scripts\dev-up.ps1
+.\scripts\services-up.ps1
+.\scripts\dev-status.ps1
+.\scripts\dev-logs.ps1 -Service api -Stream stdout -Follow
+.\scripts\service-restart.ps1 -Service api
+.\scripts\services-down.ps1
+.\scripts\dev-down.ps1
+.\scripts\dev-down.ps1 -StopInfra
+```
+
+说明：
+
+1. 所有后端脚本统一收敛在 `backend/scripts` 目录下。
+2. `scripts/dev-up.ps1` 会先确保 Docker 基础设施就绪，再按顺序构建并拉起全部 RPC 服务与 API。
+3. `scripts/services-up.ps1` 只拉起后端服务本身，不触碰 Docker 基础设施。
+4. `scripts/dev-status.ps1` 用于查看各服务是脚本托管、外部运行还是未启动。
+5. `scripts/dev-logs.ps1` 用于查看单个服务最新日志；可选 `-Stream stdout|stderr|both`，带 `-Follow` 可持续追日志。
+6. `scripts/service-restart.ps1 -Service <name>` 用于重启单个脚本托管的后端服务；若该服务由外部进程托管，则会直接拒绝操作。
+7. `scripts/services-down.ps1` 只停止脚本托管的后端服务进程。
+8. `scripts/dev-down.ps1` 默认只停止脚本托管的后端进程；加 `-StopInfra` 才会一并停止 Docker 基础设施。
+
+## 8.2 启动前端开发环境
 
 前端目录在 `frontend/`，本地开发步骤如下：
 
@@ -1027,7 +1231,7 @@ npm run dev
 2. 开发代理目标：`http://127.0.0.1:8080`
 3. 因此前端本地联调前，需要先确保后端服务已经启动在 `8080`
 
-## 8.2 前端生产构建
+## 8.3 前端生产构建
 
 ```bash
 cd frontend
@@ -1040,7 +1244,7 @@ npm run preview
 1. `npm run build` 会先执行 `vue-tsc -b` 做类型检查，再执行 `vite build`。
 2. 当前构建是可通过的；但由于主包仍然偏大，Vite 会给出 chunk size warning，这属于现阶段可接受状态。
 
-## 8.3 建议的前后端联调顺序
+## 8.4 建议的前后端联调顺序
 
 建议按下面顺序启动和验证：
 

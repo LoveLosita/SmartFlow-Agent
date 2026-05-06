@@ -2249,6 +2249,24 @@ function toggleHistoryPanel() {
   historyExpanded.value = !historyExpanded.value
 }
 
+function buildTimelineDisplayMessageId(event: TimelineEvent, role: 'user' | 'assistant') {
+  // 1. Redis 热缓存里的 timeline 事件在未落 MySQL 前，event.id 可能暂时为 0。
+  // 2. 如果这里仍直接使用 t-0 作为消息主键，不同轮次的 user / assistant 会撞到同一个前端状态桶。
+  // 3. 一旦发生撞 key，工具卡片、正文块、thinking 块都会被后来的事件复用，表现成“每轮下面都挂着同一整份 assistant 内容”。
+  // 4. 因此优先使用真实 event.id；缺失时退回会话内单调递增的 seq，保证历史重建阶段的主键稳定且唯一。
+  const numericID = Number(event.id || 0)
+  if (Number.isFinite(numericID) && numericID > 0) {
+    return `t-${numericID}`
+  }
+
+  const numericSeq = Number(event.seq || 0)
+  if (Number.isFinite(numericSeq) && numericSeq > 0) {
+    return `t-${role}-${numericSeq}`
+  }
+
+  return createMessageId(role)
+}
+
 function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[]) {
   const result: AssistantMessage[] = []
   let currentAssistantMessage: AssistantMessage | null = null
@@ -2278,7 +2296,7 @@ function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[
     if (isUser) {
       currentAssistantMessage = null
       result.push({
-        id: `t-${event.id}`,
+        id: buildTimelineDisplayMessageId(event, 'user'),
         role: 'user',
         content: event.content || '',
         createdAt: event.created_at,
@@ -2289,7 +2307,7 @@ function rebuildStateFromTimeline(conversationId: string, events: TimelineEvent[
     // 助手事件
     if (!currentAssistantMessage) {
       currentAssistantMessage = {
-        id: `t-${event.id}`,
+        id: buildTimelineDisplayMessageId(event, 'assistant'),
         role: 'assistant',
         content: '',
         createdAt: event.created_at,

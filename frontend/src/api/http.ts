@@ -18,13 +18,24 @@ declare module 'axios' {
   }
 }
 
+function resolveApiBaseURL() {
+  const rawBaseURL = import.meta.env.VITE_API_BASE_URL?.trim() || '/api/v1'
+  if (/^https?:\/\//i.test(rawBaseURL)) {
+    return rawBaseURL.replace(/\/+$/, '')
+  }
+  const normalizedPath = `/${rawBaseURL.replace(/^\/+/, '')}`.replace(/\/+$/, '')
+  return normalizedPath || '/api/v1'
+}
+
+const apiBaseURL = resolveApiBaseURL()
+
 const http = axios.create({
-  baseURL: '/api/v1',
+  baseURL: apiBaseURL,
   timeout: 12000,
 })
 
 const refreshHttp = axios.create({
-  baseURL: '/api/v1',
+  baseURL: apiBaseURL,
   timeout: 12000,
 })
 

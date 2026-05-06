@@ -1,0 +1,5 @@
+.dev/
+.gocache/
+.gopath/
+bin/
+config.yaml

@@ -20,6 +20,7 @@ func RegisterRoutes(apiGroup *gin.RouterGroup, handler *UserHandler, authClient 
 
 	userGroup := apiGroup.Group("/user")
 	{
+		userGroup.GET("/captcha/register", handler.CaptchaRegister)
 		userGroup.POST("/register", handler.UserRegister)
 		userGroup.POST("/login", handler.UserLogin)
 		userGroup.POST("/refresh-token", handler.RefreshTokenHandler)

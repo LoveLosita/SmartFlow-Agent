@@ -116,8 +116,13 @@ func buildLLMOutboxDispatchEngine(outboxRepo *outboxinfra.Repository) (*outboxin
 		return nil, nil
 	}
 
+	// 1. LLM 进程这里只启动“LLM 自己 outbox 的 dispatch”，不应复用 kafka.LoadConfig() 里的全局默认 topic/group。
+	// 2. 全局默认值当前仍兼容指向 agent outbox；若只改 ServiceName 不同步改 Topic/GroupID，llm.exe 会误入 agent consumer group。
+	// 3. 因此这里显式绑定 llm 服务目录，确保 dispatch engine 只触达 llm_outbox_messages / smartflow.llm.outbox。
 	route, _ := outboxinfra.ResolveServiceRoute(outboxinfra.ServiceLLM)
-	kafkaCfg.ServiceName = outboxinfra.ServiceLLM
+	kafkaCfg.ServiceName = route.ServiceName
+	kafkaCfg.Topic = route.Topic
+	kafkaCfg.GroupID = route.GroupID
 	return outboxinfra.NewEngine(outboxRepo.WithRoute(route), kafkaCfg)
 }
 

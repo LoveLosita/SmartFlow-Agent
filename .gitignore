@@ -32,3 +32,5 @@ backend/config.yaml
 .claude/
 .omc/
 /backend/.dev/
+/.docker-bundles/
+.gopath/

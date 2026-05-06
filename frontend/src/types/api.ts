@@ -14,12 +14,25 @@ export interface TokenPair {
   refresh_token: string
 }
 
-export interface LoginPayload {
+export interface GeeTestValidateResult {
+  geetest_challenge: string
+  geetest_validate: string
+  geetest_seccode: string
+}
+
+export interface GeeTestRegisterData {
+  success: number
+  gt: string
+  challenge: string
+  new_captcha: boolean
+}
+
+export interface LoginPayload extends GeeTestValidateResult {
   username: string
   password: string
 }
 
-export interface RegisterPayload {
+export interface RegisterPayload extends GeeTestValidateResult {
   username: string
   phone_number: string
   password: string

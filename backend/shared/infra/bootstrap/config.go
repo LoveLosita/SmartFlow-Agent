@@ -3,17 +3,29 @@ package bootstrap
 import (
 	"fmt"
 	"log"
+	"os"
+	"strings"
 
 	"github.com/spf13/viper"
 )
 
-// LoadConfig 统一加载后端进程配置。
-//
-// 职责边界：
-// 1. 只负责把 config.yaml 读入 viper，不解释具体业务配置语义。
-// 2. 同时兼容从仓库根目录和 backend 目录启动的两种路径。
-// 3. 失败时返回 error，由各进程入口决定是否退出。
+const configFileEnv = "SMARTFLOW_CONFIG_FILE"
+
 func LoadConfig() error {
+	viper.Reset()
+	viper.SetEnvPrefix("SMARTFLOW")
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	viper.AutomaticEnv()
+
+	if configFile := os.Getenv(configFileEnv); configFile != "" {
+		viper.SetConfigFile(configFile)
+		if err := viper.ReadInConfig(); err != nil {
+			return fmt.Errorf("failed to read config file %q: %w", configFile, err)
+		}
+		log.Printf("Config loaded successfully from %s", configFile)
+		return nil
+	}
+
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(".")

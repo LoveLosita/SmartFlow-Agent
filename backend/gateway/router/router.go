@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	taskclassforumclient "github.com/LoveLosita/smartflow/backend/client/taskclassforum"
@@ -68,6 +69,13 @@ func RegisterRouters(
 	limiter *ratelimit.RateLimiter,
 ) *gin.Engine {
 	r := gin.Default()
+	r.Use(gatewaymiddleware.CORSMiddleware(gatewaymiddleware.CORSOptions{
+		AllowedOrigins:   readConfigList("cors.allowedOrigins"),
+		AllowedMethods:   readConfigList("cors.allowedMethods"),
+		AllowedHeaders:   readConfigList("cors.allowedHeaders"),
+		ExposedHeaders:   readConfigList("cors.exposedHeaders"),
+		AllowCredentials: viper.GetBool("cors.allowCredentials"),
+	}))
 	apiGroup := r.Group("/api/v1")
 	{
 		apiGroup.GET("/health", func(c *gin.Context) {
@@ -77,7 +85,7 @@ func RegisterRouters(
 			})
 		})
 
-		userauthapi.RegisterRoutes(apiGroup, userauthapi.NewUserHandler(authClient), authClient, limiter)
+		userauthapi.RegisterRoutes(apiGroup, userauthapi.NewUserHandler(authClient, userauthapi.NewGeeTestServiceFromConfig()), authClient, limiter)
 		forumapi.RegisterRoutes(apiGroup, forumapi.NewHandler(forumClient), authClient, cache, limiter)
 		tokenstoreapi.RegisterRoutes(apiGroup, tokenstoreapi.NewHandler(tokenStoreClient), authClient, cache, limiter)
 
@@ -172,4 +180,54 @@ func RegisterRouters(
 
 	log.Println("Routes setup completed")
 	return r
+}
+
+func readConfigList(key string) []string {
+	values := viper.GetStringSlice(key)
+	if len(values) > 0 {
+		return compactConfigList(expandConfigList(values))
+	}
+
+	raw := strings.TrimSpace(viper.GetString(key))
+	if raw == "" {
+		return nil
+	}
+
+	splitted := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == ';'
+	})
+	return compactConfigList(splitted)
+}
+
+func expandConfigList(values []string) []string {
+	expanded := make([]string, 0, len(values))
+	for _, value := range values {
+		parts := strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == '\n' || r == '\r' || r == ';'
+		})
+		if len(parts) == 0 {
+			expanded = append(expanded, value)
+			continue
+		}
+		expanded = append(expanded, parts...)
+	}
+	return expanded
+}
+
+func compactConfigList(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, trimmed)
+	}
+	return result
 }

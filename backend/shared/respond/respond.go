@@ -391,6 +391,11 @@ var ( //请求相关的响应
 		Info:   "no fields to update",
 	}
 
+	CaptchaVerifyFailed = Response{ //人机验证未通过
+		Status: "40064",
+		Info:   "人机验证未通过",
+	}
+
 	TaskAlreadyDeleted = Response{ //任务已删除或不存在（幂等信息码）
 		Status: "10003",
 		Info:   "task already deleted or not found",
@@ -404,5 +409,15 @@ var ( //请求相关的响应
 	ScheduleRefineOutputParseFailed = Response{ //智能微调输出二次解析失败
 		Status: "50002",
 		Info:   "schedule refine output parse failed",
+	}
+
+	CaptchaInitFailed = Response{ //人机验证初始化失败
+		Status: "50003",
+		Info:   "人机验证初始化失败",
+	}
+
+	CaptchaVerifyUnavailable = Response{ //人机验证服务暂不可用
+		Status: "50004",
+		Info:   "人机验证服务暂不可用",
 	}
 )
