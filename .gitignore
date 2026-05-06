@@ -31,3 +31,4 @@ backend/config.yaml
 .staticcheck-cache/
 .claude/
 .omc/
+/backend/.dev/

@@ -44,23 +44,11 @@ const emit = defineEmits<{
   border: 1px solid rgba(15, 23, 42, 0.06);
   border-radius: 20px;
   cursor: pointer;
-  transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: all 0.2s ease;
   margin: 12px 0;
   position: relative;
   overflow: hidden;
   /* 弹出动画 */
-  animation: schedule-card-pop 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) both;
-}
-
-@keyframes schedule-card-pop {
-  0% {
-    opacity: 0;
-    transform: scale(0.9) translateY(10px);
-  }
-  100% {
-    opacity: 1;
-    transform: scale(1) translateY(0);
-  }
 }
 
 .schedule-result-card:hover {

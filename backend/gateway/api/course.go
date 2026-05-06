@@ -15,7 +15,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const courseRequestTimeout = 10 * time.Second
+// 课表导入与校验可能涉及较多课程展开与冲突检测，统一放宽到 5 分钟，避免网关提前超时。
+const courseRequestTimeout = 5 * time.Minute
 
 type CourseHandler struct {
 	client ports.CourseCommandClient

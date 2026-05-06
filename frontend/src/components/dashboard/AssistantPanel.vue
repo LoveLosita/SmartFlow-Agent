@@ -4000,14 +4000,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-@keyframes assistant-item-pop {
-  0% { opacity: 0; transform: scale(0.98) translateY(10px); }
-  60% { opacity: 1; transform: scale(1.01) translateY(-1px); }
-  100% { opacity: 1; transform: scale(1) translateY(0); }
-}
-
 .dashboard-item-pop {
-  animation: assistant-item-pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
   animation-delay: var(--anim-delay, 0s);
 }
 
@@ -4742,7 +4735,6 @@ onBeforeUnmount(() => {
   position: relative;
   overflow: hidden;
   border-top: 4px solid #f59e0b; /* 警告色顶部装饰条 */
-  animation: confirm-card-enter 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .assistant-confirm-card__header {
@@ -5261,19 +5253,16 @@ onBeforeUnmount(() => {
 
 /* 推理框展开收起弹性动效 */
 .reasoning-bounce-enter-active {
-  transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
-  transform-origin: top center;
+  transition: opacity 0.18s ease;
 }
 
 .reasoning-bounce-leave-active {
-  transition: all 0.2s ease;
-  transform-origin: top center;
+  transition: opacity 0.12s ease;
 }
 
 .reasoning-bounce-enter-from,
 .reasoning-bounce-leave-to {
   opacity: 0;
-  transform: translateY(-15px);
 }
 
 .chat-message__reasoning-title {
@@ -5824,11 +5813,6 @@ onBeforeUnmount(() => {
 @keyframes thinking-shimmer {
   from { background-position: 200% 0; }
   to { background-position: 0% 0; }
-}
-
-@keyframes confirm-card-enter {
-  0% { opacity: 0; transform: translateY(10px) scale(0.985); }
-  100% { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 @keyframes pulse-dot {

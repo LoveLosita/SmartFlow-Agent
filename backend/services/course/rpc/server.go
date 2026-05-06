@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	defaultListenOn          = "0.0.0.0:9087"
-	defaultTimeout           = 10 * time.Second
+	defaultListenOn = "0.0.0.0:9087"
+	// 课表导入与图片识别都可能持续较久，服务端默认超时统一放宽到 5 分钟，避免 zrpc 提前取消上下文。
+	defaultTimeout           = 5 * time.Minute
 	defaultMaxRPCMessageSize = 8 * 1024 * 1024
 	rpcMessageSizePadding    = 1024 * 1024
 )

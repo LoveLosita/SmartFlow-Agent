@@ -8,6 +8,33 @@
 
 > 越用越懂你的成长型 AI 排程伙伴 · 面向大学生的陪伴式日程管理平台
 
+## 后端本地快速启动
+
+后端开发统一使用 `backend` 根目录下的 PowerShell 启动脚本，不再维护 `cmd/all` 聚合入口。
+
+```powershell
+cd backend
+.\scripts\dev-up.ps1
+.\scripts\services-up.ps1
+.\scripts\dev-status.ps1
+.\scripts\dev-logs.ps1 -Service api -Stream stdout -Follow
+.\scripts\service-restart.ps1 -Service api
+.\scripts\services-down.ps1
+.\scripts\dev-down.ps1
+.\scripts\dev-down.ps1 -StopInfra
+```
+
+说明：
+
+- 所有后端脚本统一收敛在 `backend/scripts` 目录下。
+- `scripts/dev-up.ps1` 会先确保 Docker 基础设施就绪，再按顺序构建并拉起全部 RPC 服务与 API。
+- `scripts/services-up.ps1` 只拉起后端服务本身，不触碰 Docker 基础设施。
+- `scripts/dev-status.ps1` 用于查看各服务是脚本托管、外部运行还是未启动。
+- `scripts/dev-logs.ps1` 用于查看单个服务最新日志；可选 `-Stream stdout|stderr|both`，带 `-Follow` 可持续追日志。
+- `scripts/service-restart.ps1 -Service <name>` 用于重启单个脚本托管的后端服务；若该服务由外部进程托管，则会直接拒绝操作。
+- `scripts/services-down.ps1` 只停止脚本托管的后端服务进程。
+- `scripts/dev-down.ps1` 默认只停止脚本托管的后端进程；加 `-StopInfra` 才会一并停止 Docker 基础设施。
+
 # 1 项目概览
 
 ## 1.1 总体介绍

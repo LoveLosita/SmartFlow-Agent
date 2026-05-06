@@ -62,6 +62,7 @@ function buildTimeKey(start?: string | null, end?: string | null) {
 const eventMap = computed(() => {
   const map = new Map<string, TodayEvent>()
   for (const event of props.events ?? []) {
+    if ((event.type || '').trim() === 'empty') continue
     map.set(buildTimeKey(event.start_time, event.end_time), event)
   }
   return map
@@ -92,8 +93,8 @@ const renderSlots = computed<RenderSlot[]>(() =>
       key: slot.key,
       kind: 'event',
       timeText: formatTimeRange(event?.start_time || slot.startTime, event?.end_time || slot.endTime),
-      title: event?.name || '今日无安排',
-      locationText: event?.location || '休息时间',
+      title: event?.name || '无课',
+      locationText: event?.location || '当前时段无课程安排',
       tone: resolveCardTone(event),
     }
   }),

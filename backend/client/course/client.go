@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	defaultEndpoint          = "127.0.0.1:9087"
-	defaultTimeout           = 10 * time.Second
+	defaultEndpoint = "127.0.0.1:9087"
+	// 课表导入可能一次展开大量周次与节次，RPC 默认超时与网关保持一致，避免内层先被截断。
+	defaultTimeout           = 5 * time.Minute
 	defaultMaxRPCMessageSize = 8 * 1024 * 1024
 	rpcMessageSizePadding    = 1024 * 1024
 )

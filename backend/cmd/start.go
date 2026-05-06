@@ -74,7 +74,7 @@ const (
 // 职责边界：
 // 1. 只负责保存启动期已经装配好的基础设施、仓储、服务和 HTTP handler；
 // 2. 不承载业务逻辑，业务仍然由 service / agent / memory 等领域模块负责；
-// 3. 不决定进程角色，api / worker / all 由 StartAPI、StartWorker、StartAll 选择启动哪些生命周期。
+// 3. 不决定进程角色，api / worker 由 StartAPI、StartWorker 选择启动哪些生命周期；StartAll 仅保留兼容别名。
 type appRuntime struct {
 	db             *gorm.DB
 	redisClient    *redis.Client
@@ -95,24 +95,20 @@ func loadConfig() error {
 	return bootstrap.LoadConfig()
 }
 
-// Start 保留历史兼容入口，当前默认等价于 StartAll。
+// Start 保留历史兼容入口，当前默认等价于 StartAPI。
 // 1. 兼容 backend/main.go 和旧部署命令。
-// 2. 不新增业务语义，只转发给 StartAll。
+// 2. 不新增业务语义，只转发给 StartAPI。
 // 3. 后续若全面切到独立 api/worker 启动，本入口只保留过渡兼容。
 func Start() {
-	StartAll()
+	StartAPI()
 }
 
-// StartAll 启动当前仓库的完整运行态：HTTP API + 后台 worker。
-// 这仍然是迁移期的兼容装配，不是终态的“一个服务一个 main.go”模型。
+// StartAll 保留给历史入口与旧命令的兼容别名，当前语义与 StartAPI 完全一致。
+// 1. cmd/all 已移除，不再作为后端本地启动标准入口。
+// 2. 之所以暂时保留该函数，是为了避免仓库根兼容入口和旧脚本立刻失效。
+// 3. 后续若仓库根入口一并收口，可直接删除该兼容别名。
 func StartAll() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	runtime := mustBuildRuntime(ctx)
-	defer runtime.close()
-
-	runtime.startWorkers(ctx)
-	runtime.startHTTP(ctx)
+	StartAPI()
 }
 
 // StartAPI 只启动 Gin API 和其同步依赖，不启动后台 worker。

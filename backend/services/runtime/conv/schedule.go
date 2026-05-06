@@ -163,6 +163,97 @@ func SchedulesToUserTodaySchedule(schedules []model.Schedule) []model.UserTodayS
 	return result
 }
 
+// SchedulesToExistingUserTodaySchedule 只返回真实存在的日程事件，不再补“无课/empty”占位。
+//
+// 职责边界：
+// 1. 负责把 DAO 返回的当天原子节次合并成前端展示事件。
+// 2. 负责保留真实课程/任务与嵌入任务信息。
+// 3. 不负责生成空档占位，空档展示交给前端按固定时间轴自行补齐。
+func SchedulesToExistingUserTodaySchedule(schedules []model.Schedule) []model.UserTodaySchedule {
+	if len(schedules) == 0 {
+		return []model.UserTodaySchedule{}
+	}
+
+	dayGroups := make(map[string][]model.Schedule)
+	dayKeys := make([]string, 0, len(schedules))
+	for _, s := range schedules {
+		dayKey := fmt.Sprintf("%d-%d", s.Week, s.DayOfWeek)
+		if _, ok := dayGroups[dayKey]; !ok {
+			dayKeys = append(dayKeys, dayKey)
+		}
+		dayGroups[dayKey] = append(dayGroups[dayKey], s)
+	}
+	sort.Strings(dayKeys)
+
+	result := make([]model.UserTodaySchedule, 0, len(dayKeys))
+	for _, dayKey := range dayKeys {
+		daySchedules := dayGroups[dayKey]
+		todayDTO := model.UserTodaySchedule{
+			Week:      daySchedules[0].Week,
+			DayOfWeek: daySchedules[0].DayOfWeek,
+			Events:    []model.EventBrief{},
+		}
+
+		sectionMap := make(map[int]model.Schedule, len(daySchedules))
+		for _, s := range daySchedules {
+			sectionMap[s.Section] = s
+		}
+
+		order := 1
+		for curr := 1; curr <= 12; {
+			slot, ok := sectionMap[curr]
+			if !ok {
+				curr++
+				continue
+			}
+
+			end := curr
+			for next := curr + 1; next <= 12; next++ {
+				nextSlot, exist := sectionMap[next]
+				if !exist || nextSlot.EventID != slot.EventID {
+					break
+				}
+				end = next
+			}
+
+			location := ""
+			if slot.Event.Location != nil {
+				location = *slot.Event.Location
+			}
+
+			brief := model.EventBrief{
+				ID:        slot.EventID,
+				Order:     order,
+				Name:      slot.Event.Name,
+				Location:  location,
+				Type:      slot.Event.Type,
+				StartTime: sectionTimeMap[curr][0],
+				EndTime:   sectionTimeMap[end][1],
+				Span:      end - curr + 1,
+			}
+
+			for i := curr; i <= end; i++ {
+				if s, exist := sectionMap[i]; exist && s.EmbeddedTask != nil && s.EmbeddedTask.Content != nil {
+					brief.EmbeddedTaskInfo = model.TaskBrief{
+						ID:   s.EmbeddedTask.ID,
+						Name: *s.EmbeddedTask.Content,
+						Type: "task",
+					}
+					break
+				}
+			}
+
+			todayDTO.Events = append(todayDTO.Events, brief)
+			curr = end + 1
+			order++
+		}
+
+		result = append(result, todayDTO)
+	}
+
+	return result
+}
+
 func SchedulesToUserWeeklySchedule(schedules []model.Schedule) *model.UserWeekSchedule {
 	if len(schedules) == 0 {
 		return &model.UserWeekSchedule{

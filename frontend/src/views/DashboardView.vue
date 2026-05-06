@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 
@@ -11,10 +11,13 @@ import { useAuthStore } from '@/stores/auth'
 import type { TaskItem, TodayEvent } from '@/types/dashboard'
 import { formatHeaderDate } from '@/utils/date'
 
+defineOptions({
+  name: 'DashboardView',
+})
+
 const router = useRouter()
 const authStore = useAuthStore()
 
-const pageLoading = ref(true)
 const taskLoading = ref(true)
 const scheduleLoading = ref(true)
 const saveTaskLoading = ref(false)
@@ -31,6 +34,8 @@ const dashboardMainScale = ref(1)
 
 const tasks = ref<TaskItem[]>([])
 const todayEvents = ref<TodayEvent[]>([])
+
+let dashboardScaleAnimationFrame = 0
 
 const taskForm = reactive<{
   title: string
@@ -110,10 +115,7 @@ async function loadScheduleData() {
 }
 
 async function loadDashboardData() {
-  pageLoading.value = true
-  const minLoadingTimer = new Promise((resolve) => setTimeout(resolve, 800))
-  await Promise.allSettled([loadTasksData(), loadScheduleData(), minLoadingTimer])
-  pageLoading.value = false
+  await Promise.allSettled([loadTasksData(), loadScheduleData()])
 }
 
 async function handleTaskToggle(task: TaskItem) {
@@ -228,31 +230,52 @@ function syncDashboardMainScale() {
   const topbar = dashboardTopbarRef.value
   const content = dashboardContentRef.value
   if (!main || !inner || !topbar || !content || window.innerWidth <= 980) { dashboardMainScale.value = 1; return }
-  dashboardMainScale.value = 1
-  window.requestAnimationFrame(() => {
-    const availableHeight = main.clientHeight
-    const gridGap = 10
-    const naturalHeight = topbar.getBoundingClientRect().height + content.scrollHeight + gridGap
-    if (!availableHeight || !naturalHeight) { dashboardMainScale.value = 1; return }
-    const nextScale = Math.min(1, (availableHeight / naturalHeight) * 0.96)
-    dashboardMainScale.value = Number(nextScale.toFixed(4))
+
+  const availableHeight = main.clientHeight
+  const gridGap = 10
+  const naturalHeight = topbar.offsetHeight + content.scrollHeight + gridGap
+  if (!availableHeight || !naturalHeight) return
+
+  const nextScale = Number(Math.min(1, (availableHeight / naturalHeight) * 0.96).toFixed(4))
+  dashboardMainScale.value = nextScale
+}
+
+function scheduleDashboardMainScaleSync() {
+  if (typeof window === 'undefined') return
+  if (dashboardScaleAnimationFrame) window.cancelAnimationFrame(dashboardScaleAnimationFrame)
+
+  // 1. 侧栏切回首页时，外层布局会比首页内容晚一点稳定。
+  // 2. 延后两帧再测量，只处理“回首页首帧偏大”的问题，避免持续重算。
+  dashboardScaleAnimationFrame = window.requestAnimationFrame(() => {
+    dashboardScaleAnimationFrame = window.requestAnimationFrame(() => {
+      dashboardScaleAnimationFrame = 0
+      syncDashboardMainScale()
+    })
   })
 }
 
 onMounted(async () => {
+  await nextTick()
+  scheduleDashboardMainScaleSync()
   await loadDashboardData()
   await nextTick()
-  syncDashboardMainScale()
-  window.addEventListener('resize', syncDashboardMainScale)
+  scheduleDashboardMainScaleSync()
+  window.addEventListener('resize', scheduleDashboardMainScaleSync)
+})
+
+onActivated(async () => {
+  await nextTick()
+  scheduleDashboardMainScaleSync()
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('resize', syncDashboardMainScale)
+  if (dashboardScaleAnimationFrame) window.cancelAnimationFrame(dashboardScaleAnimationFrame)
+  window.removeEventListener('resize', scheduleDashboardMainScaleSync)
 })
 
-watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], async () => {
+watch([() => tasks.value.length, () => todayEvents.value.length, taskLoading, scheduleLoading], async () => {
   await nextTick()
-  syncDashboardMainScale()
+  scheduleDashboardMainScaleSync()
 }, { flush: 'post' })
 </script>
 
@@ -277,7 +300,7 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
           </header>
 
           <div ref="dashboardContentRef" class="dashboard-content page-shell">
-            <TodayTimeline :style="{ '--anim-delay': '0.04s' }" :events="todayEvents" :loading="scheduleLoading || pageLoading" />
+            <TodayTimeline :style="{ '--anim-delay': '0.04s' }" :events="todayEvents" :loading="scheduleLoading" />
 
             <div class="dashboard-actions dashboard-item-pop" :style="{ '--anim-delay': '0.08s' }">
               <button type="button" class="dashboard-actions__primary" @click="openCreateTaskDialog">添加任务</button>
@@ -295,7 +318,7 @@ watch([() => tasks.value.length, () => todayEvents.value.length, pageLoading], a
                 :empty-text="quadrantMeta[group].emptyText"
                 :count="groupedTasks[group].length"
                 :tasks="groupedTasks[group]"
-                :loading="taskLoading || pageLoading"
+                :loading="taskLoading"
                 @toggle="handleTaskToggle"
                 @edit="handleTaskEdit"
                 @delete="handleTaskDelete"

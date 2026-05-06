@@ -22,9 +22,12 @@ type ScheduleService struct {
 	scheduleDAO  *scheduledao.ScheduleDAO
 	taskClassDAO *rootdao.TaskClassDAO
 	repoManager  *rootdao.RepoManager // 统一管理多个 DAO 的事务
-	cacheDAO     *rootdao.CacheDAO    // 需要在 ScheduleService 中使用缓存
+	cacheDAO     *rootdao.CacheDAO    // 负责 today/week/ongoing 等课表缓存读写
 	applyAdapter *applyadapter.GormApplyAdapter
 }
+
+// scheduleNow 允许测试注入当前时钟，避免 today 接口再次退回到硬编码日期。
+var scheduleNow = time.Now
 
 func NewScheduleService(scheduleDAO *scheduledao.ScheduleDAO, taskClassDAO *rootdao.TaskClassDAO, repoManager *rootdao.RepoManager, cacheDAO *rootdao.CacheDAO) *ScheduleService {
 	return &ScheduleService{
@@ -51,6 +54,13 @@ func (ss *ScheduleService) GetUserTodaySchedule(ctx context.Context, userID int)
 	//1.先尝试从缓存获取数据
 	cachedResp, err := ss.cacheDAO.GetUserTodayScheduleFromCache(ctx, userID)
 	if err == nil {
+		normalized, changed := filterPlaceholderTodayEvents(cachedResp)
+		if changed {
+			_ = ss.cacheDAO.SetUserTodayScheduleToCache(ctx, userID, normalized)
+		}
+		cachedResp = normalized
+	}
+	if err == nil {
 		// 缓存命中，直接返回
 		return cachedResp, nil
 	}
@@ -59,19 +69,18 @@ func (ss *ScheduleService) GetUserTodaySchedule(ctx context.Context, userID int)
 		return nil, err
 	}
 	//2.获取当前日期
-	/*curTime := time.Now().Format("2006-01-02")*/
-	curTime := "2026-03-02" //测试数据
-	week, dayOfWeek, err := conv.RealDateToRelativeDate(curTime)
+	week, dayOfWeek, err := currentRelativeWeekAndDay()
 	if err != nil {
 		return nil, err
 	}
 	//3.查询用户当天的日程安排
-	schedules, err := ss.scheduleDAO.GetUserTodaySchedule(ctx, userID, week, dayOfWeek) //测试数据
+	schedules, err := ss.scheduleDAO.GetUserTodaySchedule(ctx, userID, week, dayOfWeek)
 	if err != nil {
 		return nil, err
 	}
 	//4.转换为前端需要的格式
-	todaySchedules := conv.SchedulesToUserTodaySchedule(schedules)
+	todaySchedules := conv.SchedulesToExistingUserTodaySchedule(schedules)
+	todaySchedules, _ = filterPlaceholderTodayEvents(todaySchedules)
 	//5.将查询结果存入缓存，设置过期时间为当天结束
 	err = ss.cacheDAO.SetUserTodayScheduleToCache(ctx, userID, todaySchedules)
 	return todaySchedules, nil
@@ -112,6 +121,38 @@ func (ss *ScheduleService) GetUserWeeklySchedule(ctx context.Context, userID, we
 	//4.将查询结果存入缓存，设置过期时间为一周（或者根据实际情况调整）
 	err = ss.cacheDAO.SetUserWeeklyScheduleToCache(ctx, userID, weeklySchedule)
 	return weeklySchedule, nil
+}
+
+// currentRelativeWeekAndDay 只负责把“当前时间”换算成课表内部使用的周次与星期。
+func currentRelativeWeekAndDay() (int, int, error) {
+	currentDate := scheduleNow().Format(conv.DateFormat)
+	return conv.RealDateToRelativeDate(currentDate)
+}
+
+// filterPlaceholderTodayEvents 负责剔除旧缓存里遗留的 empty 占位事件，保证 today 接口只返回真实日程。
+func filterPlaceholderTodayEvents(schedules []model.UserTodaySchedule) ([]model.UserTodaySchedule, bool) {
+	if len(schedules) == 0 {
+		return []model.UserTodaySchedule{}, false
+	}
+
+	result := make([]model.UserTodaySchedule, 0, len(schedules))
+	changed := false
+	for _, day := range schedules {
+		filteredEvents := make([]model.EventBrief, 0, len(day.Events))
+		for _, event := range day.Events {
+			if strings.EqualFold(strings.TrimSpace(event.Type), "empty") {
+				changed = true
+				continue
+			}
+			filteredEvents = append(filteredEvents, event)
+		}
+		if len(filteredEvents) != len(day.Events) {
+			changed = true
+		}
+		day.Events = filteredEvents
+		result = append(result, day)
+	}
+	return result, changed
 }
 
 func (ss *ScheduleService) DeleteScheduleEvent(ctx context.Context, requests []model.UserDeleteScheduleEvent, userID int) error {

@@ -52,7 +52,9 @@ router.afterEach(() => {
     <MainSidebar />
     <div class="smartmate-content">
       <router-view v-slot="{ Component }">
-        <component :is="Component" />
+        <keep-alive include="DashboardView">
+          <component :is="Component" />
+        </keep-alive>
       </router-view>
     </div>
   </div>

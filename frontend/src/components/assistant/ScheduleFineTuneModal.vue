@@ -772,14 +772,7 @@ const currentWeekEntries = computed(() =>
 }
 
 /* 进场动画 */
-@keyframes board-item-spring {
-  0% { opacity: 0; transform: scale(0.6) translateY(20px); }
-  60% { opacity: 1; transform: scale(1.05) translateY(-2px); }
-  100% { opacity: 1; transform: scale(1) translateY(0); }
-}
-
 .board-item-pop {
-  animation: board-item-spring 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
 /* 弹窗核心动画：采用物理弹簧质感 */
@@ -796,26 +789,4 @@ const currentWeekEntries = computed(() =>
   opacity: 0;
 }
 
-.modal-enter-active .schedule-modal {
-  animation: modal-pop-in 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-
-.modal-leave-active .schedule-modal {
-  animation: modal-pop-in 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) reverse;
-}
-
-@keyframes modal-pop-in {
-  0% {
-    transform: scale(0.9) translateY(40px);
-    opacity: 0;
-  }
-  60% {
-    transform: scale(1.02) translateY(-2px);
-    opacity: 1;
-  }
-  100% {
-    transform: scale(1) translateY(0);
-    opacity: 1;
-  }
-}
 </style>

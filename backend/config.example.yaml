@@ -108,7 +108,7 @@ course:
     listenOn: "0.0.0.0:9087"
     endpoints:
       - "127.0.0.1:9087"
-    timeout: 10s
+    timeout: 5m
 
 # 主动调度服务配置。
 activeScheduler:
