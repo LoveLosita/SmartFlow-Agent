@@ -14,15 +14,17 @@ import (
 )
 
 type UserHandler struct {
-	client  ports.UserCommandClient
-	captcha *GeeTestService
+	client        ports.UserCommandClient
+	captcha       *GeeTestService
+	allowRegister bool
 }
 
 // NewUserHandler 只接收 user/auth 客户端与验证码服务，不再直接依赖本地 user service。
-func NewUserHandler(client ports.UserCommandClient, captcha *GeeTestService) *UserHandler {
+func NewUserHandler(client ports.UserCommandClient, captcha *GeeTestService, allowRegister bool) *UserHandler {
 	return &UserHandler{
-		client:  client,
-		captcha: captcha,
+		client:        client,
+		captcha:       captcha,
+		allowRegister: allowRegister,
 	}
 }
 
@@ -39,6 +41,10 @@ func (api *UserHandler) CaptchaRegister(c *gin.Context) {
 }
 
 func (api *UserHandler) UserRegister(c *gin.Context) {
+	if !api.ensureRegisterEnabled(c) {
+		return
+	}
+
 	var req registerRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, respond.WrongParamType)
@@ -128,4 +134,21 @@ func (api *UserHandler) UserLogout(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, respond.Ok)
+}
+
+// ensureRegisterEnabled 负责统一收口“注册相关入口”的开关判断。
+// 职责边界：
+// 1. 只判断当前环境是否允许注册，并向前端返回明确的 403；
+// 2. 不负责登录、刷新 token、登出等其它 user/auth 能力；
+// 3. 不触发验证码或 RPC 调用，避免“已关闭注册”时仍向下游产生无效流量。
+func (api *UserHandler) ensureRegisterEnabled(c *gin.Context) bool {
+	if api.allowRegister {
+		return true
+	}
+
+	c.JSON(http.StatusForbidden, respond.Response{
+		Status: "40301",
+		Info:   "registration is disabled",
+	})
+	return false
 }

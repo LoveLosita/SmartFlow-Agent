@@ -31,6 +31,7 @@ redis:
   password: "redis_password_789"
 
 userauth:
+  allowRegister: false
   rpc:
     listenOn: "0.0.0.0:9081"
     endpoints:

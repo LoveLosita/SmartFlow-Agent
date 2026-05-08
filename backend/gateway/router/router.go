@@ -85,7 +85,11 @@ func RegisterRouters(
 			})
 		})
 
-		userauthapi.RegisterRoutes(apiGroup, userauthapi.NewUserHandler(authClient, userauthapi.NewGeeTestServiceFromConfig()), authClient, limiter)
+		userauthapi.RegisterRoutes(apiGroup, userauthapi.NewUserHandler(
+			authClient,
+			userauthapi.NewGeeTestServiceFromConfig(),
+			readUserAuthAllowRegister(),
+		), authClient, limiter)
 		forumapi.RegisterRoutes(apiGroup, forumapi.NewHandler(forumClient), authClient, cache, limiter)
 		tokenstoreapi.RegisterRoutes(apiGroup, tokenstoreapi.NewHandler(tokenStoreClient), authClient, cache, limiter)
 
@@ -230,4 +234,13 @@ func compactConfigList(values []string) []string {
 		result = append(result, trimmed)
 	}
 	return result
+}
+
+func readUserAuthAllowRegister() bool {
+	// 1. 缺省保持“允许注册”，避免历史未补配置的环境升级后被静默改行为。
+	// 2. 只有显式把 userauth.allowRegister 设成 false，才真正关闭注册入口。
+	if !viper.IsSet("userauth.allowRegister") {
+		return true
+	}
+	return viper.GetBool("userauth.allowRegister")
 }
