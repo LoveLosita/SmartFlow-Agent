@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       base_ref:
-        description: "可选：用于 impact diff 的起始 ref，留空则默认 HEAD^"
+        description: "Optional base ref for impact diff, defaults to HEAD^"
         required: false
       include_infra:
-        description: "是否同时打 infra bundle"
+        description: "Whether to pack infra bundle too"
         required: false
         default: "false"
 
@@ -15,29 +15,48 @@ jobs:
   package-and-deploy:
     runs-on: build-host
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Resolve release refs
+      - name: Prepare local worktree
+        env:
+          SMARTFLOW_REPO_SLUG: ${{ gitea.repository }}
+          SMARTFLOW_REPO_SHA: ${{ gitea.sha }}
         shell: bash
         run: |
           set -euo pipefail
-          APP_TAG="$(git rev-parse --short=12 HEAD)"
+          repo_slug="${SMARTFLOW_REPO_SLUG,,}"
+          bare_repo="/srv/gitea/data/gitea/data/gitea-repositories/${repo_slug}.git"
+          worktree_root="/tmp/smartflow-actions"
+          worktree="${worktree_root}/${SMARTFLOW_REPO_SHA}"
+          if [[ ! -d "${bare_repo}" ]]; then
+            echo "gitea bare repo not found: ${bare_repo}" >&2
+            exit 65
+          fi
+          rm -rf "${worktree}"
+          mkdir -p "${worktree_root}"
+          git clone --no-checkout "${bare_repo}" "${worktree}"
+          git -C "${worktree}" checkout --force "${SMARTFLOW_REPO_SHA}"
+          git -C "${worktree}" clean -dffx
+          app_tag="$(git -C "${worktree}" rev-parse --short=12 HEAD)"
+          {
+            echo "APP_TAG=${app_tag}"
+            echo "SMARTFLOW_WORKTREE=${worktree}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Resolve release base
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${SMARTFLOW_WORKTREE}"
           BASE_REF="${{ inputs.base_ref }}"
           if [[ -z "${BASE_REF}" ]] && git rev-parse --verify --quiet HEAD^ >/dev/null; then
             BASE_REF="$(git rev-parse HEAD^)"
           fi
-          {
-            echo "APP_TAG=${APP_TAG}"
-            echo "BASE_REF=${BASE_REF}"
-          } >> "${GITHUB_ENV}"
+          echo "BASE_REF=${BASE_REF}" >> "${GITHUB_ENV}"
 
       - name: Build release plan
         shell: bash
         run: |
           set -euo pipefail
+          cd "${SMARTFLOW_WORKTREE}"
           ./deploy/impact-rules.sh "${BASE_REF:-}" HEAD deploy/release-plan.env
           cat deploy/release-plan.env
 
@@ -45,6 +64,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd "${SMARTFLOW_WORKTREE}"
           source deploy/release-plan.env
           args=(--app-tag "${APP_TAG}")
           if [[ "${SMARTFLOW_BUILD_BACKEND}" != "1" ]]; then
@@ -62,40 +82,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd "${SMARTFLOW_WORKTREE}"
           ./deploy/stage-release.sh \
             --release-dir ".release/${APP_TAG}" \
             --plan-file "deploy/release-plan.env" \
             --bundle-dir ".docker-bundles"
 
-      - name: Upload release bundle
+      - name: Materialize release directory
         shell: bash
-        env:
-          SMARTFLOW_DEPLOY_HOST: ${{ secrets.SMARTFLOW_DEPLOY_HOST }}
-          SMARTFLOW_DEPLOY_PORT: ${{ secrets.SMARTFLOW_DEPLOY_PORT }}
-          SMARTFLOW_DEPLOY_USER: ${{ secrets.SMARTFLOW_DEPLOY_USER }}
-          SMARTFLOW_DEPLOY_SSH_KEY: ${{ secrets.SMARTFLOW_DEPLOY_SSH_KEY }}
         run: |
           set -euo pipefail
-          mkdir -p ~/.ssh
-          printf '%s\n' "${SMARTFLOW_DEPLOY_SSH_KEY}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -p "${SMARTFLOW_DEPLOY_PORT:-22}" "${SMARTFLOW_DEPLOY_HOST}" >> ~/.ssh/known_hosts
-          tar -C ".release/${APP_TAG}" -czf ".release/${APP_TAG}.tgz" .
-          ssh -p "${SMARTFLOW_DEPLOY_PORT:-22}" "${SMARTFLOW_DEPLOY_USER}@${SMARTFLOW_DEPLOY_HOST}" "mkdir -p /srv/smartflow/releases/${APP_TAG}"
-          scp -P "${SMARTFLOW_DEPLOY_PORT:-22}" ".release/${APP_TAG}.tgz" "${SMARTFLOW_DEPLOY_USER}@${SMARTFLOW_DEPLOY_HOST}:/srv/smartflow/releases/${APP_TAG}.tgz"
-          ssh -p "${SMARTFLOW_DEPLOY_PORT:-22}" "${SMARTFLOW_DEPLOY_USER}@${SMARTFLOW_DEPLOY_HOST}" "rm -rf /srv/smartflow/releases/${APP_TAG}/* && tar -xzf /srv/smartflow/releases/${APP_TAG}.tgz -C /srv/smartflow/releases/${APP_TAG} && rm -f /srv/smartflow/releases/${APP_TAG}.tgz"
+          cd "${SMARTFLOW_WORKTREE}"
+          release_root="/srv/smartflow/releases/${APP_TAG}"
+          release_archive="/srv/smartflow/releases/${APP_TAG}.tgz"
+          mkdir -p /srv/smartflow/releases
+          rm -f "${release_archive}"
+          tar -C ".release/${APP_TAG}" -czf "${release_archive}" .
+          rm -rf "${release_root}"
+          mkdir -p "${release_root}"
+          tar -xzf "${release_archive}" -C "${release_root}"
+          rm -f "${release_archive}"
 
       - name: Trigger deploy
         shell: bash
-        env:
-          SMARTFLOW_DEPLOY_HOST: ${{ secrets.SMARTFLOW_DEPLOY_HOST }}
-          SMARTFLOW_DEPLOY_PORT: ${{ secrets.SMARTFLOW_DEPLOY_PORT }}
-          SMARTFLOW_DEPLOY_USER: ${{ secrets.SMARTFLOW_DEPLOY_USER }}
-          SMARTFLOW_DEPLOY_SSH_KEY: ${{ secrets.SMARTFLOW_DEPLOY_SSH_KEY }}
         run: |
           set -euo pipefail
-          mkdir -p ~/.ssh
-          printf '%s\n' "${SMARTFLOW_DEPLOY_SSH_KEY}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -p "${SMARTFLOW_DEPLOY_PORT:-22}" "${SMARTFLOW_DEPLOY_HOST}" >> ~/.ssh/known_hosts
-          ssh -p "${SMARTFLOW_DEPLOY_PORT:-22}" "${SMARTFLOW_DEPLOY_USER}@${SMARTFLOW_DEPLOY_HOST}" "smartflow-release deploy ${APP_TAG}"
+          smartflow-release deploy "${APP_TAG}"
+
+      - name: Cleanup worktree
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${SMARTFLOW_WORKTREE:-}" && "${SMARTFLOW_WORKTREE}" == /tmp/smartflow-actions/* ]]; then
+            rm -rf "${SMARTFLOW_WORKTREE}"
+          fi
