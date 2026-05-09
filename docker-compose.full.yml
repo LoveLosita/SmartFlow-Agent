@@ -1,7 +1,6 @@
 name: smartflow-full
 
 x-backend-common: &backend-common
-  image: ${SMARTFLOW_BACKEND_IMAGE:-smartflow/backend-suite:latest}
   restart: unless-stopped
   working_dir: /app/backend
   environment:
@@ -194,54 +193,67 @@ services:
 
   userauth:
     <<: *backend-common
+    image: ${SMARTFLOW_IMAGE_USERAUTH:-smartflow/userauth:latest}
     command: ["/app/bin/userauth"]
 
   notification:
     <<: *backend-common
+    image: ${SMARTFLOW_IMAGE_NOTIFICATION:-smartflow/notification:latest}
     command: ["/app/bin/notification"]
 
   active-scheduler:
     <<: *backend-common
+    image: ${SMARTFLOW_IMAGE_ACTIVE_SCHEDULER:-smartflow/active-scheduler:latest}
     command: ["/app/bin/active-scheduler"]
 
   schedule:
     <<: *backend-common
+    image: ${SMARTFLOW_IMAGE_SCHEDULE:-smartflow/schedule:latest}
     command: ["/app/bin/schedule"]
 
   task:
     <<: *backend-common
+    image: ${SMARTFLOW_IMAGE_TASK:-smartflow/task:latest}
     command: ["/app/bin/task"]
 
   task-class:
     <<: *backend-common
+    image: ${SMARTFLOW_IMAGE_TASK_CLASS:-smartflow/task-class:latest}
     command: ["/app/bin/task-class"]
 
   course:
     <<: *backend-common
+    image: ${SMARTFLOW_IMAGE_COURSE:-smartflow/course:latest}
     command: ["/app/bin/course"]
 
   memory:
     <<: *backend-common
+    image: ${SMARTFLOW_IMAGE_MEMORY:-smartflow/memory:latest}
     command: ["/app/bin/memory"]
 
   agent:
     <<: *backend-common
+    image: ${SMARTFLOW_IMAGE_AGENT:-smartflow/agent:latest}
     command: ["/app/bin/agent"]
 
   taskclassforum:
     <<: *backend-common
+    image: ${SMARTFLOW_IMAGE_TASKCLASSFORUM:-smartflow/taskclassforum:latest}
     command: ["/app/bin/taskclassforum"]
 
   tokenstore:
     <<: *backend-common
+    image: ${SMARTFLOW_IMAGE_TOKENSTORE:-smartflow/tokenstore:latest}
     command: ["/app/bin/tokenstore"]
 
   llm:
     <<: *backend-common
+    image: ${SMARTFLOW_IMAGE_LLM:-smartflow/llm:latest}
     command: ["/app/bin/llm"]
 
   api:
     <<: *backend-common
+    image: ${SMARTFLOW_IMAGE_API:-smartflow/api:latest}
     command: ["/app/bin/api"]
     ports:
       - "${SMARTFLOW_API_PORT:-8080}:8080"
@@ -286,7 +298,7 @@ services:
         condition: service_started
 
   frontend:
-    image: ${SMARTFLOW_FRONTEND_IMAGE:-smartflow/frontend:latest}
+    image: ${SMARTFLOW_IMAGE_FRONTEND:-smartflow/frontend:latest}
     restart: unless-stopped
     ports:
       - "${SMARTFLOW_FRONTEND_PORT:-80}:80"

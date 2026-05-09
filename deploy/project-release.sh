@@ -11,6 +11,8 @@ release_id="${SMARTFLOW_RELEASE_ID:?SMARTFLOW_RELEASE_ID is required}"
 plan_file="${release_dir}/deploy/release-plan.env"
 runtime_env="${runtime_dir}/.env"
 
+source "${release_dir}/deploy/service-catalog.sh"
+
 if [[ ! -f "${plan_file}" ]]; then
   echo "release plan not found: ${plan_file}" >&2
   exit 66
@@ -61,14 +63,6 @@ if compgen -G "${release_dir}/.docker-bundles/*.tar" >/dev/null 2>&1; then
   bash "${release_dir}/deploy/docker-load.sh" "${release_dir}/.docker-bundles"
 fi
 
-if [[ "${SMARTFLOW_BUILD_BACKEND:-0}" == "1" ]]; then
-  set_env_var "SMARTFLOW_BACKEND_IMAGE" "${SMARTFLOW_BACKEND_IMAGE}" "${runtime_env}"
-fi
-
-if [[ "${SMARTFLOW_BUILD_FRONTEND:-0}" == "1" ]]; then
-  set_env_var "SMARTFLOW_FRONTEND_IMAGE" "${SMARTFLOW_FRONTEND_IMAGE}" "${runtime_env}"
-fi
-
 services=()
 IFS=',' read -r -a raw_services <<< "${SMARTFLOW_RESTART_SERVICES:-}"
 for service in "${raw_services[@]}"; do
@@ -81,6 +75,19 @@ if [[ "${#services[@]}" -eq 0 ]]; then
   echo "release ${release_id} has no target services"
   exit 0
 fi
+
+# 1. release-plan.env 是构建机生成的单一事实源，部署机只按服务名读取对应镜像变量。
+# 2. 某个服务缺少镜像变量时直接失败，避免 compose 沿用旧镜像造成“发布成功但代码未更新”。
+# 3. .env 更新发生在 docker load 之后；如果镜像包无法加载，不会提前切换运行时镜像引用。
+for service in "${services[@]}"; do
+  image_env="$(smartflow_image_env_for_service "${service}")"
+  local_image_ref="${!image_env:-}"
+  if [[ -z "${local_image_ref}" ]]; then
+    echo "image ref not found in release plan: ${image_env}" >&2
+    exit 68
+  fi
+  set_env_var "${image_env}" "${local_image_ref}" "${runtime_env}"
+done
 
 # 1. 使用 --no-deps 只重建命中的服务，避免后端小改动把整套依赖链一起拉起来。
 # 2. 如果后续服务新增或删减，只要 release-plan.env 给出的服务名同步更新，这里无需改脚本。

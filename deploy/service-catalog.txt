@@ -1,0 +1,15 @@
+# service|image_env|image_repo|kind
+userauth|SMARTFLOW_IMAGE_USERAUTH|smartflow/userauth|backend
+notification|SMARTFLOW_IMAGE_NOTIFICATION|smartflow/notification|backend
+active-scheduler|SMARTFLOW_IMAGE_ACTIVE_SCHEDULER|smartflow/active-scheduler|backend
+schedule|SMARTFLOW_IMAGE_SCHEDULE|smartflow/schedule|backend
+task|SMARTFLOW_IMAGE_TASK|smartflow/task|backend
+task-class|SMARTFLOW_IMAGE_TASK_CLASS|smartflow/task-class|backend
+course|SMARTFLOW_IMAGE_COURSE|smartflow/course|backend
+memory|SMARTFLOW_IMAGE_MEMORY|smartflow/memory|backend
+agent|SMARTFLOW_IMAGE_AGENT|smartflow/agent|backend
+taskclassforum|SMARTFLOW_IMAGE_TASKCLASSFORUM|smartflow/taskclassforum|backend
+tokenstore|SMARTFLOW_IMAGE_TOKENSTORE|smartflow/tokenstore|backend
+llm|SMARTFLOW_IMAGE_LLM|smartflow/llm|backend
+api|SMARTFLOW_IMAGE_API|smartflow/api|backend
+frontend|SMARTFLOW_IMAGE_FRONTEND|smartflow/frontend|frontend

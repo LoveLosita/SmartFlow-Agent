@@ -8,7 +8,8 @@ output_file="${3:-}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
-backend_services=(userauth notification active-scheduler schedule task task-class course memory agent taskclassforum tokenstore llm api)
+source "${repo_root}/deploy/service-catalog.sh"
+
 selected_services=()
 frontend_changed=0
 full_backend=0
@@ -50,7 +51,7 @@ for file in "${changed_files[@]}"; do
     frontend/*|deploy/nginx/*)
       frontend_changed=1
       ;;
-    deploy/docker-pack.*|deploy/docker-load.sh|deploy/stage-release.sh|deploy/project-release.sh|deploy/project-rollback.sh|deploy/impact-rules.sh)
+    deploy/docker-pack.*|deploy/docker-load.sh|deploy/stage-release.*|deploy/project-release.sh|deploy/project-rollback.sh|deploy/impact-rules.*|deploy/service-catalog.*)
       frontend_changed=1
       full_backend=1
       ;;
@@ -107,7 +108,7 @@ for file in "${changed_files[@]}"; do
 done
 
 if [[ "${full_backend}" -eq 1 ]]; then
-  selected_services=("${backend_services[@]}")
+  selected_services=("${SMARTFLOW_BACKEND_SERVICES[@]}")
 fi
 
 if [[ "${frontend_changed}" -eq 1 ]]; then
@@ -140,11 +141,15 @@ SMARTFLOW_APP_TAG=${app_tag}
 SMARTFLOW_NOOP=${noop}
 SMARTFLOW_BUILD_BACKEND=${build_backend}
 SMARTFLOW_BUILD_FRONTEND=${build_frontend}
-SMARTFLOW_BACKEND_IMAGE=smartflow/backend-suite:${app_tag}
-SMARTFLOW_FRONTEND_IMAGE=smartflow/frontend:${app_tag}
 SMARTFLOW_RESTART_SERVICES=${restart_csv}
 EOF
 )
+
+for service in "${selected_services[@]}"; do
+  image_env="$(smartflow_image_env_for_service "${service}")"
+  image_ref="$(smartflow_default_image_for_service "${service}" "${app_tag}")"
+  content+=$'\n'"${image_env}=${image_ref}"
+done
 
 if [[ -n "${output_file}" ]]; then
   printf '%s\n' "${content}" > "${output_file}"

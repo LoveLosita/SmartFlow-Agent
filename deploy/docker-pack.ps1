@@ -1,90 +1,177 @@
 param(
     [string]$AppTag = "latest",
-    [string]$BackendImage = "smartflow/backend-suite",
-    [string]$FrontendImage = "smartflow/frontend",
     [string]$OutputDir = ".docker-bundles",
-    [switch]$IncludeInfra
+    [string]$PlanFile = "",
+    [string]$Services = "",
+    [switch]$IncludeInfra,
+    [switch]$SkipBackend,
+    [switch]$SkipFrontend,
+    [string]$BackendImage = "",
+    [string]$FrontendImage = ""
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot "service-catalog.ps1")
 
-function Get-ImageRef {
-    param(
-        [string]$EnvName,
-        [string]$DefaultValue
-    )
+function Read-ReleasePlan {
+    param([string]$Path)
 
-    $value = [Environment]::GetEnvironmentVariable($EnvName)
-    if ([string]::IsNullOrWhiteSpace($value)) {
-        return $DefaultValue
+    $values = @{}
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $values
+    }
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw ("release plan not found: {0}" -f $Path)
     }
 
-    return $value.Trim()
+    foreach ($line in Get-Content -LiteralPath $Path -Encoding UTF8) {
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.TrimStart().StartsWith("#")) {
+            continue
+        }
+
+        $parts = $line -split "=", 2
+        if ($parts.Count -ne 2) {
+            throw ("invalid release plan line: {0}" -f $line)
+        }
+        $values[$parts[0].Trim()] = $parts[1].Trim()
+    }
+
+    return $values
+}
+
+function Get-ImageRefForService {
+    param(
+        [string]$Service,
+        [hashtable]$Plan,
+        [string]$Tag
+    )
+
+    $imageEnv = Get-SmartFlowImageEnvForService -Service $Service
+    if ($Plan.ContainsKey($imageEnv) -and -not [string]::IsNullOrWhiteSpace($Plan[$imageEnv])) {
+        return $Plan[$imageEnv]
+    }
+
+    return Get-SmartFlowDefaultImageForService -Service $Service -AppTag $Tag
+}
+
+function Invoke-Docker {
+    param([string[]]$Arguments)
+
+    & docker @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw ("docker command failed: docker {0}" -f ($Arguments -join " "))
+    }
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $bundleDir = Join-Path $repoRoot $OutputDir
-$backendRef = "{0}:{1}" -f $BackendImage, $AppTag
-$frontendRef = "{0}:{1}" -f $FrontendImage, $AppTag
-$appBundlePath = Join-Path $bundleDir ("smartflow-app-{0}.tar" -f $AppTag)
-$infraBundlePath = Join-Path $bundleDir ("smartflow-infra-{0}.tar" -f $AppTag)
+$plan = Read-ReleasePlan -Path $PlanFile
 
-New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
-
-Write-Host "==> Build backend image $backendRef"
-docker build --platform linux/amd64 -f (Join-Path $repoRoot "backend\Dockerfile") -t $backendRef (Join-Path $repoRoot "backend")
-if ($LASTEXITCODE -ne 0) {
-    throw "Backend image build failed."
+if ($plan.ContainsKey("SMARTFLOW_APP_TAG") -and -not [string]::IsNullOrWhiteSpace($plan["SMARTFLOW_APP_TAG"])) {
+    $AppTag = $plan["SMARTFLOW_APP_TAG"]
 }
 
-Write-Host "==> Build frontend image $frontendRef"
-docker build --platform linux/amd64 -f (Join-Path $repoRoot "frontend\Dockerfile") -t $frontendRef (Join-Path $repoRoot "frontend")
-if ($LASTEXITCODE -ne 0) {
-    throw "Frontend image build failed."
+if ([string]::IsNullOrWhiteSpace($Services) -and $plan.ContainsKey("SMARTFLOW_RESTART_SERVICES")) {
+    $Services = $plan["SMARTFLOW_RESTART_SERVICES"]
 }
 
-if (Test-Path $appBundlePath) {
-    Remove-Item -LiteralPath $appBundlePath -Force
-}
-
-Write-Host "==> Export app bundle to $appBundlePath"
-docker save -o $appBundlePath $backendRef $frontendRef
-if ($LASTEXITCODE -ne 0) {
-    throw "App bundle export failed."
-}
-
-if (-not $IncludeInfra) {
-    Write-Host "==> Done. App bundle exported."
-    return
-}
-
-$infraImages = @(
-    (Get-ImageRef -EnvName "SMARTFLOW_MYSQL_IMAGE" -DefaultValue "mysql:8.0"),
-    (Get-ImageRef -EnvName "SMARTFLOW_REDIS_IMAGE" -DefaultValue "redis:7"),
-    (Get-ImageRef -EnvName "SMARTFLOW_KAFKA_IMAGE" -DefaultValue "apache/kafka:3.7.2"),
-    (Get-ImageRef -EnvName "SMARTFLOW_ETCD_IMAGE" -DefaultValue "quay.io/coreos/etcd:v3.5.5"),
-    (Get-ImageRef -EnvName "SMARTFLOW_MINIO_IMAGE" -DefaultValue "minio/minio:RELEASE.2023-03-20T20-16-18Z"),
-    (Get-ImageRef -EnvName "SMARTFLOW_MILVUS_IMAGE" -DefaultValue "milvusdb/milvus:v2.4.4"),
-    (Get-ImageRef -EnvName "SMARTFLOW_ATTU_IMAGE" -DefaultValue "zilliz/attu:v2.4.3")
-)
-
-foreach ($imageRef in $infraImages) {
-    Write-Host "==> Pull infra image $imageRef"
-    docker pull $imageRef
-    if ($LASTEXITCODE -ne 0) {
-        throw ("Infra image pull failed: {0}" -f $imageRef)
+$selectedServices = @()
+if (-not [string]::IsNullOrWhiteSpace($Services)) {
+    $selectedServices = @($Services.Split(",") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() })
+} elseif ([string]::IsNullOrWhiteSpace($PlanFile)) {
+    if (-not $SkipBackend) {
+        $selectedServices += @(Get-SmartFlowBackendServices)
+    }
+    if (-not $SkipFrontend) {
+        $selectedServices += "frontend"
     }
 }
 
-if (Test-Path $infraBundlePath) {
+New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
+$appBundlePath = Join-Path $bundleDir ("smartflow-app-{0}.tar" -f $AppTag)
+$infraBundlePath = Join-Path $bundleDir ("smartflow-infra-{0}.tar" -f $AppTag)
+
+if (Test-Path -LiteralPath $appBundlePath) {
+    Remove-Item -LiteralPath $appBundlePath -Force
+}
+
+$appImages = @()
+foreach ($service in $selectedServices) {
+    if ($service -eq "frontend") {
+        if ($SkipFrontend) {
+            continue
+        }
+
+        $imageRef = Get-ImageRefForService -Service $service -Plan $plan -Tag $AppTag
+        Write-Host "==> Build frontend image $imageRef"
+        Invoke-Docker -Arguments @(
+            "build", "--platform", "linux/amd64",
+            "-f", (Join-Path $repoRoot "frontend\Dockerfile"),
+            "-t", $imageRef,
+            (Join-Path $repoRoot "frontend")
+        )
+        $appImages += $imageRef
+        continue
+    }
+
+    if ($SkipBackend) {
+        continue
+    }
+    if (-not (Test-SmartFlowBackendService -Service $service)) {
+        throw ("unknown backend release service: {0}" -f $service)
+    }
+
+    $imageRef = Get-ImageRefForService -Service $service -Plan $plan -Tag $AppTag
+    Write-Host "==> Build backend service image $imageRef"
+    Invoke-Docker -Arguments @(
+        "build", "--platform", "linux/amd64",
+        "--target", "runtime-service",
+        "--build-arg", ("SERVICE={0}" -f $service),
+        "-f", (Join-Path $repoRoot "backend\Dockerfile"),
+        "-t", $imageRef,
+        (Join-Path $repoRoot "backend")
+    )
+    $appImages += $imageRef
+}
+
+if ($appImages.Count -gt 0) {
+    Write-Host "==> Export app bundle to $appBundlePath"
+    Invoke-Docker -Arguments (@("save", "-o", $appBundlePath) + $appImages)
+} else {
+    Write-Host "==> Skip app bundle export because no application image is selected"
+}
+
+if (-not $IncludeInfra) {
+    Write-Host "==> Done."
+    return
+}
+
+$infraImages = @()
+if ([string]::IsNullOrWhiteSpace($env:SMARTFLOW_MYSQL_IMAGE)) { $infraImages += "mysql:8.0" } else { $infraImages += $env:SMARTFLOW_MYSQL_IMAGE }
+if ([string]::IsNullOrWhiteSpace($env:SMARTFLOW_REDIS_IMAGE)) { $infraImages += "redis:7" } else { $infraImages += $env:SMARTFLOW_REDIS_IMAGE }
+if ([string]::IsNullOrWhiteSpace($env:SMARTFLOW_KAFKA_IMAGE)) { $infraImages += "apache/kafka:3.7.2" } else { $infraImages += $env:SMARTFLOW_KAFKA_IMAGE }
+if ([string]::IsNullOrWhiteSpace($env:SMARTFLOW_ETCD_IMAGE)) { $infraImages += "quay.io/coreos/etcd:v3.5.5" } else { $infraImages += $env:SMARTFLOW_ETCD_IMAGE }
+if ([string]::IsNullOrWhiteSpace($env:SMARTFLOW_MINIO_IMAGE)) { $infraImages += "minio/minio:RELEASE.2023-03-20T20-16-18Z" } else { $infraImages += $env:SMARTFLOW_MINIO_IMAGE }
+if ([string]::IsNullOrWhiteSpace($env:SMARTFLOW_MILVUS_IMAGE)) { $infraImages += "milvusdb/milvus:v2.4.4" } else { $infraImages += $env:SMARTFLOW_MILVUS_IMAGE }
+if ([string]::IsNullOrWhiteSpace($env:SMARTFLOW_ATTU_IMAGE)) { $infraImages += "zilliz/attu:v2.4.3" } else { $infraImages += $env:SMARTFLOW_ATTU_IMAGE }
+
+foreach ($imageRef in $infraImages) {
+    & docker image inspect $imageRef | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "==> Reuse local infra image $imageRef"
+        continue
+    }
+
+    Write-Host "==> Pull infra image $imageRef"
+    Invoke-Docker -Arguments @("pull", $imageRef)
+}
+
+if (Test-Path -LiteralPath $infraBundlePath) {
     Remove-Item -LiteralPath $infraBundlePath -Force
 }
 
 Write-Host "==> Export infra bundle to $infraBundlePath"
-docker save -o $infraBundlePath @infraImages
-if ($LASTEXITCODE -ne 0) {
-    throw "Infra bundle export failed."
-}
+Invoke-Docker -Arguments (@("save", "-o", $infraBundlePath) + $infraImages)
 
-Write-Host "==> Done. App bundle and infra bundle exported."
+Write-Host "==> Done."

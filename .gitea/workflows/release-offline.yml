@@ -12,111 +12,207 @@ on:
         default: "false"
 
 jobs:
-  package-and-deploy:
-    runs-on: build-host
+  build-upload:
+    runs-on: local-build
     steps:
       - name: Prepare local worktree
         env:
-          SMARTFLOW_REPO_SLUG: ${{ gitea.repository }}
+          SMARTFLOW_REPO_URL: https://git.lecspace.com/${{ gitea.repository }}.git
+          SMARTFLOW_GIT_REPO_URL: ${{ secrets.SMARTFLOW_GIT_REPO_URL }}
+          SMARTFLOW_REPO_SHA: ${{ gitea.sha }}
+          SMARTFLOW_GITEA_USER: ${{ secrets.SMARTFLOW_GITEA_USER }}
+          SMARTFLOW_GITEA_TOKEN: ${{ secrets.SMARTFLOW_GITEA_TOKEN }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+
+          function Add-GitHubEnv {
+            param([string]$Line)
+            $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+            [System.IO.File]::AppendAllText($env:GITHUB_ENV, $Line + [Environment]::NewLine, $utf8NoBom)
+          }
+
+          $worktreeRoot = Join-Path ([System.IO.Path]::GetTempPath()) "smartflow-actions"
+          $worktree = Join-Path $worktreeRoot $env:SMARTFLOW_REPO_SHA
+          $repoUrl = if ([string]::IsNullOrWhiteSpace($env:SMARTFLOW_GIT_REPO_URL)) { $env:SMARTFLOW_REPO_URL } else { $env:SMARTFLOW_GIT_REPO_URL }
+
+          if (Test-Path $worktree) {
+            Remove-Item -LiteralPath $worktree -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path $worktreeRoot | Out-Null
+
+          $gitArgs = @()
+          if (-not [string]::IsNullOrWhiteSpace($env:SMARTFLOW_GITEA_TOKEN)) {
+            $giteaUser = $env:SMARTFLOW_GITEA_USER
+            if ([string]::IsNullOrWhiteSpace($giteaUser)) { $giteaUser = "Losita" }
+            $basicToken = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $giteaUser, $env:SMARTFLOW_GITEA_TOKEN)))
+            $gitArgs += @("-c", ("http.extraHeader=Authorization: Basic {0}" -f $basicToken))
+          }
+
+          & git @gitArgs clone --no-checkout $repoUrl $worktree
+          if ($LASTEXITCODE -ne 0) { throw "source clone failed." }
+
+          & git -C $worktree checkout --force $env:SMARTFLOW_REPO_SHA
+          if ($LASTEXITCODE -ne 0) { throw "source checkout failed." }
+
+          & git -C $worktree clean -dffx
+          if ($LASTEXITCODE -ne 0) { throw "source cleanup failed." }
+
+          $appTag = (& git -C $worktree rev-parse --short=12 HEAD).Trim()
+          Add-GitHubEnv "APP_TAG=$appTag"
+          Add-GitHubEnv "SMARTFLOW_WORKTREE=$worktree"
+
+      - name: Resolve release base
+        env:
+          INPUT_BASE_REF: ${{ inputs.base_ref }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+
+          function Add-GitHubEnv {
+            param([string]$Line)
+            $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+            [System.IO.File]::AppendAllText($env:GITHUB_ENV, $Line + [Environment]::NewLine, $utf8NoBom)
+          }
+
+          Set-Location $env:SMARTFLOW_WORKTREE
+          $baseRef = $env:INPUT_BASE_REF
+          if ([string]::IsNullOrWhiteSpace($baseRef)) {
+            & git rev-parse --verify --quiet "HEAD^" | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+              $baseRef = (& git rev-parse "HEAD^").Trim()
+            }
+          }
+
+          Add-GitHubEnv "BASE_REF=$baseRef"
+
+      - name: Build release plan
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+
+          Set-Location $env:SMARTFLOW_WORKTREE
+          .\deploy\impact-rules.ps1 -BaseRef $env:BASE_REF -HeadRef "HEAD" -OutputFile "deploy\release-plan.env"
+          Get-Content -LiteralPath "deploy\release-plan.env"
+
+      - name: Pack docker images
+        env:
+          INPUT_INCLUDE_INFRA: ${{ inputs.include_infra }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+
+          Set-Location $env:SMARTFLOW_WORKTREE
+          $packArgs = @("-AppTag", $env:APP_TAG, "-PlanFile", "deploy\release-plan.env")
+          if ($env:INPUT_INCLUDE_INFRA -eq "true") {
+            $packArgs += "-IncludeInfra"
+          }
+          .\deploy\docker-pack.ps1 @packArgs
+
+      - name: Stage release directory
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+
+          Set-Location $env:SMARTFLOW_WORKTREE
+          .\deploy\stage-release.ps1 `
+            -ReleaseDir ".release\$env:APP_TAG" `
+            -PlanFile "deploy\release-plan.env" `
+            -BundleDir ".docker-bundles"
+
+      - name: Upload release to server
+        env:
+          SMARTFLOW_RELEASE_HOST: ${{ secrets.SMARTFLOW_RELEASE_HOST }}
+          SMARTFLOW_RELEASE_USER: ${{ secrets.SMARTFLOW_RELEASE_USER }}
+          SMARTFLOW_RELEASE_PORT: ${{ secrets.SMARTFLOW_RELEASE_PORT }}
+          SMARTFLOW_RELEASE_ROOT: ${{ secrets.SMARTFLOW_RELEASE_ROOT }}
+          SMARTFLOW_SSH_KEY: ${{ secrets.SMARTFLOW_SSH_KEY }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+
+          Set-Location $env:SMARTFLOW_WORKTREE
+          $hostName = $env:SMARTFLOW_RELEASE_HOST
+          if ([string]::IsNullOrWhiteSpace($hostName)) { $hostName = "192.140.166.210" }
+          $userName = $env:SMARTFLOW_RELEASE_USER
+          if ([string]::IsNullOrWhiteSpace($userName)) { $userName = "root" }
+          $port = $env:SMARTFLOW_RELEASE_PORT
+          if ([string]::IsNullOrWhiteSpace($port)) { $port = "22" }
+          $releaseRoot = $env:SMARTFLOW_RELEASE_ROOT
+          if ([string]::IsNullOrWhiteSpace($releaseRoot)) { $releaseRoot = "/srv/smartflow/releases" }
+          if ($releaseRoot -notmatch '^/srv/smartflow/releases(/.*)?$') { throw "release root must stay under /srv/smartflow/releases." }
+          $remote = "{0}@{1}" -f $userName, $hostName
+          $archivePath = Join-Path ([System.IO.Path]::GetTempPath()) ("smartflow-release-{0}.tgz" -f $env:APP_TAG)
+          $remoteArchive = ("{0}/{1}.tgz" -f $releaseRoot.TrimEnd('/'), $env:APP_TAG)
+
+          if (Test-Path $archivePath) {
+            Remove-Item -LiteralPath $archivePath -Force
+          }
+          & tar -C ".release\$env:APP_TAG" -czf $archivePath .
+          if ($LASTEXITCODE -ne 0) { throw "release archive failed." }
+
+          $sshArgs = @("-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=30", "-p", $port)
+          $scpArgs = @("-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=30", "-P", $port)
+          if (-not [string]::IsNullOrWhiteSpace($env:SMARTFLOW_SSH_KEY)) {
+            $keyPath = Join-Path ([System.IO.Path]::GetTempPath()) ("smartflow-release-{0}.key" -f $env:APP_TAG)
+            $env:SMARTFLOW_SSH_KEY.Replace("`r`n", "`n") | Out-File -FilePath $keyPath -Encoding ascii -NoNewline
+            if ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)) {
+              & icacls $keyPath /inheritance:r /grant:r "$($env:USERNAME):(R)" | Out-Null
+            } else {
+              & chmod 600 $keyPath
+            }
+            $sshArgs += @("-i", $keyPath)
+            $scpArgs += @("-i", $keyPath)
+          }
+
+          & ssh @sshArgs $remote "mkdir -p '$releaseRoot'"
+          if ($LASTEXITCODE -ne 0) { throw "remote release root prepare failed." }
+
+          & scp @scpArgs $archivePath ("{0}:{1}" -f $remote, $remoteArchive)
+          if ($LASTEXITCODE -ne 0) { throw "release upload failed." }
+
+          $remoteScript = @(
+            "set -euo pipefail",
+            "release_root='$releaseRoot'",
+            "app_tag='$env:APP_TAG'",
+            "archive='$remoteArchive'",
+            "[[ -n `"`$release_root`" && `"`$app_tag`" =~ ^[0-9a-f]{12}$ ]]",
+            "target=`"`$release_root/`$app_tag`"",
+            "rm -rf `"`$target`"",
+            "mkdir -p `"`$target`"",
+            "tar -xzf `"`$archive`" -C `"`$target`"",
+            "rm -f `"`$archive`""
+          ) -join "`n"
+
+          $remoteScript | ssh @sshArgs $remote "bash -s"
+          if ($LASTEXITCODE -ne 0) { throw "remote release unpack failed." }
+
+      - name: Cleanup worktree
+        if: ${{ always() }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $worktreeRoot = Join-Path ([System.IO.Path]::GetTempPath()) "smartflow-actions"
+          $expectedPrefix = $worktreeRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+          if (-not [string]::IsNullOrWhiteSpace($env:SMARTFLOW_WORKTREE) -and $env:SMARTFLOW_WORKTREE.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -LiteralPath $env:SMARTFLOW_WORKTREE -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+  deploy:
+    runs-on: build-host
+    needs: build-upload
+    steps:
+      - name: Trigger deploy
+        env:
           SMARTFLOW_REPO_SHA: ${{ gitea.sha }}
         shell: bash
         run: |
           set -euo pipefail
-          repo_slug="${SMARTFLOW_REPO_SLUG,,}"
-          bare_repo="/srv/gitea/data/gitea/data/gitea-repositories/${repo_slug}.git"
-          worktree_root="/tmp/smartflow-actions"
-          worktree="${worktree_root}/${SMARTFLOW_REPO_SHA}"
-          if [[ ! -d "${bare_repo}" ]]; then
-            echo "gitea bare repo not found: ${bare_repo}" >&2
-            exit 65
-          fi
-          export HOME="${HOME:-${worktree_root}/home}"
-          mkdir -p "${HOME}"
-          git config --global --add safe.directory "${bare_repo}"
-          rm -rf "${worktree}"
-          mkdir -p "${worktree_root}"
-          git clone --no-checkout "${bare_repo}" "${worktree}"
-          git -C "${worktree}" checkout --force "${SMARTFLOW_REPO_SHA}"
-          git -C "${worktree}" clean -dffx
-          app_tag="$(git -C "${worktree}" rev-parse --short=12 HEAD)"
-          {
-            echo "APP_TAG=${app_tag}"
-            echo "SMARTFLOW_WORKTREE=${worktree}"
-          } >> "${GITHUB_ENV}"
-
-      - name: Resolve release base
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "${SMARTFLOW_WORKTREE}"
-          BASE_REF="${{ inputs.base_ref }}"
-          if [[ -z "${BASE_REF}" ]] && git rev-parse --verify --quiet HEAD^ >/dev/null; then
-            BASE_REF="$(git rev-parse HEAD^)"
-          fi
-          echo "BASE_REF=${BASE_REF}" >> "${GITHUB_ENV}"
-
-      - name: Build release plan
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "${SMARTFLOW_WORKTREE}"
-          ./deploy/impact-rules.sh "${BASE_REF:-}" HEAD deploy/release-plan.env
-          cat deploy/release-plan.env
-
-      - name: Pack docker images
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "${SMARTFLOW_WORKTREE}"
-          source deploy/release-plan.env
-          args=(--app-tag "${APP_TAG}")
-          if [[ "${SMARTFLOW_BUILD_BACKEND}" != "1" ]]; then
-            args+=(--skip-backend)
-          fi
-          if [[ "${SMARTFLOW_BUILD_FRONTEND}" != "1" ]]; then
-            args+=(--skip-frontend)
-          fi
-          if [[ "${{ inputs.include_infra }}" == "true" ]]; then
-            args+=(--include-infra)
-          fi
-          ./deploy/docker-pack.sh "${args[@]}"
-
-      - name: Stage release directory
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "${SMARTFLOW_WORKTREE}"
-          ./deploy/stage-release.sh \
-            --release-dir ".release/${APP_TAG}" \
-            --plan-file "deploy/release-plan.env" \
-            --bundle-dir ".docker-bundles"
-
-      - name: Materialize release directory
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "${SMARTFLOW_WORKTREE}"
-          release_root="/srv/smartflow/releases/${APP_TAG}"
-          release_archive="/srv/smartflow/releases/${APP_TAG}.tgz"
-          mkdir -p /srv/smartflow/releases
-          rm -f "${release_archive}"
-          tar -C ".release/${APP_TAG}" -czf "${release_archive}" .
-          rm -rf "${release_root}"
-          mkdir -p "${release_root}"
-          tar -xzf "${release_archive}" -C "${release_root}"
-          rm -f "${release_archive}"
-
-      - name: Trigger deploy
-        shell: bash
-        run: |
-          set -euo pipefail
-          smartflow-release deploy "${APP_TAG}"
-
-      - name: Cleanup worktree
-        if: ${{ always() }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -n "${SMARTFLOW_WORKTREE:-}" && "${SMARTFLOW_WORKTREE}" == /tmp/smartflow-actions/* ]]; then
-            rm -rf "${SMARTFLOW_WORKTREE}"
-          fi
+          app_tag="${SMARTFLOW_REPO_SHA:0:12}"
+          smartflow-release deploy "${app_tag}"
