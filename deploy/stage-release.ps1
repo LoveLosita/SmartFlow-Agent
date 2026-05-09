@@ -11,6 +11,15 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+function Convert-FileToUtf8Lf {
+    param([string]$Path)
+
+    $content = [System.IO.File]::ReadAllText($Path)
+    $normalized = $content.Replace("`r`n", "`n")
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($Path, $normalized, $utf8NoBom)
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $releaseAbs = Join-Path $repoRoot $ReleaseDir
 $bundleAbs = Join-Path $repoRoot $BundleDir
@@ -37,6 +46,17 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "deploy\service-catalog.txt") -Desti
 Copy-Item -LiteralPath (Join-Path $repoRoot "deploy\nginx\default.conf") -Destination (Join-Path $releaseAbs "deploy\nginx\default.conf")
 Copy-Item -LiteralPath (Join-Path $repoRoot "deploy\certs\README.md") -Destination (Join-Path $releaseAbs "deploy\certs\README.md")
 Copy-Item -LiteralPath $PlanFile -Destination (Join-Path $releaseAbs "deploy\release-plan.env")
+
+$shellScripts = @(
+    (Join-Path $releaseAbs "deploy\docker-load.sh"),
+    (Join-Path $releaseAbs "deploy\project-release.sh"),
+    (Join-Path $releaseAbs "deploy\project-rollback.sh"),
+    (Join-Path $releaseAbs "deploy\impact-rules.sh"),
+    (Join-Path $releaseAbs "deploy\service-catalog.sh")
+)
+foreach ($scriptPath in $shellScripts) {
+    Convert-FileToUtf8Lf -Path $scriptPath
+}
 
 if (Test-Path -LiteralPath $bundleAbs) {
     $bundles = Get-ChildItem -LiteralPath $bundleAbs -Filter "*.tar" -File
