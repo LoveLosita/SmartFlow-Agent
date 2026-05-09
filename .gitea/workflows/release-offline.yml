@@ -30,6 +30,8 @@ jobs:
             echo "gitea bare repo not found: ${bare_repo}" >&2
             exit 65
           fi
+          export HOME="${HOME:-${worktree_root}/home}"
+          mkdir -p "${HOME}"
           git config --global --add safe.directory "${bare_repo}"
           rm -rf "${worktree}"
           mkdir -p "${worktree_root}"
