@@ -107,11 +107,14 @@ jobs:
           Set-StrictMode -Version Latest
 
           Set-Location $env:SMARTFLOW_WORKTREE
-          $packArgs = @("-AppTag", $env:APP_TAG, "-PlanFile", "deploy\release-plan.env")
-          if ($env:INPUT_INCLUDE_INFRA -eq "true") {
-            $packArgs += "-IncludeInfra"
+          $packArgs = @{
+            AppTag = $env:APP_TAG
+            PlanFile = "deploy\release-plan.env"
           }
-          .\deploy\docker-pack.ps1 @packArgs
+          if ($env:INPUT_INCLUDE_INFRA -eq "true") {
+            $packArgs["IncludeInfra"] = $true
+          }
+          & .\deploy\docker-pack.ps1 @packArgs
 
       - name: Stage release directory
         shell: powershell
